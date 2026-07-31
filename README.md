@@ -4,10 +4,11 @@ Analytico is a small, self-hosted web analytics engine for low-traffic sites.
 It aims to provide the useful part of Plausible without a ClickHouse service,
 an administrative JavaScript application, or a multi-container runtime.
 
-Milestone M0 is complete: the executable links the exact Turso and DuckDB
-versions, creates both real on-disk stores, survives process restart, rejects
-truncated copies, and runs deterministic million-event analytical queries. It
-does not yet collect production traffic.
+Milestones M0 and M1 are complete. The executable now owns the exact embedded
+stores, numbered schemas, validated sites/origins/property allowlists,
+goals/funnels, a private visitor key, daily visitor pseudonyms, direct durable
+event insertion, and an operator `doctor` command. It does not yet collect
+production HTTP traffic.
 
 ## Selected shape
 
@@ -53,6 +54,8 @@ real-time views, session replay, arbitrary user SQL, and distributed ingestion.
 - [Collection protocol](docs/PROTOCOL.md)
 - [Performance contract](docs/PERFORMANCE.md)
 - [Operations and deployment](docs/OPERATIONS.md)
+- [M0 viability evidence](docs/M0_RESULTS.md)
+- [M1 durable-core evidence](docs/M1_RESULTS.md)
 
 The machine-readable dependency intentions are in
 [`versions.json`](versions.json). A dependency is not considered adopted until
@@ -84,6 +87,12 @@ Run the M0 viability probe with:
 
 ```sh
 zig build e2e-m0 -Doptimize=ReleaseSafe
+```
+
+Run the durable administration scenario with:
+
+```sh
+zig build e2e-m1 -Doptimize=ReleaseSafe
 ```
 
 ## MVP boundary

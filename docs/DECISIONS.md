@@ -14,8 +14,8 @@ semantic, or application state model is consequential and must be added here.
 | D03 | Storage topology | Turso metadata + DuckDB events | Accepted |
 | D04 | DuckDB integration | Direct pinned LTS C API | Accepted |
 | D05 | Zig and Turso channel | Exact local development pins | Accepted |
-| D06 | Ingestion durability | Direct synchronous insert | Proposed |
-| D07 | Visitor/session identity | Cookieless site-scoped daily pseudonym | Proposed |
+| D06 | Ingestion durability | Direct synchronous insert | Accepted |
+| D07 | Visitor/session identity | Cookieless site-scoped daily pseudonym | Accepted |
 | D08 | Persisted visitor data | Derived dimensions only | Accepted |
 | D09 | Country and client classification | Trusted country header + small local classifiers | Proposed |
 | D10 | Collection transport | POST beacon plus optional GET pixel | Proposed |
@@ -27,6 +27,7 @@ semantic, or application state model is consequential and must be added here.
 | D16 | Backup and retention | Stop-the-service verified snapshots; explicit maintenance | Proposed |
 | D17 | Scale path | Measure, then batch/Parquet/server DB | Accepted |
 | D18 | Plausible migration | Fresh start and direct cutover | Accepted |
+| D19 | Metadata writes on pinned Turso | Durable autocommits with compensation | Accepted |
 
 ## D01. MVP interface
 
@@ -404,3 +405,26 @@ Start fresh and hand the owner a direct-cutover runbook after the product and
 dashboard milestones are complete. Exporting Plausible history is optional and
 does not block Analytico. The agent does not stop or remove Plausible; the owner
 will do that after accepting the finished replacement.
+
+## D19. Metadata writes on the pinned Turso engine
+
+### Candidates
+
+| Candidate | Advantages | Costs |
+| --- | --- | --- |
+| Explicit multi-write transactions | Ideal all-or-nothing metadata changes | The pinned `0.8.0-pre.2` engine reports a false `pwrite: quota exceeded` on this filesystem for these transactions |
+| Durable autocommits plus compensating delete | Uses the requested engine and each successful row is durable | A process crash between parent and child writes can leave an incomplete row until `doctor`/retry repairs it |
+| Replace Turso with SQLite or DuckDB metadata | Avoids the pin-specific behavior | Discards the requested Torso binding and changes the accepted storage topology |
+| Wait for an upstream engine update | May restore transaction behavior | Blocks a small private project on a development-channel fix |
+
+### Recommendation
+
+Use individual durable autocommits for metadata on the current pin. Multi-row
+commands insert the parent first and synchronously delete it if a child insert
+returns an error. Numbered `CREATE TABLE IF NOT EXISTS` migrations are replayable
+and write their ledger row last. `doctor` remains the place to detect incomplete
+state after an actual process crash.
+
+This is a narrow workaround for a measured pin/filesystem interaction, not a
+generic transaction abstraction. Re-test explicit transactions when upgrading
+Turso; remove the compensation path if the real end-to-end scenario passes.

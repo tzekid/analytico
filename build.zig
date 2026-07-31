@@ -92,4 +92,9 @@ pub fn build(b: *std.Build) void {
     m0_e2e.addArtifactArg(app);
     m0_e2e.step.dependOn(b.getInstallStep());
     b.step("e2e-m0", "Run M0 against real on-disk Turso and DuckDB files").dependOn(&m0_e2e.step);
+
+    const m1_e2e = b.addSystemCommand(&.{ "bash", "tests/e2e-m1.sh" });
+    m1_e2e.addArtifactArg(app);
+    m1_e2e.step.dependOn(b.getInstallStep());
+    b.step("e2e-m1", "Run M1 administration and durability through real processes").dependOn(&m1_e2e.step);
 }

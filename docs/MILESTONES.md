@@ -79,20 +79,22 @@ Create sites, goals, funnels, and events without HTTP or a web UI.
 
 ### Definition of done
 
-- [ ] All schemas in `DATA_MODEL.md` have reviewed migration equivalents.
-- [ ] Fresh migration and every supported upgrade path produce the same schema.
-- [ ] Newer unknown schema versions fail closed with a useful local error.
-- [ ] CLI creates/lists/disables/deletes metadata using explicit confirmation
+- [x] All schemas in `DATA_MODEL.md` have reviewed migration equivalents.
+- [x] Fresh migration and the only supported v0-to-v1 path are replayable and
+      produce schema version 1 in both stores.
+- [x] Newer unknown schema versions fail closed with a useful local error.
+- [x] CLI creates/lists/disables/deletes metadata using explicit confirmation
       for destructive actions.
-- [ ] Real CLI scenarios cover funnel, origin, slug, path, event, property,
+- [x] Real CLI scenarios cover funnel, origin, slug, path, event, property,
       UUID, time-range, malformed UTF-8, and duplicate-input boundaries against
       disposable on-disk databases.
-- [ ] Pseudonym fixtures prove site scoping, daily rotation, network
+- [x] Pseudonym fixtures prove site scoping, daily rotation, IPv4 `/24`, IPv6
+      `/48`,
       normalization, determinism, and key sensitivity without logging raw data.
-- [ ] An accepted event survives process termination after commit and reopening.
-- [ ] No M1 domain or application module imports HTTP, HTML, or CLI modules.
-- [ ] Debug/ReleaseSafe builds and real-process fault/recovery scenarios pass.
-- [ ] Temporary unit tests, mock stores, or in-memory substitutes used during
+- [x] An accepted event survives process termination after commit and reopening.
+- [x] No M1 domain or application module imports HTTP, HTML, or CLI modules.
+- [x] Debug/ReleaseSafe builds and real-process fault/recovery scenarios pass.
+- [x] Temporary unit tests, mock stores, or in-memory substitutes used during
       feature development are removed unless they still catch a distinct
       production-path failure not covered end to end.
 

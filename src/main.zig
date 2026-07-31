@@ -1,5 +1,6 @@
 const std = @import("std");
 const analytico = @import("root.zig");
+const cli = @import("cli.zig");
 const probe = @import("m0/probe.zig");
 
 pub fn main(init: std.process.Init) !void {
@@ -36,6 +37,7 @@ pub fn main(init: std.process.Init) !void {
         try output.print("analytico {s}\n", .{analytico.version});
         return;
     }
+    if (try cli.run(allocator, init.io, output, args)) return;
 
     try output.writeAll(
         \\Usage:
@@ -45,4 +47,5 @@ pub fn main(init: std.process.Init) !void {
         \\  analytico m0 benchmark <directory>
         \\
     );
+    try cli.writeUsage(output);
 }
