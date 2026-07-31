@@ -77,6 +77,7 @@ real-time views, session replay, arbitrary user SQL, and distributed ingestion.
 - [0.2.0 release notes](docs/RELEASE_0.2.0.md)
 - [0.2.1 release notes](docs/RELEASE_0.2.1.md)
 - [0.3.0 release notes](docs/RELEASE_0.3.0.md)
+- [U1 dashboard functional-quality evidence](docs/U1_RESULTS.md)
 
 The machine-readable dependency intentions are in
 [`versions.json`](versions.json). A dependency is not considered adopted until

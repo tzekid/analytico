@@ -393,20 +393,20 @@ consistent before beginning a design-led visual rewrite.
 
 ### Definition of done
 
-- [ ] Selecting either configured site renders that site's own overview and
+- [x] Selecting either configured site renders that site's own overview and
       canonical URL; report navigation never silently returns to another site.
-- [ ] Switching sites from a site-specific goal or funnel safely returns to the
+- [x] Switching sites from a site-specific goal or funnel safely returns to the
       destination site's overview instead of retaining an invalid subject.
-- [ ] Date changes preserve the selected site and report while resetting unsafe
+- [x] Date changes preserve the selected site and report while resetting unsafe
       pagination state.
-- [ ] Pagination, campaign dimensions, notices, validation errors, and
+- [x] Pagination, campaign dimensions, notices, validation errors, and
       goal/funnel mutations preserve all applicable context.
-- [ ] Every primary control works through native links/forms with JavaScript
+- [x] Every primary control works through native links/forms with JavaScript
       disabled; enhancement adds no client state store or report API.
-- [ ] Login has no empty alert, management controls no longer dominate every
+- [x] Login has no empty alert, management controls no longer dominate every
       report, and mobile/desktop layouts use consistent spacing, controls,
       focus, empty, loading, error, and dark-mode states.
-- [ ] The two-site real-browser journey, existing M6/M7/passkey gates, Debug,
+- [x] The two-site real-browser journey, existing M6/M7/passkey gates, Debug,
       ReleaseSafe, release archive, and production smoke checks pass.
 
 ## U2. Figma-led dashboard redesign

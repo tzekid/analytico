@@ -4,7 +4,7 @@
   "analytico": {
     "version": "0.3.0",
     "release_target": "linux-x86_64",
-    "status": "dashboard functional-quality release candidate"
+    "status": "accepted production release"
   },
   "zig": {
     "version": "0.17.0-dev.1509+bb296ab9b",
