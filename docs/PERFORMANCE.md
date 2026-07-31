@@ -136,6 +136,15 @@ measured overview p50/p95/p99 at 86/111/111 ms and the funnel at
 920/982/982 ms. The DuckDB file was 15,740,928 bytes. Full environment and
 fixture details are in `bench/results/m3-reports-release-safe.json`.
 
+### M4 production-MVP baseline
+
+The current ReleaseSafe package contains a 26,341,344-byte executable and a
+64,775,472-byte private DuckDB runtime: 91,116,816 installed bytes. The
+100-request collector run measured 53 ms startup, 50,228 KiB idle RSS after 30
+seconds, 60,228 KiB loaded RSS, 8.907 ms durable-insert p95, 9.169 ms p99, and
+21 ms shutdown. Full lifecycle, deployment, failure, rollback, and
+extracted-archive evidence is in `M4_RESULTS.md`.
+
 ## 7. M6/M7 web budgets
 
 These apply only when the dashboard exists:

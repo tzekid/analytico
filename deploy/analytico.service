@@ -1,0 +1,44 @@
+[Unit]
+Description=Analytico embedded web analytics
+Documentation=https://github.com/tzekid/analytico
+After=local-fs.target network.target
+
+[Service]
+Type=simple
+User=analytico
+Group=analytico
+WorkingDirectory=/var/lib/analytico
+ExecStartPre=/opt/analytico/bin/analytico doctor /var/lib/analytico
+ExecStart=/opt/analytico/bin/analytico serve --listen 127.0.0.1:4318 --meta /var/lib/analytico/meta.db --events /var/lib/analytico/events.duckdb --temp /var/lib/analytico/tmp --visitor-key-file /var/lib/analytico/visitor.key
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=3s
+KillSignal=SIGTERM
+UMask=0077
+
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/analytico
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryHigh=192M
+MemoryMax=256M
+TasksMax=64
+LimitNOFILE=1024
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

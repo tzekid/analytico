@@ -4,8 +4,15 @@ const cli = @import("cli.zig");
 const probe = @import("m0/probe.zig");
 const m2_probe = @import("m2/probe.zig");
 const m3_probe = @import("m3/probe.zig");
+const m4_probe = @import("m4/probe.zig");
 
 pub fn main(init: std.process.Init) !void {
+    const ignore_file_limit: std.posix.Sigaction = .{
+        .handler = .{ .handler = std.posix.SIG.IGN },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(.XFSZ, &ignore_file_limit, null);
     const allocator = init.arena.allocator();
     const args = try init.minimal.args.toSlice(allocator);
 
@@ -47,6 +54,20 @@ pub fn main(init: std.process.Init) !void {
         std.mem.eql(u8, args[2], "timeout"))
     {
         try m3_probe.timeout(allocator, output, args[3]);
+        return;
+    }
+    if (args.len == 4 and
+        std.mem.eql(u8, args[1], "m4") and
+        std.mem.eql(u8, args[2], "legacy-million"))
+    {
+        try m4_probe.legacyMillion(allocator, output, args[3]);
+        return;
+    }
+    if (args.len == 5 and
+        std.mem.eql(u8, args[1], "m4") and
+        std.mem.eql(u8, args[2], "poison-newer"))
+    {
+        try m4_probe.poisonNewer(allocator, output, args[3], args[4]);
         return;
     }
     if (args.len == 4 and
@@ -95,6 +116,8 @@ pub fn main(init: std.process.Init) !void {
         \\  analytico m3 timeout <directory>
         \\  analytico m3 legacy-create <directory>
         \\  analytico m3 legacy-verify <directory>
+        \\  analytico m4 legacy-million <directory>
+        \\  analytico m4 poison-newer <directory> <metadata|events>
         \\
     );
     try cli.writeUsage(output);

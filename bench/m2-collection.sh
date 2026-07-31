@@ -35,7 +35,11 @@ payload=$(printf \
     "$site_id")
 
 startup_started=$(date +%s%N)
-"$binary" serve "$fixture_dir" 127.0.0.1 "$port" \
+"$binary" serve --listen "127.0.0.1:$port" \
+    --meta "$fixture_dir/meta.db" \
+    --events "$fixture_dir/events.duckdb" \
+    --temp "$fixture_dir/tmp" \
+    --visitor-key-file "$fixture_dir/visitor.key" \
     >"$fixture_dir/server.stdout" 2>"$fixture_dir/server.stderr" &
 server_pid=$!
 ready=false
@@ -97,7 +101,7 @@ wait "$server_pid"
 server_pid=
 shutdown_ms=$((($(date +%s%N) - shutdown_started) / 1000000))
 stored_events=$("$binary" doctor "$fixture_dir" |
-    sed -n 's/.*stored_events=//p')
+    sed -n 's/.*stored_events=\([0-9][0-9]*\).*/\1/p')
 
 cat <<JSON
 {

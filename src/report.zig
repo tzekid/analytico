@@ -504,7 +504,7 @@ fn renderCsv(
     }
 }
 
-fn dateDay(value: []const u8) !u32 {
+pub fn dateDay(value: []const u8) !u32 {
     const year = try std.fmt.parseInt(u16, value[0..4], 10);
     const month = try std.fmt.parseInt(u8, value[5..7], 10);
     const day = try std.fmt.parseInt(u8, value[8..10], 10);

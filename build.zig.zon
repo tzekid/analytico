@@ -1,6 +1,6 @@
 .{
     .name = .analytico,
-    .version = "0.0.0",
+    .version = "0.1.0",
     .fingerprint = 0xfec3bac728f22f9a,
     .minimum_zig_version = "0.17.0-dev.1509+bb296ab9b",
     .dependencies = .{
@@ -22,6 +22,11 @@
         "tests",
         "bench",
         "docs",
+        "deploy",
+        "scripts",
+        "LICENSE",
+        "LICENSES",
+        "THIRD_PARTY_NOTICES.md",
         "AGENTS.md",
         "README.md",
         "versions.json",

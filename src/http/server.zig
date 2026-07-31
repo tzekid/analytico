@@ -26,27 +26,55 @@ var shutdown_requested = std.atomic.Value(bool).init(false);
 var listener_fd = std.atomic.Value(i32).init(-1);
 var active_stream_fd = std.atomic.Value(i32).init(-1);
 
+pub const Options = struct {
+    host: []const u8,
+    port: u16,
+    meta_path: []const u8,
+    event_path: []const u8,
+    temp_directory: []const u8,
+    key_path: []const u8,
+};
+
 pub fn run(
     allocator: std.mem.Allocator,
     io: std.Io,
-    directory: []const u8,
-    host: []const u8,
-    port: u16,
+    options: Options,
 ) !void {
-    if (!(std.mem.eql(u8, host, "127.0.0.1") or
-        std.mem.eql(u8, host, "::1")))
+    if (!(std.mem.eql(u8, options.host, "127.0.0.1") or
+        std.mem.eql(u8, options.host, "::1")))
     {
         return error.CollectorMustBindLoopback;
     }
-    const meta_path = try std.fs.path.join(allocator, &.{ directory, "meta.db" });
-    defer allocator.free(meta_path);
-    const event_path = try std.fs.path.join(allocator, &.{ directory, "events.duckdb" });
-    defer allocator.free(event_path);
-    const key_path = try std.fs.path.join(allocator, &.{ directory, "visitor.key" });
-    defer allocator.free(key_path);
+    inline for (.{
+        options.meta_path,
+        options.event_path,
+        options.temp_directory,
+        options.key_path,
+    }) |path| {
+        if (!std.fs.path.isAbsolute(path)) return error.ProductionPathMustBeAbsolute;
+    }
+    const key_stat = try std.Io.Dir.cwd().statFile(
+        io,
+        options.key_path,
+        .{ .follow_symlinks = false },
+    );
+    if (key_stat.kind != .file or key_stat.size != 32) {
+        return error.InvalidKeyFile;
+    }
+    if (key_stat.permissions.toMode() & 0o777 != 0o600) {
+        return error.InsecureKeyPermissions;
+    }
+    const meta_stat = try std.Io.Dir.cwd().statFile(io, options.meta_path, .{});
+    const event_stat = try std.Io.Dir.cwd().statFile(io, options.event_path, .{});
+    const temp_stat = try std.Io.Dir.cwd().statFile(io, options.temp_directory, .{});
+    if (meta_stat.kind != .file or event_stat.kind != .file or
+        temp_stat.kind != .directory)
+    {
+        return error.InvalidProductionPath;
+    }
     const key_bytes = try std.Io.Dir.cwd().readFileAlloc(
         io,
-        key_path,
+        options.key_path,
         allocator,
         .limited(33),
     );
@@ -56,12 +84,16 @@ pub fn run(
     }
     if (key_bytes.len != 32) return error.InvalidKeyFile;
 
-    var metadata = try meta.Store.open(allocator, meta_path);
+    var metadata = try meta.Store.open(allocator, options.meta_path);
     defer metadata.deinit();
-    try metadata.migrate();
-    var event_store = try events.Store.open(allocator, event_path);
+    try metadata.requireCurrent();
+    var event_store = try events.Store.openWithTemp(
+        allocator,
+        options.event_path,
+        options.temp_directory,
+    );
     defer event_store.deinit();
-    try event_store.migrate();
+    try event_store.requireCurrent();
     var policy_arena = std.heap.ArenaAllocator.init(allocator);
     defer policy_arena.deinit();
     const policies = try loadPolicies(policy_arena.allocator(), &metadata);
@@ -72,10 +104,13 @@ pub fn run(
         .events = &event_store,
         .policies = policies,
         .master_key = key_bytes[0..32].*,
+        .meta_path = options.meta_path,
+        .event_path = options.event_path,
+        .key_path = options.key_path,
     };
     defer std.crypto.secureZero(u8, &context.master_key);
 
-    var address = try std.Io.net.IpAddress.parse(host, port);
+    var address = try std.Io.net.IpAddress.parse(options.host, options.port);
     var listener = try address.listen(io, .{ .reuse_address = true });
     defer listener.deinit(io);
     shutdown_requested.store(false, .release);
@@ -90,7 +125,11 @@ pub fn run(
     std.posix.sigaction(.TERM, &term_action, &old_term_action);
     defer std.posix.sigaction(.TERM, &old_term_action, null);
 
-    std.debug.print("analytico serve http://{s}:{d}\n", .{ host, port });
+    std.debug.print(
+        "{{\"level\":\"info\",\"code\":\"serve_started\",\"host\":\"{s}\"," ++
+            "\"port\":{d}}}\n",
+        .{ options.host, options.port },
+    );
     while (!shutdown_requested.load(.acquire)) {
         const stream = listener.accept(io) catch |err| {
             if (shutdown_requested.load(.acquire) and
@@ -106,12 +145,44 @@ pub fn run(
         }
         active_stream_fd.store(stream.socket.handle, .release);
         handle(&context, stream) catch |err| {
-            std.log.err("collector request failed: {s}", .{@errorName(err)});
+            context.counters.request_failures += 1;
+            std.debug.print(
+                "{{\"level\":\"error\",\"code\":\"request_failed\"," ++
+                    "\"category\":\"{s}\"}}\n",
+                .{@errorName(err)},
+            );
         };
         active_stream_fd.store(-1, .release);
     }
-    try event_store.checkpoint();
+    if (context.events_healthy) try event_store.checkpoint();
+    std.debug.print(
+        "{{\"level\":\"info\",\"code\":\"serve_stopped\",\"accepted\":{d}," ++
+            "\"rejected\":{d},\"rate_limited\":{d},\"bots\":{d}," ++
+            "\"unknown_country\":{d},\"unknown_client\":{d}," ++
+            "\"write_failures\":{d},\"request_failures\":{d}}}\n",
+        .{
+            context.counters.accepted,
+            context.counters.rejected,
+            context.counters.rate_limited,
+            context.counters.bots,
+            context.counters.unknown_country,
+            context.counters.unknown_client,
+            context.counters.write_failures,
+            context.counters.request_failures,
+        },
+    );
 }
+
+const Counters = struct {
+    accepted: u64 = 0,
+    rejected: u64 = 0,
+    rate_limited: u64 = 0,
+    bots: u64 = 0,
+    unknown_country: u64 = 0,
+    unknown_client: u64 = 0,
+    write_failures: u64 = 0,
+    request_failures: u64 = 0,
+};
 
 const Context = struct {
     allocator: std.mem.Allocator,
@@ -120,8 +191,12 @@ const Context = struct {
     events: *events.Store,
     policies: []const meta.SitePolicy,
     master_key: [32]u8,
+    meta_path: []const u8,
+    event_path: []const u8,
+    key_path: []const u8,
     limiter: rate_limit.Limiter = .{},
     events_healthy: bool = true,
+    counters: Counters = .{},
 };
 
 fn requestShutdown(_: std.posix.SIG) callconv(.c) void {
@@ -146,6 +221,7 @@ fn handle(context: *Context, stream: std.Io.net.Stream) !void {
     defer arena_state.deinit();
     const allocator = arena_state.allocator();
     const request = (request_mod.read(allocator, &reader.interface) catch |err| {
+        context.counters.rejected += 1;
         switch (err) {
             error.PayloadTooLarge => try writeError(output, 413),
             error.UnsupportedTransferEncoding => try writeError(output, 415),
@@ -168,7 +244,7 @@ fn handle(context: *Context, stream: std.Io.net.Stream) !void {
             try methodNotAllowed(output, "GET");
             return;
         }
-        if (!context.events_healthy) {
+        if (!context.events_healthy or !pathsReady(context)) {
             try response.write(output, 503, "text/plain; charset=utf-8", no_store_headers, "unavailable\n");
             return;
         }
@@ -279,45 +355,55 @@ fn postEvent(
     request: request_mod.Request,
     output: *std.Io.Writer,
 ) !void {
+    if (!context.events_healthy) {
+        try reject(context, output, 503);
+        return;
+    }
     if (!supportedContentType(try request.header("content-type")) or
         (try request.header("content-encoding")) != null)
     {
-        try writeError(output, 415);
+        try reject(context, output, 415);
         return;
     }
     const payload = collect.parsePost(allocator, request.body) catch {
-        try writeError(output, 400);
+        try reject(context, output, 400);
         return;
     };
     const policy = findPolicy(context.policies, payload.site) orelse {
-        try writeError(output, 404);
+        try reject(context, output, 404);
         return;
     };
     if (policy.disabled) {
-        try writeError(output, 404);
+        try reject(context, output, 404);
         return;
     }
     const raw_origin = (try request.header("origin")) orelse {
-        try writeError(output, 403);
+        try reject(context, output, 403);
         return;
     };
     const origin = domain.normalizeOrigin(allocator, raw_origin) catch {
-        try writeError(output, 403);
+        try reject(context, output, 403);
         return;
     };
     if (!policy.allowsOrigin(origin)) {
-        try writeError(output, 403);
+        try reject(context, output, 403);
         return;
     }
     const prepared = collect.preparePost(allocator, payload, policy) catch {
-        try writeError(output, 400);
+        try reject(context, output, 400);
         return;
     };
     const accepted = acceptEvent(context, allocator, request, prepared) catch |err| {
-        try writeError(output, if (err == error.EventWriteFailed) 500 else 400);
+        try reject(
+            context,
+            output,
+            if (err == error.EventWriteFailed) 500 else 400,
+        );
         return;
     };
     if (!accepted) {
+        context.counters.rate_limited += 1;
+        context.counters.rejected += 1;
         try response.write(
             output,
             429,
@@ -341,32 +427,41 @@ fn pixelEvent(
     request: request_mod.Request,
     output: *std.Io.Writer,
 ) !void {
+    if (!context.events_healthy) {
+        try reject(context, output, 503);
+        return;
+    }
     const pixel = collect.parsePixel(allocator, request.target) catch {
-        try writeError(output, 400);
+        try reject(context, output, 400);
         return;
     };
     const policy = findPolicy(context.policies, pixel.site) orelse {
-        try writeError(output, 404);
+        try reject(context, output, 404);
         return;
     };
     if (policy.disabled) {
-        try writeError(output, 404);
+        try reject(context, output, 404);
         return;
     }
     const referer = (try request.header("referer")) orelse {
-        try writeError(output, 403);
+        try reject(context, output, 403);
         return;
     };
     const prepared = collect.preparePixel(allocator, pixel, policy, referer) catch {
-        try writeError(output, 403);
+        try reject(context, output, 403);
         return;
     };
     const accepted = acceptEvent(context, allocator, request, prepared) catch |err| {
-        try writeError(output, if (err == error.EventWriteFailed) 500 else 400);
+        try reject(
+            context,
+            output,
+            if (err == error.EventWriteFailed) 500 else 400,
+        );
         return;
     };
     if (!accepted) {
-        try writeError(output, 429);
+        context.counters.rate_limited += 1;
+        try reject(context, output, 429);
         return;
     }
     try response.write(
@@ -399,6 +494,15 @@ fn acceptEvent(
     if (user_agent.len > 1024) return error.InvalidUserAgent;
     const client = classify.userAgent(user_agent);
     const country_code = classify.country(try request.header("x-analytico-country"));
+    if (std.mem.eql(u8, client.device, "bot")) context.counters.bots += 1;
+    if (std.mem.eql(u8, country_code[0..], "ZZ")) {
+        context.counters.unknown_country += 1;
+    }
+    if (std.mem.eql(u8, client.browser, "Unknown") or
+        std.mem.eql(u8, client.browser, "Other"))
+    {
+        context.counters.unknown_client += 1;
+    }
     const coarse = try std.fmt.allocPrint(allocator, "{s}|{s}|{s}", .{
         client.browser,
         client.os,
@@ -434,9 +538,33 @@ fn acceptEvent(
         .properties_json = prepared.properties_json,
     }) catch {
         context.events_healthy = false;
+        context.counters.write_failures += 1;
         return error.EventWriteFailed;
     };
+    context.counters.accepted += 1;
     return true;
+}
+
+fn pathsReady(context: *Context) bool {
+    const meta_stat = std.Io.Dir.cwd().statFile(
+        context.io,
+        context.meta_path,
+        .{},
+    ) catch return false;
+    const event_stat = std.Io.Dir.cwd().statFile(
+        context.io,
+        context.event_path,
+        .{},
+    ) catch return false;
+    const key_stat = std.Io.Dir.cwd().statFile(
+        context.io,
+        context.key_path,
+        .{ .follow_symlinks = false },
+    ) catch return false;
+    return meta_stat.kind == .file and meta_stat.size > 0 and
+        event_stat.kind == .file and event_stat.size > 0 and
+        key_stat.kind == .file and key_stat.size == 32 and
+        key_stat.permissions.toMode() & 0o777 == 0o600;
 }
 
 const CurrentTime = struct {
@@ -558,4 +686,9 @@ fn writeError(output: *std.Io.Writer, status: u16) !void {
         no_store_headers,
         body,
     );
+}
+
+fn reject(context: *Context, output: *std.Io.Writer, status: u16) !void {
+    context.counters.rejected += 1;
+    try writeError(output, status);
 }

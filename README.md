@@ -4,12 +4,14 @@ Analytico is a small, self-hosted web analytics engine for low-traffic sites.
 It aims to provide the useful part of Plausible without a ClickHouse service,
 an administrative JavaScript application, or a multi-container runtime.
 
-Milestones M0 through M3 are complete. The executable now owns the exact embedded
+Milestones M0 through M4 are complete: this is the production MVP. The
+executable owns the exact embedded
 stores, numbered schemas, validated sites/origins/property allowlists,
 goals/funnels, a private visitor key, daily visitor pseudonyms, direct durable
 event insertion, a bounded loopback HTTP collector, a tiny self-hosted tracker,
-a JavaScript-free pixel, complete typed CLI reports, and an operator `doctor`
-command.
+a JavaScript-free pixel, complete typed CLI reports, verified lifecycle
+commands, a hardened single-service deployment, and checksummed release
+packaging.
 
 ## Selected shape
 
@@ -59,6 +61,7 @@ real-time views, session replay, arbitrary user SQL, and distributed ingestion.
 - [M1 durable-core evidence](docs/M1_RESULTS.md)
 - [M2 collection evidence](docs/M2_RESULTS.md)
 - [M3 report evidence](docs/M3_RESULTS.md)
+- [M4 production-MVP evidence](docs/M4_RESULTS.md)
 
 The machine-readable dependency intentions are in
 [`versions.json`](versions.json). A dependency is not considered adopted until
@@ -113,6 +116,14 @@ zig build e2e-m3 -Doptimize=ReleaseSafe
 zig build bench-m3 -Doptimize=ReleaseSafe
 ```
 
+Run lifecycle, rollback, and extracted-release gates with:
+
+```sh
+zig build e2e-m4 -Doptimize=ReleaseSafe
+zig build e2e-rollback -Doptimize=ReleaseSafe
+zig build e2e-release-full -Doptimize=ReleaseSafe
+```
+
 For example:
 
 ```sh
@@ -127,7 +138,12 @@ Playwright, browser, container, or JavaScript runtime dependency.
 After `init` and `site add`, start the loopback collector with:
 
 ```sh
-analytico serve ./data 127.0.0.1 4318
+analytico serve \
+  --listen 127.0.0.1:4318 \
+  --meta /var/lib/analytico/meta.db \
+  --events /var/lib/analytico/events.duckdb \
+  --temp /var/lib/analytico/tmp \
+  --visitor-key-file /var/lib/analytico/visitor.key
 ```
 
 Use the content-hashed production tracker:
@@ -144,7 +160,6 @@ Use the content-hashed production tracker:
 
 ## MVP boundary
 
-M0 through M3 produce a functional collector and complete CLI report surface.
-M4 makes that system practical to operate and is the production-MVP gate. M5
-packages the direct-cutover handoff; it does not require a parallel Plausible
-trial. The HTML and HTMX work begins only in M6 and M7.
+M4 is the production-MVP gate. M5 prepares the site-specific direct-cutover
+handoff; it does not require a parallel Plausible trial. The HTML and HTMX work
+begins only in M6 and M7.

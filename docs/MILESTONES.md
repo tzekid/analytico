@@ -197,25 +197,25 @@ The functional MVP can safely replace a small self-hosted analytics stack.
 
 ### Definition of done
 
-- [ ] A fresh VPS-style directory can be installed from the release artifact
+- [x] A fresh VPS-style directory can be installed from the release artifact
       with one service process and no database container.
-- [ ] The service runs unprivileged with the intended filesystem and cgroup
+- [x] The service runs unprivileged with the intended filesystem and cgroup
       restrictions.
-- [ ] Caddy exposes only collection/tracker routes and overwrites trust headers.
-- [ ] Readiness fails within five seconds of either store becoming unusable and
+- [x] Caddy exposes only collection/tracker routes and overwrites trust headers.
+- [x] Readiness fails within five seconds of either store becoming unusable and
       recovers honestly after restart.
-- [ ] Stop/checkpoint/copy/hash/isolated-restore procedure is automated and
+- [x] Stop/checkpoint/copy/hash/isolated-restore procedure is automated and
       succeeds twice on representative data.
-- [ ] A deliberately corrupted backup, wrong manifest, newer schema, wrong key
+- [x] A deliberately corrupted backup, wrong manifest, newer schema, wrong key
       permission, disk-full fixture, and interrupted migration each fail safely.
-- [ ] `maintain` enforces the 400-day rule and site deletion, reports counts, and
+- [x] `maintain` enforces the 400-day rule and site deletion, reports counts, and
       does not touch rows outside its explicit predicate.
-- [ ] Previous binary plus pre-migration backup rollback is rehearsed.
-- [ ] Logs pass a denylist scan for raw visitor/request data and secrets.
-- [ ] Installed size, idle/peak RSS, startup, insert, report, and shutdown
+- [x] Previous binary plus pre-migration backup rollback is rehearsed.
+- [x] Logs pass a denylist scan for raw visitor/request data and secrets.
+- [x] Installed size, idle/peak RSS, startup, insert, report, and shutdown
       budgets pass on the target VPS.
-- [ ] Dependency license/notices and exact source provenance are included.
-- [ ] Debug and ReleaseSafe full gates pass from the release archive.
+- [x] Dependency license/notices and exact source provenance are included.
+- [x] Debug and ReleaseSafe full gates pass from the release archive.
 
 Completion of M4 is the **proper production MVP**.
 

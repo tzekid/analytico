@@ -1,214 +1,269 @@
 # Operations and deployment
 
-This is the target M4 runbook. Commands and paths become executable/tested
-artifacts during implementation; they must not be applied to the VPS merely
-because they appear here.
+This is the tested production-MVP runbook for a single Linux x86-64 host.
+Analytico is one service process with two embedded database files; there is no
+database server or container.
 
-## 1. Runtime inventory
+## 1. Release layout
+
+The release archive contains:
 
 ```text
-/usr/local/bin/analytico
-/etc/analytico/visitor-key
+analytico-<version>-linux-x86_64/
+  bin/analytico
+  lib/libduckdb.so
+  deploy/analytico.service
+  deploy/Caddyfile
+  public/tracker.*
+  docs/
+  LICENSES/
+  SHA256SUMS
+```
+
+Verify both checksum layers before installation:
+
+```sh
+sha256sum -c analytico-<version>-linux-x86_64.tar.gz.sha256
+tar --same-permissions -xzf analytico-<version>-linux-x86_64.tar.gz
+cd analytico-<version>-linux-x86_64
+sha256sum -c SHA256SUMS
+```
+
+Install the directory at `/opt/analytico`. The executable's `$ORIGIN/../lib`
+runpath loads only the packaged DuckDB runtime in a normal installation.
+
+```text
+/opt/analytico/bin/analytico
+/opt/analytico/lib/libduckdb.so
 /var/lib/analytico/meta.db
 /var/lib/analytico/events.duckdb
+/var/lib/analytico/visitor.key
 /var/lib/analytico/tmp/
 /var/backups/analytico/<timestamp>/
 ```
 
-Ownership:
+The release directory is root-owned and not writable by the service user. The
+data directory and its contents belong to the unprivileged `analytico` user;
+the directory and key are mode `0700` and `0600`. Use local block storage, not
+NFS, SMB, or a shared filesystem, for writable DuckDB data.
 
-- executable: root-owned, not writable by service user;
-- configuration directory/key: `analytico` service user, mode `0700/0600`;
-- data and temp directories: `analytico`, mode `0700`;
-- backups: separate operator-controlled path, not served by Caddy.
+## 2. First installation
 
-The database files are on local block storage. NFS/SMB/shared filesystems are
-not supported for writable DuckDB files.
+Create the service account and initialize data before installing the unit:
 
-## 2. Process configuration
-
-Use explicit flags in the service unit rather than a general configuration
-language:
-
-```text
-analytico serve
-  --listen 127.0.0.1:4318
-  --meta /var/lib/analytico/meta.db
-  --events /var/lib/analytico/events.duckdb
-  --temp /var/lib/analytico/tmp
-  --visitor-key-file /etc/analytico/visitor-key
-  --trusted-proxy 127.0.0.1
-  --country-header CF-IPCountry
+```sh
+useradd --system --home-dir /var/lib/analytico \
+  --shell /usr/bin/nologin analytico
+install -d -o analytico -g analytico -m 0700 /var/lib/analytico
+sudo -u analytico /opt/analytico/bin/analytico init /var/lib/analytico
+sudo -u analytico /opt/analytico/bin/analytico \
+  site add /var/lib/analytico example "Example" https://example.com
+sudo -u analytico /opt/analytico/bin/analytico \
+  doctor /var/lib/analytico
+install -m 0644 deploy/analytico.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now analytico
+curl --fail http://127.0.0.1:4318/readyz
 ```
 
-The actual parser accepts the equivalent single-line command. Unknown flags,
-duplicate singleton flags, missing values, relative production paths, and
-world-readable key files fail startup.
+`init` creates the temp directory, both stores, current schemas, and one random
+32-byte visitor key. Re-running it preserves the key. Do not copy one
+installation's key into another except as part of a matched restore.
 
-## 3. Startup sequence
+## 3. Process contract
 
-1. Parse and validate all flags without opening a listener.
-2. Load the 32-byte visitor key from its exact file.
-3. Initialize the Turso library and open metadata.
-4. Verify metadata schema version and load the bounded site-policy snapshot.
-5. Open DuckDB, apply resource/security settings, verify its schema version,
-   and recover WAL if required.
-6. Run readiness queries with deadlines.
-7. Bind the loopback listener.
-8. Mark ready.
+The checked-in service invokes the exact production parser:
 
-Migrations are not applied implicitly by `serve`. The operator runs
-`analytico migrate` after a verified backup and before starting the new binary.
-
-## 4. Illustrative systemd shape
-
-M4 ships and tests a real unit based on:
-
-```ini
-[Unit]
-Description=Analytico embedded web analytics
-After=network.target
-
-[Service]
-Type=simple
-User=analytico
-Group=analytico
-ExecStart=/usr/local/bin/analytico serve --listen 127.0.0.1:4318 --meta /var/lib/analytico/meta.db --events /var/lib/analytico/events.duckdb --temp /var/lib/analytico/tmp --visitor-key-file /etc/analytico/visitor-key --trusted-proxy 127.0.0.1 --country-header CF-IPCountry
-Restart=on-failure
-RestartSec=2
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/var/lib/analytico
-MemoryHigh=192M
-MemoryMax=256M
-TasksMax=64
-LimitNOFILE=1024
-
-[Install]
-WantedBy=multi-user.target
+```sh
+analytico serve \
+  --listen 127.0.0.1:4318 \
+  --meta /var/lib/analytico/meta.db \
+  --events /var/lib/analytico/events.duckdb \
+  --temp /var/lib/analytico/tmp \
+  --visitor-key-file /var/lib/analytico/visitor.key
 ```
 
-The memory limits are validated against M0 measurements before adoption. A
-failed report must not cause the process to hit `MemoryMax`.
+Only loopback listeners and absolute paths are accepted. Unknown, duplicate,
+or missing flags; missing paths; non-current schemas; and a key with the wrong
+type, length, or mode fail before binding the listener. `serve` never migrates.
 
-## 5. Reverse proxy
+DuckDB is configured before its configuration is locked: one query thread,
+128 MiB memory, 256 MiB temp limit, insertion-order preservation off,
+community extensions off, and external access off.
 
-Caddy:
+## 4. systemd boundary
 
-- terminates TLS;
-- proxies only `/tracker.aef65945.js`, `/tracker.js`, `/v1/event`, and
-  `/v1/p.gif`;
-- keeps health routes on loopback;
-- overwrites client-IP/country trust headers;
-- sets conservative request and timeout limits;
-- does not cache event routes;
-- may cache the content-hashed tracker asset.
+`deploy/analytico.service` runs as `analytico`, writes only
+`/var/lib/analytico`, and applies a 256 MiB memory ceiling, task/file limits,
+empty capabilities, private devices/temp, a strict read-only system, namespace
+and kernel protections, and an `0077` umask. Its offline
+`systemd-analyze security` exposure score is gated by the release test.
 
-The collector performs its own origin, body, rate, and timeout checks; Caddy is
-defense in depth.
+The 192/256 MiB memory thresholds exceed the measured 48 MiB idle and 59 MiB
+loaded collector RSS while remaining small for a VPS. `SIGTERM` stops the
+listener, closes any active connection, checkpoints a healthy event store, and
+exits; `TimeoutStopSec=3s` exceeds the measured shutdown time by two orders of
+magnitude.
+
+## 5. Caddy boundary
+
+Replace `analytics.example` in `deploy/Caddyfile`, then validate and install it:
+
+```sh
+caddy validate --config deploy/Caddyfile
+```
+
+The vhost exposes only `/tracker.aef65945.js`, `/tracker.js`, `/v1/event`, and
+`/v1/p.gif`; all other paths, including health endpoints, receive `404`.
+Caddy overwrites `X-Forwarded-For` and `X-Analytico-Country` before proxying.
+Do not trust `CF-IPCountry` unless the origin is network-restricted to
+Cloudflare. If Cloudflare is not used, clear the country header and Analytico
+will honestly store `ZZ`.
+
+The collector still enforces origins, content type, body/header bounds, rate
+limits, and timeouts. Caddy is not an application state or authentication
+layer.
 
 ## 6. Health and logs
 
-`/healthz` proves only that the event loop can answer. `/readyz` performs bounded
-constant work against both stores or uses a recent readiness result no older
-than five seconds.
+`/healthz` proves the event loop can answer. `/readyz` checks the healthy-write
+latch, the presence and basic properties of all durable paths, and exact schema
+versions in both stores. A write failure latches readiness to `503`; the
+process returns `503` without retrying later event writes until it is restarted.
 
-Structured logs include:
+The service emits newline-delimited structured JSON to stderr for:
 
-- timestamp, level, stable event code, request ID;
-- route, status class, bounded duration, site ID only when safe;
-- database error category, never SQL values or native error strings that may
-  include input;
-- aggregate counters for accepted, rejected, rate-limited, bot, unknown
-  classification, report timeout, and write failure.
+- `serve_started`, containing only host and port;
+- `request_failed`, containing only an error category;
+- `serve_stopped`, containing accepted, rejected, rate-limited, bot, unknown
+  classification, write-failure, and request-failure counters.
 
-Logs exclude IPs, visitor pseudonyms, user agents, paths, referrers, campaigns,
-custom properties, request bodies, and secrets.
+Logs never include IPs, user agents, paths, referrers, campaigns, properties,
+request bodies, visitor IDs, keys, or database paths. Journald owns rotation.
 
 ## 7. Backup
 
-The MVP favors a short honest outage over an online coordinator:
+The MVP chooses a short honest outage over an online two-store coordinator:
 
-1. Confirm a prior verified backup exists.
-2. Stop the service and verify no Analytico process owns either file.
-3. Run `analytico backup` with explicit source paths and a new destination.
-4. The command opens each store, verifies schema, checkpoints, closes, copies
-   files to a temporary destination, fsyncs files/directories, and atomically
-   renames the destination.
-5. Write `manifest.json` containing binary version, schema versions, byte
-   sizes, SHA-256 values, and UTC creation time.
-6. Run `analytico restore --verify` into a separate temporary directory and run
-   `doctor` against it.
-7. Restart the service and verify readiness plus a known report.
+```sh
+systemctl stop analytico
+sudo -u analytico /opt/analytico/bin/analytico \
+  backup /var/lib/analytico /var/backups/analytico/2026-07-31T120000Z
+sudo -u analytico /opt/analytico/bin/analytico \
+  restore /var/backups/analytico/2026-07-31T120000Z \
+  /var/backups/analytico/verify-2026-07-31T120000Z --verify
+sudo -u analytico /opt/analytico/bin/analytico \
+  doctor /var/backups/analytico/verify-2026-07-31T120000Z
+systemctl start analytico
+curl --fail http://127.0.0.1:4318/readyz
+```
 
-Never copy a live DuckDB file or omit its WAL. Never write a new backup over the
-last known-good backup.
+`backup` requires current, readable stores and a secure key; checkpoints both
+engines, copies into a unique sibling temp directory, fsyncs files and the
+directory, writes sizes and SHA-256 hashes to `manifest.json`, then atomically
+renames to a destination which must not exist. Never overwrite the last
+known-good backup.
 
 ## 8. Restore
 
-1. Stop service.
-2. Preserve the failed/current data directory by renaming it; do not delete it.
-3. Verify manifest hashes and schema compatibility.
-4. Restore into a new data directory on the same filesystem.
-5. Run `doctor` and representative report fixtures.
-6. Atomically switch the service-visible directory.
-7. Start and verify.
+`restore ... --verify` rejects an unknown manifest/schema, unexpected file
+name, size/hash mismatch, insecure key, unreadable store, or existing
+destination. It copies into a sibling temp directory, creates a secure DuckDB
+temp directory, validates both isolated stores, fsyncs, and atomically renames.
 
-Rollback restores both metadata and events from the same backup directory even
-though the stores do not require cross-file transactions during ordinary work.
+For production recovery:
 
-## 9. Upgrade
+1. Stop the service.
+2. Rename the current data directory; do not delete it.
+3. Restore the matched metadata/events/key backup to a new directory.
+4. Run `doctor` and a representative report.
+5. Rename it to `/var/lib/analytico`, start, and check readiness.
 
-1. Read schema and metric changes.
-2. Build exact pins in Debug and ReleaseSafe.
-3. Run real-binary end-to-end, recovery, browser where applicable, and
-   performance gates against disposable on-disk databases.
-4. Produce and verify backup.
-5. Stop service.
-6. Run explicit migrations with the new binary.
-7. Start, verify readiness and reports.
-8. Keep the previous binary and compatible backup until the observation window
-   passes.
+## 9. Upgrade, migration, and rollback
 
-A binary refuses a newer unknown database schema. Destructive migration needs a
-separate decision and rehearsed reverse path.
+```sh
+systemctl stop analytico
+analytico backup /var/lib/analytico /var/backups/analytico/pre-<version>
+/opt/analytico-new/bin/analytico migrate /var/lib/analytico
+/opt/analytico-new/bin/analytico doctor /var/lib/analytico
+# atomically switch /opt/analytico to the new verified release
+systemctl start analytico
+```
 
-## 10. Retention and deletion
+Migrations are numbered and transactional. Killing the process during the
+million-row v1-to-v2 DuckDB migration and retrying is an automated release
+gate. A binary refuses a database with a newer unknown schema.
 
-The default event retention window is 400 days. `analytico maintain`, run while
-the service is stopped:
+Keep the previous release directory and the verified pre-upgrade backup.
+Rollback means stopping the new binary, restoring both stores and the key from
+that backup into a new data directory, switching the data path, and starting
+the prior binary. `zig build e2e-rollback` builds the actual prior commit and
+rehearses this procedure.
 
-- deletes expired events in a bounded site/date operation;
-- completes pending disabled-site deletions;
-- checkpoints DuckDB;
-- reports before/after counts and file sizes;
-- runs integrity/readability checks.
+## 10. Retention and site deletion
 
-At the expected traffic, monthly manual maintenance is sufficient. A systemd
-timer that stops the service is introduced only if operations show the manual
-schedule is unreliable and the downtime is acceptable.
+Run maintenance with the service stopped:
 
-## 11. Disk-full and corruption response
+```sh
+analytico maintain /var/lib/analytico 2025-06-01
+```
 
-- Stop accepting collection writes after a disk-full error.
-- Readiness becomes unhealthy.
-- Existing report reads may continue only if proven safe.
-- Do not repeatedly retry a failing write in a hot loop.
-- Record a non-sensitive operator event and rely on journald alerting.
-- Free space outside the database files first; never truncate a DB/WAL.
-- Restore only after copying the suspect files for diagnosis.
+The cutoff must be a valid UTC date at least 400 days old. The command deletes
+only event rows with `received_date_utc < cutoff`, then removes events and
+metadata for sites already marked disabled, checkpoints both stores, and
+reports exact before/expired/site/after counts. A too-recent cutoff fails
+before either store is opened.
 
-## 12. Plausible replacement handoff
+Direct site deletion is also two phase:
 
-M5 prepares a direct replacement:
+```sh
+analytico site disable /var/lib/analytico example
+analytico site delete /var/lib/analytico example --confirm example
+```
 
-- build and verify the final release artifact;
-- provide snippets and CSP changes for each selected site;
-- provide a fresh-data initialization and rollback checklist;
-- record measured RSS, CPU, disk, and request latency;
-- optionally export Plausible history for archival reference;
-- leave the actual Plausible shutdown/removal to the owner after acceptance.
+The second command removes DuckDB rows and checkpoints before deleting Turso
+metadata, making a retry safe.
 
-No parallel-running period is required.
+## 11. Normalized export
+
+```sh
+analytico export /var/lib/analytico example \
+  2026-01-01 2026-07-31 /secure/path/example.csv
+```
+
+Export pages through the real database in bounded 1,000-row chunks and creates
+a new mode-`0600` CSV. It includes normalized event dimensions and properties,
+not visitor/session IDs. Spreadsheet formula prefixes are escaped. The
+destination must not already exist.
+
+## 12. Disk-full and corruption response
+
+After any event write failure, collection writes stop, readiness is unhealthy,
+and the process does not hot-loop retries. Stop the service, free space outside
+database/WAL files, preserve suspect files, and restart. Never truncate a
+database or WAL. Run `doctor`; restore a verified snapshot if readability is
+not recovered.
+
+The M4 gate uses the kernel's real `RLIMIT_FSIZE=0` to force this path and also
+tests corrupted bytes, wrong manifests, wrong key permissions, newer schemas,
+missing live paths, and interrupted migrations.
+
+## 13. Build and release gates
+
+For the exact pinned environment:
+
+```sh
+zig build test -Doptimize=ReleaseSafe \
+  -Dturso-native-path=<exact-prefix>
+zig build e2e-m0 e2e-m1 e2e-m2 e2e-m2-browser e2e-m3 e2e-m4 \
+  -Doptimize=ReleaseSafe -Dturso-native-path=<exact-prefix>
+zig build e2e-rollback \
+  -Doptimize=ReleaseSafe -Dturso-native-path=<exact-prefix>
+zig build e2e-release \
+  -Doptimize=ReleaseSafe -Dturso-native-path=<exact-prefix>
+```
+
+`e2e-release` checks the outer and inner checksums, private DuckDB linkage,
+Caddy syntax, systemd security, and a fresh real-data report from the extracted
+archive. Large event/browser fixtures are acceptance tooling only and are not
+shipped.

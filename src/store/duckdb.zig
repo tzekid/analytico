@@ -15,10 +15,29 @@ pub const Database = struct {
     connection: c.duckdb_connection,
 
     pub fn open(allocator: std.mem.Allocator, path: []const u8) (Error || std.mem.Allocator.Error)!Database {
+        return openWithTemp(allocator, path, null);
+    }
+
+    pub fn openWithTemp(
+        allocator: std.mem.Allocator,
+        path: []const u8,
+        temp_directory: ?[]const u8,
+    ) (Error || std.mem.Allocator.Error)!Database {
         var config: c.duckdb_config = null;
         if (c.duckdb_create_config(&config) != c.DuckDBSuccess) return error.ConfigFailed;
         defer c.duckdb_destroy_config(&config);
 
+        if (temp_directory) |directory| {
+            const directory_z = try allocator.dupeSentinel(u8, directory, 0);
+            defer allocator.free(directory_z);
+            if (c.duckdb_set_config(
+                config,
+                "temp_directory",
+                directory_z.ptr,
+            ) != c.DuckDBSuccess) {
+                return error.ConfigFailed;
+            }
+        }
         inline for (.{
             .{ "threads", "1" },
             .{ "memory_limit", "128MB" },
@@ -32,7 +51,6 @@ pub const Database = struct {
                 return error.ConfigFailed;
             }
         }
-
         const path_z = try allocator.dupeSentinel(u8, path, 0);
         defer allocator.free(path_z);
 
@@ -49,11 +67,14 @@ pub const Database = struct {
         if (c.duckdb_connect(handle, &connection) != c.DuckDBSuccess) {
             return error.ConnectFailed;
         }
-
-        return .{
+        errdefer c.duckdb_disconnect(&connection);
+        var database = Database{
             .handle = handle,
             .connection = connection,
         };
+        database.exec("SET lock_configuration = true") catch
+            return error.ConfigFailed;
+        return database;
     }
 
     pub fn deinit(self: *Database) void {

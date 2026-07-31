@@ -22,9 +22,9 @@ semantic, or application state model is consequential and must be added here.
 | D11 | Aggregation | Query raw events on demand | Accepted |
 | D12 | HTTP implementation | Zig standard library plus local narrow routing | Accepted |
 | D13 | Dashboard and HTMX | Server HTML first; HTMX 4 later | Accepted |
-| D14 | Deployment | One binary under systemd behind Caddy | Proposed |
+| D14 | Deployment | One binary under systemd behind Caddy | Accepted |
 | D15 | Administration/auth | Local CLI for MVP | Accepted |
-| D16 | Backup and retention | Stop-the-service verified snapshots; explicit maintenance | Proposed |
+| D16 | Backup and retention | Stop-the-service verified snapshots; explicit maintenance | Accepted |
 | D17 | Scale path | Measure, then batch/Parquet/server DB | Accepted |
 | D18 | Plausible migration | Fresh start and direct cutover | Accepted |
 | D19 | Metadata writes on pinned Turso | Durable autocommits with compensation | Accepted |
@@ -350,6 +350,16 @@ Deploy one ReleaseSafe binary as an unprivileged systemd service behind the
 existing Caddy. Keep the executable, configuration, secret, metadata DB, event
 DB, and backups in explicit paths. Do not add Docker for this VPS.
 
+### M4 evidence
+
+Accepted. The checksummed archive carries one executable and one private
+DuckDB shared library. The checked-in unit uses an unprivileged fixed user,
+strict filesystem access, empty capabilities, and a 256 MiB cgroup ceiling;
+`systemd-analyze security --offline` scores it 3.2/10, `OK`. The validated
+Caddy vhost exposes only the two tracker and two event routes and overwrites
+both headers that influence derived visitor data. Release extraction proves
+`$ORIGIN/../lib` selects the archive's DuckDB library.
+
 ## D15. Administration and authentication
 
 ### Candidates
@@ -392,6 +402,16 @@ procedure is proven and its brief downtime is understood.
 
 DuckDB's `CHECKPOINT` synchronizes WAL data to the database file:
 [DuckDB CHECKPOINT](https://duckdb.org/docs/lts/sql/statements/checkpoint).
+
+### M4 evidence
+
+Accepted. The real-process gate checkpoints and creates two independent
+backups, verifies all manifest hashes, restores each in isolation, and matches
+reports. Corrupted content, an incompatible manifest, an existing destination,
+and wrong key mode leave no partial destination. Maintenance refuses a
+too-recent cutoff without touching data, deletes exactly the `< cutoff` event,
+and completes a disabled-site delete. A previous binary built from the actual
+M3 commit successfully starts against the restored pre-upgrade snapshot.
 
 ## D17. Scaling path
 

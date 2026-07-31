@@ -155,6 +155,40 @@ pub const Store = struct {
         try self.migrate();
     }
 
+    pub fn requireCurrent(self: *Store) !void {
+        const current = try self.migrationVersion();
+        if (current > schema_version) return error.NewerMetadataSchema;
+        if (current < schema_version) return error.MetadataMigrationRequired;
+    }
+
+    pub fn checkpoint(self: *Store) !void {
+        var rows = try self.connection.query(
+            "PRAGMA wal_checkpoint",
+            &.{},
+            .{},
+        );
+        defer rows.deinit();
+        const row = (try rows.next()) orelse return error.MissingCheckpointRow;
+        if (try row.get(i64, 0) != 0) return error.CheckpointBusy;
+        if ((try rows.next()) != null) return error.UnexpectedCheckpointRow;
+        try rows.finish(null);
+    }
+
+    pub fn integrityCheck(self: *Store) !void {
+        var rows = try self.connection.query(
+            "PRAGMA integrity_check",
+            &.{},
+            .{},
+        );
+        defer rows.deinit();
+        const row = (try rows.next()) orelse return error.MissingIntegrityRow;
+        if (!std.mem.eql(u8, try row.get([]const u8, 0), "ok")) {
+            return error.MetadataIntegrityFailed;
+        }
+        if ((try rows.next()) != null) return error.UnexpectedIntegrityRow;
+        try rows.finish(null);
+    }
+
     pub fn seedProbeSite(self: *Store) !void {
         _ = try self.connection.execParams(
             \\INSERT INTO sites

@@ -3,6 +3,7 @@
 /zig-pkg/
 /data/
 /backups/
+/dist/
 /*.duckdb
 /*.duckdb.wal
 /*.db

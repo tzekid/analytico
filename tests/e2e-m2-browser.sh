@@ -42,7 +42,11 @@ trap cleanup EXIT
 site_id=$("$binary" site list "$fixture_dir" |
     awk -F '\t' '$1 == "browser" { print $2 }')
 
-"$binary" serve "$fixture_dir" 127.0.0.1 "$collector_port" \
+"$binary" serve --listen "127.0.0.1:$collector_port" \
+    --meta "$fixture_dir/meta.db" \
+    --events "$fixture_dir/events.duckdb" \
+    --temp "$fixture_dir/tmp" \
+    --visitor-key-file "$fixture_dir/visitor.key" \
     >"$fixture_dir/server.stdout" 2>"$fixture_dir/server.stderr" &
 collector_pid=$!
 ready=false
@@ -88,7 +92,7 @@ wait "$collector_pid" 2>/dev/null || true
 collector_pid=
 
 test "$("$binary" doctor "$fixture_dir")" = \
-    "ok metadata=v1 events=v2 sites=1 goals=0 funnels=0 stored_events=6"
+    "ok metadata=v1 events=v2 sites=1 goals=0 funnels=0 stored_events=6 key=ok"
 
 if grep -aE '(browser-(chromium|firefox|webkit)\?|noscript-(chromium|firefox|webkit)\?)' \
     "$fixture_dir/events.duckdb" "$fixture_dir/server.stdout" \

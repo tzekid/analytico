@@ -1,0 +1,24 @@
+# Replace analytics.example with the collector's public hostname. This vhost
+# deliberately exposes only immutable/mutable tracker assets and event routes.
+analytics.example {
+	encode zstd gzip
+
+	@analytico_public path /tracker.aef65945.js /tracker.js /v1/event /v1/p.gif
+	handle @analytico_public {
+		reverse_proxy 127.0.0.1:4318 {
+			# Overwrite both trust inputs. Restrict direct origin access to
+			# Cloudflare before trusting CF-IPCountry in production.
+			header_up X-Forwarded-For {http.request.remote.host}
+			header_up X-Analytico-Country {http.request.header.CF-IPCountry}
+
+			transport http {
+				dial_timeout 2s
+				response_header_timeout 3s
+			}
+		}
+	}
+
+	handle {
+		respond "not found" 404
+	}
+}

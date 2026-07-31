@@ -53,7 +53,6 @@ pub fn build(b: *std.Build) void {
     });
     app_module.addLibraryPath(duckdb_dependency.path(""));
     app_module.linkSystemLibrary("duckdb", .{ .use_pkg_config = .no });
-    app_module.addRPath(duckdb_dependency.path(""));
     app_module.addRPathSpecial("$ORIGIN/../lib");
     const app = b.addExecutable(.{
         .name = "analytico",
@@ -134,4 +133,61 @@ pub fn build(b: *std.Build) void {
         "bench-m3",
         "Measure M3 reports over one million real events",
     ).dependOn(&m3_benchmark.step);
+
+    const m4_e2e = b.addSystemCommand(&.{ "bash", "tests/e2e-m4.sh" });
+    m4_e2e.addArtifactArg(app);
+    m4_e2e.step.dependOn(b.getInstallStep());
+    b.step(
+        "e2e-m4",
+        "Run M4 lifecycle, recovery, and storage-failure checks",
+    ).dependOn(&m4_e2e.step);
+
+    const package_release = b.addSystemCommand(&.{
+        "bash",
+        "scripts/package-release.sh",
+    });
+    package_release.addArtifactArg(app);
+    package_release.addFileArg(duckdb_dependency.path("libduckdb.so"));
+    package_release.addArg("dist");
+    package_release.step.dependOn(b.getInstallStep());
+    b.step(
+        "release",
+        "Package the current build with checksums and deployment artifacts",
+    ).dependOn(&package_release.step);
+
+    const release_e2e = b.addSystemCommand(&.{
+        "bash",
+        "tests/e2e-release.sh",
+    });
+    release_e2e.addArtifactArg(app);
+    release_e2e.addArg("dist");
+    release_e2e.step.dependOn(&package_release.step);
+    b.step(
+        "e2e-release",
+        "Verify the extracted release using its private DuckDB runtime",
+    ).dependOn(&release_e2e.step);
+
+    const full_release_e2e = b.addSystemCommand(&.{
+        "bash",
+        "tests/e2e-release.sh",
+    });
+    full_release_e2e.addArtifactArg(app);
+    full_release_e2e.addArgs(&.{ "dist", "--full" });
+    full_release_e2e.step.dependOn(&package_release.step);
+    b.step(
+        "e2e-release-full",
+        "Run every real-process gate against the extracted release",
+    ).dependOn(&full_release_e2e.step);
+
+    const rollback_e2e = b.addSystemCommand(&.{
+        "bash",
+        "scripts/rehearse-rollback.sh",
+    });
+    rollback_e2e.addArtifactArg(app);
+    rollback_e2e.addArg(turso_native_path orelse "source");
+    rollback_e2e.step.dependOn(b.getInstallStep());
+    b.step(
+        "e2e-rollback",
+        "Build the prior release and rehearse a verified data rollback",
+    ).dependOn(&rollback_e2e.step);
 }

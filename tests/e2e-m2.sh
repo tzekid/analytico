@@ -77,7 +77,11 @@ site_id=$("$binary" site list "$fixture_dir" | awk -F '\t' '$1 == "example" { pr
 disabled_id=$("$binary" site list "$fixture_dir" | awk -F '\t' '$1 == "disabled" { print $2 }')
 "$binary" site disable "$fixture_dir" disabled >/dev/null
 
-"$binary" serve "$fixture_dir" 127.0.0.1 "$port" \
+"$binary" serve --listen "127.0.0.1:$port" \
+    --meta "$fixture_dir/meta.db" \
+    --events "$fixture_dir/events.duckdb" \
+    --temp "$fixture_dir/tmp" \
+    --visitor-key-file "$fixture_dir/visitor.key" \
     >"$fixture_dir/server.stdout" 2>"$fixture_dir/server.stderr" &
 server_pid=$!
 ready=false
@@ -348,7 +352,7 @@ exec 9<&-
 server_pid=
 
 test "$("$binary" doctor "$fixture_dir")" = \
-    "ok metadata=v1 events=v2 sites=2 goals=0 funnels=0 stored_events=36"
+    "ok metadata=v1 events=v2 sites=2 goals=0 funnels=0 stored_events=36 key=ok"
 pageview_row=$("$binary" event inspect "$fixture_dir" pageview)
 test "$pageview_row" = $'pageview\t/pricing\tsearch.example\tDE\tFirefox\tLinux\tdesktop\tnewsletter\t{}'
 custom_row=$("$binary" event inspect "$fixture_dir" signup)
@@ -391,7 +395,11 @@ fault_base="http://127.0.0.1:$fault_port"
     "https://fault.example" >/dev/null
 fault_site=$("$binary" site list "$fault_dir" |
     awk -F '\t' '$1 == "fault" { print $2 }')
-"$binary" serve "$fault_dir" 127.0.0.1 "$fault_port" \
+"$binary" serve --listen "127.0.0.1:$fault_port" \
+    --meta "$fault_dir/meta.db" \
+    --events "$fault_dir/events.duckdb" \
+    --temp "$fault_dir/tmp" \
+    --visitor-key-file "$fault_dir/visitor.key" \
     >"$fault_dir/server.stdout" 2>"$fault_dir/server.stderr" &
 server_pid=$!
 ready=false
@@ -419,6 +427,6 @@ kill -TERM "$server_pid"
 wait "$server_pid"
 server_pid=
 test "$("$binary" doctor "$fault_dir")" = \
-    "ok metadata=v1 events=v2 sites=1 goals=0 funnels=0 stored_events=0"
+    "ok metadata=v1 events=v2 sites=1 goals=0 funnels=0 stored_events=0 key=ok"
 
 echo "M2 bounded real-HTTP collection checks passed"

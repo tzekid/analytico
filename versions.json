@@ -1,6 +1,11 @@
 {
   "schema": 1,
   "evaluated_at_utc": "2026-07-31",
+  "analytico": {
+    "version": "0.1.0",
+    "release_target": "linux-x86_64",
+    "status": "M4 production MVP"
+  },
   "zig": {
     "version": "0.17.0-dev.1509+bb296ab9b",
     "channel": "development snapshot",

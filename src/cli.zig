@@ -1,6 +1,7 @@
 const std = @import("std");
 const domain = @import("domain.zig");
 const http_server = @import("http/server.zig");
+const ops = @import("ops.zig");
 const report = @import("report.zig");
 const meta = @import("store/meta.zig");
 const events = @import("store/events.zig");
@@ -17,10 +18,39 @@ pub fn run(
         try initialize(allocator, io, output, args[2]);
         return true;
     }
-    if (args.len == 5 and std.mem.eql(u8, args[1], "serve")) {
-        const port = std.fmt.parseInt(u16, args[4], 10) catch
-            return error.InvalidPort;
-        try http_server.run(gpa, io, args[2], args[3], port);
+    if (args.len == 3 and std.mem.eql(u8, args[1], "migrate")) {
+        try ops.migrate(allocator, output, args[2]);
+        return true;
+    }
+    if (args.len == 4 and std.mem.eql(u8, args[1], "backup")) {
+        try ops.backup(allocator, io, output, args[2], args[3]);
+        return true;
+    }
+    if (args.len == 5 and std.mem.eql(u8, args[1], "restore") and
+        std.mem.eql(u8, args[4], "--verify"))
+    {
+        try ops.restore(allocator, io, output, args[2], args[3]);
+        return true;
+    }
+    if (args.len == 4 and std.mem.eql(u8, args[1], "maintain")) {
+        try ops.maintain(allocator, io, output, args[2], args[3]);
+        return true;
+    }
+    if (args.len == 7 and std.mem.eql(u8, args[1], "export")) {
+        try ops.exportCsv(
+            allocator,
+            io,
+            output,
+            args[2],
+            args[3],
+            args[4],
+            args[5],
+            args[6],
+        );
+        return true;
+    }
+    if (args.len >= 2 and std.mem.eql(u8, args[1], "serve")) {
+        try http_server.run(gpa, io, try parseServe(args));
         return true;
     }
     if (args.len >= 7 and std.mem.eql(u8, args[1], "report")) {
@@ -44,7 +74,7 @@ pub fn run(
         return true;
     }
     if (args.len == 3 and std.mem.eql(u8, args[1], "doctor")) {
-        try doctor(allocator, output, args[2]);
+        try ops.doctor(allocator, io, output, args[2]);
         return true;
     }
     if (args.len == 7 and std.mem.eql(u8, args[1], "pseudonym")) {
@@ -65,7 +95,12 @@ pub fn run(
 pub fn writeUsage(output: *std.Io.Writer) !void {
     try output.writeAll(
         \\  analytico init <directory>
-        \\  analytico serve <directory> <loopback-host> <port>
+        \\  analytico migrate <directory>
+        \\  analytico backup <directory> <new-backup-directory>
+        \\  analytico restore <backup-directory> <new-data-directory> --verify
+        \\  analytico maintain <directory> <delete-before-date>
+        \\  analytico export <directory> <site> <start-date> <end-date> <new.csv>
+        \\  analytico serve --listen <loopback:port> --meta <absolute-path> --events <absolute-path> --temp <absolute-directory> --visitor-key-file <absolute-path>
         \\  analytico site add <directory> <slug> <name> <origin>
         \\  analytico site list <directory>
         \\  analytico site disable <directory> <slug>
@@ -129,6 +164,11 @@ fn initialize(
     directory: []const u8,
 ) !void {
     try std.Io.Dir.cwd().createDirPath(io, directory);
+    const temp_path = try std.fs.path.join(allocator, &.{ directory, "tmp" });
+    std.Io.Dir.cwd().createDir(io, temp_path, @fromBackingInt(@intCast(0o700))) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
     const paths = try Paths.init(allocator, directory);
 
     const key_created = createKey(io, paths.key) catch |err| switch (err) {
@@ -151,6 +191,55 @@ fn initialize(
             if (key_created) "created" else "existing",
         },
     );
+}
+
+fn parseServe(args: []const []const u8) !http_server.Options {
+    var listen: ?[]const u8 = null;
+    var meta_path: ?[]const u8 = null;
+    var event_path: ?[]const u8 = null;
+    var temp_directory: ?[]const u8 = null;
+    var key_path: ?[]const u8 = null;
+    var index: usize = 2;
+    while (index < args.len) : (index += 2) {
+        if (index + 1 >= args.len) return error.InvalidServeOption;
+        const flag = args[index];
+        const value = args[index + 1];
+        if (std.mem.eql(u8, flag, "--listen")) {
+            if (listen != null) return error.DuplicateServeOption;
+            listen = value;
+        } else if (std.mem.eql(u8, flag, "--meta")) {
+            if (meta_path != null) return error.DuplicateServeOption;
+            meta_path = value;
+        } else if (std.mem.eql(u8, flag, "--events")) {
+            if (event_path != null) return error.DuplicateServeOption;
+            event_path = value;
+        } else if (std.mem.eql(u8, flag, "--temp")) {
+            if (temp_directory != null) return error.DuplicateServeOption;
+            temp_directory = value;
+        } else if (std.mem.eql(u8, flag, "--visitor-key-file")) {
+            if (key_path != null) return error.DuplicateServeOption;
+            key_path = value;
+        } else {
+            return error.InvalidServeOption;
+        }
+    }
+    const listen_value = listen orelse return error.MissingServeOption;
+    const separator = std.mem.lastIndexOfScalar(u8, listen_value, ':') orelse
+        return error.InvalidListenAddress;
+    var host = listen_value[0..separator];
+    if (host.len >= 2 and host[0] == '[' and host[host.len - 1] == ']') {
+        host = host[1 .. host.len - 1];
+    }
+    const port = std.fmt.parseInt(u16, listen_value[separator + 1 ..], 10) catch
+        return error.InvalidPort;
+    return .{
+        .host = host,
+        .port = port,
+        .meta_path = meta_path orelse return error.MissingServeOption,
+        .event_path = event_path orelse return error.MissingServeOption,
+        .temp_directory = temp_directory orelse return error.MissingServeOption,
+        .key_path = key_path orelse return error.MissingServeOption,
+    };
 }
 
 fn siteCommand(
@@ -206,7 +295,16 @@ fn siteCommand(
         std.mem.eql(u8, args[5], "--confirm") and
         std.mem.eql(u8, args[4], args[6]))
     {
+        const site_id = try store.siteIdBySlug(allocator, args[4]);
+        const policy = try store.sitePolicy(allocator, site_id);
+        if (!policy.disabled) return error.SiteMustBeDisabled;
+        var event_store = try events.Store.open(allocator, paths.events);
+        defer event_store.deinit();
+        try event_store.requireCurrent();
+        _ = try event_store.deleteSite(site_id);
+        try event_store.checkpoint();
         try store.deleteSite(args[4]);
+        try store.checkpoint();
         try output.print("site deleted {s}\n", .{args[4]});
         return;
     }
@@ -401,32 +499,6 @@ fn eventCommand(
     });
     try event_store.checkpoint();
     try output.print("event committed {s}\n", .{id});
-}
-
-fn doctor(
-    allocator: std.mem.Allocator,
-    output: *std.Io.Writer,
-    directory: []const u8,
-) !void {
-    const paths = try Paths.init(allocator, directory);
-    var metadata = try meta.Store.open(allocator, paths.meta);
-    defer metadata.deinit();
-    try metadata.migrate();
-    var event_store = try events.Store.open(allocator, paths.events);
-    defer event_store.deinit();
-    try event_store.migrate();
-    const counts = try metadata.counts();
-    try output.print(
-        "ok metadata=v{d} events=v{d} sites={d} goals={d} funnels={d} stored_events={d}\n",
-        .{
-            try metadata.migrationVersion(),
-            try event_store.migrationVersion(),
-            counts.sites,
-            counts.goals,
-            counts.funnels,
-            try event_store.eventCount(),
-        },
-    );
 }
 
 const Paths = struct {
