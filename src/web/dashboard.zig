@@ -14,6 +14,7 @@ pub const Dependencies = struct {
     metadata: *meta.Store,
     events: *events.Store,
     csrf_token: []const u8,
+    origin: []const u8,
     report_timeout_ms: u32,
 };
 
@@ -176,7 +177,7 @@ fn postAction(
         });
         return;
     }
-    if (!try sameOrigin(dependencies.allocator, request)) {
+    if (!try sameOrigin(request, dependencies.origin)) {
         try writeError(output, .{
             .status = 403,
             .title = "Forbidden",
@@ -339,32 +340,14 @@ fn writeError(output: *std.Io.Writer, value: model.ErrorPage) !void {
 }
 
 fn sameOrigin(
-    allocator: std.mem.Allocator,
     request: request_mod.Request,
+    expected: []const u8,
 ) !bool {
     const raw_origin = (try request.header("origin")) orelse return false;
-    const host = (try request.header("host")) orelse return false;
-    if (host.len == 0 or host.len > 300 or
-        std.mem.findScalar(u8, host, '/') != null or
-        std.mem.findScalar(u8, host, '\\') != null or
-        std.mem.findScalar(u8, host, ' ') != null)
-    {
-        return false;
-    }
-    const forwarded = (try request.header("x-forwarded-proto")) orelse "http";
-    if (!(std.mem.eql(u8, forwarded, "http") or
-        std.mem.eql(u8, forwarded, "https")))
-    {
-        return false;
-    }
-    const expected_raw = try std.fmt.allocPrint(
-        allocator,
-        "{s}://{s}",
-        .{ forwarded, host },
-    );
-    const expected = domain.normalizeOrigin(allocator, expected_raw) catch return false;
-    const actual = domain.normalizeOrigin(allocator, raw_origin) catch return false;
-    return std.mem.eql(u8, expected, actual);
+    if (raw_origin.len != expected.len) return false;
+    var difference: u8 = 0;
+    for (raw_origin, expected) |actual, wanted| difference |= actual ^ wanted;
+    return difference == 0;
 }
 
 fn validFormContentType(value: ?[]const u8) bool {

@@ -18,7 +18,7 @@ pub const Dependencies = struct {
     policy: store_mod.Policy,
 };
 
-pub fn handle(
+pub fn handlePublic(
     dependencies: Dependencies,
     request: request_mod.Request,
     output: *std.Io.Writer,
@@ -55,6 +55,14 @@ pub fn handle(
         }
         return true;
     }
+    if (std.mem.eql(u8, path, "/admin/login")) {
+        if (!std.mem.eql(u8, request.method, "GET")) {
+            try methodNotAllowed(output, "GET");
+        } else {
+            try loginPage(dependencies, request, output);
+        }
+        return true;
+    }
     if (std.mem.eql(u8, path, "/admin/auth/setup/options")) {
         if (!std.mem.eql(u8, request.method, "POST")) {
             try methodNotAllowed(output, "POST");
@@ -71,7 +79,84 @@ pub fn handle(
         }
         return true;
     }
+    if (std.mem.eql(u8, path, "/admin/auth/login/options")) {
+        if (!std.mem.eql(u8, request.method, "POST")) {
+            try methodNotAllowed(output, "POST");
+        } else {
+            try loginOptions(dependencies, request, output);
+        }
+        return true;
+    }
+    if (std.mem.eql(u8, path, "/admin/auth/login/verify")) {
+        if (!std.mem.eql(u8, request.method, "POST")) {
+            try methodNotAllowed(output, "POST");
+        } else {
+            try loginVerify(dependencies, request, output);
+        }
+        return true;
+    }
     return false;
+}
+
+pub fn handlePrivate(
+    dependencies: Dependencies,
+    request: request_mod.Request,
+    session: service.Session,
+    output: *std.Io.Writer,
+) !bool {
+    if (!std.mem.eql(u8, request.path(), "/admin/logout")) return false;
+    if (!std.mem.eql(u8, request.method, "POST")) {
+        try methodNotAllowed(output, "POST");
+        return true;
+    }
+    if (!hasFormContentType(try request.header("content-type")) or
+        !try originMatches(request, dependencies.policy.origin))
+    {
+        try textError(output, 403, "forbidden\n");
+        return true;
+    }
+    const csrf = (formValue(dependencies.allocator, request.body, "csrf") catch null) orelse {
+        try textError(output, 403, "forbidden\n");
+        return true;
+    };
+    if (!service.constantTimeEqual(csrf, session.csrf_token)) {
+        try textError(output, 403, "forbidden\n");
+        return true;
+    }
+    try service.revokeSession(appContext(dependencies), session.token);
+    var headers = std.Io.Writer.Allocating.init(dependencies.allocator);
+    try headers.writer.writeAll("Cache-Control: no-store\r\nLocation: /admin/login\r\n");
+    try writeClearedSessionCookie(&headers.writer, isSecure(dependencies.policy.origin));
+    try response.write(output, 303, "text/plain; charset=utf-8", headers.written(), "see other\n");
+    return true;
+}
+
+pub fn requestSession(
+    dependencies: Dependencies,
+    request: request_mod.Request,
+) !?service.Session {
+    const cookies = (try request.header("cookie")) orelse return null;
+    const token = cookieValue(cookies, cookieName(isSecure(dependencies.policy.origin))) orelse
+        return null;
+    return service.validateSession(appContext(dependencies), token);
+}
+
+pub fn denyAnonymous(
+    allocator: std.mem.Allocator,
+    request: request_mod.Request,
+    output: *std.Io.Writer,
+) !void {
+    const enhanced = (try request.header("hx-request")) != null;
+    if (!std.mem.eql(u8, request.method, "GET") or enhanced) {
+        try textError(output, 401, "authentication required\n");
+        return;
+    }
+    var location = std.Io.Writer.Allocating.init(allocator);
+    try location.writer.writeAll("/admin/login?return=");
+    try urlComponent(&location.writer, if (validReturnPath(request.target)) request.target else "/admin");
+    var headers = std.Io.Writer.Allocating.init(allocator);
+    try headers.writer.print("Cache-Control: no-store\r\nLocation: {s}\r\n", .{location.written()});
+    try response.write(output, 303, "text/plain; charset=utf-8", headers.written(), "see other\n");
 }
 
 fn setupOptions(
@@ -184,6 +269,100 @@ fn setupVerify(
     );
 }
 
+fn loginPage(
+    dependencies: Dependencies,
+    request: request_mod.Request,
+    output: *std.Io.Writer,
+) !void {
+    const return_path = try requestedReturnPath(dependencies.allocator, request.target);
+    if (try requestSession(dependencies, request)) |session| {
+        defer session.deinit(dependencies.allocator);
+        var headers = std.Io.Writer.Allocating.init(dependencies.allocator);
+        try headers.writer.print(
+            "Cache-Control: no-store\r\nLocation: {s}\r\n",
+            .{return_path},
+        );
+        try response.write(output, 303, "text/plain; charset=utf-8", headers.written(), "see other\n");
+        return;
+    }
+    var body = std.Io.Writer.Allocating.init(dependencies.allocator);
+    try render.loginPage(&body.writer, return_path);
+    try response.write(
+        output,
+        200,
+        "text/html; charset=utf-8",
+        render.html_headers,
+        body.written(),
+    );
+}
+
+fn loginOptions(
+    dependencies: Dependencies,
+    request: request_mod.Request,
+    output: *std.Io.Writer,
+) !void {
+    if (!hasJsonContentType(try request.header("content-type"))) {
+        try jsonError(output, 415, "json_required");
+        return;
+    }
+    var body = std.Io.Writer.Allocating.init(dependencies.allocator);
+    service.writeLoginOptions(appContext(dependencies), &body.writer) catch |err| {
+        try authError(output, err);
+        return;
+    };
+    try response.write(output, 200, "application/json; charset=utf-8", json_headers, body.written());
+}
+
+const AuthenticationBody = struct {
+    challenge_id: []const u8,
+    credential_id: []const u8,
+    authenticator_data: []const u8,
+    client_data_json: []const u8,
+    signature: []const u8,
+};
+
+fn loginVerify(
+    dependencies: Dependencies,
+    request: request_mod.Request,
+    output: *std.Io.Writer,
+) !void {
+    if (!hasJsonContentType(try request.header("content-type"))) {
+        try jsonError(output, 415, "json_required");
+        return;
+    }
+    const parsed = std.json.parseFromSlice(
+        AuthenticationBody,
+        dependencies.allocator,
+        request.body,
+        .{ .ignore_unknown_fields = false },
+    ) catch {
+        try jsonError(output, 401, "invalid_passkey_response");
+        return;
+    };
+    defer parsed.deinit();
+    const issued = service.finishAuthentication(appContext(dependencies), .{
+        .challenge_id = parsed.value.challenge_id,
+        .credential_id = parsed.value.credential_id,
+        .authenticator_data = parsed.value.authenticator_data,
+        .client_data_json = parsed.value.client_data_json,
+        .signature = parsed.value.signature,
+    }) catch |err| {
+        try authError(output, err);
+        return;
+    };
+    defer issued.deinit(dependencies.allocator);
+
+    var headers = std.Io.Writer.Allocating.init(dependencies.allocator);
+    try headers.writer.writeAll(json_headers);
+    try writeSessionCookie(
+        &headers.writer,
+        isSecure(dependencies.policy.origin),
+        issued.token,
+        service.session_seconds,
+    );
+    try response.write(output, 200, "application/json; charset=utf-8", headers.written(), "{\"ok\":true}\n");
+}
+
 fn appContext(dependencies: Dependencies) service.Context {
     return .{
         .io = dependencies.io,
@@ -248,11 +427,120 @@ fn hasJsonContentType(value: ?[]const u8) bool {
         (raw.len == "application/json".len or raw["application/json".len] == ';');
 }
 
+fn hasFormContentType(value: ?[]const u8) bool {
+    const raw = value orelse return false;
+    const base = if (std.mem.cutScalar(u8, raw, ';')) |parts| parts[0] else raw;
+    return std.ascii.eqlIgnoreCase(
+        std.mem.trim(u8, base, " \t"),
+        "application/x-www-form-urlencoded",
+    );
+}
+
+fn originMatches(request: request_mod.Request, expected: []const u8) !bool {
+    const actual = (try request.header("origin")) orelse return false;
+    return service.constantTimeEqual(actual, expected);
+}
+
+fn formValue(
+    allocator: std.mem.Allocator,
+    body: []const u8,
+    expected: []const u8,
+) !?[]const u8 {
+    var result: ?[]const u8 = null;
+    var pairs = std.mem.splitScalar(u8, body, '&');
+    while (pairs.next()) |pair| {
+        const raw_name, const raw_value = std.mem.cutScalar(u8, pair, '=') orelse
+            return error.InvalidFormEncoding;
+        const name = try decodeComponent(allocator, raw_name);
+        if (!std.mem.eql(u8, name, expected)) continue;
+        if (result != null) return error.InvalidFormEncoding;
+        result = try decodeComponent(allocator, raw_value);
+    }
+    return result;
+}
+
+fn requestedReturnPath(allocator: std.mem.Allocator, target: []const u8) ![]const u8 {
+    const marker = std.mem.findScalar(u8, target, '?') orelse return "/admin";
+    var pairs = std.mem.splitScalar(u8, target[marker + 1 ..], '&');
+    while (pairs.next()) |pair| {
+        const raw_name, const raw_value = std.mem.cutScalar(u8, pair, '=') orelse continue;
+        const name = decodeComponent(allocator, raw_name) catch continue;
+        if (!std.mem.eql(u8, name, "return")) continue;
+        const value = decodeComponent(allocator, raw_value) catch return "/admin";
+        return if (validReturnPath(value)) value else "/admin";
+    }
+    return "/admin";
+}
+
+fn validReturnPath(value: []const u8) bool {
+    if (value.len < "/admin".len or value.len > request_mod.max_target_bytes or
+        !std.mem.startsWith(u8, value, "/admin") or
+        std.mem.startsWith(u8, value, "//"))
+    {
+        return false;
+    }
+    if (value.len > "/admin".len and value["/admin".len] != '/' and
+        value["/admin".len] != '?')
+    {
+        return false;
+    }
+    for (value) |byte| {
+        if (byte == '\\' or byte == '\r' or byte == '\n' or byte == 0) return false;
+    }
+    return true;
+}
+
+fn decodeComponent(allocator: std.mem.Allocator, encoded: []const u8) ![]const u8 {
+    const decoded = try allocator.alloc(u8, encoded.len);
+    var input: usize = 0;
+    var output: usize = 0;
+    while (input < encoded.len) {
+        if (encoded[input] == '+') {
+            decoded[output] = ' ';
+            input += 1;
+        } else if (encoded[input] == '%') {
+            if (input + 2 >= encoded.len) return error.InvalidUrlEncoding;
+            decoded[output] = std.fmt.parseInt(
+                u8,
+                encoded[input + 1 .. input + 3],
+                16,
+            ) catch return error.InvalidUrlEncoding;
+            input += 3;
+        } else {
+            decoded[output] = encoded[input];
+            input += 1;
+        }
+        output += 1;
+    }
+    if (!std.unicode.utf8ValidateSlice(decoded[0..output])) {
+        return error.InvalidUrlEncoding;
+    }
+    return decoded[0..output];
+}
+
+fn urlComponent(output: *std.Io.Writer, value: []const u8) !void {
+    const hex = "0123456789ABCDEF";
+    for (value) |byte| {
+        if (std.ascii.isAlphanumeric(byte) or
+            byte == '-' or byte == '_' or byte == '.' or byte == '~')
+        {
+            try output.writeByte(byte);
+        } else {
+            try output.writeByte('%');
+            try output.writeByte(hex[byte >> 4]);
+            try output.writeByte(hex[byte & 0x0f]);
+        }
+    }
+}
+
 fn authError(output: *std.Io.Writer, err: anyerror) !void {
     switch (err) {
-        error.InvalidBootstrap, error.InvalidChallenge => try jsonError(output, 401, "invalid_setup_link"),
-        error.AuthAlreadyConfigured => try jsonError(output, 409, "passkey_already_configured"),
+        error.InvalidBootstrap => try jsonError(output, 401, "invalid_setup_link"),
+        error.InvalidChallenge,
         error.InvalidPasskeyResponse,
+        error.AuthNotConfigured,
+        => try jsonError(output, 401, "invalid_passkey_response"),
+        error.AuthAlreadyConfigured => try jsonError(output, 409, "passkey_already_configured"),
         error.InvalidCredentialLabel,
         error.InvalidTransports,
         error.CredentialAlreadyRegistered,
@@ -260,6 +548,16 @@ fn authError(output: *std.Io.Writer, err: anyerror) !void {
         error.TooManyAuthChallenges => try jsonError(output, 429, "try_again_later"),
         else => try jsonError(output, 500, "internal_error"),
     }
+}
+
+fn textError(output: *std.Io.Writer, status: u16, body: []const u8) !void {
+    try response.write(
+        output,
+        status,
+        "text/plain; charset=utf-8",
+        "Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n",
+        body,
+    );
 }
 
 fn jsonError(

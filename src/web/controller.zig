@@ -278,12 +278,12 @@ pub fn deleteFunnel(
 
 pub fn verifyCsrf(form: Form, expected: []const u8) !void {
     const actual = try form.required("csrf");
-    if (actual.len != 32 or expected.len != 32) {
+    if (actual.len < 32 or actual.len > 128 or actual.len != expected.len) {
         return error.InvalidCsrfToken;
     }
-    if (!std.crypto.timing_safe.eql([32]u8, actual[0..32].*, expected[0..32].*)) {
-        return error.InvalidCsrfToken;
-    }
+    var difference: u8 = 0;
+    for (actual, expected) |left, right| difference |= left ^ right;
+    if (difference != 0) return error.InvalidCsrfToken;
 }
 
 fn validateQuery(query: model.Query) !void {

@@ -53,6 +53,33 @@ SQL
 grep -Fq 'metadata=v2 events=v2' "$fixture/upgrade.txt"
 "$binary" site list "$legacy" | grep -Fq $'preserved\t'
 
+site_id=$("$binary" site list "$data" | awk -F '\t' '$1 == "example" { print $2 }')
+"$binary" serve --listen "127.0.0.1:$port" \
+    --meta "$data/meta.db" \
+    --events "$data/events.duckdb" \
+    --temp "$data/tmp" \
+    --visitor-key-file "$data/visitor.key" \
+    >"$fixture/unconfigured.stdout" 2>"$fixture/unconfigured.stderr" &
+server_pid=$!
+for _ in {1..100}; do
+    curl --silent --fail "$origin/readyz" >/dev/null 2>&1 && break
+    sleep 0.02
+done
+test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+    "$origin/admin")" = 503
+test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+    "$origin/admin/login")" = 503
+pageview=$(printf '{"v":1,"site":"%s","type":"pageview","path":"/auth-boundary"}' "$site_id")
+test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+    -X POST "$origin/v1/event" \
+    -H 'Content-Type: text/plain;charset=UTF-8' \
+    -H 'Origin: https://example.com' \
+    -H 'X-Forwarded-For: 203.0.113.42' \
+    --data-binary "$pageview")" = 204
+kill -TERM "$server_pid"
+wait "$server_pid"
+server_pid=
+
 "$binary" auth configure "$data" "$origin" >"$fixture/configure.txt"
 setup_url=$("$binary" auth bootstrap "$data" --ttl 10m | sed -n '2p')
 case "$setup_url" in
@@ -72,6 +99,11 @@ for _ in {1..100}; do
     sleep 0.02
 done
 curl --silent --fail "$origin/readyz" >/dev/null
+test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+    -H 'HX-Request: true' "$origin/admin")" = 401
+test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+    -H 'Cookie: analytico_session=invalid-session-token-that-is-long-enough' \
+    "$origin/admin/private-unknown")" = 303
 
 TMPDIR="$fixture" NODE_PATH="$module_root" \
     PLAYWRIGHT_BROWSERS_PATH="$browser_root" \

@@ -1,6 +1,6 @@
 # Passkey-only owner authentication
 
-Status: accepted design; P1 implemented after `0.1.0`, P2–P3 pending.
+Status: accepted design; P1 and P2 implemented after `0.1.0`, P3 pending.
 
 This specification replaces the current Caddy Basic Auth dashboard gate with
 one application-owned WebAuthn passkey gate. It intentionally serves one owner,

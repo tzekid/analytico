@@ -20,7 +20,7 @@ async function main() {
     const page = await context.newPage();
     const cdp = await context.newCDPSession(page);
     await cdp.send("WebAuthn.enable");
-    await cdp.send("WebAuthn.addVirtualAuthenticator", {
+    const authenticator = await cdp.send("WebAuthn.addVirtualAuthenticator", {
       options: {
         protocol: "ctap2",
         transport: "internal",
@@ -85,11 +85,108 @@ async function main() {
     assert.equal(session.httpOnly, true);
     assert.equal(session.sameSite, "Strict");
     assert.equal(session.path, "/");
+
+    const anonymous = await browser.newContext();
+    const anonymousPage = await anonymous.newPage();
+    response = await anonymousPage.goto(`${origin}/admin?site=example&report=overview`);
+    assert.equal(response.status(), 200);
+    assert.equal(await anonymousPage.locator("h1").textContent(), "Analytico");
+    assert.equal(await anonymousPage.locator("#login-button").count(), 1);
+    assert.equal(
+      await anonymousPage.locator("body").getAttribute("data-return"),
+      "/admin?site=example&report=overview"
+    );
+    assert.equal(await anonymousPage.locator("#report").count(), 0);
+    await anonymous.close();
+
+    await page.locator('form[action="/admin/logout"] button').click();
+    await page.waitForURL(`${origin}/admin/login`);
+    assert.equal(await page.locator("#login-button").count(), 1);
+    await page.locator("#login-button").click();
+    try {
+      await page.waitForURL(`${origin}/admin`, { timeout: 15000 });
+    } catch (_) {
+      throw new Error(
+        "login failed: " + await page.locator("#login-error").textContent() +
+        " console=" + failures.join(" | ") +
+        " requested=" + requested.slice(-8).join(" | ") +
+        " credentials=" + JSON.stringify(await cdp.send("WebAuthn.getCredentials", {
+          authenticatorId: authenticator.authenticatorId
+        }))
+      );
+    }
+    assert.equal(await page.locator("#report").count(), 1);
+
+    const freshSession = (await context.cookies(origin)).find(
+      (cookie) => cookie.name === "analytico_session"
+    );
+    assert.ok(freshSession);
+    assert.notEqual(freshSession.value, session.value);
+    const csrf = await page.locator('input[name="csrf"]').first().getAttribute("value");
+    assert.ok(csrf && csrf.length >= 32);
+    const crossOrigin = await context.request.post(`${origin}/admin/goals`, {
+      headers: {
+        Cookie: `analytico_session=${freshSession.value}`,
+        "Content-Type": "application/x-www-form-urlencoded",
+        Origin: "https://attacker.example"
+      },
+      data: `csrf=${encodeURIComponent(csrf)}&site=example&name=Cross&kind=event&value=cross`
+    });
+    assert.equal(crossOrigin.status(), 403);
+
+    const noScript = await browser.newContext({ javaScriptEnabled: false });
+    await noScript.addCookies([freshSession]);
+    const noScriptPage = await noScript.newPage();
+    response = await noScriptPage.goto(`${origin}/admin`);
+    assert.equal(response.status(), 200);
+    assert.equal(await noScriptPage.locator("#report").count(), 1);
+    const goalForm = noScriptPage.locator('form[action="/admin/goals"]');
+    await goalForm.locator('input[name="name"]').fill("Signup");
+    await goalForm.locator('select[name="kind"]').selectOption("event");
+    await goalForm.locator('input[name="value"]').fill("signup");
+    await goalForm.locator('button[type="submit"]').click();
+    await noScriptPage.waitForURL(/notice=goal-added/);
+    assert.equal(await noScriptPage.locator("li strong", { hasText: "Signup" }).count(), 1);
+    const funnelForm = noScriptPage.locator('form[action="/admin/funnels"]');
+    await funnelForm.locator('input[name="name"]').fill("Signup journey");
+    await funnelForm.locator('textarea[name="steps"]').fill("path=/\nevent=signup");
+    await funnelForm.locator('button[type="submit"]').click();
+    await noScriptPage.waitForURL(/notice=funnel-added/);
+    assert.equal(await noScriptPage.locator("li strong", { hasText: "Signup journey" }).count(), 1);
+    await noScriptPage.locator('form[action="/admin/logout"] button').click();
+    await noScriptPage.waitForURL(`${origin}/admin/login`);
+    await noScript.close();
+
+    response = await page.goto(`${origin}/admin`);
+    assert.equal(response.status(), 200);
+    assert.equal(await page.locator("#login-button").count(), 1);
+    await page.locator("#login-button").click();
+    try {
+      await page.waitForURL(`${origin}/admin`, { timeout: 15000 });
+    } catch (_) {
+      throw new Error("second login failed: " + await page.locator("#login-error").textContent());
+    }
+    assert.equal(await page.locator("#report").count(), 1);
+
+    const malicious = await browser.newContext();
+    const maliciousPage = await malicious.newPage();
+    await maliciousPage.goto(`${origin}/admin/login?return=${encodeURIComponent("//attacker.example/")}`);
+    assert.equal(await maliciousPage.locator("body").getAttribute("data-return"), "/admin");
+    await malicious.close();
     await context.close();
   } finally {
     await browser.close();
   }
-  process.stdout.write(JSON.stringify({ setup: "ok", virtual_authenticator: "ctap2", fragment_leaked: false }) + "\n");
+  process.stdout.write(JSON.stringify({
+    setup: "ok",
+    login: "ok",
+    logout: "revoked",
+    no_javascript_dashboard: "ok",
+    csrf_origin: "enforced",
+    return_path: "bounded",
+    virtual_authenticator: "ctap2",
+    fragment_leaked: false
+  }) + "\n");
 }
 
 main().catch((error) => {

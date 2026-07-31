@@ -19,7 +19,15 @@ pub const headers = html_headers;
 
 pub fn page(output: *std.Io.Writer, value: model.Page) !void {
     try head(output, "Dashboard");
-    try output.writeAll("<header><h1>Analytico</h1><span class=\"muted\">private dashboard</span></header><main>");
+    try output.writeAll(
+        "<header><h1>Analytico</h1><div><span class=\"muted\">private dashboard</span> " ++
+            "<form class=\"inline\" method=\"post\" action=\"/admin/logout\" hx-boost=\"false\">" ++
+            "<input type=\"hidden\" name=\"csrf\" value=\"",
+    );
+    try attribute(output, value.csrf_token);
+    try output.writeAll(
+        "\"><button type=\"submit\">Sign out</button></form></div></header><main>",
+    );
     if (value.notice.len != 0) {
         try output.writeAll("<p class=\"notice\" role=\"status\">");
         try text(output, value.notice);

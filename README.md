@@ -145,6 +145,18 @@ analytico report ./data example 2026-07-01 2026-07-31 funnel signup-flow
 The browser setup is acceptance tooling only. Analytico itself has no Node,
 Playwright, browser, container, or JavaScript runtime dependency.
 
+Owner access is passkey-only. Configure the canonical dashboard origin and
+print a one-use setup link before the first production start:
+
+```sh
+analytico auth configure /var/lib/analytico https://analytics-admin.example
+analytico auth bootstrap /var/lib/analytico --ttl 10m
+```
+
+The complete setup and login acceptance evidence is recorded in
+[`docs/PASSKEY_P1_RESULTS.md`](docs/PASSKEY_P1_RESULTS.md) and
+[`docs/PASSKEY_P2_RESULTS.md`](docs/PASSKEY_P2_RESULTS.md).
+
 After `init` and `site add`, start the loopback collector with:
 
 ```sh

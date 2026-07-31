@@ -46,6 +46,26 @@
     };
   }
 
+  function requestOptions(publicKey) {
+    var options = Object.assign({}, publicKey, {
+      challenge: fromBase64url(publicKey.challenge)
+    });
+    options.allowCredentials = (publicKey.allowCredentials || []).map(function (item) {
+      return Object.assign({}, item, { id: fromBase64url(item.id) });
+    });
+    return options;
+  }
+
+  function authenticationPayload(challengeId, credential) {
+    return {
+      challenge_id: challengeId,
+      credential_id: toBase64url(credential.rawId),
+      client_data_json: toBase64url(credential.response.clientDataJSON),
+      authenticator_data: toBase64url(credential.response.authenticatorData),
+      signature: toBase64url(credential.response.signature)
+    };
+  }
+
   async function post(url, body, bootstrapToken) {
     var headers = { "Content-Type": "application/json", Accept: "application/json" };
     if (bootstrapToken) headers["X-Analytico-Bootstrap"] = bootstrapToken;
@@ -110,5 +130,39 @@
     });
   }
 
+  function loginPage() {
+    var button = document.getElementById("login-button");
+    if (!button) return;
+    var error = document.getElementById("login-error");
+    if (!supported()) {
+      button.disabled = true;
+      error.textContent = "Passkeys require a current browser and a secure connection.";
+      return;
+    }
+    button.addEventListener("click", async function () {
+      error.textContent = "";
+      button.disabled = true;
+      button.textContent = "Waiting for your device…";
+      try {
+        var options = await post("/admin/auth/login/options", {});
+        var credential = await navigator.credentials.get({ publicKey: requestOptions(options.publicKey) });
+        if (!credential) throw new Error("Passkey sign-in was cancelled.");
+        await post(
+          "/admin/auth/login/verify",
+          authenticationPayload(options.challenge_id, credential)
+        );
+        window.location.replace(document.body.dataset.return || "/admin");
+      } catch (failure) {
+        error.textContent = failure && failure.name === "NotAllowedError"
+          ? "Passkey sign-in was cancelled or timed out."
+          : failure.message;
+      } finally {
+        button.disabled = false;
+        button.textContent = "Use a passkey";
+      }
+    });
+  }
+
   setupPage();
+  loginPage();
 })();

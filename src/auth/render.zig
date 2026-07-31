@@ -1,7 +1,7 @@
 const std = @import("std");
 
 pub const passkeys_js = @embedFile("passkeys.js");
-pub const passkeys_path = "/admin/passkeys.5e127fb5.js";
+pub const passkeys_path = "/admin/passkeys.4d304eb6.js";
 
 pub const html_headers =
     "Cache-Control: private, no-store, max-age=0\r\n" ++
@@ -14,7 +14,7 @@ pub const html_headers =
     "Referrer-Policy: no-referrer\r\n";
 
 pub fn setupPage(output: *std.Io.Writer) !void {
-    try head(output, "Set up a passkey");
+    try head(output, "Set up a passkey", null);
     try output.writeAll(
         "<main><section class=\"panel\"><h1>Set up Analytico</h1>" ++
             "<p>Create the owner passkey that will unlock the private dashboard.</p>" ++
@@ -32,7 +32,27 @@ pub fn setupPage(output: *std.Io.Writer) !void {
     try foot(output);
 }
 
-fn head(output: *std.Io.Writer, title: []const u8) !void {
+pub fn loginPage(output: *std.Io.Writer, return_path: []const u8) !void {
+    try head(output, "Sign in", return_path);
+    try output.writeAll(
+        "<main><section class=\"panel\"><h1>Analytico</h1>" ++
+            "<p>Use the owner passkey to unlock the private dashboard.</p>" ++
+            "<p><button id=\"login-button\" type=\"button\">Use a passkey</button></p>" ++
+            "<p id=\"login-error\" class=\"error\" role=\"alert\"></p>" ++
+            "<noscript><p class=\"error\">Sign-in needs JavaScript because WebAuthn " ++
+            "is a browser API. No dashboard state is available until sign-in " ++
+            "succeeds.</p></noscript>" ++
+            "<p class=\"muted\">Touch ID, Face ID, device passcode, or a compatible " ++
+            "security key can verify you.</p></section></main>",
+    );
+    try foot(output);
+}
+
+fn head(
+    output: *std.Io.Writer,
+    title: []const u8,
+    return_path: ?[]const u8,
+) !void {
     try output.writeAll(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">" ++
             "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" ++
@@ -44,7 +64,13 @@ fn head(output: *std.Io.Writer, title: []const u8) !void {
             "<script defer src=\"",
     );
     try attribute(output, passkeys_path);
-    try output.writeAll("\"></script></head><body>");
+    try output.writeAll("\"></script></head><body");
+    if (return_path) |value| {
+        try output.writeAll(" data-return=\"");
+        try attribute(output, value);
+        try output.writeByte('"');
+    }
+    try output.writeByte('>');
 }
 
 fn foot(output: *std.Io.Writer) !void {
