@@ -62,6 +62,10 @@ real-time views, session replay, arbitrary user SQL, and distributed ingestion.
 - [M2 collection evidence](docs/M2_RESULTS.md)
 - [M3 report evidence](docs/M3_RESULTS.md)
 - [M4 production-MVP evidence](docs/M4_RESULTS.md)
+- [M5 direct-cutover evidence](docs/M5_RESULTS.md)
+- [M6 server-dashboard evidence](docs/M6_RESULTS.md)
+- [M7 HTMX-enhancement evidence](docs/M7_RESULTS.md)
+- [M8 Cloudio-boundary evidence](docs/M8_RESULTS.md)
 
 The machine-readable dependency intentions are in
 [`versions.json`](versions.json). A dependency is not considered adopted until
@@ -174,7 +178,8 @@ enhances those exact controls when JavaScript is available.
 
 ## MVP boundary
 
-M4 is the production-MVP gate. M5 is the completed site-specific
-direct-cutover handoff; it does not require a parallel Plausible trial. M6 adds
-the complete server-rendered dashboard; M7 is optional progressive
-enhancement.
+M4 is the production-MVP gate. M5 is the completed site-specific direct-cutover
+handoff; it does not require a parallel Plausible trial. M6 adds the complete
+server-rendered dashboard, M7 adds removable progressive enhancement, and M8
+selects an optional ordinary Cloudio link while leaving both deployments and
+authorization boundaries independent.

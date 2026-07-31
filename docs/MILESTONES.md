@@ -330,17 +330,17 @@ Opening the writable DuckDB file from both processes is not a candidate.
 
 ### Definition of done
 
-- [ ] The decision compares real integration code, failure modes, deployment
+- [x] The decision compares real integration code, failure modes, deployment
       count, auth boundary, first-view latency, and upgrade coupling.
-- [ ] There remains exactly one writable DuckDB owner process.
-- [ ] Cloudio's first response is complete or contains an honest
+- [x] There remains exactly one writable DuckDB owner process.
+- [x] Cloudio's first response is complete or contains an honest
       server-rendered upstream failure state.
-- [ ] Authorization is enforced at the owning server; forwarded identity has a
+- [x] Authorization is enforced at the owning server; forwarded identity has a
       signed and bounded contract if used.
-- [ ] Native navigation/forms and no-JavaScript behavior remain complete.
-- [ ] No shared abstraction is extracted without the two concrete consumers
+- [x] Native navigation/forms and no-JavaScript behavior remain complete.
+- [x] No shared abstraction is extracted without the two concrete consumers
       demonstrating identical semantics.
-- [ ] Independent rollback to standalone Analytico is rehearsed.
+- [x] Independent rollback to standalone Analytico is rehearsed.
 
 ## M9. Trigger-based scale and optional features
 

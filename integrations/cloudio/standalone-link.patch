@@ -1,0 +1,157 @@
+diff --git a/README.md b/README.md
+index cb9c746..f57c6af 100644
+--- a/README.md
++++ b/README.md
+@@ -63,0 +64,5 @@ rp_id = "cloudio.example.com"          # or CLOUDIO_AUTH_RP_ID
++
++[integrations]
++# Optional ordinary link to the independently deployed Analytico dashboard.
++# HTTPS is required outside loopback; Analytico keeps its own authorization.
++analytico_url = "https://analytics.example.com/admin" # or CLOUDIO_ANALYTICO_URL
+diff --git a/src/core/config.zig b/src/core/config.zig
+index 9efaab9..c0b851f 100644
+--- a/src/core/config.zig
++++ b/src/core/config.zig
+@@ -22,0 +23 @@ const Setting = enum {
++    analytico_url,
+@@ -57,0 +59 @@ const env_bindings = [_]EnvBinding{
++    .{ .key = "CLOUDIO_ANALYTICO_URL", .setting = .analytico_url },
+@@ -82,0 +85 @@ const config_bindings = [_]ConfigBinding{
++    .{ .section = "integrations", .key = "analytico_url", .setting = .analytico_url },
+@@ -108,0 +112 @@ pub const Config = struct {
++    analytico_url: ?[]const u8 = null,
+@@ -242,0 +247,5 @@ fn applySetting(arena: Allocator, cfg: *Config, setting: Setting, raw_value: []c
++        .analytico_url => {
++            if (isValidAnalyticoUrl(value)) {
++                cfg.analytico_url = try arena.dupe(u8, value);
++            }
++        },
+@@ -269,0 +279,32 @@ fn parsePositiveU32(value: []const u8) ?u32 {
++fn isValidAnalyticoUrl(value: []const u8) bool {
++    if (value.len == 0 or value.len > 2048) return false;
++    for (value) |byte| {
++        if (byte <= 0x20 or byte == 0x7f) return false;
++    }
++    if (std.mem.indexOfScalar(u8, value, '#') != null) return false;
++
++    const secure = std.mem.startsWith(u8, value, "https://");
++    const plain = std.mem.startsWith(u8, value, "http://");
++    if (!secure and !plain) return false;
++    const scheme_len: usize = if (secure) "https://".len else "http://".len;
++    const rest = value[scheme_len..];
++    const authority_end = std.mem.indexOfAny(u8, rest, "/?") orelse rest.len;
++    const authority = rest[0..authority_end];
++    if (authority.len == 0 or std.mem.indexOfScalar(u8, authority, '@') != null) return false;
++
++    const colon = std.mem.indexOfScalar(u8, authority, ':');
++    const host = if (colon) |index| authority[0..index] else authority;
++    if (colon) |index| {
++        const port = authority[index + 1 ..];
++        const parsed = std.fmt.parseInt(u16, port, 10) catch return false;
++        if (parsed == 0) return false;
++    }
++    if (plain and
++        !std.ascii.eqlIgnoreCase(host, "localhost") and
++        !std.mem.eql(u8, host, "127.0.0.1"))
++    {
++        return false;
++    }
++    return host.len > 0;
++}
++
+@@ -360,0 +402,36 @@ test "config parser reads platform and passkey settings" {
++test "config parser accepts only secure or loopback Analytico links" {
++    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
++    defer arena.deinit();
++    var cfg = Config{ .domains = try parseList(arena.allocator(), "plosca.ru") };
++    try applyConfigText(arena.allocator(), &cfg,
++        \\[integrations]
++        \\analytico_url = "https://analytics.example.com/admin"
++    );
++    try std.testing.expectEqualStrings(
++        "https://analytics.example.com/admin",
++        cfg.analytico_url.?,
++    );
++
++    cfg.analytico_url = null;
++    try applyConfigText(arena.allocator(), &cfg,
++        \\[integrations]
++        \\analytico_url = "javascript:alert(1)"
++    );
++    try std.testing.expect(cfg.analytico_url == null);
++
++    try applyConfigText(arena.allocator(), &cfg,
++        \\[integrations]
++        \\analytico_url = "http://analytics.example.com/admin"
++    );
++    try std.testing.expect(cfg.analytico_url == null);
++
++    try applyConfigText(arena.allocator(), &cfg,
++        \\[integrations]
++        \\analytico_url = "http://127.0.0.1:4319/admin"
++    );
++    try std.testing.expectEqualStrings(
++        "http://127.0.0.1:4319/admin",
++        cfg.analytico_url.?,
++    );
++}
++
+diff --git a/src/server/pages.zig b/src/server/pages.zig
+index f0ef23f..3b6bc44 100644
+--- a/src/server/pages.zig
++++ b/src/server/pages.zig
+@@ -128 +128 @@ pub fn render(
+-    try writeShellStart(out, page);
++    try writeShellStart(out, page, ctx.config.analytico_url);
+@@ -167 +167,5 @@ fn writeDocumentStart(out: *std.Io.Writer, page: Page) !void {
+-fn writeShellStart(out: *std.Io.Writer, active: Page) !void {
++fn writeShellStart(
++    out: *std.Io.Writer,
++    active: Page,
++    analytico_url: ?[]const u8,
++) !void {
+@@ -183,0 +188,5 @@ fn writeShellStart(out: *std.Io.Writer, active: Page) !void {
++    if (analytico_url) |href| {
++        try out.writeAll("<li><a href=\"");
++        try web_html.urlAttribute(out, href);
++        try out.writeAll("\" rel=\"external\">Analytics</a></li>");
++    }
+@@ -892,0 +902,38 @@ test "every authenticated page has a useful server-rendered empty state" {
++
++test "configured Analytico navigation is an escaped ordinary external link" {
++    const allocator = std.testing.allocator;
++    var tmp = std.testing.tmpDir(.{});
++    defer tmp.cleanup();
++    const db_path = try std.fmt.allocPrint(
++        allocator,
++        ".zig-cache/tmp/{s}/pages-analytico.db",
++        .{tmp.sub_path},
++    );
++    defer allocator.free(db_path);
++    var db = try @import("db_store").Db.open(std.testing.io, db_path);
++    defer db.close();
++    try db.initSchema();
++
++    var output = std.Io.Writer.Allocating.init(allocator);
++    defer output.deinit();
++    const request: http.Request = .{
++        .method = "GET",
++        .target = "/",
++        .headers = &.{},
++        .body = "",
++    };
++    try std.testing.expect(try render(.{
++        .io = std.testing.io,
++        .gpa = allocator,
++        .db = &db,
++        .config = .{
++            .domains = &.{},
++            .analytico_url = "https://analytics.example.com/admin?site=a&x=\"",
++        },
++    }, request, "/", &output.writer));
++    try std.testing.expect(std.mem.indexOf(
++        u8,
++        output.written(),
++        "href=\"https://analytics.example.com/admin?site=a&amp;x=&quot;\" rel=\"external\">Analytics</a>",
++    ) != null);
++}

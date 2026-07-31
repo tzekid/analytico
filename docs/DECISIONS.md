@@ -30,6 +30,7 @@ semantic, or application state model is consequential and must be added here.
 | D19 | Metadata writes on pinned Turso | Durable autocommits with compensation | Accepted |
 | D20 | Collector concurrency | One bounded sequential accept loop | Accepted |
 | D21 | Session boundaries | Persist event-local boundaries at commit | Accepted |
+| D22 | Cloudio integration | Optional ordinary link to standalone Analytico | Accepted |
 
 ## D01. MVP interface
 
@@ -550,3 +551,46 @@ million-event ReleaseSafe fixture, the accepted design measured overview p95
 at 111 ms and an eight-step funnel p95 at 982 ms across ten full CLI processes.
 The changed durable insert path measured 11.326 ms p95, within its 25 ms
 budget. All remain within the existing gates.
+
+## D22. Optional Cloudio integration
+
+### Candidates
+
+| Candidate | Runtime/deployment | Failure and authorization boundary | Coupling |
+| --- | --- | --- | --- |
+| Ordinary Cloudio link to standalone Analytico | Two existing processes; no upstream request in Cloudio's first view | Cloudio keeps passkeys; Analytico keeps Caddy Basic Auth; either application can fail independently | One optional URL and one escaped anchor |
+| Link Analytico modules into Cloudio | One process after a substantial merge | Cloudio must own DuckDB, adopt Analytico lifecycle operations, and reconcile passkey authorization with the dashboard | One release, dependency graph, backup contract, and rollback unit |
+| Server-side HTML proxy with a strict timeout | Two processes plus an upstream request per analytics view | Needs an honest timeout page and either a second login or a signed, expiring forwarded identity contract | Cloudio availability and first-view latency depend on Analytico response semantics |
+
+Two processes opening the writable DuckDB file is rejected rather than treated
+as a fourth candidate.
+
+### Recommendation
+
+Keep Analytico standalone and, when the owner wants the affordance, expose one
+optional ordinary `Analytics` link in Cloudio. Do not proxy HTML, forward
+identity, share a session, import modules, or extract a common web framework.
+This keeps exactly one writable DuckDB owner and lets both products upgrade and
+roll back independently.
+
+The reviewed integration is retained as a patch against an exact clean Cloudio
+revision rather than applied to Cloudio now. The owner described this expansion
+as later work, and Cloudio had concurrent settings changes during M8. The patch
+therefore proves the integration without coupling either current worktree or
+release.
+
+### M8 evidence
+
+The ReleaseSafe candidate was built from Cloudio commit
+`cad77b48119cdedbc1b1370067141a07c9b5dc06`. Real Chromium enrolled a disposable
+passkey, disabled JavaScript, loaded a complete authenticated Cloudio first
+view, and followed the ordinary link through Analytico's real Basic Auth
+boundary. One measured run observed 16.6 ms to Cloudio's first response and
+961.3 ms to Analytico's first response; these are local single-run observations,
+not percentile claims.
+
+Cloudio made zero Analytico requests for its first view. With Analytico stopped,
+Cloudio still returned a complete `200` page. `/proc` file descriptors showed
+only the Analytico process owning `events.duckdb`. Removing the optional URL and
+restarting only Cloudio removed the link, while direct standalone Analytico
+remained healthy. No identity is forwarded and no shared abstraction was added.

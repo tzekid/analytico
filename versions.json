@@ -4,7 +4,7 @@
   "analytico": {
     "version": "0.1.0",
     "release_target": "linux-x86_64",
-    "status": "M7 enhanced production product"
+    "status": "M8 complete release candidate"
   },
   "zig": {
     "version": "0.17.0-dev.1509+bb296ab9b",
