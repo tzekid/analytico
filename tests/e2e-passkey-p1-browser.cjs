@@ -9,6 +9,7 @@ const mode = process.argv[4] || "accept";
 if (!origin || !setupUrl) throw new Error("usage: browser <origin> <setup-url>");
 
 async function main() {
+  const loginDurations = [];
   const options = {
     headless: true,
     args: ["--no-sandbox", "--ozone-platform=headless", "--use-angle=swiftshader-webgl"]
@@ -164,8 +165,10 @@ async function main() {
     });
     await context.clearCookies();
     await page.goto(`${origin}/admin/login`);
+    let loginStarted = Date.now();
     await page.locator("#login-button").click();
     await page.waitForURL(`${origin}/admin`);
+    loginDurations.push(Date.now() - loginStarted);
     const firstLoginSession = (await context.cookies(origin)).find(
       (cookie) => cookie.name === "analytico_session"
     );
@@ -181,8 +184,10 @@ async function main() {
     });
     await context.clearCookies();
     await page.goto(`${origin}/admin/login`);
+    loginStarted = Date.now();
     await page.locator("#login-button").click();
     await page.waitForURL(`${origin}/admin`);
+    loginDurations.push(Date.now() - loginStarted);
     const secondLoginSession = (await context.cookies(origin)).find(
       (cookie) => cookie.name === "analytico_session"
     );
@@ -247,12 +252,14 @@ async function main() {
     response = await page.goto(`${origin}/admin`);
     assert.equal(response.status(), 200);
     assert.equal(await page.locator("#login-button").count(), 1);
+    loginStarted = Date.now();
     await page.locator("#login-button").click();
     try {
       await page.waitForURL(`${origin}/admin`, { timeout: 15000 });
     } catch (_) {
       throw new Error("final login failed: " + await page.locator("#login-error").textContent());
     }
+    loginDurations.push(Date.now() - loginStarted);
     assert.equal(await page.locator("#report").count(), 1);
 
     const malicious = await browser.newContext();
@@ -276,7 +283,8 @@ async function main() {
     csrf_origin: "enforced",
     return_path: "bounded",
     virtual_authenticator: "ctap2",
-    fragment_leaked: false
+    fragment_leaked: false,
+    max_virtual_login_ms: Math.max(...loginDurations)
   }) + "\n");
 }
 

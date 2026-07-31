@@ -81,7 +81,7 @@ for backup in "$backup_one" "$backup_two"; do
         $'events.duckdb\nmanifest.json\nmeta.db\nvisitor.key'
     test "$(stat -c '%a' "$backup/visitor.key")" = 600
     test "$(jq -r '.schema' "$backup/manifest.json")" = 1
-    test "$(jq -r '.metadata_schema' "$backup/manifest.json")" = 1
+    test "$(jq -r '.metadata_schema' "$backup/manifest.json")" = 2
     test "$(jq -r '.event_schema' "$backup/manifest.json")" = 2
     for name in meta.db events.duckdb visitor.key; do
         expected=$(jq -r \

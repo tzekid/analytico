@@ -1,6 +1,7 @@
 # Passkey-only owner authentication
 
-Status: accepted design; P1 and P2 implemented after `0.1.0`, P3 pending.
+Status: accepted design; P1–P3 implemented for `0.2.0`; owner Apple-platform
+acceptance and the production tag remain pending.
 
 This specification replaces the current Caddy Basic Auth dashboard gate with
 one application-owned WebAuthn passkey gate. It intentionally serves one owner,
@@ -321,6 +322,9 @@ Definition of done:
 
 ### P2. Login, session, and server-first integration
 
+Status: implemented and accepted. Evidence is in
+[`PASSKEY_P2_RESULTS.md`](PASSKEY_P2_RESULTS.md).
+
 Implement the login page, fixed server-side sessions, route authorization,
 logout, CSRF migration, and the minimal local WebAuthn browser adapter.
 
@@ -341,6 +345,10 @@ Definition of done:
 - Debug and ReleaseSafe checks pass.
 
 ### P3. Credential management and production cutover
+
+Status: implemented and automated acceptance passed. Production Apple-platform
+acceptance remains the explicit tag gate. Evidence is in
+[`PASSKEY_P3_RESULTS.md`](PASSKEY_P3_RESULTS.md).
 
 Implement the server-rendered security page, second-passkey enrollment,
 rename/revoke/session controls, hardened Caddy policy, operational docs, and the
