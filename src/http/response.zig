@@ -22,12 +22,15 @@ pub fn write(
 pub fn statusText(status: u16) []const u8 {
     return switch (status) {
         200 => "OK",
+        201 => "Created",
         204 => "No Content",
         303 => "See Other",
         400 => "Bad Request",
+        401 => "Unauthorized",
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        409 => "Conflict",
         413 => "Payload Too Large",
         415 => "Unsupported Media Type",
         422 => "Unprocessable Content",

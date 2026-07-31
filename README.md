@@ -60,6 +60,7 @@ real-time views, session replay, arbitrary user SQL, and distributed ingestion.
 - [Performance contract](docs/PERFORMANCE.md)
 - [Operations and deployment](docs/OPERATIONS.md)
 - [Passkey-only owner authentication](docs/PASSKEY_AUTH_SPEC.md)
+- [Passkey P1 evidence](docs/PASSKEY_P1_RESULTS.md)
 - [M0 viability evidence](docs/M0_RESULTS.md)
 - [M1 durable-core evidence](docs/M1_RESULTS.md)
 - [M2 collection evidence](docs/M2_RESULTS.md)

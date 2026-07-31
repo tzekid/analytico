@@ -1,6 +1,6 @@
 # Passkey-only owner authentication
 
-Status: accepted design; not implemented in `0.1.0`.
+Status: accepted design; P1 implemented after `0.1.0`, P2–P3 pending.
 
 This specification replaces the current Caddy Basic Auth dashboard gate with
 one application-owned WebAuthn passkey gate. It intentionally serves one owner,
@@ -161,7 +161,7 @@ store:
 - `auth_credentials`: credential ID, owner ID, public key, algorithm, signature
   counter, transports, AAGUID, backup eligibility/state, owner label,
   created/last-used/revoked times;
-- `auth_challenges`: random challenge hash, purpose, owner/session or
+- `auth_challenges`: random challenge, purpose, owner/session or
   bootstrap binding, expiry, used time, creation time;
 - `auth_sessions`: session-token hash, owner ID, CSRF token, fixed expiry,
   last-seen and revoked times;
@@ -175,6 +175,10 @@ sizes are bounded before allocation or database work.
 
 No credential private key, biometric, device passcode, raw session token, or raw
 bootstrap token reaches either database. DuckDB receives no auth tables.
+
+The WebAuthn challenge is stored in clear text until its short expiry because
+it is public protocol entropy returned to the browser and the verifier needs
+the exact value. It is not an authenticator, session secret, or recovery secret.
 
 ## WebAuthn verification contract
 
@@ -296,6 +300,9 @@ the public collector hostname and tracker snippets do not change.
 ## Implementation milestones
 
 ### P1. Durable verifier and owner bootstrap
+
+Status: implemented and accepted. Evidence is in
+[`PASSKEY_P1_RESULTS.md`](PASSKEY_P1_RESULTS.md).
 
 Implement exact dependency pins, Turso migrations, configuration/status,
 bounded WebAuthn verification, bootstrap/reset commands, and the setup page.

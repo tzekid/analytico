@@ -2,7 +2,7 @@ const std = @import("std");
 const turso = @import("turso");
 const domain = @import("../domain.zig");
 
-pub const schema_version: i64 = 1;
+pub const schema_version: i64 = 2;
 
 pub const Site = struct {
     id: []u8,
@@ -98,9 +98,7 @@ pub const Store = struct {
         };
         const current = try self.migrationVersion();
         if (current > schema_version) return error.NewerMetadataSchema;
-        if (current == schema_version) return;
-
-        _ = self.connection.execBatch(
+        if (current < 1) _ = self.connection.execBatch(
             \\CREATE TABLE IF NOT EXISTS sites (
             \\  id TEXT PRIMARY KEY,
             \\  slug TEXT NOT NULL UNIQUE,
@@ -153,6 +151,86 @@ pub const Store = struct {
             \\INSERT INTO meta_migrations VALUES (1, 'initial-metadata', 0);
         , .{ .diagnostics = &diagnostics }) catch |err| {
             std.log.err("metadata migration v1 failed: {s}", .{diagnostics.text()});
+            return err;
+        };
+        if (current < 2) _ = self.connection.execBatch(
+            \\CREATE TABLE IF NOT EXISTS auth_config (
+            \\  id INTEGER PRIMARY KEY CHECK (id = 1),
+            \\  origin TEXT NOT NULL,
+            \\  rp_id TEXT NOT NULL,
+            \\  created_at_utc_seconds INTEGER NOT NULL,
+            \\  updated_at_utc_seconds INTEGER NOT NULL,
+            \\  CHECK (length(origin) BETWEEN 8 AND 255),
+            \\  CHECK (length(rp_id) BETWEEN 1 AND 253)
+            \\);
+            \\CREATE TABLE IF NOT EXISTS auth_users (
+            \\  id TEXT PRIMARY KEY,
+            \\  display_name TEXT NOT NULL,
+            \\  created_at_utc_seconds INTEGER NOT NULL,
+            \\  CHECK (length(id) BETWEEN 32 AND 128),
+            \\  CHECK (length(display_name) BETWEEN 1 AND 120)
+            \\);
+            \\CREATE TABLE IF NOT EXISTS auth_credentials (
+            \\  credential_id TEXT PRIMARY KEY,
+            \\  user_id TEXT NOT NULL,
+            \\  public_key TEXT NOT NULL,
+            \\  algorithm INTEGER NOT NULL CHECK (algorithm IN (-7, -257)),
+            \\  sign_count INTEGER NOT NULL CHECK (sign_count >= 0),
+            \\  transports TEXT NOT NULL,
+            \\  aaguid TEXT NOT NULL,
+            \\  backup_eligible INTEGER NOT NULL CHECK (backup_eligible IN (0, 1)),
+            \\  backup_state INTEGER NOT NULL CHECK (backup_state IN (0, 1)),
+            \\  label TEXT NOT NULL,
+            \\  created_at_utc_seconds INTEGER NOT NULL,
+            \\  last_used_at_utc_seconds INTEGER,
+            \\  revoked_at_utc_seconds INTEGER,
+            \\  FOREIGN KEY (user_id) REFERENCES auth_users(id) ON DELETE CASCADE,
+            \\  CHECK (length(credential_id) BETWEEN 1 AND 1374),
+            \\  CHECK (length(public_key) BETWEEN 1 AND 16384),
+            \\  CHECK (length(transports) <= 128),
+            \\  CHECK (length(aaguid) <= 128),
+            \\  CHECK (length(label) BETWEEN 1 AND 64)
+            \\);
+            \\CREATE TABLE IF NOT EXISTS auth_challenges (
+            \\  id TEXT PRIMARY KEY,
+            \\  purpose TEXT NOT NULL CHECK (purpose IN ('setup', 'register', 'login')),
+            \\  challenge TEXT NOT NULL UNIQUE,
+            \\  user_id TEXT NOT NULL,
+            \\  binding_hash TEXT NOT NULL,
+            \\  expires_at_utc_seconds INTEGER NOT NULL,
+            \\  used_at_utc_seconds INTEGER,
+            \\  created_at_utc_seconds INTEGER NOT NULL,
+            \\  CHECK (length(id) BETWEEN 32 AND 128),
+            \\  CHECK (length(challenge) BETWEEN 32 AND 128),
+            \\  CHECK (length(user_id) <= 128),
+            \\  CHECK (length(binding_hash) IN (0, 64))
+            \\);
+            \\CREATE TABLE IF NOT EXISTS auth_sessions (
+            \\  token_hash TEXT PRIMARY KEY,
+            \\  user_id TEXT NOT NULL,
+            \\  csrf_token TEXT NOT NULL,
+            \\  created_at_utc_seconds INTEGER NOT NULL,
+            \\  expires_at_utc_seconds INTEGER NOT NULL,
+            \\  last_seen_at_utc_seconds INTEGER NOT NULL,
+            \\  revoked_at_utc_seconds INTEGER,
+            \\  FOREIGN KEY (user_id) REFERENCES auth_users(id) ON DELETE CASCADE,
+            \\  CHECK (length(token_hash) = 64),
+            \\  CHECK (length(csrf_token) BETWEEN 32 AND 128)
+            \\);
+            \\CREATE TABLE IF NOT EXISTS auth_bootstrap (
+            \\  id INTEGER PRIMARY KEY CHECK (id = 1),
+            \\  token_hash TEXT NOT NULL CHECK (length(token_hash) = 64),
+            \\  expires_at_utc_seconds INTEGER NOT NULL,
+            \\  created_at_utc_seconds INTEGER NOT NULL,
+            \\  consumed_at_utc_seconds INTEGER
+            \\);
+            \\CREATE INDEX IF NOT EXISTS auth_sessions_active
+            \\  ON auth_sessions(expires_at_utc_seconds, revoked_at_utc_seconds);
+            \\CREATE INDEX IF NOT EXISTS auth_challenges_expiry
+            \\  ON auth_challenges(expires_at_utc_seconds, used_at_utc_seconds);
+            \\INSERT INTO meta_migrations VALUES (2, 'passkey-owner-auth', 0);
+        , .{ .diagnostics = &diagnostics }) catch |err| {
+            std.log.err("metadata migration v2 failed: {s}", .{diagnostics.text()});
             return err;
         };
     }

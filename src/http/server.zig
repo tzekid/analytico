@@ -8,6 +8,8 @@ const rate_limit = @import("rate_limit.zig");
 const request_mod = @import("request.zig");
 const response = @import("response.zig");
 const dashboard = @import("../web/dashboard.zig");
+const auth_http = @import("../auth/http.zig");
+const auth_store = @import("../auth/store.zig");
 
 const tracker = @embedFile("tracker.min.js");
 const tracker_br = @embedFile("tracker.min.js.br");
@@ -99,6 +101,9 @@ pub fn run(
     var policy_arena = std.heap.ArenaAllocator.init(allocator);
     defer policy_arena.deinit();
     const policies = try loadPolicies(policy_arena.allocator(), &metadata);
+    const auth_policy = try (auth_store.Store{ .metadata = &metadata }).policy(
+        policy_arena.allocator(),
+    );
     var context = Context{
         .allocator = allocator,
         .io = io,
@@ -111,6 +116,7 @@ pub fn run(
         .key_path = options.key_path,
         .csrf_token = csrfToken(key_bytes[0..32].*),
         .report_timeout_ms = options.report_timeout_ms,
+        .auth_policy = auth_policy,
     };
     defer std.crypto.secureZero(u8, &context.master_key);
 
@@ -200,6 +206,7 @@ const Context = struct {
     key_path: []const u8,
     csrf_token: [32]u8,
     report_timeout_ms: u32,
+    auth_policy: ?auth_store.Policy,
     limiter: rate_limit.Limiter = .{},
     events_healthy: bool = true,
     counters: Counters = .{},
@@ -272,6 +279,26 @@ fn handle(context: *Context, stream: std.Io.net.Stream) !void {
         return;
     }
     if (std.mem.startsWith(u8, path, "/admin")) {
+        if (context.auth_policy) |policy| {
+            const auth_handled = auth_http.handle(.{
+                .allocator = allocator,
+                .io = context.io,
+                .metadata = context.metadata,
+                .policy = policy,
+            }, request, output) catch |err| switch (err) {
+                error.DuplicateHeader => {
+                    try writeError(output, 400);
+                    return;
+                },
+                else => return err,
+            };
+            if (auth_handled) return;
+        } else if (std.mem.startsWith(u8, path, "/admin/auth/") or
+            std.mem.eql(u8, path, "/admin/setup"))
+        {
+            try writeError(output, 503);
+            return;
+        }
         const handled = dashboard.handle(.{
             .allocator = allocator,
             .io = context.io,

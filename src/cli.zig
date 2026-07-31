@@ -6,6 +6,7 @@ const report = @import("report.zig");
 const meta = @import("store/meta.zig");
 const events = @import("store/events.zig");
 const reports = @import("store/reports.zig");
+const auth_cli = @import("auth/cli.zig");
 
 pub fn run(
     allocator: std.mem.Allocator,
@@ -14,6 +15,7 @@ pub fn run(
     output: *std.Io.Writer,
     args: []const []const u8,
 ) !bool {
+    if (try auth_cli.run(allocator, io, output, args)) return true;
     if (args.len == 3 and std.mem.eql(u8, args[1], "init")) {
         try initialize(allocator, io, output, args[2]);
         return true;
@@ -121,6 +123,7 @@ pub fn writeUsage(output: *std.Io.Writer) !void {
         \\  analytico pseudonym <64-hex-key> <site-id> <date> <ip> <coarse-client>
         \\
     );
+    try auth_cli.writeUsage(output);
 }
 
 fn reportCommand(

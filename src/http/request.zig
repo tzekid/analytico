@@ -4,6 +4,7 @@ pub const max_target_bytes = 4096;
 pub const max_header_count = 32;
 pub const max_header_bytes = 16 * 1024;
 pub const max_body_bytes = 8 * 1024;
+pub const max_auth_body_bytes = 192 * 1024;
 
 pub const Header = struct {
     name: []const u8,
@@ -47,6 +48,7 @@ pub fn read(
         return null;
     const request_line = parseRequestLine(line) orelse return error.BadRequest;
     if (request_line.target.len > max_target_bytes) return error.PayloadTooLarge;
+    const body_limit = bodyLimit(request_line.target);
 
     var headers: std.ArrayList(Header) = .empty;
     var header_bytes: usize = 0;
@@ -72,7 +74,7 @@ pub fn read(
             if (content_length != null) return error.BadRequest;
             content_length = std.fmt.parseInt(usize, value, 10) catch
                 return error.BadRequest;
-            if (content_length.? > max_body_bytes) return error.PayloadTooLarge;
+            if (content_length.? > body_limit) return error.PayloadTooLarge;
         }
         if (std.ascii.eqlIgnoreCase(name, "transfer-encoding")) {
             if (!std.ascii.eqlIgnoreCase(value, "chunked") or chunked) {
@@ -88,7 +90,7 @@ pub fn read(
     if (chunked and content_length != null) return error.BadRequest;
 
     const body = if (chunked)
-        try readChunked(allocator, reader)
+        try readChunked(allocator, reader, body_limit)
     else if (content_length) |length|
         try reader.readAlloc(allocator, length)
     else
@@ -123,6 +125,7 @@ fn parseRequestLine(line: []const u8) ?RequestLine {
 fn readChunked(
     allocator: std.mem.Allocator,
     reader: *std.Io.Reader,
+    body_limit: usize,
 ) ReadError![]const u8 {
     var body: std.ArrayList(u8) = .empty;
     while (true) {
@@ -140,7 +143,9 @@ fn readChunked(
             if (trimLine(end).len != 0) return error.BadRequest;
             return body.toOwnedSlice(allocator);
         }
-        if (size > max_body_bytes - body.items.len) return error.PayloadTooLarge;
+        if (body.items.len > body_limit or size > body_limit - body.items.len) {
+            return error.PayloadTooLarge;
+        }
         const chunk = try reader.readAlloc(allocator, size);
         if (chunk.len != size) return error.BadRequest;
         try body.appendSlice(allocator, chunk);
@@ -148,6 +153,16 @@ fn readChunked(
             return error.BadRequest;
         if (ending.len != 1 or ending[0] != '\r') return error.BadRequest;
     }
+}
+
+fn bodyLimit(target: []const u8) usize {
+    const path_end = std.mem.findScalar(u8, target, '?') orelse target.len;
+    const path = target[0..path_end];
+    return if (std.mem.startsWith(u8, path, "/admin/auth/") or
+        std.mem.eql(u8, path, "/admin/security/passkeys/verify"))
+        max_auth_body_bytes
+    else
+        max_body_bytes;
 }
 
 fn trimLine(line: []const u8) []const u8 {

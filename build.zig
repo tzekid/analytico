@@ -51,6 +51,14 @@ pub fn build(b: *std.Build) void {
     const gzip_htmx = b.addRunArtifact(gzip_tool);
     gzip_htmx.addFileArg(htmx_source);
     const htmx_gzip = gzip_htmx.captureStdOut(.{});
+    const passcay_module = b.dependency("passcay", .{
+        .target = target,
+        .optimize = optimize,
+    }).module("passcay");
+    const zbor_module = b.dependency("zbor", .{
+        .target = target,
+        .optimize = optimize,
+    }).module("zbor");
 
     const app_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -61,6 +69,8 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "turso", .module = turso_module },
             .{ .name = "duckdb_c", .module = duckdb_c_module },
+            .{ .name = "passcay", .module = passcay_module },
+            .{ .name = "zbor", .module = zbor_module },
         },
     });
     app_module.addLibraryPath(duckdb_dependency.path(""));
@@ -91,6 +101,8 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "turso", .module = turso_module },
                 .{ .name = "duckdb_c", .module = duckdb_c_module },
+                .{ .name = "passcay", .module = passcay_module },
+                .{ .name = "zbor", .module = zbor_module },
             },
         }),
     });
@@ -238,6 +250,17 @@ pub fn build(b: *std.Build) void {
         "e2e-m7",
         "Run HTMX 4 enhancement and native fallback through real Chromium",
     ).dependOn(&m7_htmx_e2e.step);
+
+    const passkey_p1_e2e = b.addSystemCommand(&.{
+        "bash",
+        "tests/e2e-passkey-p1.sh",
+    });
+    passkey_p1_e2e.addArtifactArg(app);
+    passkey_p1_e2e.step.dependOn(b.getInstallStep());
+    b.step(
+        "e2e-passkey-p1",
+        "Run owner bootstrap through real Turso, HTTP, Chromium, and WebAuthn",
+    ).dependOn(&passkey_p1_e2e.step);
 }
 
 fn addHtmxAssets(

@@ -16,6 +16,14 @@
             .url = "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0-beta6.tgz",
             .hash = "N-V-__8AAAhgEwAkQvSpCBDH3yfm0iALwvlZfmscrzeb7Csg",
         },
+        .passcay = .{
+            .url = "git+https://github.com/uzyn/passcay.git#3.1.0",
+            .hash = "passcay-3.1.0-ckLGcmQzBAC1vu-rL_dmObKye8Fbs8qHsFUeDtRAr1ni",
+        },
+        .zbor = .{
+            .url = "git+https://codeberg.org/r4gus/zbor?ref=0.21.2#658c1c0ec607557b52d2e2a42acbfad31058ecee",
+            .hash = "zbor-0.21.2-kr-CoPF7AwAU2EqWqJzgxd1jHhpaaRBK0_c1LCgiwTbn",
+        },
     },
     .paths = .{
         "build.zig",

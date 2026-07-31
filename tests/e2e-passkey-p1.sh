@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -ne 1 ]]; then
+    echo "usage: $0 <analytico-binary>" >&2
+    exit 2
+fi
+
+binary=$1
+case "$binary" in
+    /*) ;;
+    *) binary="$PWD/$binary" ;;
+esac
+module_root=${ANALYTICO_PLAYWRIGHT_NODE_PATH:-"$PWD/.zig-cache/playwright-node/node_modules"}
+browser_root=${PLAYWRIGHT_BROWSERS_PATH:-"$PWD/.zig-cache/ms-playwright"}
+chromium_path=${ANALYTICO_CHROMIUM_PATH:-"$browser_root/chromium-1234/chrome-linux64/chrome"}
+if [[ ! -d "$module_root/playwright" || ! -x "$chromium_path" ]]; then
+    echo "browser fixture missing; run tests/setup-browser-e2e.sh" >&2
+    exit 2
+fi
+
+fixture=$(mktemp -d "$PWD/.zig-cache/passkey-p1.XXXXXX")
+server_pid=
+cleanup() {
+    if [[ -n "$server_pid" ]] && kill -0 "$server_pid" 2>/dev/null; then
+        kill -TERM "$server_pid" 2>/dev/null || true
+        wait "$server_pid" 2>/dev/null || true
+    fi
+    rm -rf -- "$fixture"
+}
+trap cleanup EXIT
+
+port=$((49000 + ($$ % 500)))
+origin="http://localhost:$port"
+data="$fixture/data"
+"$binary" init "$data" >"$fixture/init.txt"
+grep -Fq 'metadata=v2' "$fixture/init.txt"
+"$binary" site add "$data" example Example https://example.com >/dev/null
+
+legacy="$fixture/legacy-v1"
+"$binary" init "$legacy" >/dev/null
+"$binary" site add "$legacy" preserved Preserved https://preserved.example >/dev/null
+sqlite3 "$legacy/meta.db" <<'SQL'
+DROP TABLE auth_bootstrap;
+DROP TABLE auth_sessions;
+DROP TABLE auth_challenges;
+DROP TABLE auth_credentials;
+DROP TABLE auth_users;
+DROP TABLE auth_config;
+DELETE FROM meta_migrations WHERE version = 2;
+SQL
+"$binary" migrate "$legacy" >"$fixture/upgrade.txt"
+grep -Fq 'metadata=v2 events=v2' "$fixture/upgrade.txt"
+"$binary" site list "$legacy" | grep -Fq $'preserved\t'
+
+"$binary" auth configure "$data" "$origin" >"$fixture/configure.txt"
+setup_url=$("$binary" auth bootstrap "$data" --ttl 10m | sed -n '2p')
+case "$setup_url" in
+    "$origin/admin/setup#token="*) ;;
+    *) echo "invalid setup URL" >&2; exit 1 ;;
+esac
+
+"$binary" serve --listen "127.0.0.1:$port" \
+    --meta "$data/meta.db" \
+    --events "$data/events.duckdb" \
+    --temp "$data/tmp" \
+    --visitor-key-file "$data/visitor.key" \
+    >"$fixture/server.stdout" 2>"$fixture/server.stderr" &
+server_pid=$!
+for _ in {1..100}; do
+    curl --silent --fail "$origin/readyz" >/dev/null 2>&1 && break
+    sleep 0.02
+done
+curl --silent --fail "$origin/readyz" >/dev/null
+
+TMPDIR="$fixture" NODE_PATH="$module_root" \
+    PLAYWRIGHT_BROWSERS_PATH="$browser_root" \
+    ANALYTICO_CHROMIUM_PATH="$chromium_path" \
+    node tests/e2e-passkey-p1-browser.cjs "$origin" "$setup_url" \
+    >"$fixture/browser.json"
+
+kill -TERM "$server_pid"
+wait "$server_pid"
+server_pid=
+"$binary" auth status "$data" >"$fixture/status.txt"
+grep -Fq 'configured=yes credentials=1 active_sessions=1 bootstrap_active=no' \
+    "$fixture/status.txt"
+if rg -a -F "${setup_url#*#token=}" "$data/meta.db" >/dev/null 2>&1; then
+    echo "raw bootstrap token found in metadata" >&2
+    exit 1
+fi
+backup="$fixture/before-auth-reset"
+"$binary" auth reset "$data" "$backup" --confirm >"$fixture/reset.txt"
+grep -Fq "verified_backup=$backup" "$fixture/reset.txt"
+"$binary" restore "$backup" "$fixture/restored" --verify >/dev/null
+"$binary" doctor "$fixture/restored" >/dev/null
+"$binary" auth status "$data" >"$fixture/reset-status.txt"
+grep -Fq 'configured=no credentials=0 active_sessions=0 bootstrap_active=no' \
+    "$fixture/reset-status.txt"
+grep -Fq "origin=$origin" "$fixture/reset-status.txt"
+
+wrong_port=$((port + 1))
+wrong_origin="http://localhost:$((wrong_port + 1))"
+actual_origin="http://localhost:$wrong_port"
+wrong_data="$fixture/wrong-origin"
+"$binary" init "$wrong_data" >/dev/null
+"$binary" auth configure "$wrong_data" "$wrong_origin" >/dev/null
+wrong_setup_url=$("$binary" auth bootstrap "$wrong_data" --ttl 10m | sed -n '2p')
+wrong_token=${wrong_setup_url#*#token=}
+"$binary" serve --listen "127.0.0.1:$wrong_port" \
+    --meta "$wrong_data/meta.db" \
+    --events "$wrong_data/events.duckdb" \
+    --temp "$wrong_data/tmp" \
+    --visitor-key-file "$wrong_data/visitor.key" \
+    >"$fixture/wrong-server.stdout" 2>"$fixture/wrong-server.stderr" &
+server_pid=$!
+for _ in {1..100}; do
+    curl --silent --fail "$actual_origin/readyz" >/dev/null 2>&1 && break
+    sleep 0.02
+done
+curl --silent --fail "$actual_origin/readyz" >/dev/null
+
+test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+    -X POST "$actual_origin/admin/auth/setup/options" \
+    -H 'Content-Type: application/json' \
+    -H 'X-Analytico-Bootstrap: invalid-bootstrap-value-that-is-long-enough' \
+    --data '{}')" = 401
+test "$(head -c 200000 /dev/zero | tr '\0' x | curl --silent \
+    --output /dev/null --write-out '%{http_code}' \
+    -X POST "$actual_origin/admin/auth/setup/options" \
+    -H 'Content-Type: application/json' \
+    -H "X-Analytico-Bootstrap: $wrong_token" \
+    --data-binary @-)" = 413
+
+wrong_access_url="$actual_origin/admin/setup#token=$wrong_token"
+TMPDIR="$fixture" NODE_PATH="$module_root" \
+    PLAYWRIGHT_BROWSERS_PATH="$browser_root" \
+    ANALYTICO_CHROMIUM_PATH="$chromium_path" \
+    node tests/e2e-passkey-p1-browser.cjs \
+    "$actual_origin" "$wrong_access_url" reject-origin \
+    >"$fixture/wrong-browser.json"
+kill -TERM "$server_pid"
+wait "$server_pid"
+server_pid=
+"$binary" auth status "$wrong_data" >"$fixture/wrong-status.txt"
+grep -Fq 'configured=no credentials=0 active_sessions=0 bootstrap_active=yes' \
+    "$fixture/wrong-status.txt"
+
+cat "$fixture/browser.json"
+cat "$fixture/wrong-browser.json"
+echo "P1 migration, bootstrap, verified reset, and real-browser checks passed"

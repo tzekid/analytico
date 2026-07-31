@@ -41,7 +41,7 @@ backup="$fixture/pre-upgrade"
 "$current" event add "$live" rollback signup /after \
     1785456000000001 2026-07-31 203.0.113.2 Firefox Linux desktop >/dev/null
 test "$("$current" doctor "$live")" = \
-    "ok metadata=v1 events=v2 sites=1 goals=0 funnels=0 stored_events=2 key=ok"
+    "ok metadata=v2 events=v2 sites=1 goals=0 funnels=0 stored_events=2 key=ok"
 
 rolled_back="$fixture/rolled-back"
 "$current" restore "$backup" "$rolled_back" --verify >/dev/null
