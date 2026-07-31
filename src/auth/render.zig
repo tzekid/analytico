@@ -170,11 +170,11 @@ fn head(
     );
     try text(output, title);
     try output.writeAll(
-        " · Analytico</title><link rel=\"stylesheet\" href=\"/admin/app.v1.css\">" ++
+        " · Analytico</title><link rel=\"stylesheet\" href=\"/admin/app.v2.css\">" ++
             "<script defer src=\"",
     );
     try attribute(output, passkeys_path);
-    try output.writeAll("\"></script></head><body");
+    try output.writeAll("\"></script></head><body class=\"auth-page\"");
     if (return_path) |value| {
         try output.writeAll(" data-return=\"");
         try attribute(output, value);

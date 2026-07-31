@@ -369,3 +369,49 @@ Face ID, hardware-key, and synced-passkey login. Its three independently
 checkable implementation milestones and definitions of done are specified in
 [`PASSKEY_AUTH_SPEC.md`](PASSKEY_AUTH_SPEC.md). The shipped Caddy Basic Auth
 gate remains in force until all three milestones and the staged cutover pass.
+
+## U1. Dashboard functional quality
+
+### Outcome
+
+Make the existing server-rendered dashboard dependable and internally
+consistent before beginning a design-led visual rewrite.
+
+### Work
+
+- Separate site switching, date filtering, report navigation, and definition
+  management so each action has one clear state transition.
+- Preserve safe site/date context through report navigation, pagination, and
+  goal/funnel mutations.
+- Make site changes immediate when enhancement is available while retaining a
+  complete native GET form and submit button.
+- Remove empty error chrome, reduce management-form dominance, and apply one
+  restrained component vocabulary across login, dashboard, and security pages.
+- Exercise two sites with deliberately different report results through real
+  HTTP, Caddy, Turso, DuckDB, Chromium, passkey sessions, and both JavaScript
+  modes.
+
+### Definition of done
+
+- [ ] Selecting either configured site renders that site's own overview and
+      canonical URL; report navigation never silently returns to another site.
+- [ ] Switching sites from a site-specific goal or funnel safely returns to the
+      destination site's overview instead of retaining an invalid subject.
+- [ ] Date changes preserve the selected site and report while resetting unsafe
+      pagination state.
+- [ ] Pagination, campaign dimensions, notices, validation errors, and
+      goal/funnel mutations preserve all applicable context.
+- [ ] Every primary control works through native links/forms with JavaScript
+      disabled; enhancement adds no client state store or report API.
+- [ ] Login has no empty alert, management controls no longer dominate every
+      report, and mobile/desktop layouts use consistent spacing, controls,
+      focus, empty, loading, error, and dark-mode states.
+- [ ] The two-site real-browser journey, existing M6/M7/passkey gates, Debug,
+      ReleaseSafe, release archive, and production smoke checks pass.
+
+## U2. Figma-led dashboard redesign
+
+U2 begins only after U1 is accepted. It will define user journeys and
+information architecture first, iterate on concepts in Figma, and implement an
+accepted direction afterward. U1 deliberately avoids choosing that future
+visual language.

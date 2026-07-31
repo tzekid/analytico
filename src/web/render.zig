@@ -3,10 +3,12 @@ const report = @import("../report.zig");
 const model = @import("model.zig");
 
 pub const stylesheet = @embedFile("style.css");
-pub const stylesheet_path = "/admin/app.v1.css";
+pub const stylesheet_path = "/admin/app.v2.css";
 pub const htmx = @embedFile("htmx_js");
 pub const htmx_gzip = @embedFile("htmx_gzip");
 pub const htmx_path = "/admin/htmx.28fae7bb.js";
+pub const dashboard_js = @embedFile("dashboard.js");
+pub const dashboard_js_path = "/admin/dashboard.5f88a716.js";
 
 const html_headers =
     "Cache-Control: private, no-store, max-age=0\r\n" ++
@@ -20,14 +22,15 @@ pub const headers = html_headers;
 pub fn page(output: *std.Io.Writer, value: model.Page) !void {
     try head(output, "Dashboard");
     try output.writeAll(
-        "<header><h1>Analytico</h1><div><a href=\"/admin/security\">Security</a> " ++
-            "<span class=\"muted\">private dashboard</span> " ++
+        "<header class=\"app-header\"><h1><a class=\"brand\" href=\"/admin\">Analytico</a></h1>" ++
+            "<nav class=\"account-nav\" aria-label=\"Account\"><a href=\"/admin/security\">Security</a>" ++
             "<form class=\"inline\" method=\"post\" action=\"/admin/logout\" hx-boost=\"false\">" ++
             "<input type=\"hidden\" name=\"csrf\" value=\"",
     );
     try attribute(output, value.csrf_token);
     try output.writeAll(
-        "\"><button type=\"submit\">Sign out</button></form></div></header><main>",
+        "\"><button class=\"button-secondary\" type=\"submit\">Sign out</button></form>" ++
+            "</nav></header><main>",
     );
     if (value.notice.len != 0) {
         try output.writeAll("<p class=\"notice\" role=\"status\">");
@@ -48,6 +51,13 @@ pub fn page(output: *std.Io.Writer, value: model.Page) !void {
         try foot(output);
         return;
     }
+    try output.writeAll("<section class=\"site-context\"><div><span class=\"eyebrow\">Current site</span><strong>");
+    try text(output, value.selected_site.?.name);
+    try output.writeAll("</strong><span class=\"muted\">");
+    try text(output, value.query.start_date);
+    try output.writeAll(" to ");
+    try text(output, value.query.end_date);
+    try output.writeAll(" · UTC</span></div></section>");
     try filters(output, value);
     try reportNavigation(output, value);
     try output.writeAll("<section id=\"report\"><h2>");
@@ -83,6 +93,8 @@ fn head(output: *std.Io.Writer, title: []const u8) !void {
     try attribute(output, stylesheet_path);
     try output.writeAll("\"><script defer src=\"");
     try attribute(output, htmx_path);
+    try output.writeAll("\"></script><script defer src=\"");
+    try attribute(output, dashboard_js_path);
     try output.writeAll("\"></script></head><body hx-boost:inherited=\"true\">");
 }
 
@@ -91,7 +103,12 @@ fn foot(output: *std.Io.Writer) !void {
 }
 
 fn filters(output: *std.Io.Writer, value: model.Page) !void {
-    try output.writeAll("<form class=\"filters\" method=\"get\" action=\"/admin\" hx-boost=\"true\" hx-sync=\"this:replace\"><label>Site<select name=\"site\">");
+    try output.writeAll(
+        "<section class=\"report-controls\" aria-label=\"Report controls\">" ++
+            "<form class=\"site-switcher\" method=\"get\" action=\"/admin\" " ++
+            "data-site-switcher hx-boost=\"true\" hx-sync=\"this:replace\">" ++
+            "<label><span>Site</span><select name=\"site\">",
+    );
     for (value.sites) |site| {
         try output.writeAll("<option value=\"");
         try attribute(output, site.slug);
@@ -104,9 +121,20 @@ fn filters(output: *std.Io.Writer, value: model.Page) !void {
         if (site.disabled) try output.writeAll(" (disabled)");
         try output.writeAll("</option>");
     }
-    try output.writeAll("</select></label><label>Start<input type=\"date\" name=\"start\" required value=\"");
+    try output.writeAll("</select></label><input type=\"hidden\" name=\"start\" value=\"");
     try attribute(output, value.query.start_date);
-    try output.writeAll("\"></label><label>End<input type=\"date\" name=\"end\" required value=\"");
+    try output.writeAll("\"><input type=\"hidden\" name=\"end\" value=\"");
+    try attribute(output, value.query.end_date);
+    try output.writeAll(
+        "\"><button class=\"button-secondary\" type=\"submit\">View site</button></form>" ++
+            "<form class=\"range-filter\" method=\"get\" action=\"/admin\" " ++
+            "hx-boost=\"true\" hx-sync=\"this:replace\">" ++
+            "<input type=\"hidden\" name=\"site\" value=\"",
+    );
+    try attribute(output, value.query.site);
+    try output.writeAll("\"><label><span>Start</span><input type=\"date\" name=\"start\" required value=\"");
+    try attribute(output, value.query.start_date);
+    try output.writeAll("\"></label><label><span>End</span><input type=\"date\" name=\"end\" required value=\"");
     try attribute(output, value.query.end_date);
     try output.writeAll("\"></label><input type=\"hidden\" name=\"report\" value=\"");
     try attribute(output, value.query.kind.name());
@@ -121,7 +149,14 @@ fn filters(output: *std.Io.Writer, value: model.Page) !void {
         try attribute(output, @tagName(value.query.campaign_dimension));
         try output.writeAll("\">");
     }
-    try output.writeAll("<button type=\"submit\">Apply</button></form>");
+    if (value.query.kind.isList()) {
+        try output.writeAll("<input type=\"hidden\" name=\"sort\" value=\"");
+        try attribute(output, @tagName(value.query.sort));
+        try output.writeAll("\"><input type=\"hidden\" name=\"limit\" value=\"");
+        try output.print("{d}", .{value.query.limit});
+        try output.writeAll("\">");
+    }
+    try output.writeAll("<button type=\"submit\">Update dates</button></form></section>");
 }
 
 const NavItem = struct {
@@ -144,9 +179,13 @@ const navigation = [_]NavItem{
 };
 
 fn reportNavigation(output: *std.Io.Writer, value: model.Page) !void {
-    try output.writeAll("<nav aria-label=\"Reports\">");
+    try output.writeAll("<div class=\"report-navigation\"><nav class=\"report-tabs\" aria-label=\"Reports\">");
     for (navigation) |item| {
         try reportLink(output, value.query, item.kind, "", item.label);
+    }
+    try output.writeAll("</nav>");
+    if (value.goals.len != 0 or value.funnels.len != 0) {
+        try output.writeAll("<div class=\"conversion-navigation\"><span class=\"eyebrow\">Conversions</span><nav aria-label=\"Conversions\">");
     }
     for (value.goals) |goal| {
         try reportLink(output, value.query, .goal, goal.name, goal.name);
@@ -154,7 +193,10 @@ fn reportNavigation(output: *std.Io.Writer, value: model.Page) !void {
     for (value.funnels) |funnel| {
         try reportLink(output, value.query, .funnel, funnel.name, funnel.name);
     }
-    try output.writeAll("</nav>");
+    if (value.goals.len != 0 or value.funnels.len != 0) {
+        try output.writeAll("</nav></div>");
+    }
+    try output.writeAll("</div>");
 }
 
 fn reportLink(
@@ -278,7 +320,15 @@ fn campaignTabs(output: *std.Io.Writer, query: model.Query) !void {
 }
 
 fn definitions(output: *std.Io.Writer, value: model.Page) !void {
-    try output.writeAll("<section class=\"split\"><div class=\"panel\"><h2>Goals</h2><ul>");
+    try output.writeAll("<details class=\"management\"");
+    if (value.form_error.len != 0 or value.notice.len != 0) {
+        try output.writeAll(" open");
+    }
+    try output.print(
+        "><summary><span>Goals &amp; funnels</span><span class=\"muted\">{d} goals · {d} funnels</span></summary>" ++
+            "<div class=\"split\"><section class=\"panel\"><h2>Goals</h2><ul class=\"definition-list\">",
+        .{ value.goals.len, value.funnels.len },
+    );
     for (value.goals) |goal| {
         try output.writeAll("<li><strong>");
         try text(output, goal.name);
@@ -307,9 +357,9 @@ fn definitions(output: *std.Io.Writer, value: model.Page) !void {
     }
     try output.writeAll("</select></label><label>Value<input name=\"value\" maxlength=\"1024\" required value=\"");
     try attribute(output, value.goal_draft.match_value);
-    try output.writeAll("\"></label><button type=\"submit\">Add goal</button></form></div>");
+    try output.writeAll("\"></label><button type=\"submit\">Add goal</button></form></section>");
 
-    try output.writeAll("<div class=\"panel\"><h2>Funnels</h2><ul>");
+    try output.writeAll("<section class=\"panel\"><h2>Funnels</h2><ul class=\"definition-list\">");
     for (value.funnels) |funnel| {
         try output.writeAll("<li><strong>");
         try text(output, funnel.name);
@@ -326,7 +376,7 @@ fn definitions(output: *std.Io.Writer, value: model.Page) !void {
     try attribute(output, value.funnel_draft.name);
     try output.writeAll("\"></label><label>Steps, one <code>kind=value</code> per line<textarea name=\"steps\" maxlength=\"8192\" required>");
     try text(output, value.funnel_draft.steps);
-    try output.writeAll("</textarea></label><button type=\"submit\">Add funnel</button></form></div></section>");
+    try output.writeAll("</textarea></label><button type=\"submit\">Add funnel</button></form></section></div></details>");
 }
 
 fn deleteForm(
@@ -349,6 +399,10 @@ fn formCommon(output: *std.Io.Writer, value: model.Page) !void {
     try attribute(output, value.csrf_token);
     try output.writeAll("\"><input type=\"hidden\" name=\"site\" value=\"");
     try attribute(output, value.query.site);
+    try output.writeAll("\"><input type=\"hidden\" name=\"start\" value=\"");
+    try attribute(output, value.query.start_date);
+    try output.writeAll("\"><input type=\"hidden\" name=\"end\" value=\"");
+    try attribute(output, value.query.end_date);
     try output.writeAll("\">");
 }
 

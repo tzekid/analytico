@@ -46,6 +46,24 @@ pub const Field = struct {
     value: []const u8,
 };
 
+pub const DateRange = struct {
+    start: []const u8,
+    end: []const u8,
+};
+
+pub fn formDateRange(form: Form) !DateRange {
+    const start = try form.required("start");
+    const end = try form.required("end");
+    try domain.validateDate(start);
+    try domain.validateDate(end);
+    const start_day = try report.dateDay(start);
+    const end_day = try report.dateDay(end);
+    if (end_day < start_day or end_day - start_day + 1 > report.maximum_range_days) {
+        return error.InvalidReportRange;
+    }
+    return .{ .start = start, .end = end };
+}
+
 pub fn parseQuery(
     allocator: std.mem.Allocator,
     target: []const u8,

@@ -97,6 +97,7 @@ async function main() {
     assert.equal(response.status(), 200);
     assert.equal(await anonymousPage.locator("h1").textContent(), "Analytico");
     assert.equal(await anonymousPage.locator("#login-button").count(), 1);
+    assert.equal(await anonymousPage.locator("#login-error").isVisible(), false);
     assert.equal(
       await anonymousPage.locator("body").getAttribute("data-return"),
       "/admin?site=example&report=overview"
@@ -232,6 +233,7 @@ async function main() {
     response = await noScriptPage.goto(`${origin}/admin`);
     assert.equal(response.status(), 200);
     assert.equal(await noScriptPage.locator("#report").count(), 1);
+    await noScriptPage.locator("details.management > summary").click();
     const goalForm = noScriptPage.locator('form[action="/admin/goals"]');
     await goalForm.locator('input[name="name"]').fill("Signup");
     await goalForm.locator('select[name="kind"]').selectOption("event");

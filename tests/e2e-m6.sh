@@ -46,6 +46,7 @@ data="$fixture/data"
 
 "$binary" init "$data" >/dev/null
 "$binary" site add "$data" example Example https://example.com >/dev/null
+"$binary" site add "$data" second "Second Site" https://second.example >/dev/null
 site_id=$("$binary" site list "$data" |
     awk -F '\t' '$1 == "example" { print $2 }')
 "$binary" goal add "$data" example Signup event signup >/dev/null
@@ -54,6 +55,10 @@ site_id=$("$binary" site list "$data" |
 "$binary" funnel add "$data" example Journey \
     path=/ path=/pricing event=signup >/dev/null
 "$binary" m3 seed "$data" "$site_id" >/dev/null
+"$binary" event add "$data" second pageview /second \
+    1735776000000000 2025-01-02 203.0.113.20 Safari macOS desktop >/dev/null
+"$binary" event add "$data" second pageview /another \
+    1735776060000000 2025-01-02 203.0.113.21 Safari iOS mobile >/dev/null
 "$binary" auth configure "$data" "$dashboard" >/dev/null
 setup_url=$("$binary" auth bootstrap "$data" --ttl 10m | sed -n '2p')
 

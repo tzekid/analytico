@@ -69,6 +69,41 @@ async function normal() {
       0,
     );
 
+    let siteResponse = page.waitForResponse(
+      (candidate) =>
+        candidate.url().includes("site=second") &&
+        candidate.request().headers()["hx-request"] === "true",
+    );
+    await page
+      .locator("form.site-switcher select[name=site]")
+      .selectOption("second");
+    response = await siteResponse;
+    assert.equal(response.status(), 200);
+    await page.waitForFunction(() =>
+      document.querySelector('form.site-switcher select[name="site"]')?.value ===
+      "second",
+    );
+    assert.match(page.url(), /site=second/);
+    assert.equal(
+      await page.locator(".metrics li", { hasText: "Page views" }).locator("strong").textContent(),
+      "2",
+    );
+
+    siteResponse = page.waitForResponse(
+      (candidate) =>
+        candidate.url().includes("site=example") &&
+        candidate.request().headers()["hx-request"] === "true",
+    );
+    await page
+      .locator("form.site-switcher select[name=site]")
+      .selectOption("example");
+    response = await siteResponse;
+    assert.equal(response.status(), 200);
+    await page.waitForFunction(() =>
+      document.querySelector('form.site-switcher select[name="site"]')?.value ===
+      "example",
+    );
+
     await page.route("**/admin?*report=pages*", async (route) => {
       if (route.request().headers()["hx-request"] === "true") {
         await new Promise((resolve) => setTimeout(resolve, 250));
@@ -131,6 +166,7 @@ async function normal() {
       waitUntil: "load",
     });
     await page.waitForFunction(() => window.htmx !== undefined);
+    await page.locator("details.management > summary").click();
     const goalForm = page.locator('form[action="/admin/goals"]');
     const postCountBeforeValidation = enhanced.filter(
       (entry) => entry.method === "POST",

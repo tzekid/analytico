@@ -33,6 +33,7 @@ semantic, or application state model is consequential and must be added here.
 | D22 | Cloudio integration | Optional ordinary link to standalone Analytico | Accepted |
 | D23 | Private dashboard authentication | Passkey-only owner gate after staged Basic Auth cutover | Accepted and deployed |
 | D24 | Public and dashboard URL topology | One canonical hostname with strict path routing | Accepted and deployed |
+| D25 | Dashboard functional-quality pass | Separate native state transitions with minimal enhancement | Accepted for U1 |
 
 ## D01. MVP interface
 
@@ -645,3 +646,28 @@ loopback process, redirects exact `/` to `/admin`, and returns `404` for every
 unknown path. Analytico remains the server-side authorization boundary for all
 dashboard state. This removes the second hostname without adding a proxy auth
 model or changing the stable application route tree.
+
+## D25. Dashboard functional-quality pass
+
+### Candidates
+
+| Candidate | Advantages | Costs |
+| --- | --- | --- |
+| Keep one combined filter form | Smallest markup | Site, date, report subject, and pagination state remain coupled and ambiguous |
+| Separate native forms plus minimal auto-submit enhancement | Explicit server state, useful without JavaScript, immediate site switching when available | One tiny browser-only script and slightly more markup |
+| Build a client-side dashboard state model | Richest interaction freedom | Duplicates server state and violates the product doctrine |
+
+For definition management, U1 also considered leaving both large forms always
+visible, moving them to a new settings route, and placing the existing native
+forms in a collapsed disclosure. A separate route belongs in the later journey
+and information-architecture work; always-visible forms obscure the reports.
+
+### Recommendation
+
+Use separate native GET forms for site and date/report context. A site change
+always resolves to the destination overview, while a date change preserves the
+current applicable report and resets pagination. A tiny self-hosted script may
+call the site form's native `requestSubmit`; the visible submit button remains
+the baseline. Keep goal and funnel management in one native collapsed
+disclosure for U1. Apply a consistency pass now, then make the visual and
+information-architecture decisions in the Figma-led U2 milestone.

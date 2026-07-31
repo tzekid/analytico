@@ -76,6 +76,7 @@ real-time views, session replay, arbitrary user SQL, and distributed ingestion.
 - [0.1.0 release notes](docs/RELEASE_0.1.0.md)
 - [0.2.0 release notes](docs/RELEASE_0.2.0.md)
 - [0.2.1 release notes](docs/RELEASE_0.2.1.md)
+- [0.3.0 release notes](docs/RELEASE_0.3.0.md)
 
 The machine-readable dependency intentions are in
 [`versions.json`](versions.json). A dependency is not considered adopted until
@@ -198,6 +199,12 @@ canonical hostname, redirects `/` to `/admin`, and rejects unknown paths. All
 report navigation, UTC date filters, pagination, and goal/funnel forms work
 without JavaScript. The pinned self-hosted HTMX 4 core progressively enhances
 those exact controls when JavaScript is available.
+
+The U1 functional-quality pass separates site switching from report/date
+state, preserves applicable context through navigation and mutations, and
+keeps goal/funnel management collapsed until requested. Site selection submits
+immediately when the 315-byte local enhancement is available; the visible
+native form remains the baseline.
 
 ## MVP boundary
 

@@ -2,9 +2,9 @@
   "schema": 1,
   "evaluated_at_utc": "2026-07-31",
   "analytico": {
-    "version": "0.2.1",
+    "version": "0.3.0",
     "release_target": "linux-x86_64",
-    "status": "unified-host release candidate"
+    "status": "dashboard functional-quality release candidate"
   },
   "zig": {
     "version": "0.17.0-dev.1509+bb296ab9b",
@@ -70,6 +70,13 @@
     "gzip_bytes": 13014,
     "license": "0BSD",
     "status": "accepted M7 optional enhancement; exact core asset embedded and self-hosted"
+  },
+  "dashboard_enhancement": {
+    "source_bytes": 315,
+    "sha256": "5f88a716358d2672418fb55c4cc4f08389dfa1467304741787474b54e121cbde",
+    "third_party_dependencies": 0,
+    "purpose": "submit the existing native site form on selection changes",
+    "status": "accepted U1 optional enhancement; delegated listener survives HTMX body swaps"
   },
   "passcay": {
     "version": "3.1.0",

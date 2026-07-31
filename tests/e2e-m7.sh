@@ -46,12 +46,17 @@ data="$fixture/data"
 
 "$binary" init "$data" >/dev/null
 "$binary" site add "$data" example Example https://example.com >/dev/null
+"$binary" site add "$data" second "Second Site" https://second.example >/dev/null
 site_id=$("$binary" site list "$data" |
     awk -F '\t' '$1 == "example" { print $2 }')
 "$binary" goal add "$data" example Signup event signup >/dev/null
 "$binary" funnel add "$data" example Journey \
     path=/ path=/pricing event=signup >/dev/null
 "$binary" m3 seed "$data" "$site_id" >/dev/null
+"$binary" event add "$data" second pageview /second \
+    1735776000000000 2025-01-02 203.0.113.20 Safari macOS desktop >/dev/null
+"$binary" event add "$data" second pageview /another \
+    1735776060000000 2025-01-02 203.0.113.21 Safari iOS mobile >/dev/null
 "$binary" auth configure "$data" "$dashboard" >/dev/null
 setup_url=$("$binary" auth bootstrap "$data" --ttl 10m | sed -n '2p')
 
@@ -107,6 +112,7 @@ curl --silent --fail --cookie "$cookie" \
     >"$page"
 grep -Fq 'hx-boost:inherited="true"' "$page"
 grep -Fq '/admin/htmx.28fae7bb.js' "$page"
+grep -Fq '/admin/dashboard.5f88a716.js' "$page"
 if grep -Eq 'https?://[^"]+htmx|cdn\\.' "$page"; then
     echo "dashboard referenced a remote HTMX asset" >&2
     exit 1
@@ -130,6 +136,11 @@ gzip --test "$fixture/htmx.js.gz"
 gzip --decompress --stdout "$fixture/htmx.js.gz" >"$fixture/htmx.unpacked.js"
 cmp "$fixture/htmx.js" "$fixture/htmx.unpacked.js"
 test "$(wc -c <"$fixture/htmx.js.gz")" -le 16384
+curl --silent --fail --cookie "$cookie" \
+    "$dashboard/admin/dashboard.5f88a716.js" >"$fixture/dashboard.js"
+test "$(wc -c <"$fixture/dashboard.js")" = 315
+test "$(sha256sum "$fixture/dashboard.js" | awk '{ print $1 }')" = \
+    5f88a716358d2672418fb55c4cc4f08389dfa1467304741787474b54e121cbde
 
 TMPDIR="$fixture" NODE_PATH="$module_root" \
     PLAYWRIGHT_BROWSERS_PATH="$browser_root" \
@@ -151,5 +162,5 @@ TMPDIR="$fixture" NODE_PATH="$module_root" \
 cat "$fixture/browser-normal.json"
 cat "$fixture/browser-timeout.json"
 printf '{"htmx_raw_bytes":36282,"htmx_gzip_bytes":13014,'
-printf '"startup_requests":3,"startup_api_requests":0}\n'
+printf '"startup_requests":4,"startup_api_requests":0}\n'
 echo "M7 HTMX 4 progressive-enhancement browser checks passed"

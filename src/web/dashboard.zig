@@ -65,6 +65,21 @@ pub fn handle(
         }
         return true;
     }
+    if (std.mem.eql(u8, path, render.dashboard_js_path)) {
+        if (!std.mem.eql(u8, request.method, "GET")) {
+            try methodNotAllowed(output, "GET");
+        } else {
+            try response.write(
+                output,
+                200,
+                "text/javascript; charset=utf-8",
+                "Cache-Control: private, max-age=31536000, immutable\r\n" ++
+                    "X-Content-Type-Options: nosniff\r\n",
+                render.dashboard_js,
+            );
+        }
+        return true;
+    }
     if (std.mem.eql(u8, path, "/admin") or
         std.mem.eql(u8, path, "/admin/"))
     {
@@ -204,6 +219,14 @@ fn postAction(
         });
         return;
     };
+    const date_range = controller.formDateRange(form) catch {
+        try writeError(output, .{
+            .status = 400,
+            .title = "Invalid form",
+            .message = "The submitted report date range was missing or invalid.",
+        });
+        return;
+    };
     const now = currentMicros() catch {
         try writeError(output, .{
             .status = 503,
@@ -247,7 +270,11 @@ fn postAction(
     var location = std.Io.Writer.Allocating.init(dependencies.allocator);
     try location.writer.writeAll("/admin?site=");
     try urlComponent(&location.writer, site);
-    try location.writer.writeAll("&notice=");
+    try location.writer.writeAll("&start=");
+    try urlComponent(&location.writer, date_range.start);
+    try location.writer.writeAll("&end=");
+    try urlComponent(&location.writer, date_range.end);
+    try location.writer.writeAll("&report=overview&notice=");
     try location.writer.writeAll(switch (action) {
         .add_goal => "goal-added",
         .delete_goal => "goal-deleted",
@@ -274,12 +301,19 @@ fn formErrorPage(
     form: controller.Form,
     action: Action,
 ) !void {
-    const range = try currentRange();
+    const range = controller.formDateRange(form) catch {
+        try writeError(output, .{
+            .status = 400,
+            .title = "Invalid form",
+            .message = "The submitted report date range was missing or invalid.",
+        });
+        return;
+    };
     const site = form.required("site") catch "";
     const query = model.Query{
         .site = site,
-        .start_date = &range.start,
-        .end_date = &range.end,
+        .start_date = range.start,
+        .end_date = range.end,
     };
     var page = controller.loadPage(
         dependencies.allocator,

@@ -82,7 +82,7 @@ async function main() {
     assert.equal(firstViewRequests.filter((kind) => kind === "script").length, 0);
     assert.equal(firstViewRequests.filter((kind) => kind === "fetch").length, 0);
     assert.equal(firstViewRequests.filter((kind) => kind === "xhr").length, 0);
-    assert.equal(await page.locator("script").count(), 1);
+    assert.equal(await page.locator("script").count(), 2);
     assert.equal(await page.evaluate(() => typeof window.htmx), "undefined");
     assert.equal(await page.evaluate(() => localStorage.length), 0);
     assert.equal(await page.evaluate(() => sessionStorage.length), 0);
@@ -94,6 +94,74 @@ async function main() {
       uploadThroughput: -1,
       connectionType: "none",
     });
+    if (process.env.ANALYTICO_SCREENSHOT_PATH) {
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await page.screenshot({
+        path: process.env.ANALYTICO_SCREENSHOT_PATH,
+        fullPage: true,
+      });
+    }
+
+    const siteForm = page.locator("form.site-switcher");
+    await siteForm.locator('select[name="site"]').selectOption("second");
+    response = await Promise.all([
+      page.waitForNavigation({ waitUntil: "load" }),
+      siteForm.getByRole("button", { name: "View site" }).click(),
+    ]).then(([navigation]) => navigation);
+    assert.equal(response.status(), 200);
+    assert.match(page.url(), /site=second/);
+    assert.equal(
+      await page.locator('select[name="site"]').inputValue(),
+      "second",
+    );
+    await assertMetric(page, "Page views", "2");
+    await page.getByRole("link", { name: "Pages", exact: true }).click();
+    assert.match(page.url(), /site=second/);
+    assert.match(page.url(), /report=pages/);
+    const rangeForm = page.locator("form.range-filter");
+    await rangeForm.locator('input[name="start"]').fill("2025-01-02");
+    response = await Promise.all([
+      page.waitForNavigation({ waitUntil: "load" }),
+      rangeForm.getByRole("button", { name: "Update dates" }).click(),
+    ]).then(([navigation]) => navigation);
+    assert.equal(response.status(), 200);
+    assert.match(page.url(), /site=second/);
+    assert.match(page.url(), /start=2025-01-02/);
+    assert.match(page.url(), /report=pages/);
+
+    await page.goto(
+      `${origin}/admin?${range}&report=goal&subject=Signup`,
+      { waitUntil: "load" },
+    );
+    await page
+      .locator("form.site-switcher select[name=site]")
+      .selectOption("second");
+    response = await Promise.all([
+      page.waitForNavigation({ waitUntil: "load" }),
+      page
+        .locator("form.site-switcher")
+        .getByRole("button", { name: "View site" })
+        .click(),
+    ]).then(([navigation]) => navigation);
+    assert.equal(response.status(), 200);
+    assert.match(page.url(), /site=second/);
+    assert.doesNotMatch(page.url(), /subject=/);
+    assert.equal(
+      await page.locator('a[aria-current="page"]').textContent(),
+      "Overview",
+    );
+
+    await page
+      .locator("form.site-switcher select[name=site]")
+      .selectOption("example");
+    await Promise.all([
+      page.waitForNavigation({ waitUntil: "load" }),
+      page
+        .locator("form.site-switcher")
+        .getByRole("button", { name: "View site" })
+        .click(),
+    ]);
+    await assertMetric(page, "Page views", "8");
 
     const reports = [
       "pages",
@@ -137,13 +205,14 @@ async function main() {
       waitUntil: "load",
     });
     const unsafeText = "<script>alert(1)</script> \"&";
-    assert.equal(await page.locator("script").count(), 1);
+    assert.equal(await page.locator("script").count(), 2);
     assert.match(
-      await page.locator("script").getAttribute("src"),
+      await page.locator("script").first().getAttribute("src"),
       /\/admin\/htmx\.[a-f0-9]+\.js$/,
     );
     assert.ok((await page.locator("body").innerText()).includes(unsafeText));
 
+    await page.locator("details.management > summary").click();
     const goalForm = page.locator('form[action="/admin/goals"]');
     await goalForm.locator('input[name="name"]').fill("kept goal");
     await goalForm.locator('select[name="kind"]').selectOption("event");
@@ -190,6 +259,8 @@ async function main() {
     ]).then(([navigation]) => navigation);
     assert.equal(response.status(), 200);
     assert.equal(await page.locator('[role="status"]').textContent(), "Goal added.");
+    assert.match(page.url(), /start=2025-01-01/);
+    assert.match(page.url(), /end=2025-01-02/);
 
     const purchaseItem = page.locator("li", { hasText: "Purchase" });
     response = await Promise.all([
