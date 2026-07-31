@@ -4,11 +4,14 @@ const model = @import("model.zig");
 
 pub const stylesheet = @embedFile("style.css");
 pub const stylesheet_path = "/admin/app.v1.css";
+pub const htmx = @embedFile("htmx_js");
+pub const htmx_gzip = @embedFile("htmx_gzip");
+pub const htmx_path = "/admin/htmx.28fae7bb.js";
 
 const html_headers =
     "Cache-Control: private, no-store, max-age=0\r\n" ++
-    "Content-Security-Policy: default-src 'none'; style-src 'self'; " ++
-    "form-action 'self'; base-uri 'none'; frame-ancestors 'none'\r\n" ++
+    "Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; " ++
+    "connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'\r\n" ++
     "X-Content-Type-Options: nosniff\r\n" ++
     "Referrer-Policy: same-origin\r\n";
 
@@ -58,7 +61,7 @@ pub fn errorPage(output: *std.Io.Writer, value: model.ErrorPage) !void {
     try text(output, value.title);
     try output.writeAll("</h2><p class=\"error\" role=\"alert\">");
     try text(output, value.message);
-    try output.writeAll("</p><p><a href=\"");
+    try output.writeAll("</p><p><a hx-boost=\"true\" href=\"");
     try attribute(output, value.return_url);
     try output.writeAll("\">Return to dashboard</a></p></section></main>");
     try foot(output);
@@ -69,7 +72,9 @@ fn head(output: *std.Io.Writer, title: []const u8) !void {
     try text(output, title);
     try output.writeAll(" · Analytico</title><link rel=\"stylesheet\" href=\"");
     try attribute(output, stylesheet_path);
-    try output.writeAll("\"></head><body>");
+    try output.writeAll("\"><script defer src=\"");
+    try attribute(output, htmx_path);
+    try output.writeAll("\"></script></head><body hx-boost:inherited=\"true\">");
 }
 
 fn foot(output: *std.Io.Writer) !void {
@@ -77,7 +82,7 @@ fn foot(output: *std.Io.Writer) !void {
 }
 
 fn filters(output: *std.Io.Writer, value: model.Page) !void {
-    try output.writeAll("<form class=\"filters\" method=\"get\" action=\"/admin\"><label>Site<select name=\"site\">");
+    try output.writeAll("<form class=\"filters\" method=\"get\" action=\"/admin\" hx-boost=\"true\" hx-sync=\"this:replace\"><label>Site<select name=\"site\">");
     for (value.sites) |site| {
         try output.writeAll("<option value=\"");
         try attribute(output, site.slug);
@@ -150,7 +155,13 @@ fn reportLink(
     subject: []const u8,
     label: []const u8,
 ) !void {
-    try output.writeAll("<a href=\"");
+    try output.writeAll("<a hx-boost=\"true\"");
+    if (subject.len == 0) {
+        try output.writeAll(" id=\"report-nav-");
+        try attribute(output, kind.name());
+        try output.writeAll("\"");
+    }
+    try output.writeAll(" href=\"");
     try queryUrl(output, query, kind, subject, 1);
     if (query.kind == kind and std.mem.eql(u8, query.subject, subject)) {
         try output.writeAll("\" aria-current=\"page\">");
@@ -198,12 +209,12 @@ fn renderResult(
             }
             try output.writeAll("</tbody></table></div><nav aria-label=\"Pagination\">");
             if (query.page > 1) {
-                try output.writeAll("<a rel=\"prev\" href=\"");
+                try output.writeAll("<a hx-boost=\"true\" rel=\"prev\" href=\"");
                 try queryUrl(output, query, query.kind, query.subject, query.page - 1);
                 try output.writeAll("\">Previous</a>");
             }
             if (list.next_page) |next| {
-                try output.writeAll("<a rel=\"next\" href=\"");
+                try output.writeAll("<a hx-boost=\"true\" rel=\"next\" href=\"");
                 try queryUrl(output, query, query.kind, query.subject, next);
                 try output.writeAll("\">Next</a>");
             }
@@ -242,7 +253,7 @@ fn campaignTabs(output: *std.Io.Writer, query: model.Query) !void {
     try output.writeAll("<nav aria-label=\"Campaign dimension\">");
     inline for (.{ "source", "medium", "campaign", "term", "content", "all" }) |name| {
         const dimension = report.CampaignDimension.parse(name) catch unreachable;
-        try output.writeAll("<a href=\"");
+        try output.writeAll("<a hx-boost=\"true\" href=\"");
         var adjusted = query;
         adjusted.campaign_dimension = dimension;
         try queryUrl(output, adjusted, .campaigns, "", 1);
@@ -271,7 +282,7 @@ fn definitions(output: *std.Io.Writer, value: model.Page) !void {
         try output.writeAll("</li>");
     }
     if (value.goals.len == 0) try output.writeAll("<li>No goals yet.</li>");
-    try output.writeAll("</ul><h3>Add goal</h3><form method=\"post\" action=\"/admin/goals\">");
+    try output.writeAll("</ul><h3>Add goal</h3><form method=\"post\" action=\"/admin/goals\" hx-boost=\"true\" hx-sync=\"this:drop\">");
     try formCommon(output, value);
     try output.writeAll("<label>Name<input name=\"name\" maxlength=\"120\" required value=\"");
     try attribute(output, value.goal_draft.name);
@@ -300,7 +311,7 @@ fn definitions(output: *std.Io.Writer, value: model.Page) !void {
         try output.writeAll("</li>");
     }
     if (value.funnels.len == 0) try output.writeAll("<li>No funnels yet.</li>");
-    try output.writeAll("</ul><h3>Add funnel</h3><form method=\"post\" action=\"/admin/funnels\">");
+    try output.writeAll("</ul><h3>Add funnel</h3><form method=\"post\" action=\"/admin/funnels\" hx-boost=\"true\" hx-sync=\"this:drop\">");
     try formCommon(output, value);
     try output.writeAll("<label>Name<input name=\"name\" maxlength=\"120\" required value=\"");
     try attribute(output, value.funnel_draft.name);
@@ -315,7 +326,7 @@ fn deleteForm(
     value: model.Page,
     name: []const u8,
 ) !void {
-    try output.writeAll("<form class=\"inline\" method=\"post\" action=\"");
+    try output.writeAll("<form class=\"inline\" method=\"post\" hx-boost=\"true\" hx-sync=\"this:drop\" action=\"");
     try attribute(output, action);
     try output.writeAll("\">");
     try formCommon(output, value);

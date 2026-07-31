@@ -39,6 +39,18 @@ pub fn build(b: *std.Build) void {
     });
     duckdb_translate_c.addIncludePath(duckdb_dependency.path(""));
     const duckdb_c_module = duckdb_translate_c.createModule();
+    const htmx_dependency = b.dependency("htmx", .{});
+    const htmx_source = htmx_dependency.path("package/dist/htmx.min.js");
+    const gzip_tool = b.addExecutable(.{
+        .name = "analytico-gzip",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/gzip.zig"),
+            .target = b.graph.host,
+        }),
+    });
+    const gzip_htmx = b.addRunArtifact(gzip_tool);
+    gzip_htmx.addFileArg(htmx_source);
+    const htmx_gzip = gzip_htmx.captureStdOut(.{});
 
     const app_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -52,6 +64,7 @@ pub fn build(b: *std.Build) void {
         },
     });
     app_module.addLibraryPath(duckdb_dependency.path(""));
+    addHtmxAssets(app_module, htmx_source, htmx_gzip);
     app_module.linkSystemLibrary("duckdb", .{ .use_pkg_config = .no });
     app_module.addRPathSpecial("$ORIGIN/../lib");
     const app = b.addExecutable(.{
@@ -82,6 +95,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     tests.root_module.addLibraryPath(duckdb_dependency.path(""));
+    addHtmxAssets(tests.root_module, htmx_source, htmx_gzip);
     tests.root_module.linkSystemLibrary("duckdb", .{ .use_pkg_config = .no });
     tests.root_module.addRPath(duckdb_dependency.path(""));
     const run_tests = b.addRunArtifact(tests);
@@ -213,4 +227,24 @@ pub fn build(b: *std.Build) void {
         "e2e-m6",
         "Run the no-JavaScript dashboard through Caddy and real Chromium",
     ).dependOn(&m6_dashboard_e2e.step);
+
+    const m7_htmx_e2e = b.addSystemCommand(&.{
+        "bash",
+        "tests/e2e-m7.sh",
+    });
+    m7_htmx_e2e.addArtifactArg(app);
+    m7_htmx_e2e.step.dependOn(b.getInstallStep());
+    b.step(
+        "e2e-m7",
+        "Run HTMX 4 enhancement and native fallback through real Chromium",
+    ).dependOn(&m7_htmx_e2e.step);
+}
+
+fn addHtmxAssets(
+    module: *std.Build.Module,
+    source: std.Build.LazyPath,
+    gzip: std.Build.LazyPath,
+) void {
+    module.addAnonymousImport("htmx_js", .{ .root_source_file = source });
+    module.addAnonymousImport("htmx_gzip", .{ .root_source_file = gzip });
 }

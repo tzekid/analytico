@@ -13,6 +13,8 @@ label{display:grid;gap:.25rem;font-weight:600}
 input,select,textarea{width:100%;font:inherit;padding:.45rem;border:1px solid #777;border-radius:.25rem;background:#fff;color:#20211f}
 textarea{min-height:7rem}
 button{cursor:pointer;font-weight:650}
+.htmx-request{cursor:progress}
+.htmx-request button{opacity:.6}
 .metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(9rem,1fr));gap:.75rem;padding:0}
 .metrics li,.panel{list-style:none;background:#fff;border:1px solid #d1d0cb;border-radius:.35rem;padding:1rem}
 .metrics strong{display:block;font-size:1.7rem}

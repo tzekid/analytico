@@ -4,7 +4,7 @@
   "analytico": {
     "version": "0.1.0",
     "release_target": "linux-x86_64",
-    "status": "M4 production MVP"
+    "status": "M7 enhanced production product"
   },
   "zig": {
     "version": "0.17.0-dev.1509+bb296ab9b",
@@ -61,7 +61,14 @@
   "htmx": {
     "version": "4.0.0-beta6",
     "release_date": "2026-07-23",
+    "tag_commit": "6ca11fbdc881a96c5fbeb0d7094a77183120ea22",
+    "npm_artifact": "htmx.org-4.0.0-beta6.tgz",
+    "zig_package_hash": "N-V-__8AAAhgEwAkQvSpCBDH3yfm0iALwvlZfmscrzeb7Csg",
     "sha256_minified": "28fae7bbe8e8142b702debb9d5234a9a436d9435a4b5165b195aa1a7ed840d25",
-    "status": "evaluated prerelease only; deferred until M7 and not an MVP dependency"
+    "minified_bytes": 36282,
+    "gzip_sha256": "74cc4013d2f7a7d072fdcc0f3ac61929ee4254798b0f6750adad6d34b137da1b",
+    "gzip_bytes": 13014,
+    "license": "0BSD",
+    "status": "accepted M7 optional enhancement; exact core asset embedded and self-hosted"
   }
 }

@@ -12,6 +12,10 @@
             .url = "https://github.com/duckdb/duckdb/releases/download/v1.4.5/libduckdb-linux-amd64.zip",
             .hash = "N-V-__8AAJ3FOQhWAfYfWnXchr8TteXoVnIxrWtcrPEyc-Rp",
         },
+        .htmx = .{
+            .url = "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0-beta6.tgz",
+            .hash = "N-V-__8AAAhgEwAkQvSpCBDH3yfm0iALwvlZfmscrzeb7Csg",
+        },
     },
     .paths = .{
         "build.zig",
@@ -24,6 +28,7 @@
         "docs",
         "deploy",
         "scripts",
+        "tools",
         "LICENSE",
         "LICENSES",
         "THIRD_PARTY_NOTICES.md",

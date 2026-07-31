@@ -70,7 +70,8 @@ if [[ ${3:-} == "--full" ]]; then
         tests/e2e-m2-browser.sh \
         tests/e2e-m3.sh \
         tests/e2e-m4.sh \
-        tests/e2e-m6.sh
+        tests/e2e-m6.sh \
+        tests/e2e-m7.sh
     do
         ANALYTICO_DASHBOARD_CADDYFILE="$release_root/deploy/Caddyfile.dashboard" \
             bash "$gate" "$release_binary"

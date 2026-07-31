@@ -159,8 +159,10 @@ that browser profile or clear its cached site credentials.
 Dashboard modifying forms use POST/redirect/GET, a process token derived from
 the installation key, exact `Origin` comparison, and a same-origin referrer
 policy. A service restart invalidates forms opened from a different restored
-key. All dashboard HTML is complete without JavaScript; the stylesheet is the
-only initial subresource.
+key. All dashboard HTML is complete without JavaScript. When JavaScript is
+available, the executable self-hosts the exact content-addressed HTMX 4 core;
+it enhances the same native controls and adds no JSON endpoint or client state.
+The first enhanced view requests only HTML, CSS, and that local script.
 
 ## 7. Health and logs
 

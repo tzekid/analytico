@@ -294,22 +294,22 @@ server state model.
 
 - Re-evaluate the then-current HTMX 4 releases.
 - Vendor one exact core asset and license with SHA-256 and precompressed bytes.
-- Enhance ordinary links/forms using full-page endpoints and scoped HTML
-  fragments.
+- Enhance ordinary links/forms with HTMX 4 body-level `outerSync` swaps of the
+  same complete server HTML, avoiding a second fragment render mode.
 - Add focus, history, loading, error, retry, and accessibility behavior.
 
 ### Definition of done
 
-- [ ] Decision D13 records candidates and the exact selected HTMX version.
-- [ ] No CDN or runtime package manager is used.
-- [ ] Every enhanced control remains an ordinary working link or form when the
+- [x] Decision D13 records candidates and the exact selected HTMX version.
+- [x] No CDN or runtime package manager is used.
+- [x] Every enhanced control remains an ordinary working link or form when the
       asset is absent, blocked, corrupt, or JavaScript is disabled.
-- [ ] HTMX and native requests invoke the same controller/application operation;
+- [x] HTMX and native requests invoke the same controller/application operation;
       there is no JSON mirror or client state store.
-- [ ] History back/forward, deep links, focus, scroll, validation, double-submit,
+- [x] History back/forward, deep links, focus, scroll, validation, double-submit,
       timeout, offline, and server-error browser tests pass.
-- [ ] First view still has zero API waterfall and meets JS/request budgets.
-- [ ] Removing HTMX attributes and the script restores the complete M6 product.
+- [x] First view still has zero API waterfall and meets JS/request budgets.
+- [x] Removing HTMX attributes and the script restores the complete M6 product.
 
 ## M8. Optional Cloudio integration
 

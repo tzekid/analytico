@@ -334,6 +334,29 @@ the MVP. At M7, pin the then-selected exact asset and checksum; stable HTMX 4 is
 preferred. HTMX's own documentation describes `hx-boost` as progressively
 enhancing ordinary links and forms: [HTMX 4 documentation](https://four.htmx.org/htmx-4/).
 
+### M7 selection
+
+At M7 there was still no stable HTMX 4 release. The candidates were:
+
+| Candidate | Advantages | Costs |
+| --- | --- | --- |
+| Keep complete M6 HTML only | Zero new browser bytes and risk | Does not deliver the requested HTMX 4 enhancement |
+| HTMX 2 stable | Mature | Does not satisfy the HTMX 4 requirement and creates a migration |
+| HTMX 4.0.0-beta5 | Earlier prerelease | Superseded by beta6 fixes |
+| HTMX 4.0.0-beta6 core | Current exact 4.x release; removal-safe over M6 | Prerelease behavior may still change |
+
+Select `4.0.0-beta6` core at tag commit
+`6ca11fbdc881a96c5fbeb0d7094a77183120ea22`. It is an optional enhancement,
+not an application state model: ordinary links/forms remain canonical and the
+server returns its complete HTML through the same controller. The exact npm
+artifact is pinned by Zig package hash; the 36,282-byte minified core has
+SHA-256 `28fae7bbe8e8142b702debb9d5234a9a436d9435a4b5165b195aa1a7ed840d25`.
+A pinned-Zig build tool produces the 13,014-byte gzip representation, SHA-256
+`74cc4013d2f7a7d072fdcc0f3ac61929ee4254798b0f6750adad6d34b137da1b`.
+No extension, CDN, runtime package manager, compatibility layer, or
+application-authored JavaScript is loaded. Re-evaluate only for a stable 4.x
+release or an observed beta defect.
+
 ## D14. Deployment
 
 ### Candidates

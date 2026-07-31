@@ -174,6 +174,16 @@ also passed in a 360×640 Chromium viewport under 180 ms latency and a 64 KiB/s
 download ceiling. Full real-Caddy, browser, escaping, form, authorization, and
 timeout evidence is in `M6_RESULTS.md`.
 
+### M7 measured baseline
+
+The exact HTMX 4.0.0-beta6 core is 36,282 bytes raw and 13,014 bytes under the
+precomputed gzip representation, below the 16 KiB compressed budget. The
+enhanced first view makes three requests—complete HTML, CSS, and self-hosted
+HTMX—and no API/JSON request. It adds zero application-authored JavaScript and
+no local/session storage entries. Enhanced navigation and forms use the same
+full HTML controller as M6. Full browser failure/fallback evidence is in
+`M7_RESULTS.md`.
+
 ## 8. Regression policy
 
 For a stable benchmark environment:

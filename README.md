@@ -169,7 +169,8 @@ For a direct replacement, follow [the cutover runbook](docs/CUTOVER.md).
 The same process also serves a complete private dashboard at `/admin`.
 `deploy/Caddyfile.dashboard` places it on a separate Basic-Auth-protected
 hostname. All report navigation, UTC date filters, pagination, and goal/funnel
-forms work without JavaScript.
+forms work without JavaScript. The pinned self-hosted HTMX 4 core progressively
+enhances those exact controls when JavaScript is available.
 
 ## MVP boundary
 

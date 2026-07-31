@@ -77,7 +77,8 @@ async function main() {
     assert.equal(firstViewRequests.filter((kind) => kind === "script").length, 0);
     assert.equal(firstViewRequests.filter((kind) => kind === "fetch").length, 0);
     assert.equal(firstViewRequests.filter((kind) => kind === "xhr").length, 0);
-    assert.equal(await page.locator("script").count(), 0);
+    assert.equal(await page.locator("script").count(), 1);
+    assert.equal(await page.evaluate(() => typeof window.htmx), "undefined");
     assert.equal(await page.evaluate(() => localStorage.length), 0);
     assert.equal(await page.evaluate(() => sessionStorage.length), 0);
     assert.deepEqual(failures, []);
@@ -131,7 +132,11 @@ async function main() {
       waitUntil: "load",
     });
     const unsafeText = "<script>alert(1)</script> \"&";
-    assert.equal(await page.locator("script").count(), 0);
+    assert.equal(await page.locator("script").count(), 1);
+    assert.match(
+      await page.locator("script").getAttribute("src"),
+      /\/admin\/htmx\.[a-f0-9]+\.js$/,
+    );
     assert.ok((await page.locator("body").innerText()).includes(unsafeText));
 
     const goalForm = page.locator('form[action="/admin/goals"]');

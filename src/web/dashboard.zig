@@ -38,6 +38,32 @@ pub fn handle(
         }
         return true;
     }
+    if (std.mem.eql(u8, path, render.htmx_path)) {
+        if (!std.mem.eql(u8, request.method, "GET")) {
+            try methodNotAllowed(output, "GET");
+        } else {
+            const use_gzip = acceptsEncoding(
+                (try request.header("accept-encoding")) orelse "",
+                "gzip",
+            );
+            try response.write(
+                output,
+                200,
+                "text/javascript; charset=utf-8",
+                if (use_gzip)
+                    "Cache-Control: private, max-age=31536000, immutable\r\n" ++
+                        "Content-Encoding: gzip\r\n" ++
+                        "Vary: Accept-Encoding\r\n" ++
+                        "X-Content-Type-Options: nosniff\r\n"
+                else
+                    "Cache-Control: private, max-age=31536000, immutable\r\n" ++
+                        "Vary: Accept-Encoding\r\n" ++
+                        "X-Content-Type-Options: nosniff\r\n",
+                if (use_gzip) render.htmx_gzip else render.htmx,
+            );
+        }
+        return true;
+    }
     if (std.mem.eql(u8, path, "/admin") or
         std.mem.eql(u8, path, "/admin/"))
     {
@@ -478,4 +504,28 @@ fn urlComponent(output: *std.Io.Writer, value: []const u8) !void {
             try output.writeByte(hex[byte & 0x0f]);
         }
     }
+}
+
+fn acceptsEncoding(value: []const u8, expected: []const u8) bool {
+    var encodings = std.mem.splitScalar(u8, value, ',');
+    while (encodings.next()) |raw_encoding| {
+        var parts = std.mem.splitScalar(u8, raw_encoding, ';');
+        const name = std.mem.trim(u8, parts.next() orelse continue, " \t");
+        if (!std.ascii.eqlIgnoreCase(name, expected)) continue;
+        while (parts.next()) |raw_parameter| {
+            const parameter = std.mem.trim(u8, raw_parameter, " \t");
+            const key, const raw_quality = std.mem.cutScalar(u8, parameter, '=') orelse
+                return false;
+            if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, key, " \t"), "q")) {
+                continue;
+            }
+            const quality = std.fmt.parseFloat(
+                f32,
+                std.mem.trim(u8, raw_quality, " \t"),
+            ) catch return false;
+            return quality > 0 and quality <= 1;
+        }
+        return true;
+    }
+    return false;
 }
