@@ -4,7 +4,9 @@ Analytico is a small, self-hosted web analytics engine for low-traffic sites.
 It aims to provide the useful part of Plausible without a ClickHouse service,
 an administrative JavaScript application, or a multi-container runtime.
 
-Milestones M0 through M4 are complete: this is the production MVP. The
+Milestones M0 through M8 are complete. M4 is the production-MVP boundary; the
+later milestones finish direct-cutover evidence, the private server-rendered
+dashboard, removable HTMX enhancement, and the optional Cloudio boundary. The
 executable owns the exact embedded
 stores, numbered schemas, validated sites/origins/property allowlists,
 goals/funnels, a private visitor key, daily visitor pseudonyms, direct durable
@@ -66,6 +68,8 @@ real-time views, session replay, arbitrary user SQL, and distributed ingestion.
 - [M6 server-dashboard evidence](docs/M6_RESULTS.md)
 - [M7 HTMX-enhancement evidence](docs/M7_RESULTS.md)
 - [M8 Cloudio-boundary evidence](docs/M8_RESULTS.md)
+- [Final release evidence](docs/FINAL_RESULTS.md)
+- [0.1.0 release notes](docs/RELEASE_0.1.0.md)
 
 The machine-readable dependency intentions are in
 [`versions.json`](versions.json). A dependency is not considered adopted until
