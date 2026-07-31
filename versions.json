@@ -2,9 +2,9 @@
   "schema": 1,
   "evaluated_at_utc": "2026-07-31",
   "analytico": {
-    "version": "0.2.0",
+    "version": "0.2.1",
     "release_target": "linux-x86_64",
-    "status": "accepted production release"
+    "status": "unified-host release candidate"
   },
   "zig": {
     "version": "0.17.0-dev.1509+bb296ab9b",

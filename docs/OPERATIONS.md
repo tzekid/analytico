@@ -116,8 +116,9 @@ Replace `analytics.example` in `deploy/Caddyfile`, then validate and install it:
 caddy validate --config deploy/Caddyfile
 ```
 
-The vhost exposes only `/tracker.aef65945.js`, `/tracker.js`, `/v1/event`, and
-`/v1/p.gif`; all other paths, including health endpoints, receive `404`.
+The vhost exposes `/tracker.aef65945.js`, `/tracker.js`, `/v1/event`,
+`/v1/p.gif`, `/admin`, and `/admin/*`. `/` redirects to `/admin`; all other
+paths, including health endpoints, receive `404`.
 Caddy overwrites `X-Forwarded-For` and `X-Analytico-Country` before proxying.
 Do not trust `CF-IPCountry` unless the origin is network-restricted to
 Cloudflare. If Cloudflare is not used, clear the country header and Analytico
@@ -129,12 +130,12 @@ layer.
 
 ## 6. Private dashboard
 
-The dashboard is served at `/admin` by the same loopback process. Keep it off
-the public collector hostname. Replace `analytics-admin.example` in
-`deploy/Caddyfile.dashboard`, then validate and import that vhost:
+The dashboard is served at `/admin` by the same loopback process and canonical
+hostname as the collector. Replace `analytics.example` in `deploy/Caddyfile`,
+then validate and import that one vhost:
 
 ```sh
-caddy validate --config deploy/Caddyfile.dashboard
+caddy validate --config deploy/Caddyfile
 ```
 
 Before starting the service for the first time, store the exact HTTPS origin
@@ -142,7 +143,7 @@ and print one short-lived setup link while the data directory is offline:
 
 ```sh
 sudo -u analytico /opt/analytico/bin/analytico auth configure \
-  /var/lib/analytico https://analytics-admin.example
+  /var/lib/analytico https://analytics.example
 sudo -u analytico /opt/analytico/bin/analytico auth bootstrap \
   /var/lib/analytico --ttl 10m
 ```
@@ -153,11 +154,12 @@ the server stores only its hash. Add an independent second passkey from
 `/admin/security` when practical. There is no password, email recovery, proxy
 login, or public registration route.
 
-The vhost allows only `/admin` and `/admin/*`, caps request bodies, applies
-HSTS, and has no Basic Auth directive. Analytico validates every session and
-unsafe request server-side. An anonymous navigation reaches the login page but
-never report state. Login and additional-passkey ceremonies are the only
-JavaScript-required controls because WebAuthn is a browser API.
+The vhost uses explicit allowlists for public collection and `/admin` routes,
+caps request bodies, applies HSTS, and has no Basic Auth directive. Analytico
+validates every dashboard session and unsafe request server-side. An anonymous
+navigation reaches the login page but never report state. Login and
+additional-passkey ceremonies are the only JavaScript-required controls
+because WebAuthn is a browser API.
 
 Dashboard modifying forms use POST/redirect/GET, a token bound to the active
 session, exact configured `Origin` comparison, and a same-origin referrer

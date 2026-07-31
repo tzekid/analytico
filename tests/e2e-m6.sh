@@ -19,8 +19,8 @@ if [[ ! -d "$module_root/playwright" || ! -x "$chromium_path" ]]; then
     exit 2
 fi
 command -v caddy >/dev/null
-dashboard_caddyfile=${ANALYTICO_DASHBOARD_CADDYFILE:-deploy/Caddyfile.dashboard}
-test -f "$dashboard_caddyfile"
+caddyfile=${ANALYTICO_CADDYFILE:-deploy/Caddyfile}
+test -f "$caddyfile"
 
 fixture=$(mktemp -d "$PWD/.zig-cache/m6-e2e.XXXXXX")
 server_pid=
@@ -78,9 +78,9 @@ start_server
 {
     printf '{\n\tadmin off\n}\n'
     sed \
-        -e "s|^analytics-admin\\.example {|http://localhost:$proxy_port {|" \
+        -e "s|^analytics\\.example {|http://localhost:$proxy_port {|" \
         -e "s|127\\.0\\.0\\.1:4318|127.0.0.1:$server_port|" \
-        "$dashboard_caddyfile"
+        "$caddyfile"
 } >"$fixture/Caddyfile"
 caddy validate --config "$fixture/Caddyfile" >"$fixture/caddy.validate" 2>&1
 XDG_DATA_HOME="$fixture/caddy-data" \
@@ -95,6 +95,14 @@ for _ in {1..100}; do
     sleep 0.02
 done
 test "$status" = 303
+test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+    "$dashboard/")" = 303
+test "$(curl --silent --output /dev/null --write-out '%{redirect_url}' \
+    "$dashboard/")" = "$dashboard/admin"
+test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+    "$dashboard/tracker.aef65945.js")" = 200
+test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+    "$dashboard/not-a-route")" = 404
 
 cookie_file="$fixture/session.cookie"
 TMPDIR="$fixture" NODE_PATH="$module_root" \

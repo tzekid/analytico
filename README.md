@@ -75,6 +75,7 @@ real-time views, session replay, arbitrary user SQL, and distributed ingestion.
 - [Final release evidence](docs/FINAL_RESULTS.md)
 - [0.1.0 release notes](docs/RELEASE_0.1.0.md)
 - [0.2.0 release notes](docs/RELEASE_0.2.0.md)
+- [0.2.1 release notes](docs/RELEASE_0.2.1.md)
 
 The machine-readable dependency intentions are in
 [`versions.json`](versions.json). A dependency is not considered adopted until
@@ -148,11 +149,11 @@ analytico report ./data example 2026-07-01 2026-07-31 funnel signup-flow
 The browser setup is acceptance tooling only. Analytico itself has no Node,
 Playwright, browser, container, or JavaScript runtime dependency.
 
-Owner access is passkey-only. Configure the canonical dashboard origin and
+Owner access is passkey-only. Configure the canonical Analytico origin and
 print a one-use setup link before the first production start:
 
 ```sh
-analytico auth configure /var/lib/analytico https://analytics-admin.example
+analytico auth configure /var/lib/analytico https://analytics.example
 analytico auth bootstrap /var/lib/analytico --ttl 10m
 ```
 
@@ -192,10 +193,11 @@ analytico site install ./data example https://analytics.example
 For a direct replacement, follow [the cutover runbook](docs/CUTOVER.md).
 
 The same process also serves a complete private dashboard at `/admin`.
-`deploy/Caddyfile.dashboard` places it on a separate Basic-Auth-protected
-hostname. All report navigation, UTC date filters, pagination, and goal/funnel
-forms work without JavaScript. The pinned self-hosted HTMX 4 core progressively
-enhances those exact controls when JavaScript is available.
+`deploy/Caddyfile` exposes the collector and passkey-protected dashboard on one
+canonical hostname, redirects `/` to `/admin`, and rejects unknown paths. All
+report navigation, UTC date filters, pagination, and goal/funnel forms work
+without JavaScript. The pinned self-hosted HTMX 4 core progressively enhances
+those exact controls when JavaScript is available.
 
 ## MVP boundary
 

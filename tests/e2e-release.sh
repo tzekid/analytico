@@ -42,8 +42,6 @@ ldd "$release_binary" | grep -Fq "$release_root/bin/../lib/libduckdb.so"
 
 caddy validate --config "$release_root/deploy/Caddyfile" \
     >"$fixture/caddy.stdout" 2>"$fixture/caddy.stderr"
-caddy validate --config "$release_root/deploy/Caddyfile.dashboard" \
-    >"$fixture/caddy-dashboard.stdout" 2>"$fixture/caddy-dashboard.stderr"
 systemd-analyze security --offline=yes --no-pager \
     "$release_root/deploy/analytico.service" \
     >"$fixture/systemd-security.txt"
@@ -73,7 +71,7 @@ if [[ ${3:-} == "--full" ]]; then
         tests/e2e-m7.sh \
         tests/e2e-passkey-p1.sh
     do
-        ANALYTICO_DASHBOARD_CADDYFILE="$release_root/deploy/Caddyfile.dashboard" \
+        ANALYTICO_CADDYFILE="$release_root/deploy/Caddyfile" \
             bash "$gate" "$release_binary"
     done
 fi

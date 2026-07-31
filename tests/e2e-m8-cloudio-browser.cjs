@@ -7,8 +7,7 @@ const [
   mode,
   cloudioOrigin,
   dashboardOrigin,
-  dashboardUsername,
-  dashboardPassword,
+  analyticoSession,
   storageStatePath,
 ] = process.argv.slice(2);
 
@@ -16,13 +15,12 @@ if (
   !mode ||
   !cloudioOrigin ||
   !dashboardOrigin ||
-  !dashboardUsername ||
-  !dashboardPassword ||
+  !analyticoSession ||
   !storageStatePath
 ) {
   throw new Error(
     "usage: node e2e-m8-cloudio-browser.cjs <mode> <cloudio-origin> " +
-      "<dashboard-origin> <dashboard-user> <dashboard-password> <storage-state>",
+      "<dashboard-origin> <analytico-session> <storage-state>",
   );
 }
 
@@ -42,7 +40,7 @@ async function launch() {
 }
 
 async function setup(browser) {
-  const setupUrl = process.argv[8];
+  const setupUrl = process.argv[7];
   assert.ok(setupUrl, "setup mode requires the one-use setup URL");
   const context = await browser.newContext();
   try {
@@ -74,14 +72,20 @@ async function setup(browser) {
 }
 
 async function noJavaScriptContext(browser) {
-  return browser.newContext({
+  const context = await browser.newContext({
     javaScriptEnabled: false,
     storageState: storageStatePath,
-    httpCredentials: {
-      username: dashboardUsername,
-      password: dashboardPassword,
-    },
   });
+  await context.addCookies([
+    {
+      name: "analytico_session",
+      value: analyticoSession,
+      url: dashboardOrigin,
+      httpOnly: true,
+      sameSite: "Lax",
+    },
+  ]);
+  return context;
 }
 
 async function connected(browser) {
@@ -137,7 +141,7 @@ async function connected(browser) {
           Math.round(analyticoResponseStartMs * 10) / 10,
         cloudio_startup_analytico_requests: 0,
         navigation: "ordinary-link",
-        dashboard_auth: "basic",
+        dashboard_auth: "passkey-session",
       }) + "\n",
     );
   } finally {

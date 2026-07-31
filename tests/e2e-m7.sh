@@ -14,13 +14,13 @@ esac
 module_root=${ANALYTICO_PLAYWRIGHT_NODE_PATH:-"$PWD/.zig-cache/playwright-node/node_modules"}
 browser_root=${PLAYWRIGHT_BROWSERS_PATH:-"$PWD/.zig-cache/ms-playwright"}
 chromium_path=${ANALYTICO_CHROMIUM_PATH:-"$browser_root/chromium-1234/chrome-linux64/chrome"}
-dashboard_caddyfile=${ANALYTICO_DASHBOARD_CADDYFILE:-deploy/Caddyfile.dashboard}
+caddyfile=${ANALYTICO_CADDYFILE:-deploy/Caddyfile}
 if [[ ! -d "$module_root/playwright" || ! -x "$chromium_path" ]]; then
     echo "browser fixture missing; run tests/setup-browser-e2e.sh" >&2
     exit 2
 fi
 command -v caddy >/dev/null
-test -f "$dashboard_caddyfile"
+test -f "$caddyfile"
 
 fixture=$(mktemp -d "$PWD/.zig-cache/m7-e2e.XXXXXX")
 server_pid=
@@ -76,9 +76,9 @@ start_server
 {
     printf '{\n\tadmin off\n}\n'
     sed \
-        -e "s|^analytics-admin\\.example {|http://localhost:$proxy_port {|" \
+        -e "s|^analytics\\.example {|http://localhost:$proxy_port {|" \
         -e "s|127\\.0\\.0\\.1:4318|127.0.0.1:$server_port|" \
-        "$dashboard_caddyfile"
+        "$caddyfile"
 } >"$fixture/Caddyfile"
 XDG_DATA_HOME="$fixture/caddy-data" \
     XDG_CONFIG_HOME="$fixture/caddy-config" \

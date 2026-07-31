@@ -14,7 +14,7 @@ The public event collector remains unauthenticated and unchanged. Every auth
 record belongs in Turso metadata; DuckDB remains append-only analytics storage
 and is never opened by a second process.
 
-## Current state
+## Pre-0.2.0 state
 
 Analytico `0.1.0` has basic security but no application login page:
 
@@ -46,8 +46,9 @@ have passed their real browser suites, compare the implementations and extract
 only code whose semantics are actually identical.
 
 The permanent production gate is the passkey session. Caddy still terminates
-TLS, isolates the dashboard hostname, applies headers and request limits, and
-proxies to loopback, but its Basic Auth directive is removed after acceptance.
+TLS, restricts the public and dashboard path sets on one canonical hostname,
+applies headers and request limits, and proxies to loopback. It contains no
+Basic Auth directive.
 
 ## Product and UX contract
 
@@ -120,8 +121,9 @@ values.
 
 ## HTTP boundary
 
-All routes exist only on the private dashboard hostname. Caddy continues to
-return `404` for them on the public collector hostname.
+All auth and report routes live under `/admin` on the canonical hostname.
+Caddy forwards only that subtree plus the documented public collection paths,
+redirects `/` to `/admin`, and returns `404` for every unknown path.
 
 | Method and path | Response | Authentication |
 | --- | --- | --- |
@@ -278,7 +280,11 @@ control; adding email, security questions, recovery codes, or support bypasses
 would make a personal installation less simple without removing that ultimate
 boundary.
 
-## Cutover and rollback
+## Initial 0.2.0 cutover record
+
+The following records the staged Basic Auth migration used for the first
+passkey release. Current deployments use the unified-host procedure in
+[`OPERATIONS.md`](OPERATIONS.md) and [`CUTOVER.md`](CUTOVER.md).
 
 1. Create and verify a full pre-auth backup; retain the `0.1.0` binary and Caddy
    configuration.
@@ -361,8 +367,8 @@ Definition of done:
 - an actual Safari/Apple-device acceptance check proves Touch ID or Face ID and
   the owner's iCloud-synced passkey on the intended devices; this manual
   platform check is recorded rather than mocked;
-- the final Caddy configuration has no Basic Auth, exposes auth routes only on
-  the dashboard hostname, and passes TLS/header/body/time-limit checks;
+- the final Caddy configuration has no Basic Auth, exposes auth routes only
+  under `/admin`, and passes TLS/header/body/time-limit checks;
 - the complete backup, bootstrap, lost-passkey reset, cutover, and rollback
   runbooks are performed against disposable on-disk stores and real processes;
 - measured RSS, binary/assets, first-response bytes, requests, and login latency

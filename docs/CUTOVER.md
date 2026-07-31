@@ -44,7 +44,7 @@ sudo -u analytico /opt/analytico/bin/analytico \
   funnel add /var/lib/analytico example signup-flow \
   path=/pricing event=signup
 sudo -u analytico /opt/analytico/bin/analytico \
-  auth configure /var/lib/analytico https://analytics-admin.example
+  auth configure /var/lib/analytico https://analytics.example
 ```
 
 `site add`, goal, and funnel commands fail if an identifier is invalid or
@@ -65,10 +65,9 @@ and `img-src` directives. Do not replace the entire Content-Security-Policy.
 The script is deferred, has no dependency, and the noscript pixel records a
 bounded pageview when JavaScript is disabled.
 
-## 4. Start the process and both isolated hostnames
+## 4. Start the process and canonical hostname
 
-Replace `analytics.example` in `deploy/Caddyfile` and
-`analytics-admin.example` in `deploy/Caddyfile.dashboard`, then:
+Replace `analytics.example` in `deploy/Caddyfile`, then:
 
 ```sh
 sudo install -m 0644 deploy/analytico.service /etc/systemd/system/
@@ -76,12 +75,12 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now analytico
 curl --fail http://127.0.0.1:4318/readyz
 caddy validate --config deploy/Caddyfile
-caddy validate --config deploy/Caddyfile.dashboard
 ```
 
-Install or import both validated Caddy vhosts. Only the tracker and collection
-routes exist on the public hostname. The dashboard hostname exposes only
-`/admin` and `/admin/*`; the process remains bound to loopback.
+Install or import the validated Caddy vhost. The tracker and collection routes
+remain public; `/admin` and `/admin/*` are protected by Analytico's server-side
+passkey session; `/` redirects to `/admin`; unknown paths return `404`. The
+process remains bound to loopback.
 
 ## 5. Enroll and accept the owner passkey
 

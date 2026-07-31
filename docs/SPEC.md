@@ -151,7 +151,8 @@ confirmation flag when stdin is not interactive.
 - DuckDB external access and extension loading are disabled in the serving
   process.
 - Administration is available through the local CLI and the loopback dashboard;
-  Caddy Basic Auth and exact-origin/CSRF checks protect the latter.
+  passkey sessions plus exact-origin/CSRF checks protect the latter. Caddy
+  forwards only the documented public collection and `/admin` path sets.
 
 ### Performance
 

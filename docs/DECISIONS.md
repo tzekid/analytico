@@ -32,6 +32,7 @@ semantic, or application state model is consequential and must be added here.
 | D21 | Session boundaries | Persist event-local boundaries at commit | Accepted |
 | D22 | Cloudio integration | Optional ordinary link to standalone Analytico | Accepted |
 | D23 | Private dashboard authentication | Passkey-only owner gate after staged Basic Auth cutover | Accepted and deployed |
+| D24 | Public and dashboard URL topology | One canonical hostname with strict path routing | Accepted and deployed |
 
 ## D01. MVP interface
 
@@ -625,3 +626,22 @@ sharing sessions or copying its unrelated framework. Extract shared code only
 after both concrete consumers demonstrate identical semantics. The complete
 route, storage, recovery, migration, threat-boundary, and end-to-end acceptance
 contract is in the [passkey authentication specification](PASSKEY_AUTH_SPEC.md).
+
+## D24. Public and dashboard URL topology
+
+### Candidates
+
+| Candidate | Advantages | Costs |
+| --- | --- | --- |
+| Separate collector and dashboard hostnames | Coarse hostname-level routing boundary | A second URL and certificate path, a dead-looking dashboard root, and WebAuthn origin churn |
+| One hostname with strict path allowlists | One discoverable URL and one WebAuthn origin while preserving explicit proxy routes | Collector and dashboard share the TLS origin |
+| Move the dashboard itself to `/` | Shortest dashboard URL | Application route migration, redirects, and needless compatibility code |
+
+### Recommendation
+
+Use one canonical hostname. Caddy publicly forwards only the documented
+tracker and collection paths, forwards `/admin` and `/admin/*` to the same
+loopback process, redirects exact `/` to `/admin`, and returns `404` for every
+unknown path. Analytico remains the server-side authorization boundary for all
+dashboard state. This removes the second hostname without adding a proxy auth
+model or changing the stable application route tree.

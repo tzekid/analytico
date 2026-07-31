@@ -18,8 +18,9 @@ flowchart LR
 
 The deployed MVP has one operating-system process and two local database files.
 Turso and DuckDB are linked libraries, not services. Caddy terminates TLS,
-exposes only documented collection routes on the public hostname, and protects
-the separate private dashboard hostname with Basic Auth.
+exposes only documented collection and `/admin` routes on one canonical
+hostname, redirects `/` to `/admin`, and rejects every unknown path. Analytico
+protects dashboard state with its server-side passkey session.
 
 ## 2. Dependency direction
 
