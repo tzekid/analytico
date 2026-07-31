@@ -235,15 +235,15 @@ Prepare the finished product for the owner to replace Plausible directly.
 
 ### Definition of done
 
-- [ ] A fresh disposable deployment accepts real browser events and renders all
+- [x] A fresh disposable deployment accepts real browser events and renders all
       required reports from the resulting on-disk databases.
-- [ ] Release archive, SHA-256 manifest, systemd unit, Caddy snippet, tracker
+- [x] Release archive, SHA-256 manifest, systemd unit, Caddy snippet, tracker
       snippet, CSP guidance, backup, restore, and rollback steps agree.
-- [ ] Observed RSS/CPU/disk is recorded beside the previously observed
+- [x] Observed RSS/CPU/disk is recorded beside the previously observed
       Plausible/Postgres/ClickHouse footprint.
-- [ ] The cutover checklist starts Analytico fresh; importing history is
+- [x] The cutover checklist starts Analytico fresh; importing history is
       explicitly optional.
-- [ ] Plausible is not stopped or removed automatically; that remains the
+- [x] Plausible is not stopped or removed automatically; that remains the
       owner's action after accepting the project.
 
 ## M6. Server-rendered HTML dashboard

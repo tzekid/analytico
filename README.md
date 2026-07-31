@@ -158,8 +158,16 @@ Use the content-hashed production tracker:
 </noscript>
 ```
 
+The safer site-specific form is generated from stored metadata:
+
+```sh
+analytico site install ./data example https://analytics.example
+```
+
+For a direct replacement, follow [the cutover runbook](docs/CUTOVER.md).
+
 ## MVP boundary
 
-M4 is the production-MVP gate. M5 prepares the site-specific direct-cutover
-handoff; it does not require a parallel Plausible trial. The HTML and HTMX work
-begins only in M6 and M7.
+M4 is the production-MVP gate. M5 is the completed site-specific
+direct-cutover handoff; it does not require a parallel Plausible trial. The
+HTML and HTMX work begins only in M6 and M7.

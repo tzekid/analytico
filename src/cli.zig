@@ -106,6 +106,7 @@ pub fn writeUsage(output: *std.Io.Writer) !void {
         \\  analytico site disable <directory> <slug>
         \\  analytico site origin-add <directory> <slug> <origin>
         \\  analytico site property-add <directory> <slug> <property>
+        \\  analytico site install <directory> <slug> <collector-origin>
         \\  analytico site delete <directory> <slug> --confirm <slug>
         \\  analytico goal add <directory> <site> <name> <event|path|prefix> <value>
         \\  analytico goal list <directory> <site>
@@ -289,6 +290,32 @@ fn siteCommand(
     if (std.mem.eql(u8, args[2], "property-add") and args.len == 6) {
         try store.addProperty(allocator, args[4], args[5]);
         try output.print("property added {s} {s}\n", .{ args[4], args[5] });
+        return;
+    }
+    if (std.mem.eql(u8, args[2], "install") and args.len == 6) {
+        const collector = try domain.normalizeOrigin(allocator, args[5]);
+        const site_id = try store.siteIdBySlug(allocator, args[4]);
+        try output.print(
+            \\<!-- Analytico tracker -->
+            \\<script defer src="{s}/tracker.aef65945.js" data-site="{s}"></script>
+            \\<noscript>
+            \\  <img alt="" width="1" height="1" src="{s}/v1/p.gif?site={s}&amp;path=%2F">
+            \\</noscript>
+            \\
+            \\CSP merge:
+            \\  script-src {s}
+            \\  connect-src {s}
+            \\  img-src {s}
+            \\
+        , .{
+            collector,
+            site_id,
+            collector,
+            site_id,
+            collector,
+            collector,
+            collector,
+        });
         return;
     }
     if (std.mem.eql(u8, args[2], "delete") and args.len == 7 and

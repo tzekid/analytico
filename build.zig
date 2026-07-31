@@ -190,4 +190,16 @@ pub fn build(b: *std.Build) void {
         "e2e-rollback",
         "Build the prior release and rehearse a verified data rollback",
     ).dependOn(&rollback_e2e.step);
+
+    const m5_cutover_e2e = b.addSystemCommand(&.{
+        "bash",
+        "tests/e2e-m5-cutover.sh",
+    });
+    m5_cutover_e2e.addArtifactArg(app);
+    m5_cutover_e2e.addArg("dist");
+    m5_cutover_e2e.step.dependOn(&package_release.step);
+    b.step(
+        "e2e-m5",
+        "Run a browser cutover and every report from the extracted release",
+    ).dependOn(&m5_cutover_e2e.step);
 }
