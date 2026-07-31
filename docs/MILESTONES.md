@@ -117,25 +117,25 @@ without JavaScript for ordinary page views.
 
 ### Definition of done
 
-- [ ] Every status and header in `PROTOCOL.md` has a byte-level integration test.
-- [ ] Oversized target/header/body requests are rejected before unbounded
+- [x] Every status and header in `PROTOCOL.md` has a byte-level integration test.
+- [x] Oversized target/header/body requests are rejected before unbounded
       allocation or database work.
-- [ ] Real HTTP requests cover duplicate keys, nesting, invalid UTF-8, numeric
+- [x] Real HTTP requests cover duplicate keys, nesting, invalid UTF-8, numeric
       edges, unknown fields, and content-type/encoding variants.
-- [ ] Origin/referrer tests cover allowed, cross-site, absent, malformed,
+- [x] Origin/referrer tests cover allowed, cross-site, absent, malformed,
       default ports, punycode, spoofed forwarded headers, and disabled sites.
-- [ ] Rate-limit memory remains fixed under at least 100,000 distinct spoofed
+- [x] Rate-limit memory remains fixed under at least 100,000 distinct spoofed
       prefixes, and excess input gets `429`.
-- [ ] Raw IP, raw UA, complete URLs, referrer paths, query strings, and payloads
+- [x] Raw IP, raw UA, complete URLs, referrer paths, query strings, and payloads
       are absent from database files and captured logs in an end-to-end audit.
-- [ ] Tracker works in current Chromium/Firefox/WebKit fixtures, stays within
+- [x] Tracker works in current Chromium/Firefox/WebKit fixtures, stays within
       byte budgets, creates no storage, and causes exactly one page-view request.
-- [ ] `<noscript>` fixture records a correct page view with JavaScript disabled.
-- [ ] A custom `signup` event with an allowlisted property is committed; a
+- [x] `<noscript>` fixture records a correct page view with JavaScript disabled.
+- [x] A custom `signup` event with an allowlisted property is committed; a
       disallowed property is rejected.
-- [ ] Collection latency/resource budgets pass in Debug diagnostics and
+- [x] Collection latency/resource budgets pass in Debug diagnostics and
       ReleaseSafe measurement runs.
-- [ ] SIGTERM drains/interrupts within the shutdown budget without accepting an
+- [x] SIGTERM drains/interrupts within the shutdown budget without accepting an
       uncommitted event.
 
 ## M3. Complete CLI reporting — functional MVP

@@ -45,6 +45,25 @@ expect_code() {
     fi
 }
 
+expect_no_store_headers() {
+    grep -qi '^Cache-Control: no-store, max-age=0' "$fixture_dir/headers"
+    grep -qi '^X-Content-Type-Options: nosniff' "$fixture_dir/headers"
+    grep -qi '^Referrer-Policy: no-referrer' "$fixture_dir/headers"
+    grep -qi '^Connection: close' "$fixture_dir/headers"
+    if grep -qi '^Set-Cookie:' "$fixture_dir/headers"; then
+        echo "collector response unexpectedly set a cookie" >&2
+        exit 1
+    fi
+}
+
+expect_fixed_error() {
+    local expected=$1
+    test "$(cat "$fixture_dir/body")" = "$expected"
+    expect_no_store_headers
+    grep -qi '^Content-Type: text/plain; charset=utf-8' \
+        "$fixture_dir/headers"
+}
+
 "$binary" init "$fixture_dir" >/dev/null
 "$binary" site add "$fixture_dir" example "Example Site" \
     "https://example.com" >/dev/null
@@ -73,18 +92,31 @@ test "$ready" = true
 
 expect_code 200 "$base/healthz"
 test "$(cat "$fixture_dir/body")" = "ok"
-grep -qi '^Cache-Control: no-store, max-age=0' "$fixture_dir/headers"
+expect_no_store_headers
+grep -qi '^Content-Length: 3' "$fixture_dir/headers"
 expect_code 200 "$base/readyz"
 test "$(cat "$fixture_dir/body")" = "ready"
 expect_code 404 "$base/does-not-exist"
+expect_fixed_error "not found"
 expect_code 405 -X GET "$base/v1/event"
 grep -qi '^Allow: POST' "$fixture_dir/headers"
+expect_fixed_error "method not allowed"
 expect_code 405 -X OPTIONS "$base/v1/event"
 grep -qi '^Allow: POST' "$fixture_dir/headers"
 
 expect_code 200 "$base/tracker.js"
 cmp "$fixture_dir/body" public/tracker.js
+grep -qi '^Content-Type: text/javascript; charset=utf-8' \
+    "$fixture_dir/headers"
+grep -qi '^Content-Length: 734' "$fixture_dir/headers"
+grep -qi '^Cache-Control: public, max-age=300' "$fixture_dir/headers"
+grep -qi '^X-Content-Type-Options: nosniff' "$fixture_dir/headers"
 grep -qi '^Vary: Accept-Encoding' "$fixture_dir/headers"
+grep -qi '^Connection: close' "$fixture_dir/headers"
+if grep -qi '^Set-Cookie:' "$fixture_dir/headers"; then
+    echo "tracker response unexpectedly set a cookie" >&2
+    exit 1
+fi
 expect_code 200 -H 'Accept-Encoding: br' "$base/tracker.js"
 grep -qi '^Content-Encoding: br' "$fixture_dir/headers"
 cmp "$fixture_dir/body" public/tracker.js.br
@@ -115,7 +147,10 @@ expect_code 204 -X POST "$base/v1/event" \
     -H 'User-Agent: Mozilla/5.0 (X11; Linux x86_64) Firefox/140.0' \
     --data-binary "$pageview"
 test ! -s "$fixture_dir/body"
+expect_no_store_headers
+grep -qi '^Content-Length: 0' "$fixture_dir/headers"
 grep -q '^Access-Control-Allow-Origin: https://example.com' "$fixture_dir/headers"
+grep -qi '^Vary: Origin' "$fixture_dir/headers"
 
 custom=$(
     printf '{"v":1,"site":"%s","type":"event","name":"signup","path":"/welcome","properties":{"z":2,"plan":"basic"}}' \
@@ -135,6 +170,7 @@ expect_code 415 -X POST "$base/v1/event" \
 expect_code 415 -X POST "$base/v1/event" \
     -H 'Content-Type: text/plain' -H 'Content-Encoding: gzip' \
     -H 'Origin: https://example.com' --data-binary "$pageview"
+expect_fixed_error "unsupported media type"
 expect_code 403 -X POST "$base/v1/event" \
     -H 'Content-Type: text/plain' --data-binary "$pageview"
 expect_code 403 -X POST "$base/v1/event" \
@@ -149,6 +185,7 @@ expect_code 403 -X POST "$base/v1/event" \
 expect_code 403 -X POST "$base/v1/event" \
     -H 'Content-Type: text/plain' -H 'Origin: https://example.com:444' \
     --data-binary "$pageview"
+expect_fixed_error "forbidden"
 expect_code 400 -X POST "$base/v1/event" \
     -H 'Content-Type: text/plain' -H 'Origin: https://example.com' \
     -H 'Origin: https://example.com' --data-binary "$pageview"
@@ -228,6 +265,7 @@ expect_code 400 -X POST "$base/v1/event" \
     -H 'Content-Type: text/plain' -H 'Origin: https://example.com' \
     -H 'Content-Length: 1' -H 'Content-Length: 1' \
     --data-binary x
+expect_fixed_error "bad request"
 
 oversized=$(head -c 8200 /dev/zero | tr '\0' x)
 expect_code 413 -X POST "$base/v1/event" \
@@ -241,6 +279,7 @@ for index in {1..33}; do
     header_args+=(-H "X-Bounded-$index: x")
 done
 expect_code 413 "${header_args[@]}" "$base/healthz"
+expect_fixed_error "payload too large"
 
 expect_code 200 \
     -H 'Referer: https://example.com/rendered/page?private=yes' \
@@ -248,7 +287,8 @@ expect_code 200 \
     "$base/v1/p.gif?site=$site_id&path=%2Fdocs&utm_source=noscript"
 test "$(stat -c '%s' "$fixture_dir/body")" = "43"
 grep -qi '^Content-Type: image/gif' "$fixture_dir/headers"
-grep -qi '^Cache-Control: no-store, max-age=0' "$fixture_dir/headers"
+grep -qi '^Content-Length: 43' "$fixture_dir/headers"
+expect_no_store_headers
 expect_code 403 "$base/v1/p.gif?site=$site_id&path=%2Fdocs"
 expect_code 403 -H 'Referer: https://attacker.example/' \
     "$base/v1/p.gif?site=$site_id&path=%2Fdocs"
@@ -264,6 +304,12 @@ expect_code 400 -H 'Referer: https://example.com/' \
 rate_body=$(
     printf '{"v":1,"site":"%s","type":"pageview","path":"/rate"}' "$site_id"
 )
+# Start immediately after an integer-second boundary so the real token bucket
+# cannot refill during this short 31-request burst.
+rate_second=$EPOCHSECONDS
+while (( EPOCHSECONDS == rate_second )); do
+    :
+done
 for index in {1..30}; do
     expect_code 204 -X POST "$base/v1/event" \
         -H 'Content-Type: text/plain' -H 'Origin: https://example.com' \
@@ -273,6 +319,7 @@ expect_code 429 -X POST "$base/v1/event" \
     -H 'Content-Type: text/plain' -H 'Origin: https://example.com' \
     -H 'X-Forwarded-For: 198.51.100.9' --data-binary "$rate_body"
 grep -qi '^Retry-After: 1' "$fixture_dir/headers"
+expect_fixed_error "rate limited"
 
 # Finish with inspectable events after the rate bucket scenario.
 expect_code 204 -X POST "$base/v1/event" \
@@ -364,10 +411,9 @@ fault_payload=$(
 expect_code 500 -X POST "$fault_base/v1/event" \
     -H 'Content-Type: text/plain' -H 'Origin: https://fault.example' \
     --data-binary "$fault_payload"
-test "$(cat "$fixture_dir/body")" = "internal error"
-grep -qi '^Cache-Control: no-store, max-age=0' "$fixture_dir/headers"
+expect_fixed_error "internal error"
 expect_code 503 "$fault_base/readyz"
-test "$(cat "$fixture_dir/body")" = "unavailable"
+expect_fixed_error "unavailable"
 mv "$fault_away" "$fault_dir"
 kill -TERM "$server_pid"
 wait "$server_pid"

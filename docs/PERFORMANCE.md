@@ -115,6 +115,14 @@ M2 gates the production tracker:
 The embedding page loads it with `defer`; analytics failure cannot delay or
 break the host page's useful HTML.
 
+### M2 measured baseline
+
+The clean ReleaseSafe baseline at commit `82fba08` measured 53,832 KiB idle RSS
+after 30 seconds, 5.807 ms durable-insert p95 across 100 real HTTP samples,
+7.329 ms p99, and 26 ms shutdown. The tracker is 734 bytes raw and 383 bytes
+Brotli. Full environment and fixture details are in
+`bench/results/m2-collection-release-safe.json`.
+
 ## 7. M6/M7 web budgets
 
 These apply only when the dashboard exists:

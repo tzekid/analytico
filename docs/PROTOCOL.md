@@ -1,13 +1,14 @@
 # Collection protocol
 
-This is a provisional v1 wire contract. M2 freezes it with byte-level request
-fixtures and response tests before production use.
+This is the frozen v1 wire contract. Breaking changes require a new protocol
+version.
 
 ## 1. Routes
 
 | Method | Route | Purpose | Success |
 | --- | --- | --- | --- |
-| `GET` | `/tracker.js` | Immutable optional tracker | `200` JavaScript |
+| `GET` | `/tracker.aef65945.js` | Immutable optional tracker | `200` JavaScript |
+| `GET` | `/tracker.js` | Short-cache installation alias | `200` JavaScript |
 | `POST` | `/v1/event` | Page view or custom event | `204` empty |
 | `GET` | `/v1/p.gif` | JavaScript-free page view | `200` transparent GIF |
 | `GET` | `/healthz` | Process liveness, loopback only | `200` text |
@@ -159,12 +160,12 @@ MVP requirements:
 - tracker errors never break the measured page;
 - minified and compressed bytes recorded by the performance gate.
 
-Provisional usage:
+Usage:
 
 ```html
 <script
   defer
-  src="https://analytics.example/tracker.js"
+  src="https://analytics.example/tracker.aef65945.js"
   data-site="00000000-0000-4000-8000-000000000000"
 ></script>
 ```
@@ -173,7 +174,8 @@ Provisional usage:
 window.analytico?.event("signup", { plan: "basic" });
 ```
 
-The global API and exact attribute spelling freeze only in M2.
+The global API is `window.analytico.event(name, properties)` and the site
+attribute is exactly `data-site`.
 
 ## 6. Origin and proxy trust
 
@@ -182,8 +184,9 @@ The global API and exact attribute spelling freeze only in M2.
 - Requests without the applicable browser header are rejected in production.
 - Caddy overwrites, rather than forwards, any client-supplied proxy-IP or
   country trust header.
-- The application accepts a forwarded client IP only from a configured
-  loopback/private proxy address.
+- The application binds only to loopback, so only the local reverse proxy or an
+  equally privileged local operator can supply the overwritten forwarding
+  headers.
 - Country is read only from the specifically configured trusted header.
 
 The site identifier is public and appears in browser markup. It is not an
@@ -206,8 +209,8 @@ on it.
 
 ## 8. Caching and CSP
 
-- `/tracker.js`: content-hashed filename in production, one-year immutable
-  cache, precompressed variants.
+- `/tracker.aef65945.js`: one-year immutable cache with Brotli/gzip variants.
+- `/tracker.js`: identical bytes with a five-minute cache.
 - Event and pixel routes: `no-store`.
 - No collector route sets a cookie.
 - Measured sites must add the collector origin to `script-src` and

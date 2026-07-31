@@ -4,11 +4,12 @@ Analytico is a small, self-hosted web analytics engine for low-traffic sites.
 It aims to provide the useful part of Plausible without a ClickHouse service,
 an administrative JavaScript application, or a multi-container runtime.
 
-Milestones M0 and M1 are complete. The executable now owns the exact embedded
+Milestones M0 through M2 are complete. The executable now owns the exact embedded
 stores, numbered schemas, validated sites/origins/property allowlists,
 goals/funnels, a private visitor key, daily visitor pseudonyms, direct durable
-event insertion, and an operator `doctor` command. It does not yet collect
-production HTTP traffic.
+event insertion, a bounded loopback HTTP collector, a tiny self-hosted tracker,
+a JavaScript-free pixel, and an operator `doctor` command. Complete analytical
+reports begin in M3.
 
 ## Selected shape
 
@@ -56,6 +57,7 @@ real-time views, session replay, arbitrary user SQL, and distributed ingestion.
 - [Operations and deployment](docs/OPERATIONS.md)
 - [M0 viability evidence](docs/M0_RESULTS.md)
 - [M1 durable-core evidence](docs/M1_RESULTS.md)
+- [M2 collection evidence](docs/M2_RESULTS.md)
 
 The machine-readable dependency intentions are in
 [`versions.json`](versions.json). A dependency is not considered adopted until
@@ -93,6 +95,35 @@ Run the durable administration scenario with:
 
 ```sh
 zig build e2e-m1 -Doptimize=ReleaseSafe
+```
+
+Run the collector protocol and real-browser scenarios with:
+
+```sh
+zig build e2e-m2 -Doptimize=ReleaseSafe
+tests/setup-browser-e2e.sh
+zig build e2e-m2-browser -Doptimize=ReleaseSafe
+```
+
+The browser setup is acceptance tooling only. Analytico itself has no Node,
+Playwright, browser, container, or JavaScript runtime dependency.
+
+After `init` and `site add`, start the loopback collector with:
+
+```sh
+analytico serve ./data 127.0.0.1 4318
+```
+
+Use the content-hashed production tracker:
+
+```html
+<script defer
+  src="https://analytics.example/tracker.aef65945.js"
+  data-site="YOUR-SITE-UUID"></script>
+<noscript>
+  <img alt="" width="1" height="1"
+    src="https://analytics.example/v1/p.gif?site=YOUR-SITE-UUID&amp;path=%2F">
+</noscript>
 ```
 
 ## MVP boundary

@@ -17,10 +17,10 @@ semantic, or application state model is consequential and must be added here.
 | D06 | Ingestion durability | Direct synchronous insert | Accepted |
 | D07 | Visitor/session identity | Cookieless site-scoped daily pseudonym | Accepted |
 | D08 | Persisted visitor data | Derived dimensions only | Accepted |
-| D09 | Country and client classification | Trusted country header + small local classifiers | Proposed |
-| D10 | Collection transport | POST beacon plus optional GET pixel | Proposed |
+| D09 | Country and client classification | Trusted country header + small local classifiers | Accepted |
+| D10 | Collection transport | POST beacon plus optional GET pixel | Accepted |
 | D11 | Aggregation | Query raw events on demand | Proposed |
-| D12 | HTTP implementation | Zig standard library plus local narrow routing | Proposed |
+| D12 | HTTP implementation | Zig standard library plus local narrow routing | Accepted |
 | D13 | Dashboard and HTMX | Server HTML first; HTMX 4 later | Accepted |
 | D14 | Deployment | One binary under systemd behind Caddy | Proposed |
 | D15 | Administration/auth | Local CLI for MVP | Accepted |
@@ -28,6 +28,7 @@ semantic, or application state model is consequential and must be added here.
 | D17 | Scale path | Measure, then batch/Parquet/server DB | Accepted |
 | D18 | Plausible migration | Fresh start and direct cutover | Accepted |
 | D19 | Metadata writes on pinned Turso | Durable autocommits with compensation | Accepted |
+| D20 | Collector concurrency | One bounded sequential accept loop | Accepted |
 
 ## D01. MVP interface
 
@@ -234,6 +235,13 @@ and device families, falling back to `Other` or `Unknown`.
 Do not add MaxMind until measured unknown rates make the maintenance dependency
 worthwhile. Never call an enrichment network service on the collection path.
 
+### M2 evidence
+
+Accepted. Country and UA inputs are reduced in the request arena and discarded.
+The end-to-end privacy audit finds neither raw value in either database or
+captured log. Unknown and bot fixtures use explicit categories; no enrichment
+network or data-file dependency exists.
+
 ## D10. Collection protocol
 
 ### Candidates
@@ -254,6 +262,12 @@ The pixel is `no-store`; the tracker asset is immutable and self-hosted.
 
 Access-log import can be evaluated later as an optional adapter, not as the
 canonical event model.
+
+### M2 evidence
+
+Accepted. Real Chromium, Firefox, and WebKit each emit one POST page view, and
+each JavaScript-disabled fixture emits one pixel view. Both paths commit the
+same event shape. The tracker uses no browser storage and is 383 bytes Brotli.
 
 ## D11. Aggregation strategy
 
@@ -287,6 +301,13 @@ recorded report exceeds its latency budget on a representative dataset.
 Start with `std.http`/`std.Io` and a small explicit route switch. Local
 duplication of a few proven primitives is allowed. Extract shared web code only
 after Cloudio and Analytico have two real consumers with the same semantics.
+
+### M2 evidence
+
+Accepted. The local parser and route switch enforce the complete fixed protocol
+surface without a framework or middleware model. ReleaseSafe collection p95 is
+5.807 ms through real HTTP, and adversarial target/header/body inputs remain
+bounded.
 
 ## D13. Dashboard, HTMX, and Cloudio
 
@@ -428,3 +449,25 @@ state after an actual process crash.
 This is a narrow workaround for a measured pin/filesystem interaction, not a
 generic transaction abstraction. Re-test explicit transactions when upgrading
 Turso; remove the compensation path if the real end-to-end scenario passes.
+
+## D20. Collector concurrency
+
+### Candidates
+
+| Candidate | Advantages | Costs |
+| --- | --- | --- |
+| One sequential accept loop | Smallest ownership model; one DuckDB writer; naturally bounded | One slow connection can delay later connections |
+| Fixed worker pool | Bounded parallel connections | Synchronization, multiple connection state, coordinated shutdown |
+| Task per connection | Familiar server shape | Input can create unbounded work without another admission layer |
+| General async HTTP framework | Mature concurrency features | New dependency and application model before load needs it |
+
+### Recommendation
+
+Use one sequential loop for the expected 20–50 weekly visitors. It owns one
+active connection, keeps DuckDB write ordering obvious, and lets SIGTERM
+interrupt the listener and active socket deterministically. Caddy supplies
+outer connection and timeout limits.
+
+Accepted after the M2 real-browser, malformed-request, and 100-request
+ReleaseSafe runs. Revisit a fixed worker pool only if measured proxy queueing or
+collection latency breaches its budget under representative concurrency.

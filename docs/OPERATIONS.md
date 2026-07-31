@@ -98,7 +98,8 @@ failed report must not cause the process to hit `MemoryMax`.
 Caddy:
 
 - terminates TLS;
-- proxies only `/tracker.js`, `/v1/event`, and `/v1/p.gif`;
+- proxies only `/tracker.aef65945.js`, `/tracker.js`, `/v1/event`, and
+  `/v1/p.gif`;
 - keeps health routes on loopback;
 - overwrites client-IP/country trust headers;
 - sets conservative request and timeout limits;
