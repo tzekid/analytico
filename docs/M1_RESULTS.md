@@ -5,8 +5,9 @@ in-memory database substitutes, or repository mocks.
 
 ## Shipped core
 
-- Numbered v1 Turso metadata and DuckDB event migrations compiled into the
-  binary.
+- Numbered v1 Turso metadata and initial v1 DuckDB event migrations compiled
+  into the binary. M3 later adds the compatible DuckDB v2 session-boundary
+  migration.
 - Validated site slugs, names, exact normalized origins, paths, event/property
   identifiers, UUIDs, UTC dates, goal predicates, and two-to-eight-step
   funnels.

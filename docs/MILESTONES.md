@@ -80,8 +80,8 @@ Create sites, goals, funnels, and events without HTTP or a web UI.
 ### Definition of done
 
 - [x] All schemas in `DATA_MODEL.md` have reviewed migration equivalents.
-- [x] Fresh migration and the only supported v0-to-v1 path are replayable and
-      produce schema version 1 in both stores.
+- [x] Fresh migration and the supported Turso v0-to-v1 and DuckDB v0-to-v2
+      paths are replayable; DuckDB v1-to-v2 preserves existing events.
 - [x] Newer unknown schema versions fail closed with a useful local error.
 - [x] CLI creates/lists/disables/deletes metadata using explicit confirmation
       for destructive actions.
@@ -155,26 +155,26 @@ Every promised analytics question can be answered correctly from the CLI.
 
 ### Definition of done
 
-- [ ] Every metric in `DATA_MODEL.md` matches hand-checkable fixtures including
+- [x] Every metric in `DATA_MODEL.md` matches hand-checkable fixtures including
       midnight, 30-minute boundary, tie timestamps, internal referrer, direct
       traffic, unknown client/country, bots, repeated goal events, and interleaved
       funnel events.
-- [ ] Multi-day unique output is visibly named/described as daily uniques or
+- [x] Multi-day unique output is visibly named/described as daily uniques or
       visitor-days.
-- [ ] Every list has deterministic order, stable tie-break, default limit,
+- [x] Every list has deterministic order, stable tie-break, default limit,
       maximum limit, and next-page behavior.
-- [ ] Empty sites/ranges produce useful zero/empty output, not errors or missing
+- [x] Empty sites/ranges produce useful zero/empty output, not errors or missing
       fields.
-- [ ] Invalid ranges, sort values, filters, and funnel definitions fail before
+- [x] Invalid ranges, sort values, filters, and funnel definitions fail before
       DuckDB query work.
-- [ ] JSON and CSV stream without materializing unbounded results; escaping and
+- [x] JSON and CSV stream without materializing unbounded results; escaping and
       formula-injection policy are tested.
-- [ ] No report query contains request-formatted SQL; values are bound and sort
+- [x] No report query contains request-formatted SQL; values are bound and sort
       choices select closed templates.
-- [ ] Slow-query fixture is interrupted at the deadline and the connection
+- [x] Slow-query fixture is interrupted at the deadline and the connection
       remains reusable or is safely replaced.
-- [ ] Million-event overview and funnel budgets pass.
-- [ ] Debug and ReleaseSafe checks pass from a clean checkout.
+- [x] Million-event overview and funnel budgets pass.
+- [x] Debug and ReleaseSafe checks pass from a clean checkout.
 
 At this point Analytico is a functional MVP for a developer/operator, but it is
 not yet approved for unattended production.

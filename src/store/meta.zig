@@ -335,6 +335,34 @@ pub const Store = struct {
         return result.toOwnedSlice(allocator);
     }
 
+    pub fn goalByName(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        site_slug: []const u8,
+        name: []const u8,
+    ) !Goal {
+        try domain.validateSlug(site_slug);
+        try domain.validateName(name, 120);
+        var rows = try self.connection.queryParams(
+            \\SELECT goals.id, goals.name, goals.match_kind, goals.match_value
+            \\FROM goals JOIN sites ON sites.id = goals.site_id
+            \\WHERE sites.slug = ?1 AND goals.name = ?2
+        ,
+            .{ site_slug, name },
+            .{},
+        );
+        defer rows.deinit();
+        const row = (try rows.next()) orelse return error.GoalNotFound;
+        const result = Goal{
+            .id = try allocator.dupe(u8, try row.get([]const u8, 0)),
+            .name = try allocator.dupe(u8, try row.get([]const u8, 1)),
+            .match_kind = @fromBackingInt(@intCast(try row.get(i64, 2))),
+            .match_value = try allocator.dupe(u8, try row.get([]const u8, 3)),
+        };
+        try rows.finish(null);
+        return result;
+    }
+
     pub fn deleteGoal(
         self: *Store,
         allocator: std.mem.Allocator,

@@ -23,6 +23,7 @@ pub const Database = struct {
             .{ "threads", "1" },
             .{ "memory_limit", "128MB" },
             .{ "max_temp_directory_size", "256MB" },
+            .{ "preserve_insertion_order", "false" },
             .{ "allow_community_extensions", "false" },
             .{ "enable_external_access", "false" },
         }) |setting| {

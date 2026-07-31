@@ -88,6 +88,7 @@ The serving connection configures and then locks:
 SET threads = 1;
 SET memory_limit = '128MB';
 SET max_temp_directory_size = '256MB';
+SET preserve_insertion_order = false;
 SET allow_community_extensions = false;
 SET enable_external_access = false;
 SET lock_configuration = true;
@@ -99,6 +100,10 @@ limits and measured peak RSS provide the outer bound. DuckDB documents that
 some allocations sit outside its buffer manager and recommends reducing thread
 count and memory limit under constraints:
 [DuckDB out-of-memory guidance](https://duckdb.org/docs/current/guides/performance/oom).
+
+Explicit report ordering makes insertion-order preservation unnecessary.
+Disabling it also keeps analytical intermediates within the configured memory
+limit; it does not change event or metric ordering.
 
 ## 6. Tracker budgets
 
@@ -122,6 +127,14 @@ after 30 seconds, 5.807 ms durable-insert p95 across 100 real HTTP samples,
 7.329 ms p99, and 26 ms shutdown. The tracker is 734 bytes raw and 383 bytes
 Brotli. Full environment and fixture details are in
 `bench/results/m2-collection-release-safe.json`.
+
+### M3 measured baseline
+
+The ReleaseSafe M3 fixture contains 1,000,000 events in 100,000 sessions and an
+eight-step ordered funnel. After one warmup, ten full CLI-process samples
+measured overview p50/p95/p99 at 86/111/111 ms and the funnel at
+920/982/982 ms. The DuckDB file was 15,740,928 bytes. Full environment and
+fixture details are in `bench/results/m3-reports-release-safe.json`.
 
 ## 7. M6/M7 web budgets
 

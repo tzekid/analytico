@@ -154,7 +154,7 @@ CREATE TABLE event_migrations (
 ```sql
 CREATE TABLE events (
     schema_version UTINYINT NOT NULL,
-    event_id VARCHAR NOT NULL,
+    event_id UUID NOT NULL,
     site_id VARCHAR NOT NULL,
     received_at_utc_micros BIGINT NOT NULL,
     received_date_utc DATE NOT NULL,
@@ -162,6 +162,9 @@ CREATE TABLE events (
     event_name VARCHAR NOT NULL,
     path VARCHAR NOT NULL,
     visitor_day_id BLOB NOT NULL,
+    session_id UUID NOT NULL,
+    visitor_day_start BOOLEAN NOT NULL,
+    session_start BOOLEAN NOT NULL,
     referrer_host VARCHAR NOT NULL,
     country_code VARCHAR NOT NULL,
     browser_family VARCHAR NOT NULL,
@@ -184,8 +187,11 @@ Conventions:
   grouping and decoding.
 - `properties_json` is canonical flat JSON produced by the application. The
   MVP stores it for export but does not run goal or funnel SQL against it.
-- `event_id` is application-generated canonical UUID text. It supports audit
+- `event_id` is an application-generated UUID. It supports audit
   correlation and later deduplication but no index is added without evidence.
+- `session_id` is the UUID of the first accepted event in the session.
+  `visitor_day_start` and `session_start` are event-local boundary facts, not
+  aggregate counters. DuckDB event migration v2 derives all three for v1 rows.
 - `received_at_utc_micros` is the server clock. Client time is not accepted as
   authoritative.
 - `site_id` is duplicated deliberately. DuckDB does not enforce a foreign key
@@ -265,16 +271,22 @@ daily pseudonyms, not identified humans.
 
 ## 6. Sessionization
 
-Sessions are computed on demand for one site and date range:
+The collector commits events sequentially and server receipt time is
+authoritative. In the same single bound insert statement that writes an event:
 
-1. Partition by `site_id`, `received_date_utc`, and `visitor_day_id`.
-2. Sort by `received_at_utc_micros`, then `event_id`.
-3. Start a new session for the first event or when the previous event is more
-   than 30 minutes earlier.
-4. Cumulatively number session starts within the partition.
+1. Find the latest already-committed event for the same site, UTC date, and
+   `visitor_day_id`.
+2. Set `visitor_day_start` when no such event exists.
+3. Reuse its `session_id` when its receipt time is no more than 30 minutes
+   earlier.
+4. Otherwise set `session_start` and use the new event UUID as `session_id`.
 
 Sessions never cross a UTC day boundary because the visitor pseudonym rotates.
-This rule is deterministic and versioned as metric semantics v1.
+The exact 30-minute boundary remains in the prior session; 30 minutes plus one
+microsecond begins another. Report queries scan raw events and use these
+persisted boundary facts instead of reconstructing the same windows. There is
+no rollup table, background task, or cache. This rule is deterministic and
+versioned as metric semantics v1.
 
 ## 7. Metric definitions
 
@@ -284,9 +296,10 @@ Count accepted `kind = 1` rows in the requested range.
 
 ### Daily unique visitors
 
-For each UTC date, count distinct `visitor_day_id` among non-bot events. For a
-multi-day headline, sum those daily counts. The value is a visitor-day total,
-not a cross-day person count.
+Count non-bot `visitor_day_start` rows. This is equivalent to counting distinct
+daily pseudonyms because the one writer sets exactly one start for each
+site/date/pseudonym. For a multi-day headline, sum those daily counts. The value
+is a visitor-day total, not a cross-day person count.
 
 ### Popular pages
 

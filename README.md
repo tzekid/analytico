@@ -4,12 +4,12 @@ Analytico is a small, self-hosted web analytics engine for low-traffic sites.
 It aims to provide the useful part of Plausible without a ClickHouse service,
 an administrative JavaScript application, or a multi-container runtime.
 
-Milestones M0 through M2 are complete. The executable now owns the exact embedded
+Milestones M0 through M3 are complete. The executable now owns the exact embedded
 stores, numbered schemas, validated sites/origins/property allowlists,
 goals/funnels, a private visitor key, daily visitor pseudonyms, direct durable
 event insertion, a bounded loopback HTTP collector, a tiny self-hosted tracker,
-a JavaScript-free pixel, and an operator `doctor` command. Complete analytical
-reports begin in M3.
+a JavaScript-free pixel, complete typed CLI reports, and an operator `doctor`
+command.
 
 ## Selected shape
 
@@ -58,6 +58,7 @@ real-time views, session replay, arbitrary user SQL, and distributed ingestion.
 - [M0 viability evidence](docs/M0_RESULTS.md)
 - [M1 durable-core evidence](docs/M1_RESULTS.md)
 - [M2 collection evidence](docs/M2_RESULTS.md)
+- [M3 report evidence](docs/M3_RESULTS.md)
 
 The machine-readable dependency intentions are in
 [`versions.json`](versions.json). A dependency is not considered adopted until
@@ -103,6 +104,21 @@ Run the collector protocol and real-browser scenarios with:
 zig build e2e-m2 -Doptimize=ReleaseSafe
 tests/setup-browser-e2e.sh
 zig build e2e-m2-browser -Doptimize=ReleaseSafe
+```
+
+Run the complete report semantics and million-event performance gates with:
+
+```sh
+zig build e2e-m3 -Doptimize=ReleaseSafe
+zig build bench-m3 -Doptimize=ReleaseSafe
+```
+
+For example:
+
+```sh
+analytico report ./data example 2026-07-01 2026-07-31 overview
+analytico report ./data example 2026-07-01 2026-07-31 pages --format json
+analytico report ./data example 2026-07-01 2026-07-31 funnel signup-flow
 ```
 
 The browser setup is acceptance tooling only. Analytico itself has no Node,

@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "milestone": "M3",
+  "measured_at_utc": "2026-07-31",
+  "base_commit": "c430bfb",
+  "dirty": true,
+  "optimize": "ReleaseSafe",
+  "platform": {
+    "kernel": "Linux 7.0.12-arch1-1",
+    "architecture": "x86_64",
+    "cpu": "AMD EPYC 9354P",
+    "visible_cores": 4,
+    "memory_gib": 15,
+    "filesystem": "btrfs"
+  },
+  "command": "zig build bench-m3 -Doptimize=ReleaseSafe -Dturso-native-path=<exact-local-prefix>",
+  "fixture": {
+    "generator": "m3-report-v1",
+    "seed": "fixed-sql-sequence",
+    "events": 1000000,
+    "sessions": 100000,
+    "page_views": 800000,
+    "custom_events": 200000,
+    "funnel_steps": 8,
+    "warmups_per_report": 1,
+    "samples_per_percentile_report": 10
+  },
+  "duckdb": {
+    "version": "1.4.5",
+    "threads": 1,
+    "memory_limit_mib": 128,
+    "temp_limit_mib": 256,
+    "preserve_insertion_order": false
+  },
+  "observations": {
+    "seed_ms_one_sample": 3049,
+    "overview_p50_ms": 86,
+    "overview_p95_ms": 111,
+    "overview_p99_ms": 111,
+    "pages_ms_one_sample": 100,
+    "goal_ms_one_sample": 600,
+    "eight_step_funnel_p50_ms": 920,
+    "eight_step_funnel_p95_ms": 982,
+    "eight_step_funnel_p99_ms": 982,
+    "durable_insert_p95_ms_100_samples": 11.326,
+    "duckdb_file_bytes": 15740928
+  },
+  "raw_observations": "ephemeral per-process values; regenerate with bench/m3-reports.sh"
+}

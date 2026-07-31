@@ -348,7 +348,7 @@ exec 9<&-
 server_pid=
 
 test "$("$binary" doctor "$fixture_dir")" = \
-    "ok metadata=v1 events=v1 sites=2 goals=0 funnels=0 stored_events=36"
+    "ok metadata=v1 events=v2 sites=2 goals=0 funnels=0 stored_events=36"
 pageview_row=$("$binary" event inspect "$fixture_dir" pageview)
 test "$pageview_row" = $'pageview\t/pricing\tsearch.example\tDE\tFirefox\tLinux\tdesktop\tnewsletter\t{}'
 custom_row=$("$binary" event inspect "$fixture_dir" signup)
@@ -419,6 +419,6 @@ kill -TERM "$server_pid"
 wait "$server_pid"
 server_pid=
 test "$("$binary" doctor "$fault_dir")" = \
-    "ok metadata=v1 events=v1 sites=1 goals=0 funnels=0 stored_events=0"
+    "ok metadata=v1 events=v2 sites=1 goals=0 funnels=0 stored_events=0"
 
 echo "M2 bounded real-HTTP collection checks passed"

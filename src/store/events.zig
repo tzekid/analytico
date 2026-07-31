@@ -2,7 +2,7 @@ const std = @import("std");
 const domain = @import("../domain.zig");
 const duckdb = @import("duckdb.zig");
 
-pub const schema_version: i64 = 1;
+pub const schema_version: i64 = 2;
 
 pub const StoredEvent = struct {
     event_name: []u8,
@@ -39,35 +39,111 @@ pub const Store = struct {
             "SELECT COALESCE(MAX(version), 0) FROM event_migrations",
         );
         if (current > schema_version) return error.NewerEventSchema;
-        if (current == schema_version) return;
-
-        try self.database.exec(
-            \\BEGIN TRANSACTION;
-            \\CREATE TABLE events (
-            \\  schema_version UTINYINT NOT NULL,
-            \\  event_id VARCHAR NOT NULL,
-            \\  site_id VARCHAR NOT NULL,
-            \\  received_at_utc_micros BIGINT NOT NULL,
-            \\  received_date_utc DATE NOT NULL,
-            \\  kind UTINYINT NOT NULL,
-            \\  event_name VARCHAR NOT NULL,
-            \\  path VARCHAR NOT NULL,
-            \\  visitor_day_id BLOB NOT NULL,
-            \\  referrer_host VARCHAR NOT NULL,
-            \\  country_code VARCHAR NOT NULL,
-            \\  browser_family VARCHAR NOT NULL,
-            \\  os_family VARCHAR NOT NULL,
-            \\  device_category VARCHAR NOT NULL,
-            \\  utm_source VARCHAR NOT NULL,
-            \\  utm_medium VARCHAR NOT NULL,
-            \\  utm_campaign VARCHAR NOT NULL,
-            \\  utm_term VARCHAR NOT NULL,
-            \\  utm_content VARCHAR NOT NULL,
-            \\  properties_json VARCHAR NOT NULL
-            \\);
-            \\INSERT INTO event_migrations VALUES (1, 'initial-events', 0);
-            \\COMMIT;
-        );
+        if (current < 1) {
+            try self.database.exec(
+                \\BEGIN TRANSACTION;
+                \\CREATE TABLE events (
+                \\  schema_version UTINYINT NOT NULL,
+                \\  event_id VARCHAR NOT NULL,
+                \\  site_id VARCHAR NOT NULL,
+                \\  received_at_utc_micros BIGINT NOT NULL,
+                \\  received_date_utc DATE NOT NULL,
+                \\  kind UTINYINT NOT NULL,
+                \\  event_name VARCHAR NOT NULL,
+                \\  path VARCHAR NOT NULL,
+                \\  visitor_day_id BLOB NOT NULL,
+                \\  referrer_host VARCHAR NOT NULL,
+                \\  country_code VARCHAR NOT NULL,
+                \\  browser_family VARCHAR NOT NULL,
+                \\  os_family VARCHAR NOT NULL,
+                \\  device_category VARCHAR NOT NULL,
+                \\  utm_source VARCHAR NOT NULL,
+                \\  utm_medium VARCHAR NOT NULL,
+                \\  utm_campaign VARCHAR NOT NULL,
+                \\  utm_term VARCHAR NOT NULL,
+                \\  utm_content VARCHAR NOT NULL,
+                \\  properties_json VARCHAR NOT NULL
+                \\);
+                \\INSERT INTO event_migrations VALUES (1, 'initial-events', 0);
+                \\COMMIT;
+            );
+        }
+        if (current < 2) {
+            try self.database.exec(
+                \\BEGIN TRANSACTION;
+                \\CREATE TABLE events_v2 (
+                \\  schema_version UTINYINT NOT NULL,
+                \\  event_id UUID NOT NULL,
+                \\  site_id VARCHAR NOT NULL,
+                \\  received_at_utc_micros BIGINT NOT NULL,
+                \\  received_date_utc DATE NOT NULL,
+                \\  kind UTINYINT NOT NULL,
+                \\  event_name VARCHAR NOT NULL,
+                \\  path VARCHAR NOT NULL,
+                \\  visitor_day_id BLOB NOT NULL,
+                \\  session_id UUID NOT NULL,
+                \\  visitor_day_start BOOLEAN NOT NULL,
+                \\  session_start BOOLEAN NOT NULL,
+                \\  referrer_host VARCHAR NOT NULL,
+                \\  country_code VARCHAR NOT NULL,
+                \\  browser_family VARCHAR NOT NULL,
+                \\  os_family VARCHAR NOT NULL,
+                \\  device_category VARCHAR NOT NULL,
+                \\  utm_source VARCHAR NOT NULL,
+                \\  utm_medium VARCHAR NOT NULL,
+                \\  utm_campaign VARCHAR NOT NULL,
+                \\  utm_term VARCHAR NOT NULL,
+                \\  utm_content VARCHAR NOT NULL,
+                \\  properties_json VARCHAR NOT NULL
+                \\);
+                \\INSERT INTO events_v2
+                \\WITH lagged AS (
+                \\  SELECT *,
+                \\    lag(received_at_utc_micros) OVER (
+                \\      PARTITION BY site_id, received_date_utc, visitor_day_id
+                \\      ORDER BY received_at_utc_micros, event_id
+                \\    ) AS previous_at,
+                \\    row_number() OVER (
+                \\      PARTITION BY site_id, received_date_utc, visitor_day_id
+                \\      ORDER BY received_at_utc_micros, event_id
+                \\    ) AS visitor_position
+                \\  FROM events
+                \\),
+                \\marked AS (
+                \\  SELECT *,
+                \\    previous_at IS NULL
+                \\      OR received_at_utc_micros - previous_at > 1800000000
+                \\      AS is_session_start
+                \\  FROM lagged
+                \\),
+                \\assigned AS (
+                \\  SELECT *,
+                \\    last_value(
+                \\      CASE WHEN is_session_start THEN event_id ELSE NULL END
+                \\      IGNORE NULLS
+                \\    ) OVER (
+                \\      PARTITION BY site_id, received_date_utc, visitor_day_id
+                \\      ORDER BY received_at_utc_micros, event_id
+                \\      ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                \\    ) AS derived_session_id
+                \\  FROM marked
+                \\)
+                \\SELECT schema_version, CAST(event_id AS UUID), site_id,
+                \\  received_at_utc_micros, received_date_utc, kind, event_name,
+                \\  path, visitor_day_id, CAST(derived_session_id AS UUID),
+                \\  visitor_position = 1, is_session_start, referrer_host,
+                \\  country_code, browser_family, os_family, device_category,
+                \\  utm_source, utm_medium, utm_campaign, utm_term, utm_content,
+                \\  properties_json
+                \\FROM assigned;
+                \\DROP TABLE events;
+                \\ALTER TABLE events_v2 RENAME TO events;
+                \\INSERT INTO event_migrations VALUES (
+                \\  2, 'persist-session-boundaries', 0
+                \\);
+                \\COMMIT;
+            );
+        }
         try self.database.checkpoint();
     }
 
@@ -80,9 +156,48 @@ pub const Store = struct {
         if (event.kind != 1 and event.kind != 2) return error.InvalidEventKind;
 
         var statement = try self.database.prepare(
-            \\INSERT INTO events VALUES (
-            \\  1, ?, ?, ?, CAST(? AS DATE), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            \\INSERT INTO events
+            \\WITH incoming (
+            \\  event_id, site_id, received_at_utc_micros, received_date_utc,
+            \\  kind, event_name, path, visitor_day_id, referrer_host,
+            \\  country_code, browser_family, os_family, device_category,
+            \\  utm_source, utm_medium, utm_campaign, utm_term, utm_content,
+            \\  properties_json
+            \\) AS (
+            \\  SELECT ?, ?, ?, CAST(? AS DATE), ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            \\         ?, ?, ?, ?, ?, ?
+            \\),
+            \\resolved AS (
+            \\  SELECT i.*, p.session_id AS prior_session_id,
+            \\         p.received_at_utc_micros AS prior_at
+            \\  FROM incoming i
+            \\  LEFT JOIN LATERAL (
+            \\    SELECT e.session_id, e.received_at_utc_micros
+            \\    FROM events e
+            \\    WHERE e.site_id = i.site_id
+            \\      AND e.received_date_utc = i.received_date_utc
+            \\      AND e.visitor_day_id = i.visitor_day_id
+            \\      AND e.received_at_utc_micros <= i.received_at_utc_micros
+            \\    ORDER BY e.received_at_utc_micros DESC, e.event_id DESC
+            \\    LIMIT 1
+            \\  ) p ON true
             \\)
+            \\SELECT
+            \\  1, CAST(i.event_id AS UUID), i.site_id, i.received_at_utc_micros,
+            \\  i.received_date_utc, i.kind, i.event_name, i.path,
+            \\  i.visitor_day_id,
+            \\  CASE
+            \\    WHEN i.received_at_utc_micros - i.prior_at <= 1800000000
+            \\    THEN i.prior_session_id
+            \\    ELSE CAST(i.event_id AS UUID)
+            \\  END,
+            \\  i.prior_session_id IS NULL,
+            \\  i.prior_session_id IS NULL
+            \\    OR i.received_at_utc_micros - i.prior_at > 1800000000,
+            \\  i.referrer_host, i.country_code, i.browser_family, i.os_family,
+            \\  i.device_category, i.utm_source, i.utm_medium, i.utm_campaign,
+            \\  i.utm_term, i.utm_content, i.properties_json
+            \\FROM resolved i
         );
         defer statement.deinit();
         try statement.bindText(1, event.event_id);

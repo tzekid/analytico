@@ -19,7 +19,7 @@ semantic, or application state model is consequential and must be added here.
 | D08 | Persisted visitor data | Derived dimensions only | Accepted |
 | D09 | Country and client classification | Trusted country header + small local classifiers | Accepted |
 | D10 | Collection transport | POST beacon plus optional GET pixel | Accepted |
-| D11 | Aggregation | Query raw events on demand | Proposed |
+| D11 | Aggregation | Query raw events on demand | Accepted |
 | D12 | HTTP implementation | Zig standard library plus local narrow routing | Accepted |
 | D13 | Dashboard and HTMX | Server HTML first; HTMX 4 later | Accepted |
 | D14 | Deployment | One binary under systemd behind Caddy | Proposed |
@@ -29,6 +29,7 @@ semantic, or application state model is consequential and must be added here.
 | D18 | Plausible migration | Fresh start and direct cutover | Accepted |
 | D19 | Metadata writes on pinned Turso | Durable autocommits with compensation | Accepted |
 | D20 | Collector concurrency | One bounded sequential accept loop | Accepted |
+| D21 | Session boundaries | Persist event-local boundaries at commit | Accepted |
 
 ## D01. MVP interface
 
@@ -471,3 +472,28 @@ outer connection and timeout limits.
 Accepted after the M2 real-browser, malformed-request, and 100-request
 ReleaseSafe runs. Revisit a fixed worker pool only if measured proxy queueing or
 collection latency breaches its budget under representative concurrency.
+
+## D21. Session-boundary computation
+
+### Candidates
+
+| Candidate | Advantages | Costs |
+| --- | --- | --- |
+| Recompute sessions with report windows | Pure raw events; naturally handles arbitrary late inserts | Repeats two ordered windows; measured funnel exhausted 128 MiB and exceeded its deadline at one million rows |
+| Materialized daily/session rollups | Fast reports | New tables, invalidation, migration semantics, and background work |
+| Persist session UUID and two boundary booleans per event | One writer already knows the prior event; reports remain raw scans | The receipt-time write order becomes an explicit invariant |
+
+### Recommendation
+
+Persist `session_id`, `visitor_day_start`, and `session_start` in the same bound
+DuckDB insert that commits the event. These are local facts about that event,
+not cached aggregate results. The collector remains sequential, uses no worker,
+and returns success only after the one statement commits.
+
+The v1-to-v2 DuckDB migration reconstructs the facts with the original
+timestamp/UUID ordering. Hand fixtures prove the exact 30-minute boundary,
+tied timestamps, UTC midnight, restart, and migration behavior. On the
+million-event ReleaseSafe fixture, the accepted design measured overview p95
+at 111 ms and an eight-step funnel p95 at 982 ms across ten full CLI processes.
+The changed durable insert path measured 11.326 ms p95, within its 25 ms
+budget. All remain within the existing gates.

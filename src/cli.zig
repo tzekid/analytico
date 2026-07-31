@@ -1,8 +1,10 @@
 const std = @import("std");
 const domain = @import("domain.zig");
 const http_server = @import("http/server.zig");
+const report = @import("report.zig");
 const meta = @import("store/meta.zig");
 const events = @import("store/events.zig");
+const reports = @import("store/reports.zig");
 
 pub fn run(
     allocator: std.mem.Allocator,
@@ -19,6 +21,10 @@ pub fn run(
         const port = std.fmt.parseInt(u16, args[4], 10) catch
             return error.InvalidPort;
         try http_server.run(gpa, io, args[2], args[3], port);
+        return true;
+    }
+    if (args.len >= 7 and std.mem.eql(u8, args[1], "report")) {
+        try reportCommand(allocator, output, args);
         return true;
     }
     if (args.len >= 3 and std.mem.eql(u8, args[1], "site")) {
@@ -74,10 +80,46 @@ pub fn writeUsage(output: *std.Io.Writer) !void {
         \\  analytico funnel delete <directory> <site> <name> --confirm <name>
         \\  analytico event add <directory> <site> <event> <path> <micros> <date> <ip> <browser> <os> <device>
         \\  analytico event inspect <directory> [event-name]
+        \\  analytico report <directory> <site> <start-date> <end-date> <kind> [subject] [--format table|json|csv] [--sort count|label] [--limit 1..100] [--page N]
         \\  analytico doctor <directory>
         \\  analytico pseudonym <64-hex-key> <site-id> <date> <ip> <coarse-client>
         \\
     );
+}
+
+fn reportCommand(
+    allocator: std.mem.Allocator,
+    output: *std.Io.Writer,
+    args: []const []const u8,
+) !void {
+    // Parse and validate the complete request before either database is opened.
+    const request = try report.Request.parse(args);
+    const paths = try Paths.init(allocator, request.directory);
+    var metadata = try meta.Store.open(allocator, paths.meta);
+    defer metadata.deinit();
+    try metadata.migrate();
+    const site_id = try metadata.siteIdBySlug(allocator, request.site_slug);
+    const selected_goal: ?meta.Goal = if (request.kind == .goal)
+        try metadata.goalByName(allocator, request.site_slug, request.subject)
+    else
+        null;
+    const selected_funnel: ?[]const meta.FunnelStep = if (request.kind == .funnel)
+        try metadata.funnelSteps(allocator, request.site_slug, request.subject)
+    else
+        null;
+
+    var event_store = try events.Store.open(allocator, paths.events);
+    defer event_store.deinit();
+    try event_store.migrate();
+    const result = try reports.run(
+        allocator,
+        &event_store,
+        request,
+        site_id,
+        selected_goal,
+        selected_funnel,
+    );
+    try report.render(output, request, result);
 }
 
 fn initialize(

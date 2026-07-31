@@ -118,4 +118,20 @@ pub fn build(b: *std.Build) void {
         "bench-m2",
         "Measure the real ReleaseSafe HTTP collection path",
     ).dependOn(&m2_benchmark.step);
+
+    const m3_e2e = b.addSystemCommand(&.{ "bash", "tests/e2e-m3.sh" });
+    m3_e2e.addArtifactArg(app);
+    m3_e2e.step.dependOn(b.getInstallStep());
+    b.step(
+        "e2e-m3",
+        "Run M3 reports against real on-disk databases",
+    ).dependOn(&m3_e2e.step);
+
+    const m3_benchmark = b.addSystemCommand(&.{ "bash", "bench/m3-reports.sh" });
+    m3_benchmark.addArtifactArg(app);
+    m3_benchmark.step.dependOn(b.getInstallStep());
+    b.step(
+        "bench-m3",
+        "Measure M3 reports over one million real events",
+    ).dependOn(&m3_benchmark.step);
 }
