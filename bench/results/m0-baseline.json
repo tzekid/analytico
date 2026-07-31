@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "milestone": "M0",
+  "measured_at_utc": "2026-07-31",
+  "base_commit": "b86c4bdca00e7a6df5d3a85a55a2fcfeda4ae902",
+  "dirty": true,
+  "optimize": "ReleaseSafe",
+  "platform": {
+    "kernel": "Linux 7.0.12-arch1-1",
+    "architecture": "x86_64",
+    "cpu": "AMD EPYC 9354P",
+    "visible_cores": 4,
+    "memory_gib": 15,
+    "filesystem": "btrfs"
+  },
+  "fixture": {
+    "generator": "m0-v1",
+    "seed": "fixed-sql-sequence",
+    "events": 1000000
+  },
+  "duckdb": {
+    "version": "1.4.5",
+    "threads": 1,
+    "memory_limit_mib": 128,
+    "temp_limit_mib": 256
+  },
+  "observations": {
+    "executable_bytes": 24478632,
+    "duckdb_runtime_bytes": 64775472,
+    "installed_total_bytes": 89254104,
+    "version_elapsed_seconds_one_sample": 0.01,
+    "version_peak_rss_kib_one_sample": 17964,
+    "fixture_and_report_elapsed_seconds_one_sample": 0.82,
+    "fixture_and_report_peak_rss_kib_one_sample": 70392,
+    "report_elapsed_ns_one_sample": 42358685,
+    "duckdb_file_bytes": 3944448
+  }
+}

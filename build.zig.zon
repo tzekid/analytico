@@ -3,7 +3,16 @@
     .version = "0.0.0",
     .fingerprint = 0xfec3bac728f22f9a,
     .minimum_zig_version = "0.17.0-dev.1509+bb296ab9b",
-    .dependencies = .{},
+    .dependencies = .{
+        .turso = .{
+            .url = "git+https://github.com/tzekid/turso.zig#f1b82da9f9207bee085808ad6a8686a9780ed76d",
+            .hash = "turso-0.1.1-ff0GezXoDwAMZX7O8cWUPC_EQPxKZKliJKLGE9SnQBC3",
+        },
+        .duckdb = .{
+            .url = "https://github.com/duckdb/duckdb/releases/download/v1.4.5/libduckdb-linux-amd64.zip",
+            .hash = "N-V-__8AAJ3FOQhWAfYfWnXchr8TteXoVnIxrWtcrPEyc-Rp",
+        },
+    },
     .paths = .{
         "build.zig",
         "build.zig.zon",

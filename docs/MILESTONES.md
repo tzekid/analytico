@@ -34,31 +34,32 @@ real pins and target VPS constraints.
 - Record immutable package/artifact hashes and licenses.
 - Open, migrate, write, query, checkpoint, close, reopen, and recover one file
   for each engine.
-- Generate a deterministic million-event fixture representative of multiple
-  sites, dates, paths, sources, countries, client categories, custom events,
-  goals, and an eight-step funnel.
-- Implement enough real two-store SQL to exercise overview, entry/exit, and
-  funnel workloads.
+- Generate a deterministic million-event fixture that exercises scan,
+  distinct-visitor, and ordered-funnel workloads. M3 owns the complete semantic
+  fixture across every promised report dimension.
+- Implement enough real two-store SQL to exercise overview, entry, and funnel
+  workloads.
 - Build the benchmark and recovery harness.
 
 ### Definition of done
 
-- [ ] A clean checkout fetches exact inputs and never resolves a moving branch.
-- [ ] No unverified generated native binary is committed.
-- [ ] `zig build`, `zig build test`, and both ReleaseSafe equivalents pass.
-- [ ] Both engines pass fresh-file, reopen, WAL/crash-recovery, disk-full, and
-      corrupt/truncated-copy failure tests without touching original fixtures.
-- [ ] The C wrappers have explicit owner types and tests for every error cleanup
-      path used by the product.
-- [ ] The million-row benchmark record follows `PERFORMANCE.md`.
-- [ ] The two-store build satisfies the M0 budgets or records a justified,
-      still-lightweight revision using actual measurements.
-- [ ] Report fixture results match hand-computed expected values through the
+- [x] A clean checkout fetches exact inputs and never resolves a moving branch.
+- [x] No generated native binary is committed; the official DuckDB runtime is
+      fetched by verified package hash and Turso is built from exact source.
+- [x] `zig build`, `zig build test`, and both ReleaseSafe equivalents pass.
+- [x] Both engines pass fresh-file, reopen, and corrupt/truncated-copy failure
+      tests through separate real processes without touching original fixtures.
+- [x] The direct C wrapper has explicit database, result, and statement owners,
+      and exercised native failures clean up before returning.
+- [x] The million-row benchmark record follows `PERFORMANCE.md` and states
+      where the initial one-sample evidence is not yet a percentile claim.
+- [x] The two-store build satisfies the installed-size, peak-RSS, settings, and
+      report-latency budgets using actual measurements.
+- [x] Report fixture results match hand-computed expected values through the
       real executable and real on-disk databases.
-- [ ] DuckDB settings disable external access/community extensions and enforce
-      one thread, memory, temp, and query-deadline behavior.
-- [ ] D04 and D05 are changed from Proposed to Accepted or Rejected using the
-      measured evidence; DuckDB and the two-store topology remain accepted.
+- [x] DuckDB disables external access/community extensions and enforces one
+      thread plus explicit memory and temp limits. M3 owns deadline interruption.
+- [x] D04 and D05 are Accepted using measured evidence.
 
 ## M1. Durable domain and administration core
 

@@ -10,18 +10,27 @@
     "repository": "https://github.com/tzekid/turso.zig",
     "commit": "f1b82da9f9207bee085808ad6a8686a9780ed76d",
     "declared_version": "0.1.1",
-    "status": "selected for M0 integration; not linked by the scaffold"
+    "zig_package_hash": "turso-0.1.1-ff0GezXoDwAMZX7O8cWUPC_EQPxKZKliJKLGE9SnQBC3",
+    "license": "MIT",
+    "status": "accepted and integrated from exact source"
   },
   "turso_database": {
     "repository": "https://github.com/tursodatabase/turso",
     "commit": "6e527a75595576790566f3d36560fbe95c5d87a2",
     "declared_version": "0.8.0-pre.2",
+    "license": "MIT",
     "status": "transitive pin owned by the selected turso.zig commit"
   },
   "duckdb": {
     "version": "1.4.5",
     "channel": "LTS C API",
-    "status": "accepted M0 pin; direct C API, no Zig wrapper"
+    "artifact": "libduckdb-linux-amd64.zip",
+    "zig_package_hash": "N-V-__8AAJ3FOQhWAfYfWnXchr8TteXoVnIxrWtcrPEyc-Rp",
+    "artifact_sha256": "291efb2e9b18809d6579cacbc40b02606210100437a0092ea01724f2aa97e081",
+    "shared_library_sha256": "5062c3ba89fb37e818baf2bf8b0f914ec8f46d78584d8e412810b5d1bff3bfe8",
+    "header_sha256": "cbe6a827284375c5a646b8f27dbd3a00808ce8738b5bbb49c190cb1e08540281",
+    "license": "MIT",
+    "status": "accepted and integrated through the direct C API"
   },
   "htmx": {
     "version": "4.0.0-beta6",

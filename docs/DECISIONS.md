@@ -12,8 +12,8 @@ semantic, or application state model is consequential and must be added here.
 | D01 | MVP interface | Collector + local CLI, no dashboard | Accepted |
 | D02 | ClickHouse replacement | DuckDB | Accepted |
 | D03 | Storage topology | Turso metadata + DuckDB events | Accepted |
-| D04 | DuckDB integration | Direct pinned LTS C API | Proposed |
-| D05 | Zig and Turso channel | Exact local development pins | Accepted for scaffold |
+| D04 | DuckDB integration | Direct pinned LTS C API | Accepted |
+| D05 | Zig and Turso channel | Exact local development pins | Accepted |
 | D06 | Ingestion durability | Direct synchronous insert | Proposed |
 | D07 | Visitor/session identity | Cookieless site-scoped daily pseudonym | Proposed |
 | D08 | Persisted visitor data | Derived dimensions only | Accepted |
@@ -119,6 +119,16 @@ no Zig database wrapper.
 DuckDB's C client is a primary supported API, and the LTS documentation lists
 1.4.5 for C. See the [C client overview](https://duckdb.org/docs/lts/clients/overview).
 
+### M0 evidence
+
+Accepted. The verified official Linux AMD64 artifact is linked as a private
+shared runtime because its single static archive is not self-contained. The
+application still runs as one process; DuckDB remains in-process and stores
+events in one ordinary file. The direct wrapper configures one query thread,
+128 MiB of buffer memory, a 256 MiB temp limit, and disables external access
+and community extensions. Exact artifact, library, header, and Zig package
+hashes are recorded in `versions.json`.
+
 ### Revisit
 
 Patch updates after backup/restore and deterministic report compatibility tests.
@@ -140,9 +150,11 @@ For M0, pin Zig `0.17.0-dev.1509+bb296ab9b`, `turso.zig` commit
 `f1b82da9f9207bee085808ad6a8686a9780ed76d`, and its exact Turso Database
 transitive commit. Never depend on an unqualified branch.
 
-The scaffold records these in `versions.json`; M0 must add the immutable Zig
-package hash. A stable-channel migration is a deliberate later decision, not
-an automatic upgrade.
+Accepted after Debug and ReleaseSafe builds used the immutable Zig package
+hash and compiled the pinned Turso engine source. A mismatched prebuilt parent
+library was deliberately rejected by the binding's runtime version check. A
+stable-channel migration is a deliberate later decision, not an automatic
+upgrade.
 
 ## D06. Event write path
 

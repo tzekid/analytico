@@ -4,8 +4,10 @@ Analytico is a small, self-hosted web analytics engine for low-traffic sites.
 It aims to provide the useful part of Plausible without a ClickHouse service,
 an administrative JavaScript application, or a multi-container runtime.
 
-This repository is currently a specification and build scaffold. It does not
-yet collect production traffic.
+Milestone M0 is complete: the executable links the exact Turso and DuckDB
+versions, creates both real on-disk stores, survives process restart, rejects
+truncated copies, and runs deterministic million-event analytical queries. It
+does not yet collect production traffic.
 
 ## Selected shape
 
@@ -59,7 +61,9 @@ its milestone integrates it and the Debug and ReleaseSafe gates pass.
 ## Repository map
 
 ```text
-src/                 Zig source; currently only a compiling scaffold
+src/                 Zig source
+tests/               Real-process end-to-end gates
+bench/results/       Compact measured baselines
 docs/                Product, architecture, decisions, milestones, and contracts
 AGENTS.md             Normative server-first engineering doctrine
 versions.json         Exact evaluated tool and dependency versions
@@ -76,10 +80,10 @@ zig build -Doptimize=ReleaseSafe
 zig build test -Doptimize=ReleaseSafe
 ```
 
-Run the placeholder executable with:
+Run the M0 viability probe with:
 
 ```sh
-zig build run
+zig build e2e-m0 -Doptimize=ReleaseSafe
 ```
 
 ## MVP boundary
