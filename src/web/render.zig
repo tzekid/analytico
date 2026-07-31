@@ -20,7 +20,8 @@ pub const headers = html_headers;
 pub fn page(output: *std.Io.Writer, value: model.Page) !void {
     try head(output, "Dashboard");
     try output.writeAll(
-        "<header><h1>Analytico</h1><div><span class=\"muted\">private dashboard</span> " ++
+        "<header><h1>Analytico</h1><div><a href=\"/admin/security\">Security</a> " ++
+            "<span class=\"muted\">private dashboard</span> " ++
             "<form class=\"inline\" method=\"post\" action=\"/admin/logout\" hx-boost=\"false\">" ++
             "<input type=\"hidden\" name=\"csrf\" value=\"",
     );

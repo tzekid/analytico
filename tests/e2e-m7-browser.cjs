@@ -4,12 +4,11 @@ const assert = require("node:assert/strict");
 const { chromium } = require("playwright");
 
 const origin = process.argv[2];
-const username = process.argv[3];
-const password = process.argv[4];
-const mode = process.argv[5] || "normal";
-if (!origin || !username || !password) {
+const sessionToken = process.argv[3];
+const mode = process.argv[4] || "normal";
+if (!origin || !sessionToken) {
   throw new Error(
-    "usage: node e2e-m7-browser.cjs <origin> <username> <password> [normal|timeout]",
+    "usage: node e2e-m7-browser.cjs <origin> <session-token> [normal|timeout]",
   );
 }
 
@@ -33,9 +32,8 @@ async function launch() {
 async function normal() {
   const browser = await launch();
   try {
-    const context = await browser.newContext({
-      httpCredentials: { username, password },
-    });
+    const context = await browser.newContext();
+    await addSession(context);
     const page = await context.newPage();
     const startup = [];
     const enhanced = [];
@@ -202,8 +200,8 @@ async function normal() {
 
     await context.close();
 
-    await fallbackContext(browser, origin, username, password, "abort");
-    await fallbackContext(browser, origin, username, password, "corrupt");
+    await fallbackContext(browser, "abort");
+    await fallbackContext(browser, "corrupt");
   } finally {
     await browser.close();
   }
@@ -223,10 +221,9 @@ async function normal() {
   );
 }
 
-async function fallbackContext(browser, origin, username, password, behavior) {
-  const context = await browser.newContext({
-    httpCredentials: { username, password },
-  });
+async function fallbackContext(browser, behavior) {
+  const context = await browser.newContext();
+  await addSession(context);
   const page = await context.newPage();
   await page.route("**/admin/htmx.*.js", async (route) => {
     if (behavior === "abort") {
@@ -256,9 +253,8 @@ async function fallbackContext(browser, origin, username, password, behavior) {
 async function timeout() {
   const browser = await launch();
   try {
-    const context = await browser.newContext({
-      httpCredentials: { username, password },
-    });
+    const context = await browser.newContext();
+    await addSession(context);
     const page = await context.newPage();
     let response = await page.goto(
       `${origin}/admin?${range}&report=overview`,
@@ -295,6 +291,16 @@ async function timeout() {
       retry: "preserved-deep-link",
     }) + "\n",
   );
+}
+
+async function addSession(context) {
+  await context.addCookies([{
+    name: "analytico_session",
+    value: sessionToken,
+    url: origin,
+    httpOnly: true,
+    sameSite: "Strict",
+  }]);
 }
 
 (mode === "timeout" ? timeout() : normal()).catch((error) => {

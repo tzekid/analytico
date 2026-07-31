@@ -210,7 +210,6 @@ pub fn build(b: *std.Build) void {
         "scripts/rehearse-rollback.sh",
     });
     rollback_e2e.addArtifactArg(app);
-    rollback_e2e.addArg(turso_native_path orelse "source");
     rollback_e2e.step.dependOn(b.getInstallStep());
     b.step(
         "e2e-rollback",

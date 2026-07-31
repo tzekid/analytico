@@ -4,11 +4,10 @@ const assert = require("node:assert/strict");
 const { chromium } = require("playwright");
 
 const origin = process.argv[2];
-const username = process.argv[3];
-const password = process.argv[4];
-if (!origin || !username || !password) {
+const sessionToken = process.argv[3];
+if (!origin || !sessionToken) {
   throw new Error(
-    "usage: node e2e-m6-browser.cjs <dashboard-origin> <username> <password>",
+    "usage: node e2e-m6-browser.cjs <dashboard-origin> <session-token>",
   );
 }
 
@@ -31,8 +30,14 @@ async function main() {
   try {
     const context = await browser.newContext({
       javaScriptEnabled: false,
-      httpCredentials: { username, password },
     });
+    await context.addCookies([{
+      name: "analytico_session",
+      value: sessionToken,
+      url: origin,
+      httpOnly: true,
+      sameSite: "Strict",
+    }]);
     const page = await context.newPage();
     await page.setViewportSize({ width: 360, height: 640 });
     const cdp = await context.newCDPSession(page);

@@ -41,9 +41,7 @@ trap cleanup EXIT
 server_port=$((47000 + ($$ % 700)))
 proxy_port=$((48000 + ($$ % 700)))
 upstream="http://127.0.0.1:$server_port"
-dashboard="http://127.0.0.1:$proxy_port"
-username='admin'
-password=m6-fixture-password
+dashboard="http://localhost:$proxy_port"
 data="$fixture/data"
 
 "$binary" init "$data" >/dev/null
@@ -56,6 +54,8 @@ site_id=$("$binary" site list "$data" |
 "$binary" funnel add "$data" example Journey \
     path=/ path=/pricing event=signup >/dev/null
 "$binary" m3 seed "$data" "$site_id" >/dev/null
+"$binary" auth configure "$data" "$dashboard" >/dev/null
+setup_url=$("$binary" auth bootstrap "$data" --ttl 10m | sed -n '2p')
 
 start_server() {
     "$binary" serve --listen "127.0.0.1:$server_port" \
@@ -75,18 +75,15 @@ start_server() {
 }
 
 start_server
-admin_hash=$(caddy hash-password --plaintext "$password")
 {
     printf '{\n\tadmin off\n}\n'
     sed \
-        -e "s|^analytics-admin\\.example {|http://127.0.0.1:$proxy_port {|" \
+        -e "s|^analytics-admin\\.example {|http://localhost:$proxy_port {|" \
         -e "s|127\\.0\\.0\\.1:4318|127.0.0.1:$server_port|" \
         "$dashboard_caddyfile"
 } >"$fixture/Caddyfile"
-ANALYTICO_ADMIN_HASH=$admin_hash caddy validate \
-    --config "$fixture/Caddyfile" >"$fixture/caddy.validate" 2>&1
-ANALYTICO_ADMIN_HASH=$admin_hash \
-    XDG_DATA_HOME="$fixture/caddy-data" \
+caddy validate --config "$fixture/Caddyfile" >"$fixture/caddy.validate" 2>&1
+XDG_DATA_HOME="$fixture/caddy-data" \
     XDG_CONFIG_HOME="$fixture/caddy-config" \
     caddy run --config "$fixture/Caddyfile" \
     >"$fixture/caddy.stdout" 2>"$fixture/caddy.stderr" &
@@ -94,33 +91,40 @@ caddy_pid=$!
 for _ in {1..100}; do
     status=$(curl --silent --output /dev/null --write-out '%{http_code}' \
         "$dashboard/admin" || true)
-    [[ "$status" == 401 ]] && break
+    [[ "$status" == 303 ]] && break
     sleep 0.02
 done
-test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
-    "$dashboard/admin")" = 401
+test "$status" = 303
+
+cookie_file="$fixture/session.cookie"
+TMPDIR="$fixture" NODE_PATH="$module_root" \
+    PLAYWRIGHT_BROWSERS_PATH="$browser_root" \
+    ANALYTICO_CHROMIUM_PATH="$chromium_path" \
+    node tests/e2e-passkey-session.cjs "$dashboard" "$setup_url" "$cookie_file"
+session_cookie=$(<"$cookie_file")
+cookie="analytico_session=$session_cookie"
 
 range='site=example&start=2025-01-01&end=2025-01-02&report=overview'
-curl --silent --fail --user "$username:$password" \
+curl --silent --fail --cookie "$cookie" \
     "$dashboard/admin?$range" >"$fixture/page-one.html"
-curl --silent --fail --user "$username:$password" \
+curl --silent --fail --cookie "$cookie" \
     "$dashboard/admin?$range" >"$fixture/page-two.html"
 cmp "$fixture/page-one.html" "$fixture/page-two.html"
-curl --silent --fail --user "$username:$password" \
+curl --silent --fail --cookie "$cookie" \
     --dump-header "$fixture/page.headers" --output /dev/null \
     "$dashboard/admin?$range"
 grep -Fiq 'Content-Security-Policy:' "$fixture/page.headers"
 html_gzip_bytes=$(gzip --stdout "$fixture/page-one.html" | wc -c)
 css_path=$(grep -o 'href="/admin/[^"]*\.css"' \
     "$fixture/page-one.html" | head -1 | cut -d '"' -f 2)
-curl --silent --fail --user "$username:$password" \
+curl --silent --fail --cookie "$cookie" \
     "$dashboard$css_path" >"$fixture/app.css"
 css_gzip_bytes=$(gzip --stdout "$fixture/app.css" | wc -c)
 test "$html_gzip_bytes" -le 32768
 test "$css_gzip_bytes" -le 12288
 rss_before=$(awk '$1 == "VmRSS:" { print $2 }' "/proc/$server_pid/status")
 for _ in {1..100}; do
-    curl --silent --fail --user "$username:$password" \
+    curl --silent --fail --cookie "$cookie" \
         "$dashboard/admin?$range" >/dev/null
 done
 rss_after=$(awk '$1 == "VmRSS:" { print $2 }' "/proc/$server_pid/status")
@@ -130,14 +134,14 @@ test "$rss_growth_kib" -le 8192
 TMPDIR="$fixture" NODE_PATH="$module_root" \
     PLAYWRIGHT_BROWSERS_PATH="$browser_root" \
     ANALYTICO_CHROMIUM_PATH="$chromium_path" \
-    node tests/e2e-m6-browser.cjs "$dashboard" "$username" "$password" \
+    node tests/e2e-m6-browser.cjs "$dashboard" "$session_cookie" \
     >"$fixture/browser.json"
 
-csrf=$(grep -Eo 'name="csrf" value="[a-f0-9]{32}"' \
+csrf=$(grep -Eo 'name="csrf" value="[A-Za-z0-9_-]{43}"' \
     "$fixture/page-one.html" | head -1 | cut -d '"' -f 4)
-test "${#csrf}" = 32
+test "${#csrf}" = 43
 status=$(curl --silent --output "$fixture/cross-origin.html" \
-    --write-out '%{http_code}' --user "$username:$password" \
+    --write-out '%{http_code}' --cookie "$cookie" \
     -X POST "$dashboard/admin/goals" \
     -H 'Content-Type: application/x-www-form-urlencoded' \
     -H 'Origin: https://attacker.example' \
@@ -149,7 +153,7 @@ status=$(curl --silent --output "$fixture/cross-origin.html" \
 test "$status" = 403
 grep -Fq 'modifying form did not come from this dashboard origin' \
     "$fixture/cross-origin.html"
-curl --silent --fail --user "$username:$password" \
+curl --silent --fail --cookie "$cookie" \
     "$dashboard/admin?$range" >"$fixture/after-cross-origin.html"
 if grep -Fq 'Cross origin' "$fixture/after-cross-origin.html"; then
     echo "cross-origin mutation was persisted" >&2
@@ -162,18 +166,18 @@ server_pid=
 "$binary" m3 million "$data" "$site_id" >/dev/null
 start_server --report-timeout-ms 1
 status=$(curl --silent --output "$fixture/timeout.html" \
-    --write-out '%{http_code}' --user "$username:$password" \
+    --write-out '%{http_code}' --cookie "$cookie" \
     "$dashboard/admin?site=example&start=2025-01-01&end=2025-01-02&report=overview")
 test "$status" = 503
 grep -Fq 'Report timed out' "$fixture/timeout.html"
 grep -Fq 'Narrow the UTC date range and retry' "$fixture/timeout.html"
 grep -Fq 'start=2025-01-01' "$fixture/timeout.html"
 test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
-    --user "$username:$password" "$dashboard$css_path")" = 200
+    --cookie "$cookie" "$dashboard$css_path")" = 200
 
 cat "$fixture/browser.json"
 printf '{"html_gzip_bytes":%s,"css_gzip_bytes":%s,' \
     "$html_gzip_bytes" "$css_gzip_bytes"
 printf '"rss_growth_kib_after_100_views":%s,' "$rss_growth_kib"
-printf '"basic_auth":"challenged","csrf":"enforced","timeout_page":"rendered"}\n'
+printf '"passkey_session":"enforced","csrf":"enforced","timeout_page":"rendered"}\n'
 echo "M6 server-rendered dashboard real-browser checks passed"

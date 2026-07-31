@@ -66,9 +66,10 @@
     };
   }
 
-  async function post(url, body, bootstrapToken) {
+  async function post(url, body, bootstrapToken, csrfToken) {
     var headers = { "Content-Type": "application/json", Accept: "application/json" };
     if (bootstrapToken) headers["X-Analytico-Bootstrap"] = bootstrapToken;
+    if (csrfToken) headers["X-Analytico-Csrf"] = csrfToken;
     var response = await fetch(url, {
       method: "POST",
       credentials: "same-origin",
@@ -163,6 +164,46 @@
     });
   }
 
+  function addPasskeyPage() {
+    var form = document.getElementById("add-passkey-form");
+    if (!form) return;
+    var button = document.getElementById("add-passkey-button");
+    var error = document.getElementById("add-passkey-error");
+    var label = document.getElementById("add-passkey-label");
+    var csrf = form.querySelector('input[name="csrf"]').value;
+    if (!supported()) {
+      button.disabled = true;
+      error.textContent = "Passkeys require a current browser and a secure connection.";
+      return;
+    }
+    form.addEventListener("submit", async function (event) {
+      event.preventDefault();
+      error.textContent = "";
+      button.disabled = true;
+      button.textContent = "Waiting for your device…";
+      try {
+        var options = await post("/admin/security/passkeys/options", {}, "", csrf);
+        var credential = await navigator.credentials.create({ publicKey: creationOptions(options.publicKey) });
+        if (!credential) throw new Error("Passkey creation was cancelled.");
+        await post(
+          "/admin/security/passkeys/verify",
+          registrationPayload(options.challenge_id, credential, label.value.trim()),
+          "",
+          csrf
+        );
+        window.location.replace("/admin/security?notice=passkey-added");
+      } catch (failure) {
+        error.textContent = failure && failure.name === "NotAllowedError"
+          ? "Passkey creation was cancelled or timed out."
+          : failure.message;
+      } finally {
+        button.disabled = false;
+        button.textContent = "Add passkey";
+      }
+    });
+  }
+
   setupPage();
   loginPage();
+  addPasskeyPage();
 })();

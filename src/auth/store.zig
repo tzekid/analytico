@@ -486,16 +486,17 @@ pub const Store = struct {
         return result;
     }
 
-    pub fn listSessions(self: Store, allocator: Allocator) ![]Session {
-        var rows = try self.metadata.connection.query(
+    pub fn listSessions(self: Store, allocator: Allocator, now: i64) ![]Session {
+        var rows = try self.metadata.connection.queryParams(
             \\SELECT token_hash, user_id, csrf_token,
             \\  created_at_utc_seconds, expires_at_utc_seconds,
             \\  last_seen_at_utc_seconds, revoked_at_utc_seconds
             \\FROM auth_sessions
             \\WHERE revoked_at_utc_seconds IS NULL
+            \\  AND expires_at_utc_seconds > ?1
             \\ORDER BY created_at_utc_seconds DESC LIMIT 16
         ,
-            &.{},
+            .{now},
             .{},
         );
         defer rows.deinit();

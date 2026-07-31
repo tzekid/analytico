@@ -43,6 +43,8 @@ sudo -u analytico /opt/analytico/bin/analytico \
 sudo -u analytico /opt/analytico/bin/analytico \
   funnel add /var/lib/analytico example signup-flow \
   path=/pricing event=signup
+sudo -u analytico /opt/analytico/bin/analytico \
+  auth configure /var/lib/analytico https://analytics-admin.example
 ```
 
 `site add`, goal, and funnel commands fail if an identifier is invalid or
@@ -63,9 +65,10 @@ and `img-src` directives. Do not replace the entire Content-Security-Policy.
 The script is deferred, has no dependency, and the noscript pixel records a
 bounded pageview when JavaScript is disabled.
 
-## 4. Start the private process and public collector
+## 4. Start the process and both isolated hostnames
 
-Replace `analytics.example` in `deploy/Caddyfile`, then:
+Replace `analytics.example` in `deploy/Caddyfile` and
+`analytics-admin.example` in `deploy/Caddyfile.dashboard`, then:
 
 ```sh
 sudo install -m 0644 deploy/analytico.service /etc/systemd/system/
@@ -73,12 +76,36 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now analytico
 curl --fail http://127.0.0.1:4318/readyz
 caddy validate --config deploy/Caddyfile
+caddy validate --config deploy/Caddyfile.dashboard
 ```
 
-Install or import the validated Caddy vhost. Only the tracker and collection
-routes are public; the process remains bound to loopback.
+Install or import both validated Caddy vhosts. Only the tracker and collection
+routes exist on the public hostname. The dashboard hostname exposes only
+`/admin` and `/admin/*`; the process remains bound to loopback.
 
-## 5. Acceptance checklist
+## 5. Enroll and accept the owner passkey
+
+With the service running behind TLS, print one ten-minute setup link without
+copying it to logs or chat:
+
+```sh
+sudo -u analytico /opt/analytico/bin/analytico \
+  auth bootstrap /var/lib/analytico --ttl 10m
+```
+
+Open it on the intended Apple device, create the synced owner passkey, then:
+
+- prove `/admin/security` lists it without exposing credential material;
+- add an independent second passkey when practical;
+- sign out and perform a fresh passkey login;
+- open the dashboard with JavaScript disabled after login;
+- verify an anonymous browser receives the login page and no report state.
+
+Record the actual Safari, Touch ID or Face ID, and iCloud synchronization check
+as a manual platform result. A virtual authenticator proves the protocol and
+server behavior but cannot prove Apple's synchronization UI.
+
+## 6. Site acceptance checklist
 
 Repeat this for every site before changing Plausible:
 
@@ -99,7 +126,7 @@ sudo -u analytico /opt/analytico/bin/analytico \
   report /var/lib/analytico example "$today" "$today" overview
 ```
 
-## 6. Take and verify the first backup
+## 7. Take and verify the first backup
 
 ```sh
 sudo systemctl stop analytico
@@ -118,7 +145,7 @@ curl --fail http://127.0.0.1:4318/readyz
 Keep the verified backup and release archive together. Restore and rollback
 details are in `OPERATIONS.md`.
 
-## 7. Optional Plausible history archive
+## 8. Optional Plausible history archive
 
 This is separate from Analytico cutover. It does not modify or import history.
 For a full export, use Plausible's site settings under **Imports & Exports →
@@ -144,15 +171,16 @@ unset PLAUSIBLE_TOKEN PLAUSIBLE_SITE
 Treat exported files as private analytics data. The aggregate snapshot is not
 a substitute for Plausible's full CSV export.
 
-## 8. Owner checkpoint
+## 9. Owner checkpoint
 
-Analytico does not stop or remove Plausible, PostgreSQL, ClickHouse, their
-containers, volumes, or data. Only the owner does that, after:
+Do not delete Plausible, PostgreSQL, ClickHouse, their volumes, or exports as
+part of the cutover. Stop the old stack only after:
 
 - every site passes the acceptance checklist;
 - a verified Analytico backup exists;
 - any desired Plausible export has completed and been copied off-host; and
-- the owner accepts starting Analytico with fresh history.
+- the owner accepts starting Analytico with fresh history; and
+- passkey logout and fresh login both work from the intended device.
 
 If acceptance fails, remove the Analytico tracker snippet, restore the prior
 CSP, and keep Plausible unchanged.

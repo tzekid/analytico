@@ -33,6 +33,7 @@ async function main() {
     const requested = [];
     const failures = [];
     let verifyBody = "";
+    let renameRequest = null;
     page.on("request", (request) => requested.push(request.url()));
     page.on("console", (message) => {
       if (message.type() === "error") failures.push(message.text());
@@ -41,6 +42,9 @@ async function main() {
     page.on("request", (request) => {
       if (request.url() === `${origin}/admin/auth/setup/verify`) {
         verifyBody = request.postData() || "";
+      }
+      if (request.url() === `${origin}/admin/security/passkeys/rename`) {
+        renameRequest = request;
       }
     });
     let response = await page.goto(setupUrl, { waitUntil: "load" });
@@ -99,34 +103,97 @@ async function main() {
     assert.equal(await anonymousPage.locator("#report").count(), 0);
     await anonymous.close();
 
-    await page.locator('form[action="/admin/logout"] button').click();
-    await page.waitForURL(`${origin}/admin/login`);
-    assert.equal(await page.locator("#login-button").count(), 1);
-    await page.locator("#login-button").click();
+    await page.goto(`${origin}/admin/security`);
+    const firstCredentials = await cdp.send("WebAuthn.getCredentials", {
+      authenticatorId: authenticator.authenticatorId
+    });
+    assert.equal(firstCredentials.credentials.length, 1);
+    const firstCredential = firstCredentials.credentials[0];
+    await cdp.send("WebAuthn.setAutomaticPresenceSimulation", {
+      authenticatorId: authenticator.authenticatorId,
+      enabled: false
+    });
+    const backupAuthenticator = await cdp.send("WebAuthn.addVirtualAuthenticator", {
+      options: {
+        protocol: "ctap2",
+        transport: "usb",
+        hasResidentKey: true,
+        hasUserVerification: true,
+        isUserVerified: true,
+        automaticPresenceSimulation: true
+      }
+    });
+    await page.locator("#add-passkey-label").fill("Backup passkey");
+    await page.locator("#add-passkey-button").click();
     try {
-      await page.waitForURL(`${origin}/admin`, { timeout: 15000 });
+      await page.waitForURL(`${origin}/admin/security?notice=passkey-added`, { timeout: 15000 });
     } catch (_) {
       throw new Error(
-        "login failed: " + await page.locator("#login-error").textContent() +
-        " console=" + failures.join(" | ") +
-        " requested=" + requested.slice(-8).join(" | ") +
-        " credentials=" + JSON.stringify(await cdp.send("WebAuthn.getCredentials", {
-          authenticatorId: authenticator.authenticatorId
-        }))
+        "add passkey failed: " + await page.locator("#add-passkey-error").textContent() +
+        " console=" + failures.join(" | ") + " requested=" + requested.slice(-8).join(" | ")
       );
     }
-    assert.equal(await page.locator("#report").count(), 1);
+    const backupCredentials = await cdp.send("WebAuthn.getCredentials", {
+      authenticatorId: backupAuthenticator.authenticatorId
+    });
+    assert.equal(backupCredentials.credentials.length, 1);
+    const secondCredential = backupCredentials.credentials[0];
+    assert.notEqual(secondCredential.credentialId, firstCredential.credentialId);
+    const backupItem = page.locator("li").filter({ hasText: "Backup passkey" });
+    await backupItem.locator('form[action="/admin/security/passkeys/rename"] input[name="label"]').fill("Phone passkey");
+    await backupItem.locator('form[action="/admin/security/passkeys/rename"] button').click();
+    await page.waitForTimeout(500);
+    if (!page.url().includes("/admin/security?")) {
+      const headers = renameRequest ? await renameRequest.allHeaders() : {};
+      const posted = renameRequest ? renameRequest.postData() || "" : "";
+      throw new Error("rename did not navigate: " + page.url() + " body=" + await page.locator("body").textContent() +
+        " origin=" + headers.origin + " content-type=" + headers["content-type"] +
+        " fields=" + posted.split("&").map((field) => field.split("=")[0]).join(",") +
+        " requested=" + requested.slice(-5).join(" | "));
+    }
+    assert.equal(page.url(), `${origin}/admin/security?notice=passkey-renamed`);
+    assert.equal(await page.locator("li strong", { hasText: "Phone passkey" }).count(), 1);
 
-    const freshSession = (await context.cookies(origin)).find(
+    await cdp.send("WebAuthn.setAutomaticPresenceSimulation", {
+      authenticatorId: authenticator.authenticatorId,
+      enabled: true
+    });
+    await cdp.send("WebAuthn.setAutomaticPresenceSimulation", {
+      authenticatorId: backupAuthenticator.authenticatorId,
+      enabled: false
+    });
+    await context.clearCookies();
+    await page.goto(`${origin}/admin/login`);
+    await page.locator("#login-button").click();
+    await page.waitForURL(`${origin}/admin`);
+    const firstLoginSession = (await context.cookies(origin)).find(
       (cookie) => cookie.name === "analytico_session"
     );
-    assert.ok(freshSession);
-    assert.notEqual(freshSession.value, session.value);
+    assert.ok(firstLoginSession);
+
+    await cdp.send("WebAuthn.setAutomaticPresenceSimulation", {
+      authenticatorId: authenticator.authenticatorId,
+      enabled: false
+    });
+    await cdp.send("WebAuthn.setAutomaticPresenceSimulation", {
+      authenticatorId: backupAuthenticator.authenticatorId,
+      enabled: true
+    });
+    await context.clearCookies();
+    await page.goto(`${origin}/admin/login`);
+    await page.locator("#login-button").click();
+    await page.waitForURL(`${origin}/admin`);
+    const secondLoginSession = (await context.cookies(origin)).find(
+      (cookie) => cookie.name === "analytico_session"
+    );
+    assert.ok(secondLoginSession);
+    assert.notEqual(firstLoginSession.value, secondLoginSession.value);
+
     const csrf = await page.locator('input[name="csrf"]').first().getAttribute("value");
     assert.ok(csrf && csrf.length >= 32);
     const crossOrigin = await context.request.post(`${origin}/admin/goals`, {
       headers: {
-        Cookie: `analytico_session=${freshSession.value}`,
+        Cookie: `analytico_session=${secondLoginSession.value}`,
         "Content-Type": "application/x-www-form-urlencoded",
         Origin: "https://attacker.example"
       },
@@ -134,8 +201,28 @@ async function main() {
     });
     assert.equal(crossOrigin.status(), 403);
 
+    await page.goto(`${origin}/admin/security`);
+    while (await page.locator('form[action="/admin/security/sessions/revoke"] button').count()) {
+      await page.locator('form[action="/admin/security/sessions/revoke"] button').first().click();
+      await page.waitForURL(`${origin}/admin/security?notice=session-revoked`);
+    }
+    const revokedSession = await browser.newContext({ javaScriptEnabled: false });
+    await revokedSession.addCookies([firstLoginSession]);
+    const revokedPage = await revokedSession.newPage();
+    await revokedPage.goto(`${origin}/admin`);
+    assert.equal(await revokedPage.locator("#login-button").count(), 1);
+    await revokedSession.close();
+
+    const firstPasskeyItem = page.locator("li").filter({ hasText: "Virtual owner passkey" });
+    await firstPasskeyItem.locator('form[action="/admin/security/passkeys/revoke"] button').click();
+    await page.waitForURL(`${origin}/admin/security?notice=passkey-revoked`);
+    const lastPasskeyItem = page.locator("li").filter({ hasText: "Phone passkey" });
+    await lastPasskeyItem.locator('form[action="/admin/security/passkeys/revoke"] button').click();
+    await page.waitForURL(`${origin}/admin/security?error=last-passkey`);
+    assert.equal(await page.getByText("The last active passkey cannot be revoked.").count(), 1);
+
     const noScript = await browser.newContext({ javaScriptEnabled: false });
-    await noScript.addCookies([freshSession]);
+    await noScript.addCookies([secondLoginSession]);
     const noScriptPage = await noScript.newPage();
     response = await noScriptPage.goto(`${origin}/admin`);
     assert.equal(response.status(), 200);
@@ -164,7 +251,7 @@ async function main() {
     try {
       await page.waitForURL(`${origin}/admin`, { timeout: 15000 });
     } catch (_) {
-      throw new Error("second login failed: " + await page.locator("#login-error").textContent());
+      throw new Error("final login failed: " + await page.locator("#login-error").textContent());
     }
     assert.equal(await page.locator("#report").count(), 1);
 
@@ -179,7 +266,11 @@ async function main() {
   }
   process.stdout.write(JSON.stringify({
     setup: "ok",
-    login: "ok",
+    both_passkeys_login: "ok",
+    rename: "ok",
+    credential_revoke: "ok",
+    last_passkey: "protected",
+    other_sessions: "revoked",
     logout: "revoked",
     no_javascript_dashboard: "ok",
     csrf_origin: "enforced",

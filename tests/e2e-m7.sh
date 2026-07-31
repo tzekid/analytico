@@ -41,9 +41,7 @@ trap cleanup EXIT
 server_port=$((49000 + ($$ % 500)))
 proxy_port=$((49500 + ($$ % 400)))
 upstream="http://127.0.0.1:$server_port"
-dashboard="http://127.0.0.1:$proxy_port"
-username='admin'
-password=m7-fixture-password
+dashboard="http://localhost:$proxy_port"
 data="$fixture/data"
 
 "$binary" init "$data" >/dev/null
@@ -54,6 +52,8 @@ site_id=$("$binary" site list "$data" |
 "$binary" funnel add "$data" example Journey \
     path=/ path=/pricing event=signup >/dev/null
 "$binary" m3 seed "$data" "$site_id" >/dev/null
+"$binary" auth configure "$data" "$dashboard" >/dev/null
+setup_url=$("$binary" auth bootstrap "$data" --ttl 10m | sed -n '2p')
 
 start_server() {
     "$binary" serve --listen "127.0.0.1:$server_port" \
@@ -73,16 +73,14 @@ start_server() {
 }
 
 start_server
-admin_hash=$(caddy hash-password --plaintext "$password")
 {
     printf '{\n\tadmin off\n}\n'
     sed \
-        -e "s|^analytics-admin\\.example {|http://127.0.0.1:$proxy_port {|" \
+        -e "s|^analytics-admin\\.example {|http://localhost:$proxy_port {|" \
         -e "s|127\\.0\\.0\\.1:4318|127.0.0.1:$server_port|" \
         "$dashboard_caddyfile"
 } >"$fixture/Caddyfile"
-ANALYTICO_ADMIN_HASH=$admin_hash \
-    XDG_DATA_HOME="$fixture/caddy-data" \
+XDG_DATA_HOME="$fixture/caddy-data" \
     XDG_CONFIG_HOME="$fixture/caddy-config" \
     caddy run --config "$fixture/Caddyfile" \
     >"$fixture/caddy.stdout" 2>"$fixture/caddy.stderr" &
@@ -90,13 +88,21 @@ caddy_pid=$!
 for _ in {1..100}; do
     status=$(curl --silent --output /dev/null --write-out '%{http_code}' \
         "$dashboard/admin" || true)
-    [[ "$status" == 401 ]] && break
+    [[ "$status" == 303 ]] && break
     sleep 0.02
 done
-test "$status" = 401
+test "$status" = 303
+
+cookie_file="$fixture/session.cookie"
+TMPDIR="$fixture" NODE_PATH="$module_root" \
+    PLAYWRIGHT_BROWSERS_PATH="$browser_root" \
+    ANALYTICO_CHROMIUM_PATH="$chromium_path" \
+    node tests/e2e-passkey-session.cjs "$dashboard" "$setup_url" "$cookie_file"
+session_cookie=$(<"$cookie_file")
+cookie="analytico_session=$session_cookie"
 
 page="$fixture/page.html"
-curl --silent --fail --user "$username:$password" \
+curl --silent --fail --cookie "$cookie" \
     "$dashboard/admin?site=example&start=2025-01-01&end=2025-01-02&report=overview" \
     >"$page"
 grep -Fq 'hx-boost:inherited="true"' "$page"
@@ -106,13 +112,13 @@ if grep -Eq 'https?://[^"]+htmx|cdn\\.' "$page"; then
     exit 1
 fi
 
-curl --silent --fail --user "$username:$password" \
+curl --silent --fail --cookie "$cookie" \
     -H 'Accept-Encoding: identity' \
     "$dashboard/admin/htmx.28fae7bb.js" >"$fixture/htmx.js"
 test "$(wc -c <"$fixture/htmx.js")" = 36282
 test "$(sha256sum "$fixture/htmx.js" | awk '{ print $1 }')" = \
     28fae7bbe8e8142b702debb9d5234a9a436d9435a4b5165b195aa1a7ed840d25
-curl --silent --fail --user "$username:$password" \
+curl --silent --fail --cookie "$cookie" \
     --dump-header "$fixture/htmx.headers" \
     -H 'Accept-Encoding: gzip' \
     "$dashboard/admin/htmx.28fae7bb.js" >"$fixture/htmx.js.gz"
@@ -128,7 +134,7 @@ test "$(wc -c <"$fixture/htmx.js.gz")" -le 16384
 TMPDIR="$fixture" NODE_PATH="$module_root" \
     PLAYWRIGHT_BROWSERS_PATH="$browser_root" \
     ANALYTICO_CHROMIUM_PATH="$chromium_path" \
-    node tests/e2e-m7-browser.cjs "$dashboard" "$username" "$password" normal \
+    node tests/e2e-m7-browser.cjs "$dashboard" "$session_cookie" normal \
     >"$fixture/browser-normal.json"
 
 kill -TERM "$server_pid"
@@ -139,7 +145,7 @@ start_server --report-timeout-ms 1
 TMPDIR="$fixture" NODE_PATH="$module_root" \
     PLAYWRIGHT_BROWSERS_PATH="$browser_root" \
     ANALYTICO_CHROMIUM_PATH="$chromium_path" \
-    node tests/e2e-m7-browser.cjs "$dashboard" "$username" "$password" timeout \
+    node tests/e2e-m7-browser.cjs "$dashboard" "$session_cookie" timeout \
     >"$fixture/browser-timeout.json"
 
 cat "$fixture/browser-normal.json"

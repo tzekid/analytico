@@ -16,6 +16,28 @@ pub const Dependencies = struct {
     io: std.Io,
     metadata: *meta.Store,
     policy: store_mod.Policy,
+    limiter: *Limiter,
+};
+
+pub const Limiter = struct {
+    window_started_at: i64 = 0,
+    attempts: u16 = 0,
+
+    const window_seconds: i64 = 60;
+    const maximum_attempts: u16 = 24;
+
+    pub fn allow(self: *Limiter) bool {
+        const now = service.nowSeconds() catch return false;
+        if (self.window_started_at == 0 or now - self.window_started_at >= window_seconds or
+            now < self.window_started_at)
+        {
+            self.window_started_at = now;
+            self.attempts = 0;
+        }
+        if (self.attempts >= maximum_attempts) return false;
+        self.attempts += 1;
+        return true;
+    }
 };
 
 pub fn handlePublic(
@@ -104,7 +126,44 @@ pub fn handlePrivate(
     session: service.Session,
     output: *std.Io.Writer,
 ) !bool {
-    if (!std.mem.eql(u8, request.path(), "/admin/logout")) return false;
+    const path = request.path();
+    if (std.mem.eql(u8, path, "/admin/security")) {
+        if (!std.mem.eql(u8, request.method, "GET")) {
+            try methodNotAllowed(output, "GET");
+        } else {
+            try securityPage(dependencies, request, session, output);
+        }
+        return true;
+    }
+    if (std.mem.eql(u8, path, "/admin/security/passkeys/options")) {
+        if (!std.mem.eql(u8, request.method, "POST")) {
+            try methodNotAllowed(output, "POST");
+        } else {
+            try additionalOptions(dependencies, request, session, output);
+        }
+        return true;
+    }
+    if (std.mem.eql(u8, path, "/admin/security/passkeys/verify")) {
+        if (!std.mem.eql(u8, request.method, "POST")) {
+            try methodNotAllowed(output, "POST");
+        } else {
+            try additionalVerify(dependencies, request, session, output);
+        }
+        return true;
+    }
+    if (std.mem.eql(u8, path, "/admin/security/passkeys/rename")) {
+        try credentialAction(dependencies, request, session, output, .rename);
+        return true;
+    }
+    if (std.mem.eql(u8, path, "/admin/security/passkeys/revoke")) {
+        try credentialAction(dependencies, request, session, output, .revoke);
+        return true;
+    }
+    if (std.mem.eql(u8, path, "/admin/security/sessions/revoke")) {
+        try sessionRevoke(dependencies, request, session, output);
+        return true;
+    }
+    if (!std.mem.eql(u8, path, "/admin/logout")) return false;
     if (!std.mem.eql(u8, request.method, "POST")) {
         try methodNotAllowed(output, "POST");
         return true;
@@ -164,6 +223,10 @@ fn setupOptions(
     request: request_mod.Request,
     output: *std.Io.Writer,
 ) !void {
+    if (!dependencies.limiter.allow()) {
+        try jsonError(output, 429, "try_again_later");
+        return;
+    }
     if (!hasJsonContentType(try request.header("content-type"))) {
         try jsonError(output, 415, "json_required");
         return;
@@ -208,6 +271,10 @@ fn setupVerify(
     request: request_mod.Request,
     output: *std.Io.Writer,
 ) !void {
+    if (!dependencies.limiter.allow()) {
+        try jsonError(output, 429, "try_again_later");
+        return;
+    }
     if (!hasJsonContentType(try request.header("content-type"))) {
         try jsonError(output, 415, "json_required");
         return;
@@ -301,6 +368,10 @@ fn loginOptions(
     request: request_mod.Request,
     output: *std.Io.Writer,
 ) !void {
+    if (!dependencies.limiter.allow()) {
+        try jsonError(output, 429, "try_again_later");
+        return;
+    }
     if (!hasJsonContentType(try request.header("content-type"))) {
         try jsonError(output, 415, "json_required");
         return;
@@ -326,6 +397,10 @@ fn loginVerify(
     request: request_mod.Request,
     output: *std.Io.Writer,
 ) !void {
+    if (!dependencies.limiter.allow()) {
+        try jsonError(output, 429, "try_again_later");
+        return;
+    }
     if (!hasJsonContentType(try request.header("content-type"))) {
         try jsonError(output, 415, "json_required");
         return;
@@ -361,6 +436,208 @@ fn loginVerify(
         service.session_seconds,
     );
     try response.write(output, 200, "application/json; charset=utf-8", headers.written(), "{\"ok\":true}\n");
+}
+
+fn securityPage(
+    dependencies: Dependencies,
+    request: request_mod.Request,
+    session: service.Session,
+    output: *std.Io.Writer,
+) !void {
+    const auth_store = store_mod.Store{ .metadata = dependencies.metadata };
+    const credentials = try auth_store.listCredentials(dependencies.allocator);
+    defer {
+        for (credentials) |credential| credential.deinit(dependencies.allocator);
+        dependencies.allocator.free(credentials);
+    }
+    const sessions = try auth_store.listSessions(
+        dependencies.allocator,
+        try service.nowSeconds(),
+    );
+    defer {
+        for (sessions) |stored_session| stored_session.deinit(dependencies.allocator);
+        dependencies.allocator.free(sessions);
+    }
+    const current_hash = service.hashToken(session.token);
+    var body = std.Io.Writer.Allocating.init(dependencies.allocator);
+    try render.securityPage(&body.writer, .{
+        .credentials = credentials,
+        .sessions = sessions,
+        .current_session_hash = &current_hash,
+        .csrf_token = session.csrf_token,
+        .notice = securityNotice(request.target),
+        .error_message = securityErrorMessage(request.target),
+    });
+    try response.write(
+        output,
+        200,
+        "text/html; charset=utf-8",
+        render.authenticated_html_headers,
+        body.written(),
+    );
+}
+
+fn additionalOptions(
+    dependencies: Dependencies,
+    request: request_mod.Request,
+    session: service.Session,
+    output: *std.Io.Writer,
+) !void {
+    if (!dependencies.limiter.allow()) {
+        try jsonError(output, 429, "try_again_later");
+        return;
+    }
+    if (!try validJsonMutation(request, dependencies.policy.origin, session.csrf_token)) {
+        try jsonError(output, 403, "forbidden");
+        return;
+    }
+    var body = std.Io.Writer.Allocating.init(dependencies.allocator);
+    service.writeAdditionalRegistrationOptions(
+        appContext(dependencies),
+        session.user_id,
+        session.token,
+        &body.writer,
+    ) catch |err| {
+        try authError(output, err);
+        return;
+    };
+    try response.write(output, 200, "application/json; charset=utf-8", json_headers, body.written());
+}
+
+fn additionalVerify(
+    dependencies: Dependencies,
+    request: request_mod.Request,
+    session: service.Session,
+    output: *std.Io.Writer,
+) !void {
+    if (!dependencies.limiter.allow()) {
+        try jsonError(output, 429, "try_again_later");
+        return;
+    }
+    if (!try validJsonMutation(request, dependencies.policy.origin, session.csrf_token)) {
+        try jsonError(output, 403, "forbidden");
+        return;
+    }
+    const parsed = std.json.parseFromSlice(
+        RegistrationBody,
+        dependencies.allocator,
+        request.body,
+        .{ .ignore_unknown_fields = false },
+    ) catch {
+        try jsonError(output, 400, "invalid_passkey_response");
+        return;
+    };
+    defer parsed.deinit();
+    const issued = service.finishRegistration(appContext(dependencies), .{
+        .challenge_id = parsed.value.challenge_id,
+        .session_token = session.token,
+        .attestation_object = parsed.value.attestation_object,
+        .client_data_json = parsed.value.client_data_json,
+        .transports = parsed.value.transports,
+        .label = parsed.value.label,
+    }) catch |err| {
+        try authError(output, err);
+        return;
+    };
+    if (issued != null) {
+        var unexpected = issued.?;
+        unexpected.deinit(dependencies.allocator);
+        try jsonError(output, 500, "internal_error");
+        return;
+    }
+    try response.write(output, 201, "application/json; charset=utf-8", json_headers, "{\"ok\":true}\n");
+}
+
+const CredentialAction = enum { rename, revoke };
+
+fn credentialAction(
+    dependencies: Dependencies,
+    request: request_mod.Request,
+    session: service.Session,
+    output: *std.Io.Writer,
+    action: CredentialAction,
+) !void {
+    if (!std.mem.eql(u8, request.method, "POST")) {
+        try methodNotAllowed(output, "POST");
+        return;
+    }
+    if (!try validFormMutation(dependencies, request, session.csrf_token)) {
+        try textError(output, 403, "forbidden\n");
+        return;
+    }
+    const credential_id = (formValue(
+        dependencies.allocator,
+        request.body,
+        "credential_id",
+    ) catch null) orelse {
+        try redirectSecurity(dependencies.allocator, output, "error=invalid-request");
+        return;
+    };
+    switch (action) {
+        .rename => {
+            const label = (formValue(
+                dependencies.allocator,
+                request.body,
+                "label",
+            ) catch null) orelse {
+                try redirectSecurity(dependencies.allocator, output, "error=invalid-request");
+                return;
+            };
+            service.updateCredentialLabel(
+                appContext(dependencies),
+                credential_id,
+                label,
+            ) catch {
+                try redirectSecurity(dependencies.allocator, output, "error=invalid-request");
+                return;
+            };
+            try redirectSecurity(dependencies.allocator, output, "notice=passkey-renamed");
+        },
+        .revoke => {
+            service.revokeCredential(appContext(dependencies), credential_id) catch |err| {
+                try redirectSecurity(
+                    dependencies.allocator,
+                    output,
+                    if (err == error.LastCredential) "error=last-passkey" else "error=invalid-request",
+                );
+                return;
+            };
+            try redirectSecurity(dependencies.allocator, output, "notice=passkey-revoked");
+        },
+    }
+}
+
+fn sessionRevoke(
+    dependencies: Dependencies,
+    request: request_mod.Request,
+    session: service.Session,
+    output: *std.Io.Writer,
+) !void {
+    if (!std.mem.eql(u8, request.method, "POST")) {
+        try methodNotAllowed(output, "POST");
+        return;
+    }
+    if (!try validFormMutation(dependencies, request, session.csrf_token)) {
+        try textError(output, 403, "forbidden\n");
+        return;
+    }
+    const selected_hash = (formValue(
+        dependencies.allocator,
+        request.body,
+        "session_hash",
+    ) catch null) orelse {
+        try redirectSecurity(dependencies.allocator, output, "error=invalid-request");
+        return;
+    };
+    service.revokeOtherSession(
+        appContext(dependencies),
+        session.token,
+        selected_hash,
+    ) catch {
+        try redirectSecurity(dependencies.allocator, output, "error=invalid-request");
+        return;
+    };
+    try redirectSecurity(dependencies.allocator, output, "notice=session-revoked");
 }
 
 fn appContext(dependencies: Dependencies) service.Context {
@@ -439,6 +716,38 @@ fn hasFormContentType(value: ?[]const u8) bool {
 fn originMatches(request: request_mod.Request, expected: []const u8) !bool {
     const actual = (try request.header("origin")) orelse return false;
     return service.constantTimeEqual(actual, expected);
+}
+
+fn validJsonMutation(
+    request: request_mod.Request,
+    expected_origin: []const u8,
+    expected_csrf: []const u8,
+) !bool {
+    if (!hasJsonContentType(try request.header("content-type")) or
+        !try originMatches(request, expected_origin))
+    {
+        return false;
+    }
+    const actual_csrf = (try request.header("x-analytico-csrf")) orelse return false;
+    return service.constantTimeEqual(actual_csrf, expected_csrf);
+}
+
+fn validFormMutation(
+    dependencies: Dependencies,
+    request: request_mod.Request,
+    expected_csrf: []const u8,
+) !bool {
+    if (!hasFormContentType(try request.header("content-type")) or
+        !try originMatches(request, dependencies.policy.origin))
+    {
+        return false;
+    }
+    const actual_csrf = (formValue(
+        dependencies.allocator,
+        request.body,
+        "csrf",
+    ) catch null) orelse return false;
+    return service.constantTimeEqual(actual_csrf, expected_csrf);
 }
 
 fn formValue(
@@ -531,6 +840,37 @@ fn urlComponent(output: *std.Io.Writer, value: []const u8) !void {
             try output.writeByte(hex[byte & 0x0f]);
         }
     }
+}
+
+fn redirectSecurity(
+    allocator: std.mem.Allocator,
+    output: *std.Io.Writer,
+    query: []const u8,
+) !void {
+    var headers = std.Io.Writer.Allocating.init(allocator);
+    try headers.writer.print(
+        "Cache-Control: no-store\r\nLocation: /admin/security?{s}\r\n",
+        .{query},
+    );
+    try response.write(output, 303, "text/plain; charset=utf-8", headers.written(), "see other\n");
+}
+
+fn securityNotice(target: []const u8) []const u8 {
+    if (std.mem.indexOf(u8, target, "notice=passkey-added") != null) return "Passkey added.";
+    if (std.mem.indexOf(u8, target, "notice=passkey-renamed") != null) return "Passkey renamed.";
+    if (std.mem.indexOf(u8, target, "notice=passkey-revoked") != null) return "Passkey revoked.";
+    if (std.mem.indexOf(u8, target, "notice=session-revoked") != null) return "Session revoked.";
+    return "";
+}
+
+fn securityErrorMessage(target: []const u8) []const u8 {
+    if (std.mem.indexOf(u8, target, "error=last-passkey") != null) {
+        return "The last active passkey cannot be revoked.";
+    }
+    if (std.mem.indexOf(u8, target, "error=invalid-request") != null) {
+        return "The security change was invalid or stale. Reload and try again.";
+    }
+    return "";
 }
 
 fn authError(output: *std.Io.Writer, err: anyerror) !void {

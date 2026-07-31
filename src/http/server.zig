@@ -206,6 +206,7 @@ const Context = struct {
     key_path: []const u8,
     report_timeout_ms: u32,
     auth_policy: ?auth_store.Policy,
+    auth_limiter: auth_http.Limiter = .{},
     limiter: rate_limit.Limiter = .{},
     events_healthy: bool = true,
     counters: Counters = .{},
@@ -287,6 +288,7 @@ fn handle(context: *Context, stream: std.Io.net.Stream) !void {
             .io = context.io,
             .metadata = context.metadata,
             .policy = policy,
+            .limiter = &context.auth_limiter,
         };
         const auth_handled = auth_http.handlePublic(
             auth_dependencies,

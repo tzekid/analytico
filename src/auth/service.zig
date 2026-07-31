@@ -50,6 +50,7 @@ pub const Session = struct {
 pub const RegistrationFinish = struct {
     challenge_id: []const u8,
     bootstrap_token: ?[]const u8 = null,
+    session_token: ?[]const u8 = null,
     attestation_object: []const u8,
     client_data_json: []const u8,
     transports: []const u8 = "",
@@ -199,9 +200,11 @@ pub fn writeSetupOptions(
 pub fn writeAdditionalRegistrationOptions(
     ctx: Context,
     user_id: []const u8,
+    session_token: []const u8,
     writer: *std.Io.Writer,
 ) !void {
-    try writeRegistrationOptions(ctx, "register", user_id, "", writer);
+    const session_hash = hashToken(session_token);
+    try writeRegistrationOptions(ctx, "register", user_id, &session_hash, writer);
 }
 
 pub fn writeLoginOptions(ctx: Context, writer: *std.Io.Writer) !void {
@@ -256,6 +259,7 @@ pub fn finishRegistration(
 
     var bootstrap_hash: [64]u8 = undefined;
     if (setup) {
+        if (input.session_token != null) return error.InvalidChallenge;
         const token = input.bootstrap_token orelse return error.InvalidBootstrap;
         bootstrap_hash = hashToken(token);
         if (!constantTimeEqual(challenge.binding_hash, &bootstrap_hash) or
@@ -263,8 +267,13 @@ pub fn finishRegistration(
         {
             return error.InvalidBootstrap;
         }
-    } else if (input.bootstrap_token != null) {
-        return error.InvalidBootstrap;
+    } else {
+        if (input.bootstrap_token != null) return error.InvalidBootstrap;
+        const token = input.session_token orelse return error.InvalidChallenge;
+        const session_hash = hashToken(token);
+        if (!constantTimeEqual(challenge.binding_hash, &session_hash)) {
+            return error.InvalidChallenge;
+        }
     }
 
     if (!try ctx.store.consumeChallenge(

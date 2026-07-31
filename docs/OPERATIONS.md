@@ -131,41 +131,37 @@ layer.
 
 The dashboard is served at `/admin` by the same loopback process. Keep it off
 the public collector hostname. Replace `analytics-admin.example` in
-`deploy/Caddyfile.dashboard` and provide a Caddy password hash:
+`deploy/Caddyfile.dashboard`, then validate and import that vhost:
 
 ```sh
-caddy hash-password
+caddy validate --config deploy/Caddyfile.dashboard
 ```
 
-Set the resulting hash as `ANALYTICO_ADMIN_HASH` in the Caddy service
-environment, validate the file with that environment present, and import the
-vhost into the active Caddy configuration:
+Before starting the service for the first time, store the exact HTTPS origin
+and print one short-lived setup link while the data directory is offline:
 
 ```sh
-ANALYTICO_ADMIN_HASH='<caddy-password-hash>' \
-  caddy validate --config deploy/Caddyfile.dashboard
+sudo -u analytico /opt/analytico/bin/analytico auth configure \
+  /var/lib/analytico https://analytics-admin.example
+sudo -u analytico /opt/analytico/bin/analytico auth bootstrap \
+  /var/lib/analytico --ttl 10m
 ```
 
-Do not put the plaintext password in a unit, environment file, shell history,
-or repository. The dashboard vhost allows only `/admin` and `/admin/*`,
-requires Basic Auth before proxying, and preserves the public request host
-while setting the upstream protocol.
+Open the complete URL directly on the intended Apple device and create the
+owner's synced passkey. The fragment is removed before the first subrequest and
+the server stores only its hash. Add an independent second passkey from
+`/admin/security` when practical. There is no password, email recovery, proxy
+login, or public registration route.
 
-Basic Auth is intentionally the entire single-owner login boundary. Analytico
-does not add accounts, cookies, sessions, password reset, or a misleading
-logout endpoint. To end a Basic Auth browser session, close all windows for
-that browser profile or clear its cached site credentials.
+The vhost allows only `/admin` and `/admin/*`, caps request bodies, applies
+HSTS, and has no Basic Auth directive. Analytico validates every session and
+unsafe request server-side. An anonymous navigation reaches the login page but
+never report state. Login and additional-passkey ceremonies are the only
+JavaScript-required controls because WebAuthn is a browser API.
 
-This paragraph describes the released `0.1.0` deployment. Passkey-only owner
-authentication is now an accepted post-release design, not a current feature.
-Until the [passkey authentication specification](PASSKEY_AUTH_SPEC.md) is
-implemented and its staged cutover passes, do not remove this Basic Auth gate
-or advertise `/admin/login` as available.
-
-Dashboard modifying forms use POST/redirect/GET, a process token derived from
-the installation key, exact `Origin` comparison, and a same-origin referrer
-policy. A service restart invalidates forms opened from a different restored
-key. All dashboard HTML is complete without JavaScript. When JavaScript is
+Dashboard modifying forms use POST/redirect/GET, a token bound to the active
+session, exact configured `Origin` comparison, and a same-origin referrer
+policy. All dashboard HTML is complete without JavaScript. When JavaScript is
 available, the executable self-hosts the exact content-addressed HTMX 4 core;
 it enhances the same native controls and adds no JSON endpoint or client state.
 The first enhanced view requests only HTML, CSS, and that local script.
@@ -209,6 +205,22 @@ engines, copies into a unique sibling temp directory, fsyncs files and the
 directory, writes sizes and SHA-256 hashes to `manifest.json`, then atomically
 renames to a destination which must not exist. Never overwrite the last
 known-good backup.
+
+Lost-passkey recovery is deliberately local and first performs that same
+verified matched backup:
+
+```sh
+systemctl stop analytico
+sudo -u analytico /opt/analytico/bin/analytico auth reset \
+  /var/lib/analytico /var/backups/analytico/pre-auth-reset --confirm
+sudo -u analytico /opt/analytico/bin/analytico auth bootstrap \
+  /var/lib/analytico --ttl 10m
+systemctl start analytico
+```
+
+Reset preserves sites, reports, events, and the configured origin while
+removing owner credentials, challenges, sessions, and bootstrap state. It
+never creates a recovery credential or prints a new token implicitly.
 
 ## 9. Restore
 
@@ -302,6 +314,7 @@ For the exact pinned environment:
 zig build test -Doptimize=ReleaseSafe \
   -Dturso-native-path=<exact-prefix>
 zig build e2e-m0 e2e-m1 e2e-m2 e2e-m2-browser e2e-m3 e2e-m4 e2e-m6 \
+  e2e-m7 e2e-passkey-p1 \
   -Doptimize=ReleaseSafe -Dturso-native-path=<exact-prefix>
 zig build e2e-rollback \
   -Doptimize=ReleaseSafe -Dturso-native-path=<exact-prefix>

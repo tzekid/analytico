@@ -32,6 +32,7 @@ mkdir -p "$stage/bin" "$stage/lib" "$stage/deploy" "$stage/docs" \
 install -m 0755 "$binary" "$stage/bin/analytico"
 install -m 0644 "$duckdb" "$stage/lib/libduckdb.so"
 install -m 0644 "$project_root/deploy/analytico.service" "$stage/deploy/"
+install -m 0644 "$project_root/deploy/analytico-user.service" "$stage/deploy/"
 install -m 0644 "$project_root/deploy/Caddyfile" "$stage/deploy/"
 install -m 0644 "$project_root/deploy/Caddyfile.dashboard" "$stage/deploy/"
 install -m 0644 "$project_root/public/tracker.js" "$stage/public/"
@@ -58,5 +59,5 @@ temporary_archive="$temporary/$name.tar.gz"
 tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
     -C "$temporary" -czf "$temporary_archive" "$name"
 mv -f -- "$temporary_archive" "$archive"
-sha256sum "$archive" >"$dist/$name.tar.gz.sha256"
+(cd "$dist" && sha256sum "$name.tar.gz" >"$name.tar.gz.sha256")
 printf '%s\n' "$archive"

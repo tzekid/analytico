@@ -1,11 +1,17 @@
-# Replace analytics-admin.example and set ANALYTICO_ADMIN_HASH to a Caddy
-# password hash. This private vhost is deliberately separate from the public
-# collector hostname.
+# Replace analytics-admin.example. This private vhost is deliberately separate
+# from the public collector hostname. Analytico's passkey session is the only
+# owner gate; do not add a second application state model at the proxy.
 analytics-admin.example {
 	encode zstd gzip
 
-	basic_auth {
-		admin {$ANALYTICO_ADMIN_HASH}
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		-Server
+	}
+
+	request_body {
+		max_size 192KB
 	}
 
 	@analytico_dashboard path /admin /admin/*

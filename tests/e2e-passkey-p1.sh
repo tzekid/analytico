@@ -111,6 +111,18 @@ TMPDIR="$fixture" NODE_PATH="$module_root" \
     node tests/e2e-passkey-p1-browser.cjs "$origin" "$setup_url" \
     >"$fixture/browser.json"
 
+rate_limited=no
+for _ in {1..30}; do
+    status=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+        -X POST "$origin/admin/auth/login/options" \
+        -H 'Content-Type: application/json' --data '{}')
+    if [[ "$status" == 429 ]]; then
+        rate_limited=yes
+        break
+    fi
+done
+test "$rate_limited" = yes
+
 kill -TERM "$server_pid"
 wait "$server_pid"
 server_pid=
@@ -180,4 +192,4 @@ grep -Fq 'configured=no credentials=0 active_sessions=0 bootstrap_active=yes' \
 
 cat "$fixture/browser.json"
 cat "$fixture/wrong-browser.json"
-echo "P1 migration, bootstrap, verified reset, and real-browser checks passed"
+echo "Passkey P1-P3 on-disk, HTTP, and real-browser checks passed"
