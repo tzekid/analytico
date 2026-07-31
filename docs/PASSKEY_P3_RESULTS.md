@@ -1,7 +1,7 @@
 # Passkey P3 evidence
 
-Measured on 2026-07-31 for the `0.2.0` release candidate against the exact pins
-in `versions.json`.
+Measured and accepted on 2026-07-31 for the `0.2.0` release against the exact
+pins in `versions.json`.
 
 ## Implemented behavior
 
@@ -40,6 +40,19 @@ and the complete passkey lifecycle. The rollback gate downloaded and verified
 the actual published `v0.1.0` release, restored its real pre-migration v1
 backup, ran its report, and started its collector successfully.
 
+Production owner acceptance used Safari on the owner's Mac with Touch ID and
+the iCloud Keychain passkey. The owner created the first credential, reached
+the authenticated dashboard, signed out through the native form, completed a
+fresh discoverable-credential login, and returned to the dashboard. The stored
+credential reports both backup eligibility and backup state, and its last-used
+time advanced during the returning login. Server-side status then reported one
+active credential, one fresh active session, no active bootstrap, and the exact
+`https://analytico-admin.plosca.ru` origin and RP ID.
+
+The consumed bootstrap file was removed. A post-enrollment backup was restored
+into an isolated directory and passed schema, site, event, visitor-key, and
+authentication checks before the verification copy was removed.
+
 ## Measurements
 
 | Item | Result | Budget |
@@ -56,7 +69,7 @@ backup, ran its report, and started its collector successfully.
 | Slow-link first view | useful at simulated 64 KiB/s, 180 ms RTT | required |
 | Maximum virtual passkey login | 138 ms | 2 seconds locally |
 
-The Apple-specific check cannot be simulated: Safari plus Touch ID or Face ID
-and the owner's iCloud-synced passkey must be exercised on the intended device.
-Until that manual checkpoint is recorded, `0.2.0` remains untagged even though
-the protocol, storage, proxy, release, and rollback gates are green.
+The Apple-specific check is necessarily manual and cannot be replaced by the
+virtual-authenticator suite. Both forms of evidence are now recorded: the
+repeatable multi-browser protocol lifecycle and the owner's production
+Safari/Touch ID enrollment, sign-out, and returning login.

@@ -61,6 +61,8 @@ real-time views, session replay, arbitrary user SQL, and distributed ingestion.
 - [Operations and deployment](docs/OPERATIONS.md)
 - [Passkey-only owner authentication](docs/PASSKEY_AUTH_SPEC.md)
 - [Passkey P1 evidence](docs/PASSKEY_P1_RESULTS.md)
+- [Passkey P2 evidence](docs/PASSKEY_P2_RESULTS.md)
+- [Passkey P3 and production acceptance evidence](docs/PASSKEY_P3_RESULTS.md)
 - [M0 viability evidence](docs/M0_RESULTS.md)
 - [M1 durable-core evidence](docs/M1_RESULTS.md)
 - [M2 collection evidence](docs/M2_RESULTS.md)
@@ -72,6 +74,7 @@ real-time views, session replay, arbitrary user SQL, and distributed ingestion.
 - [M8 Cloudio-boundary evidence](docs/M8_RESULTS.md)
 - [Final release evidence](docs/FINAL_RESULTS.md)
 - [0.1.0 release notes](docs/RELEASE_0.1.0.md)
+- [0.2.0 release notes](docs/RELEASE_0.2.0.md)
 
 The machine-readable dependency intentions are in
 [`versions.json`](versions.json). A dependency is not considered adopted until

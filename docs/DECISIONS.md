@@ -31,7 +31,7 @@ semantic, or application state model is consequential and must be added here.
 | D20 | Collector concurrency | One bounded sequential accept loop | Accepted |
 | D21 | Session boundaries | Persist event-local boundaries at commit | Accepted |
 | D22 | Cloudio integration | Optional ordinary link to standalone Analytico | Accepted |
-| D23 | Private dashboard authentication | Passkey-only owner gate after staged Basic Auth cutover | P1 accepted; P2–P3 pending |
+| D23 | Private dashboard authentication | Passkey-only owner gate after staged Basic Auth cutover | Accepted and deployed |
 
 ## D01. MVP interface
 
