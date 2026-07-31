@@ -1,16 +1,24 @@
 const std = @import("std");
 const domain = @import("domain.zig");
+const http_server = @import("http/server.zig");
 const meta = @import("store/meta.zig");
 const events = @import("store/events.zig");
 
 pub fn run(
     allocator: std.mem.Allocator,
+    gpa: std.mem.Allocator,
     io: std.Io,
     output: *std.Io.Writer,
     args: []const []const u8,
 ) !bool {
     if (args.len == 3 and std.mem.eql(u8, args[1], "init")) {
         try initialize(allocator, io, output, args[2]);
+        return true;
+    }
+    if (args.len == 5 and std.mem.eql(u8, args[1], "serve")) {
+        const port = std.fmt.parseInt(u16, args[4], 10) catch
+            return error.InvalidPort;
+        try http_server.run(gpa, io, args[2], args[3], port);
         return true;
     }
     if (args.len >= 3 and std.mem.eql(u8, args[1], "site")) {
@@ -51,6 +59,7 @@ pub fn run(
 pub fn writeUsage(output: *std.Io.Writer) !void {
     try output.writeAll(
         \\  analytico init <directory>
+        \\  analytico serve <directory> <loopback-host> <port>
         \\  analytico site add <directory> <slug> <name> <origin>
         \\  analytico site list <directory>
         \\  analytico site disable <directory> <slug>
@@ -64,6 +73,7 @@ pub fn writeUsage(output: *std.Io.Writer) !void {
         \\  analytico funnel show <directory> <site> <name>
         \\  analytico funnel delete <directory> <site> <name> --confirm <name>
         \\  analytico event add <directory> <site> <event> <path> <micros> <date> <ip> <browser> <os> <device>
+        \\  analytico event inspect <directory> [event-name]
         \\  analytico doctor <directory>
         \\  analytico pseudonym <64-hex-key> <site-id> <date> <ip> <coarse-client>
         \\
@@ -275,6 +285,30 @@ fn eventCommand(
     io: std.Io,
     args: []const []const u8,
 ) !void {
+    if (std.mem.eql(u8, args[2], "inspect") and
+        (args.len == 4 or args.len == 5))
+    {
+        const paths = try Paths.init(allocator, args[3]);
+        var event_store = try events.Store.open(allocator, paths.events);
+        defer event_store.deinit();
+        try event_store.migrate();
+        const event = if (args.len == 5)
+            try event_store.latestNamed(allocator, args[4])
+        else
+            try event_store.latest(allocator);
+        try output.print("{s}\t{s}\t{s}\t{s}\t{s}\t{s}\t{s}\t{s}\t{s}\n", .{
+            event.event_name,
+            event.path,
+            event.referrer_host,
+            event.country_code,
+            event.browser_family,
+            event.os_family,
+            event.device_category,
+            event.utm_source,
+            event.properties_json,
+        });
+        return;
+    }
     if (!std.mem.eql(u8, args[2], "add") or args.len != 13) {
         return error.InvalidArguments;
     }

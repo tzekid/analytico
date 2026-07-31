@@ -4,6 +4,18 @@ const duckdb = @import("duckdb.zig");
 
 pub const schema_version: i64 = 1;
 
+pub const StoredEvent = struct {
+    event_name: []u8,
+    path: []u8,
+    referrer_host: []u8,
+    country_code: []u8,
+    browser_family: []u8,
+    os_family: []u8,
+    device_category: []u8,
+    utm_source: []u8,
+    properties_json: []u8,
+};
+
 pub const Store = struct {
     database: duckdb.Database,
 
@@ -104,6 +116,56 @@ pub const Store = struct {
         return self.scalar("SELECT COALESCE(MAX(version), 0) FROM event_migrations");
     }
 
+    pub fn latest(
+        self: *Store,
+        allocator: std.mem.Allocator,
+    ) !StoredEvent {
+        var result = try self.database.query(
+            \\SELECT event_name, path, referrer_host, country_code,
+            \\       browser_family, os_family, device_category,
+            \\       utm_source, properties_json
+            \\FROM events
+            \\ORDER BY received_at_utc_micros DESC, event_id DESC
+            \\LIMIT 1
+        );
+        defer result.deinit();
+        if (result.rowCount() != 1) return error.EventNotFound;
+        return .{
+            .event_name = try result.text(allocator, 0, 0),
+            .path = try result.text(allocator, 1, 0),
+            .referrer_host = try result.text(allocator, 2, 0),
+            .country_code = try result.text(allocator, 3, 0),
+            .browser_family = try result.text(allocator, 4, 0),
+            .os_family = try result.text(allocator, 5, 0),
+            .device_category = try result.text(allocator, 6, 0),
+            .utm_source = try result.text(allocator, 7, 0),
+            .properties_json = try result.text(allocator, 8, 0),
+        };
+    }
+
+    pub fn latestNamed(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        name: []const u8,
+    ) !StoredEvent {
+        try domain.validateIdentifier(name);
+        var statement = try self.database.prepare(
+            \\SELECT event_name, path, referrer_host, country_code,
+            \\       browser_family, os_family, device_category,
+            \\       utm_source, properties_json
+            \\FROM events
+            \\WHERE event_name = ?
+            \\ORDER BY received_at_utc_micros DESC, event_id DESC
+            \\LIMIT 1
+        );
+        defer statement.deinit();
+        try statement.bindText(1, name);
+        var result = try statement.execute();
+        defer result.deinit();
+        if (result.rowCount() != 1) return error.EventNotFound;
+        return decodeStoredEvent(allocator, &result);
+    }
+
     pub fn checkpoint(self: *Store) !void {
         try self.database.checkpoint();
     }
@@ -117,3 +179,20 @@ pub const Store = struct {
         return result.int64(0, 0);
     }
 };
+
+fn decodeStoredEvent(
+    allocator: std.mem.Allocator,
+    result: *duckdb.Result,
+) !StoredEvent {
+    return .{
+        .event_name = try result.text(allocator, 0, 0),
+        .path = try result.text(allocator, 1, 0),
+        .referrer_host = try result.text(allocator, 2, 0),
+        .country_code = try result.text(allocator, 3, 0),
+        .browser_family = try result.text(allocator, 4, 0),
+        .os_family = try result.text(allocator, 5, 0),
+        .device_category = try result.text(allocator, 6, 0),
+        .utm_source = try result.text(allocator, 7, 0),
+        .properties_json = try result.text(allocator, 8, 0),
+    };
+}

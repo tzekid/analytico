@@ -210,6 +210,15 @@ pub fn parseKeyHex(value: []const u8) ![32]u8 {
     return output;
 }
 
+pub fn networkPrefixHash(site_id: []const u8, value: []const u8) !u64 {
+    try validateUuid(site_id);
+    const prefix = try networkPrefix(value);
+    var hash = std.hash.Wyhash.init(0xa11a1c0);
+    hash.update(site_id);
+    hash.update(prefix.bytes[0..prefix.len]);
+    return hash.final();
+}
+
 fn networkPrefix(value: []const u8) !struct { bytes: [16]u8, len: usize } {
     const address = std.Io.net.IpAddress.parse(value, 0) catch return error.InvalidIpAddress;
     var output: [16]u8 = @splat(0);

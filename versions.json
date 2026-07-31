@@ -32,6 +32,27 @@
     "license": "MIT",
     "status": "accepted and integrated through the direct C API"
   },
+  "tracker": {
+    "protocol": 1,
+    "source_bytes": 1226,
+    "minified_bytes": 734,
+    "brotli_bytes": 383,
+    "gzip_bytes": 493,
+    "minified_sha256": "aef659456671d0dbc0a63e7732b14edc40ad0b08523fd91081f36004c99aa116",
+    "brotli_sha256": "481fd9baa02d4f65a8c6de6a6e210a3baa5252d3cf0aec30b701b9d793148b4a",
+    "gzip_sha256": "1ed750a773a6f6142743b088acc7e1cb0abcb2d5b4e68bcd974c7e6fe33e0338",
+    "third_party_dependencies": 0,
+    "status": "accepted M2 project-authored asset"
+  },
+  "browser_e2e": {
+    "playwright": "1.62.0",
+    "test_image": "mcr.microsoft.com/playwright:v1.62.0-noble",
+    "test_image_digest": "sha256:baed2032d533817f3dbe6425de795788430ba345e819a1201337009ba17c9d07",
+    "chromium": "151.0.7922.34",
+    "firefox": "153.0",
+    "webkit": "26.5",
+    "scope": "acceptance-test tooling only; not shipped or required at runtime"
+  },
   "htmx": {
     "version": "4.0.0-beta6",
     "release_date": "2026-07-23",

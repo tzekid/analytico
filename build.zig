@@ -97,4 +97,25 @@ pub fn build(b: *std.Build) void {
     m1_e2e.addArtifactArg(app);
     m1_e2e.step.dependOn(b.getInstallStep());
     b.step("e2e-m1", "Run M1 administration and durability through real processes").dependOn(&m1_e2e.step);
+
+    const m2_e2e = b.addSystemCommand(&.{ "bash", "tests/e2e-m2.sh" });
+    m2_e2e.addArtifactArg(app);
+    m2_e2e.step.dependOn(b.getInstallStep());
+    b.step("e2e-m2", "Run M2 through the real loopback HTTP collector").dependOn(&m2_e2e.step);
+
+    const m2_browser_e2e = b.addSystemCommand(&.{ "bash", "tests/e2e-m2-browser.sh" });
+    m2_browser_e2e.addArtifactArg(app);
+    m2_browser_e2e.step.dependOn(b.getInstallStep());
+    b.step(
+        "e2e-m2-browser",
+        "Run M2 in real Chromium, Firefox, and WebKit processes",
+    ).dependOn(&m2_browser_e2e.step);
+
+    const m2_benchmark = b.addSystemCommand(&.{ "bash", "bench/m2-collection.sh" });
+    m2_benchmark.addArtifactArg(app);
+    m2_benchmark.step.dependOn(b.getInstallStep());
+    b.step(
+        "bench-m2",
+        "Measure the real ReleaseSafe HTTP collection path",
+    ).dependOn(&m2_benchmark.step);
 }

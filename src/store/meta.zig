@@ -37,6 +37,27 @@ pub const Counts = struct {
     funnels: i64,
 };
 
+pub const SitePolicy = struct {
+    id: []u8,
+    disabled: bool,
+    origins: []const []u8,
+    properties: []const []u8,
+
+    pub fn allowsOrigin(self: SitePolicy, origin: []const u8) bool {
+        for (self.origins) |allowed| {
+            if (std.mem.eql(u8, allowed, origin)) return true;
+        }
+        return false;
+    }
+
+    pub fn allowsProperty(self: SitePolicy, property: []const u8) bool {
+        for (self.properties) |allowed| {
+            if (std.mem.eql(u8, allowed, property)) return true;
+        }
+        return false;
+    }
+};
+
 pub const Store = struct {
     database: turso.Database,
     connection: turso.Connection,
@@ -443,6 +464,66 @@ pub const Store = struct {
         return result;
     }
 
+    pub fn sitePolicy(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        id: []const u8,
+    ) !SitePolicy {
+        try domain.validateUuid(id);
+        var site_rows = try self.connection.queryParams(
+            \\SELECT id, disabled_at_utc_micros IS NOT NULL
+            \\FROM sites WHERE id = ?1
+        ,
+            .{id},
+            .{},
+        );
+        defer site_rows.deinit();
+        const site_row = (try site_rows.next()) orelse return error.SiteNotFound;
+        const owned_id = try allocator.dupe(u8, try site_row.get([]const u8, 0));
+        const disabled = (try site_row.get(i64, 1)) != 0;
+        try site_rows.finish(null);
+
+        const origins = try self.stringColumn(
+            allocator,
+            "SELECT origin FROM site_origins WHERE site_id = ?1 ORDER BY origin",
+            id,
+        );
+        const properties = try self.stringColumn(
+            allocator,
+            \\SELECT property_name FROM site_event_properties
+            \\WHERE site_id = ?1 ORDER BY property_name
+        ,
+            id,
+        );
+        return .{
+            .id = owned_id,
+            .disabled = disabled,
+            .origins = origins,
+            .properties = properties,
+        };
+    }
+
+    pub fn siteIds(
+        self: *Store,
+        allocator: std.mem.Allocator,
+    ) ![]const []u8 {
+        var rows = try self.connection.query(
+            "SELECT id FROM sites ORDER BY id",
+            &.{},
+            .{},
+        );
+        defer rows.deinit();
+        var result: std.ArrayList([]u8) = .empty;
+        while (try rows.next()) |row| {
+            try result.append(
+                allocator,
+                try allocator.dupe(u8, try row.get([]const u8, 0)),
+            );
+        }
+        try rows.finish(null);
+        return result.toOwnedSlice(allocator);
+    }
+
     pub fn siteCount(self: *Store) !i64 {
         return self.scalar("SELECT COUNT(*) FROM sites");
     }
@@ -466,6 +547,25 @@ pub const Store = struct {
         const result = try row.get(i64, 0);
         try rows.finish(null);
         return result;
+    }
+
+    fn stringColumn(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        sql: []const u8,
+        parameter: []const u8,
+    ) ![]const []u8 {
+        var rows = try self.connection.queryParams(sql, .{parameter}, .{});
+        defer rows.deinit();
+        var result: std.ArrayList([]u8) = .empty;
+        while (try rows.next()) |row| {
+            try result.append(
+                allocator,
+                try allocator.dupe(u8, try row.get([]const u8, 0)),
+            );
+        }
+        try rows.finish(null);
+        return result.toOwnedSlice(allocator);
     }
 };
 
