@@ -1,0 +1,16 @@
+.{
+    .name = .analytico,
+    .version = "0.0.0",
+    .fingerprint = 0xfec3bac728f22f9a,
+    .minimum_zig_version = "0.17.0-dev.1509+bb296ab9b",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "docs",
+        "AGENTS.md",
+        "README.md",
+        "versions.json",
+    },
+}

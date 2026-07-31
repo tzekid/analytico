@@ -1,0 +1,10 @@
+/.zig-cache/
+/zig-out/
+/data/
+/backups/
+/*.duckdb
+/*.duckdb.wal
+/*.db
+/*.db-shm
+/*.db-wal
+/.env

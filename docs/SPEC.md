@@ -1,0 +1,207 @@
+# Product specification
+
+## 1. Product statement
+
+Analytico answers a small set of website-usage questions without requiring a
+general analytics platform:
+
+1. How many pages were viewed?
+2. Roughly how many people visited each day?
+3. Which pages brought them in and where did they leave?
+4. Which referrers and campaigns brought useful traffic?
+5. What coarse country and client categories were used?
+6. Which declared actions and ordered funnels converted?
+
+It is optimized for a handful of sites receiving approximately 20–50 unique
+visitors per week in total. The design must remain correct if the event count
+grows by several orders of magnitude, but it does not pay the operational cost
+of a distributed analytics system in advance.
+
+## 2. Users
+
+### Site owner
+
+The site owner registers a site, installs the tracker, defines goals or
+funnels, runs reports, exports data, and removes data. In the MVP those actions
+are local CLI commands.
+
+### Website visitor
+
+The visitor may generate a page view or a custom event. No account, cookie,
+local-storage identifier, or persisted raw IP address is required.
+
+### Operator
+
+The operator deploys one service, protects secrets, monitors health, creates
+verified backups, upgrades the binary, and can restore the two embedded files.
+
+## 3. Functional requirements
+
+### F1. Sites
+
+- Create, list, disable, and delete sites.
+- Give each site a public random identifier.
+- Allow one or more exact origins per site.
+- Treat all configured origins as operator-controlled input, not request input.
+
+### F2. Page views
+
+- Accept a page view through a small POST request.
+- Provide a non-JavaScript pixel endpoint for server-rendered sites.
+- Store the normalized path, receipt time, external referrer host, recognized
+  UTM fields, daily visitor pseudonym, and coarse dimensions.
+- Never persist the full current URL or arbitrary query parameters.
+
+### F3. Custom events
+
+- Accept a declared event name and a bounded flat property map.
+- Support events such as `signup`, `download`, and `purchase`.
+- Reject nested values, oversized names or values, and disallowed property
+  keys before database work begins.
+- Do not add revenue accounting to the MVP; a purchase is initially a named
+  conversion event with optional allowlisted descriptive properties.
+
+### F4. Reports
+
+For a site and inclusive UTC date range, report:
+
+- page views;
+- daily unique visitors;
+- views and daily uniques by page;
+- entry and exit pages based on 30-minute sessions;
+- direct traffic and external referral hosts;
+- UTM source, medium, campaign, term, and content;
+- country, browser family, operating-system family, and device category;
+- custom-event counts;
+- goal conversions and converting sessions;
+- ordered same-session funnel entrants, step completions, and conversion rates.
+
+Every list has an explicit order, stable tie-breaker, default limit, and maximum
+limit. Exact metric semantics are defined in [DATA_MODEL.md](DATA_MODEL.md).
+
+### F5. CLI
+
+The production MVP provides these command families:
+
+```text
+analytico init
+analytico site add|list|disable|delete
+analytico goal add|list|delete
+analytico funnel add|show|delete
+analytico serve
+analytico report
+analytico export
+analytico backup
+analytico restore --verify
+analytico maintain
+analytico doctor
+```
+
+Commands use explicit paths or the same validated configuration file as the
+service. Destructive commands require the exact site slug and an explicit
+confirmation flag when stdin is not interactive.
+
+### F6. Tracker
+
+- A vendored, cacheable tracker is a small browser-only island.
+- The tracker sends only data that the collector protocol permits.
+- It handles ordinary navigation and explicitly reported custom events.
+- Single-page-application navigation is not an MVP requirement.
+- A documented `<noscript>` pixel records ordinary page views without
+  JavaScript when the embedding site supplies the path.
+
+### F7. Operations
+
+- Run as one unprivileged process behind Caddy.
+- Use local persistent storage, not network-mounted database files.
+- Expose loopback-only liveness and readiness endpoints.
+- Produce bounded structured logs without visitor identifiers or payloads.
+- Support a tested stop-the-service backup and restore procedure.
+
+## 4. Non-functional requirements
+
+### Trustworthiness
+
+- Server receipt time is authoritative.
+- Metric definitions are versioned and tested with hand-checkable fixtures.
+- Unknown country or client dimensions remain `unknown`; they are never guessed.
+- Daily uniques are explicitly described as an approximation and never marketed
+  as identified people.
+- Reports expose their UTC range and applied filters.
+- Partial upstream/enrichment failure does not invent data.
+
+### Privacy
+
+- No cookies or local storage in the MVP.
+- No raw IP address or full user-agent string is persisted.
+- Visitor pseudonyms rotate at the UTC day boundary and are site-scoped.
+- Only recognized UTM keys survive URL parsing.
+- Referrers are reduced to a normalized host; paths and query strings are
+  discarded.
+- Custom property names and values are bounded and allowlisted per site.
+
+### Security
+
+- Origin validation, input validation, rate limiting, and request-size limits
+  happen before database writes.
+- The reverse-proxy trust boundary for the client IP and country header is
+  explicit.
+- SQL structure comes only from compiled application templates. Request values
+  are bound.
+- DuckDB external access and extension loading are disabled in the serving
+  process.
+- Administration is local CLI-only until a server-side authenticated UI exists.
+
+### Performance
+
+- A valid collection request performs one bounded parse, one classification,
+  and one durable event insert.
+- Reports query on demand; there is no always-running aggregation worker.
+- The performance and resource budgets in
+  [PERFORMANCE.md](PERFORMANCE.md) are release gates.
+
+## 5. Explicit non-goals
+
+The following are not part of the production MVP:
+
+- an administrative web dashboard;
+- HTMX or any other browser application runtime;
+- organization, team, invitation, or billing systems;
+- real-time concurrent-view counters;
+- session replay, heat maps, fingerprinting, or cross-site identity;
+- automatic email reports;
+- arbitrary user-defined SQL;
+- custom dimensions without an allowlist;
+- multi-region or multi-process DuckDB writes;
+- mobile SDKs;
+- automatic import of Plausible history;
+- exact identification of a person across multiple days.
+
+## 6. Success criteria
+
+The production MVP is successful when:
+
+1. A new site can be registered and begin recording page views using one
+   documented snippet.
+2. Every required report can be produced from the CLI after a real browser and
+   collector write to disposable on-disk databases.
+3. Restart, crash-recovery, backup, restore, and upgrade rehearsals pass.
+4. Input and query limits hold under adversarial tests.
+5. Debug and ReleaseSafe gates pass from a clean checkout with exact pins.
+6. The measured footprint remains within the M0 budgets.
+7. A release artifact and direct-cutover runbook are ready for the owner to
+   replace Plausible without requiring a parallel collection period.
+
+## 7. Later server-rendered UI
+
+The UI is deliberately downstream of the product core:
+
+1. A controller loads Turso configuration and DuckDB report rows.
+2. It creates an owned, typed view model.
+3. A deterministic renderer writes a full HTML response without I/O.
+4. Links and forms work with JavaScript disabled.
+5. Only then may the same endpoints return scoped HTML fragments to HTMX.
+
+The UI does not fetch JSON after receiving the same state in HTML. It does not
+open the DuckDB file from a second process. The later Cloudio integration must
+choose one of the ownership-safe options in decision D13.
