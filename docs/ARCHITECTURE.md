@@ -13,12 +13,13 @@ flowchart LR
     Q --> R["Typed report models"]
     T --> R
     R --> C
-    R -. "M6+" .-> V["Deterministic HTML renderer"]
+    R --> V["Deterministic HTML renderer"]
 ```
 
 The deployed MVP has one operating-system process and two local database files.
-Turso and DuckDB are linked libraries, not services. Caddy terminates TLS and
-forwards only the documented routes.
+Turso and DuckDB are linked libraries, not services. Caddy terminates TLS,
+exposes only documented collection routes on the public hostname, and protects
+the separate private dashboard hostname with Basic Auth.
 
 ## 2. Dependency direction
 
@@ -31,7 +32,7 @@ adapters: cli, http, turso, duckdb
   ↑
 composition root
 
-future renderer <- typed view models <- application
+renderer <- typed view models <- controller <- application
 ```
 
 - Domain code knows plain Zig types, validation rules, and metric semantics.
@@ -45,7 +46,7 @@ An interface is introduced only when a second real implementation or a
 deterministic test seam needs the same semantics. Until then, functions accept
 the concrete store or a narrow function pointer owned by the caller.
 
-## 3. Proposed source layout
+## 3. Source layout
 
 This is a destination, not permission to create empty placeholder modules:
 
@@ -58,7 +59,7 @@ src/
   cli/                command parsing and terminal/JSON/CSV output
   http/               collector routes, origin checks, rate limits
   tracker/            source used to produce the small vendored tracker
-  web/                M6+ controllers, view models, renderers
+  web/                dashboard adapter, controller, view models, renderer
   main.zig            composition root
 ```
 
@@ -131,8 +132,8 @@ latency violates the budget.
 3. Build one of a closed set of report query plans.
 4. Bind all data values and execute on DuckDB with a deadline and interrupt.
 5. Decode into an owned typed report.
-6. Render table, JSON, or CSV in the CLI. M6 adds deterministic HTML from the
-   same report type.
+6. Render table, JSON, or CSV in the CLI, or deterministic HTML from the same
+   report type in the dashboard.
 
 No report accepts arbitrary SQL, column names, sort expressions, or templates
 from the request. Enumerated sorts select a compiled query template.
@@ -162,13 +163,13 @@ not a reason to add a worker pool before load requires it.
 | Turso unavailable/corrupt | Readiness fails; administration/reporting unavailable |
 | DuckDB unavailable/corrupt | Readiness fails; collection and reports unavailable |
 | Disk full | Reject writes, expose readiness failure, preserve existing files |
-| Renderer error in M6+ | Return a small escaped server-rendered error page |
+| Renderer error | Return a small escaped server-rendered error page |
 
 ## 9. Caching
 
 The MVP has no report cache. The expected dataset makes on-demand queries the
-simpler choice. M6 may add a bounded in-process cache only if measurements show
-the same report is repeatedly expensive. Its key must include site, exact time
+simpler choice. M6 did not add a cache because measurements did not require
+one. Any later cache key must include site, exact time
 range, metric-version, filters, sort, and page; its invalidation watermark is
 the latest accepted event time for that site.
 

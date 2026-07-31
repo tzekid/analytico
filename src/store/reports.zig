@@ -329,9 +329,37 @@ pub fn run(
     goal: ?meta.Goal,
     funnel_steps: ?[]const meta.FunnelStep,
 ) !report.Result {
+    return runWithTimeout(
+        allocator,
+        event_store,
+        request,
+        site_id,
+        goal,
+        funnel_steps,
+        deadline_milliseconds,
+    );
+}
+
+pub fn runWithTimeout(
+    allocator: std.mem.Allocator,
+    event_store: *events.Store,
+    request: report.Request,
+    site_id: []const u8,
+    goal: ?meta.Goal,
+    funnel_steps: ?[]const meta.FunnelStep,
+    timeout_ms: u32,
+) !report.Result {
+    if (timeout_ms == 0 or timeout_ms > deadline_milliseconds) {
+        return error.InvalidReportTimeout;
+    }
     try domain.validateUuid(site_id);
     return switch (request.kind) {
-        .overview => .{ .overview = try overview(event_store, request, site_id) },
+        .overview => .{ .overview = try overview(
+            event_store,
+            request,
+            site_id,
+            timeout_ms,
+        ) },
         .pages => .{ .list = try list(
             allocator,
             event_store,
@@ -341,6 +369,7 @@ pub fn run(
             "path",
             "page_views",
             "visitor_days",
+            timeout_ms,
         ) },
         .entries => .{ .list = try list(
             allocator,
@@ -351,6 +380,7 @@ pub fn run(
             "path",
             "sessions",
             "visitor_days",
+            timeout_ms,
         ) },
         .exits => .{ .list = try list(
             allocator,
@@ -361,6 +391,7 @@ pub fn run(
             "path",
             "sessions",
             "visitor_days",
+            timeout_ms,
         ) },
         .sources => .{ .list = try list(
             allocator,
@@ -371,12 +402,14 @@ pub fn run(
             "source",
             "sessions",
             "visitor_days",
+            timeout_ms,
         ) },
         .campaigns => .{ .list = try campaignList(
             allocator,
             event_store,
             request,
             site_id,
+            timeout_ms,
         ) },
         .countries => .{ .list = try dimensionList(
             allocator,
@@ -384,6 +417,7 @@ pub fn run(
             request,
             site_id,
             .country,
+            timeout_ms,
         ) },
         .browsers => .{ .list = try dimensionList(
             allocator,
@@ -391,6 +425,7 @@ pub fn run(
             request,
             site_id,
             .browser,
+            timeout_ms,
         ) },
         .operating_systems => .{ .list = try dimensionList(
             allocator,
@@ -398,6 +433,7 @@ pub fn run(
             request,
             site_id,
             .operating_system,
+            timeout_ms,
         ) },
         .devices => .{ .list = try dimensionList(
             allocator,
@@ -405,6 +441,7 @@ pub fn run(
             request,
             site_id,
             .device,
+            timeout_ms,
         ) },
         .events => .{ .list = try list(
             allocator,
@@ -415,12 +452,14 @@ pub fn run(
             "event",
             "event_count",
             "sessions",
+            timeout_ms,
         ) },
         .goal => .{ .goal = try goalReport(
             event_store,
             request,
             site_id,
             goal orelse return error.GoalNotFound,
+            timeout_ms,
         ) },
         .funnel => .{ .funnel = try funnelReport(
             allocator,
@@ -428,6 +467,7 @@ pub fn run(
             request,
             site_id,
             funnel_steps orelse return error.FunnelNotFound,
+            timeout_ms,
         ) },
     };
 }
@@ -436,11 +476,12 @@ fn overview(
     event_store: *events.Store,
     request: report.Request,
     site_id: []const u8,
+    timeout_ms: u32,
 ) !report.Overview {
     var statement = try event_store.database.prepare(overview_sql);
     defer statement.deinit();
     try bindRange(&statement, site_id, request);
-    var result = try executeDeadline(&event_store.database, &statement, deadline_milliseconds);
+    var result = try executeDeadline(&event_store.database, &statement, timeout_ms);
     defer result.deinit();
     if (result.rowCount() != 1 or result.columnCount() != 5) {
         return error.InvalidReportResult;
@@ -463,13 +504,14 @@ fn list(
     label_name: []const u8,
     primary_name: []const u8,
     secondary_name: []const u8,
+    timeout_ms: u32,
 ) !report.List {
     var statement = try event_store.database.prepare(sql);
     defer statement.deinit();
     try bindRange(&statement, site_id, request);
     try statement.bindInt64(4, @as(i64, request.limit) + 1);
     try statement.bindInt64(5, try request.offset());
-    var result = try executeDeadline(&event_store.database, &statement, deadline_milliseconds);
+    var result = try executeDeadline(&event_store.database, &statement, timeout_ms);
     defer result.deinit();
     if (result.columnCount() != 3) return error.InvalidReportResult;
     const returned = result.rowCount();
@@ -496,6 +538,7 @@ fn campaignList(
     event_store: *events.Store,
     request: report.Request,
     site_id: []const u8,
+    timeout_ms: u32,
 ) !report.List {
     const sql = switch (request.campaign_dimension) {
         .source => selectPagedSql(
@@ -539,6 +582,7 @@ fn campaignList(
         },
         "sessions",
         "visitor_days",
+        timeout_ms,
     );
 }
 
@@ -555,6 +599,7 @@ fn dimensionList(
     request: report.Request,
     site_id: []const u8,
     dimension: Dimension,
+    timeout_ms: u32,
 ) !report.List {
     const sql = switch (dimension) {
         .country => selectPagedSql(
@@ -590,6 +635,7 @@ fn dimensionList(
         },
         "sessions",
         "visitor_days",
+        timeout_ms,
     );
 }
 
@@ -598,6 +644,7 @@ fn goalReport(
     request: report.Request,
     site_id: []const u8,
     goal: meta.Goal,
+    timeout_ms: u32,
 ) !report.Goal {
     const sql = switch (goal.match_kind) {
         .event => goal_event_sql,
@@ -608,7 +655,7 @@ fn goalReport(
     defer statement.deinit();
     try bindRange(&statement, site_id, request);
     try statement.bindText(4, goal.match_value);
-    var result = try executeDeadline(&event_store.database, &statement, deadline_milliseconds);
+    var result = try executeDeadline(&event_store.database, &statement, timeout_ms);
     defer result.deinit();
     if (result.rowCount() != 1 or result.columnCount() != 3) {
         return error.InvalidReportResult;
@@ -627,6 +674,7 @@ fn funnelReport(
     request: report.Request,
     site_id: []const u8,
     steps: []const meta.FunnelStep,
+    timeout_ms: u32,
 ) !report.Funnel {
     if (steps.len < 2 or steps.len > 8) return error.InvalidFunnelLength;
     for (steps, 0..) |step, index| {
@@ -649,7 +697,7 @@ fn funnelReport(
     try statement.bindText(18, site_id);
     try statement.bindText(19, request.start_date);
     try statement.bindText(20, request.end_date);
-    var result = try executeDeadline(&event_store.database, &statement, deadline_milliseconds);
+    var result = try executeDeadline(&event_store.database, &statement, timeout_ms);
     defer result.deinit();
     if (result.columnCount() != 3 or result.rowCount() != steps.len) {
         return error.InvalidReportResult;

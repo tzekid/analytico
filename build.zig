@@ -202,4 +202,15 @@ pub fn build(b: *std.Build) void {
         "e2e-m5",
         "Run a browser cutover and every report from the extracted release",
     ).dependOn(&m5_cutover_e2e.step);
+
+    const m6_dashboard_e2e = b.addSystemCommand(&.{
+        "bash",
+        "tests/e2e-m6.sh",
+    });
+    m6_dashboard_e2e.addArtifactArg(app);
+    m6_dashboard_e2e.step.dependOn(b.getInstallStep());
+    b.step(
+        "e2e-m6",
+        "Run the no-JavaScript dashboard through Caddy and real Chromium",
+    ).dependOn(&m6_dashboard_e2e.step);
 }

@@ -7,6 +7,7 @@ const collect = @import("collect.zig");
 const rate_limit = @import("rate_limit.zig");
 const request_mod = @import("request.zig");
 const response = @import("response.zig");
+const dashboard = @import("../web/dashboard.zig");
 
 const tracker = @embedFile("tracker.min.js");
 const tracker_br = @embedFile("tracker.min.js.br");
@@ -33,6 +34,7 @@ pub const Options = struct {
     event_path: []const u8,
     temp_directory: []const u8,
     key_path: []const u8,
+    report_timeout_ms: u32 = 2_000,
 };
 
 pub fn run(
@@ -107,6 +109,8 @@ pub fn run(
         .meta_path = options.meta_path,
         .event_path = options.event_path,
         .key_path = options.key_path,
+        .csrf_token = csrfToken(key_bytes[0..32].*),
+        .report_timeout_ms = options.report_timeout_ms,
     };
     defer std.crypto.secureZero(u8, &context.master_key);
 
@@ -194,6 +198,8 @@ const Context = struct {
     meta_path: []const u8,
     event_path: []const u8,
     key_path: []const u8,
+    csrf_token: [32]u8,
+    report_timeout_ms: u32,
     limiter: rate_limit.Limiter = .{},
     events_healthy: bool = true,
     counters: Counters = .{},
@@ -264,6 +270,23 @@ fn handle(context: *Context, stream: std.Io.net.Stream) !void {
             try response.write(output, 200, "text/plain; charset=utf-8", no_store_headers, "ready\n");
         }
         return;
+    }
+    if (std.mem.startsWith(u8, path, "/admin")) {
+        const handled = dashboard.handle(.{
+            .allocator = allocator,
+            .io = context.io,
+            .metadata = context.metadata,
+            .events = context.events,
+            .csrf_token = &context.csrf_token,
+            .report_timeout_ms = context.report_timeout_ms,
+        }, request, output) catch |err| switch (err) {
+            error.DuplicateHeader => {
+                try writeError(output, 400);
+                return;
+            },
+            else => return err,
+        };
+        if (handled) return;
     }
     if (std.mem.eql(u8, path, "/tracker.js") or
         std.mem.eql(u8, path, tracker_versioned_path))
@@ -596,6 +619,14 @@ fn currentTime() !CurrentTime {
         month_day.day_index + 1,
     });
     return .{ .seconds = timestamp.sec, .micros = micros, .date = date };
+}
+
+fn csrfToken(master_key: [32]u8) [32]u8 {
+    var digest: [16]u8 = undefined;
+    var hasher = std.crypto.hash.Blake3.init(.{ .key = master_key });
+    hasher.update("analytico/dashboard/csrf/v1");
+    hasher.final(&digest);
+    return std.fmt.bytesToHex(digest, .lower);
 }
 
 fn supportedContentType(value: ?[]const u8) bool {

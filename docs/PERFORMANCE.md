@@ -164,6 +164,16 @@ These apply only when the dashboard exists:
 With JavaScript disabled, the same navigation, filters, date forms,
 pagination, goal management, and funnel management must work.
 
+### M6 measured baseline
+
+The ReleaseSafe no-JavaScript dashboard measured 1,283 compressed bytes for
+the complete first HTML response and 905 compressed bytes for CSS, with two
+initial requests and zero startup API requests. After 100 complete authenticated
+views, RSS was 1,388 KiB below the warmed starting observation. The first view
+also passed in a 360×640 Chromium viewport under 180 ms latency and a 64 KiB/s
+download ceiling. Full real-Caddy, browser, escaping, form, authorization, and
+timeout evidence is in `M6_RESULTS.md`.
+
 ## 8. Regression policy
 
 For a stable benchmark environment:

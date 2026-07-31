@@ -1,0 +1,26 @@
+# Replace analytics-admin.example and set ANALYTICO_ADMIN_HASH to a Caddy
+# password hash. This private vhost is deliberately separate from the public
+# collector hostname.
+analytics-admin.example {
+	encode zstd gzip
+
+	basic_auth {
+		admin {$ANALYTICO_ADMIN_HASH}
+	}
+
+	@analytico_dashboard path /admin /admin/*
+	handle @analytico_dashboard {
+		reverse_proxy 127.0.0.1:4318 {
+			header_up X-Forwarded-Proto {scheme}
+
+			transport http {
+				dial_timeout 2s
+				response_header_timeout 3s
+			}
+		}
+	}
+
+	handle {
+		respond "not found" 404
+	}
+}

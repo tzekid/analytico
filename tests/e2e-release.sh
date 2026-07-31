@@ -42,6 +42,9 @@ ldd "$release_binary" | grep -Fq "$release_root/bin/../lib/libduckdb.so"
 
 caddy validate --config "$release_root/deploy/Caddyfile" \
     >"$fixture/caddy.stdout" 2>"$fixture/caddy.stderr"
+ANALYTICO_ADMIN_HASH=$(caddy hash-password --plaintext release-fixture-password) \
+    caddy validate --config "$release_root/deploy/Caddyfile.dashboard" \
+    >"$fixture/caddy-dashboard.stdout" 2>"$fixture/caddy-dashboard.stderr"
 systemd-analyze security --offline=yes --no-pager \
     "$release_root/deploy/analytico.service" \
     >"$fixture/systemd-security.txt"
@@ -66,9 +69,11 @@ if [[ ${3:-} == "--full" ]]; then
         tests/e2e-m2.sh \
         tests/e2e-m2-browser.sh \
         tests/e2e-m3.sh \
-        tests/e2e-m4.sh
+        tests/e2e-m4.sh \
+        tests/e2e-m6.sh
     do
-        bash "$gate" "$release_binary"
+        ANALYTICO_DASHBOARD_CADDYFILE="$release_root/deploy/Caddyfile.dashboard" \
+            bash "$gate" "$release_binary"
     done
 fi
 

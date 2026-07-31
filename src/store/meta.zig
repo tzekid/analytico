@@ -25,6 +25,12 @@ pub const FunnelStep = struct {
     match_value: []u8,
 };
 
+pub const Funnel = struct {
+    id: []u8,
+    name: []u8,
+    step_count: i64,
+};
+
 pub const FunnelStepInput = struct {
     name: []const u8,
     match_kind: domain.MatchKind,
@@ -490,6 +496,36 @@ pub const Store = struct {
         }
         try rows.finish(null);
         if (result.items.len == 0) return error.FunnelNotFound;
+        return result.toOwnedSlice(allocator);
+    }
+
+    pub fn listFunnels(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        site_slug: []const u8,
+    ) ![]Funnel {
+        var rows = try self.connection.queryParams(
+            \\SELECT funnels.id, funnels.name, count(funnel_steps.step_index)
+            \\FROM funnels
+            \\JOIN sites ON sites.id = funnels.site_id
+            \\LEFT JOIN funnel_steps ON funnel_steps.funnel_id = funnels.id
+            \\WHERE sites.slug = ?1
+            \\GROUP BY funnels.id, funnels.name
+            \\ORDER BY funnels.name
+        ,
+            .{site_slug},
+            .{},
+        );
+        defer rows.deinit();
+        var result: std.ArrayList(Funnel) = .empty;
+        while (try rows.next()) |row| {
+            try result.append(allocator, .{
+                .id = try allocator.dupe(u8, try row.get([]const u8, 0)),
+                .name = try allocator.dupe(u8, try row.get([]const u8, 1)),
+                .step_count = try row.get(i64, 2),
+            });
+        }
+        try rows.finish(null);
         return result.toOwnedSlice(allocator);
     }
 

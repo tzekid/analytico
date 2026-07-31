@@ -379,6 +379,16 @@ Caddy boundary with Basic Auth plus exact-origin checks on modifying forms.
 Do not build accounts, password reset, sessions, or passkeys without a real
 multi-user requirement.
 
+### M6 evidence
+
+Accepted. A separate Caddy vhost challenges unauthenticated requests before
+proxying only `/admin` routes. The application remains loopback-only and uses
+POST/redirect/GET, a per-installation CSRF token, exact `Origin` comparison,
+and context-specific escaping. Basic Auth has no server logout operation, so
+the dashboard deliberately has no fake logout route or second session model;
+the browser owns cached credential lifetime. Real Chromium with JavaScript
+disabled proves challenged and authenticated access plus all modifying forms.
+
 ## D16. Backup and retention
 
 ### Candidates

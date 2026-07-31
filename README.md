@@ -166,8 +166,14 @@ analytico site install ./data example https://analytics.example
 
 For a direct replacement, follow [the cutover runbook](docs/CUTOVER.md).
 
+The same process also serves a complete private dashboard at `/admin`.
+`deploy/Caddyfile.dashboard` places it on a separate Basic-Auth-protected
+hostname. All report navigation, UTC date filters, pagination, and goal/funnel
+forms work without JavaScript.
+
 ## MVP boundary
 
 M4 is the production-MVP gate. M5 is the completed site-specific
-direct-cutover handoff; it does not require a parallel Plausible trial. The
-HTML and HTMX work begins only in M6 and M7.
+direct-cutover handoff; it does not require a parallel Plausible trial. M6 adds
+the complete server-rendered dashboard; M7 is optional progressive
+enhancement.

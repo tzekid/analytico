@@ -86,6 +86,9 @@ analytico serve \
 Only loopback listeners and absolute paths are accepted. Unknown, duplicate,
 or missing flags; missing paths; non-current schemas; and a key with the wrong
 type, length, or mode fail before binding the listener. `serve` never migrates.
+The optional `--report-timeout-ms 1..2000` flag exists for constrained
+deployments and acceptance testing; production defaults to the fixed 2,000 ms
+interactive deadline.
 
 DuckDB is configured before its configuration is locked: one query thread,
 128 MiB memory, 256 MiB temp limit, insertion-order preservation off,
@@ -124,7 +127,42 @@ The collector still enforces origins, content type, body/header bounds, rate
 limits, and timeouts. Caddy is not an application state or authentication
 layer.
 
-## 6. Health and logs
+## 6. Private dashboard
+
+The dashboard is served at `/admin` by the same loopback process. Keep it off
+the public collector hostname. Replace `analytics-admin.example` in
+`deploy/Caddyfile.dashboard` and provide a Caddy password hash:
+
+```sh
+caddy hash-password
+```
+
+Set the resulting hash as `ANALYTICO_ADMIN_HASH` in the Caddy service
+environment, validate the file with that environment present, and import the
+vhost into the active Caddy configuration:
+
+```sh
+ANALYTICO_ADMIN_HASH='<caddy-password-hash>' \
+  caddy validate --config deploy/Caddyfile.dashboard
+```
+
+Do not put the plaintext password in a unit, environment file, shell history,
+or repository. The dashboard vhost allows only `/admin` and `/admin/*`,
+requires Basic Auth before proxying, and preserves the public request host
+while setting the upstream protocol.
+
+Basic Auth is intentionally the entire single-owner login boundary. Analytico
+does not add accounts, cookies, sessions, password reset, or a misleading
+logout endpoint. To end a Basic Auth browser session, close all windows for
+that browser profile or clear its cached site credentials.
+
+Dashboard modifying forms use POST/redirect/GET, a process token derived from
+the installation key, exact `Origin` comparison, and a same-origin referrer
+policy. A service restart invalidates forms opened from a different restored
+key. All dashboard HTML is complete without JavaScript; the stylesheet is the
+only initial subresource.
+
+## 7. Health and logs
 
 `/healthz` proves the event loop can answer. `/readyz` checks the healthy-write
 latch, the presence and basic properties of all durable paths, and exact schema
@@ -141,7 +179,7 @@ The service emits newline-delimited structured JSON to stderr for:
 Logs never include IPs, user agents, paths, referrers, campaigns, properties,
 request bodies, visitor IDs, keys, or database paths. Journald owns rotation.
 
-## 7. Backup
+## 8. Backup
 
 The MVP chooses a short honest outage over an online two-store coordinator:
 
@@ -164,7 +202,7 @@ directory, writes sizes and SHA-256 hashes to `manifest.json`, then atomically
 renames to a destination which must not exist. Never overwrite the last
 known-good backup.
 
-## 8. Restore
+## 9. Restore
 
 `restore ... --verify` rejects an unknown manifest/schema, unexpected file
 name, size/hash mismatch, insecure key, unreadable store, or existing
@@ -179,7 +217,7 @@ For production recovery:
 4. Run `doctor` and a representative report.
 5. Rename it to `/var/lib/analytico`, start, and check readiness.
 
-## 9. Upgrade, migration, and rollback
+## 10. Upgrade, migration, and rollback
 
 ```sh
 systemctl stop analytico
@@ -200,7 +238,7 @@ that backup into a new data directory, switching the data path, and starting
 the prior binary. `zig build e2e-rollback` builds the actual prior commit and
 rehearses this procedure.
 
-## 10. Retention and site deletion
+## 11. Retention and site deletion
 
 Run maintenance with the service stopped:
 
@@ -224,7 +262,7 @@ analytico site delete /var/lib/analytico example --confirm example
 The second command removes DuckDB rows and checkpoints before deleting Turso
 metadata, making a retry safe.
 
-## 11. Normalized export
+## 12. Normalized export
 
 ```sh
 analytico export /var/lib/analytico example \
@@ -236,7 +274,7 @@ a new mode-`0600` CSV. It includes normalized event dimensions and properties,
 not visitor/session IDs. Spreadsheet formula prefixes are escaped. The
 destination must not already exist.
 
-## 12. Disk-full and corruption response
+## 13. Disk-full and corruption response
 
 After any event write failure, collection writes stop, readiness is unhealthy,
 and the process does not hot-loop retries. Stop the service, free space outside
@@ -248,14 +286,14 @@ The M4 gate uses the kernel's real `RLIMIT_FSIZE=0` to force this path and also
 tests corrupted bytes, wrong manifests, wrong key permissions, newer schemas,
 missing live paths, and interrupted migrations.
 
-## 13. Build and release gates
+## 14. Build and release gates
 
 For the exact pinned environment:
 
 ```sh
 zig build test -Doptimize=ReleaseSafe \
   -Dturso-native-path=<exact-prefix>
-zig build e2e-m0 e2e-m1 e2e-m2 e2e-m2-browser e2e-m3 e2e-m4 \
+zig build e2e-m0 e2e-m1 e2e-m2 e2e-m2-browser e2e-m3 e2e-m4 e2e-m6 \
   -Doptimize=ReleaseSafe -Dturso-native-path=<exact-prefix>
 zig build e2e-rollback \
   -Doptimize=ReleaseSafe -Dturso-native-path=<exact-prefix>

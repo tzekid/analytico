@@ -100,7 +100,7 @@ pub fn writeUsage(output: *std.Io.Writer) !void {
         \\  analytico restore <backup-directory> <new-data-directory> --verify
         \\  analytico maintain <directory> <delete-before-date>
         \\  analytico export <directory> <site> <start-date> <end-date> <new.csv>
-        \\  analytico serve --listen <loopback:port> --meta <absolute-path> --events <absolute-path> --temp <absolute-directory> --visitor-key-file <absolute-path>
+        \\  analytico serve --listen <loopback:port> --meta <absolute-path> --events <absolute-path> --temp <absolute-directory> --visitor-key-file <absolute-path> [--report-timeout-ms 1..2000]
         \\  analytico site add <directory> <slug> <name> <origin>
         \\  analytico site list <directory>
         \\  analytico site disable <directory> <slug>
@@ -200,6 +200,8 @@ fn parseServe(args: []const []const u8) !http_server.Options {
     var event_path: ?[]const u8 = null;
     var temp_directory: ?[]const u8 = null;
     var key_path: ?[]const u8 = null;
+    var report_timeout_ms: u32 = 2_000;
+    var report_timeout_set = false;
     var index: usize = 2;
     while (index < args.len) : (index += 2) {
         if (index + 1 >= args.len) return error.InvalidServeOption;
@@ -220,6 +222,14 @@ fn parseServe(args: []const []const u8) !http_server.Options {
         } else if (std.mem.eql(u8, flag, "--visitor-key-file")) {
             if (key_path != null) return error.DuplicateServeOption;
             key_path = value;
+        } else if (std.mem.eql(u8, flag, "--report-timeout-ms")) {
+            if (report_timeout_set) return error.DuplicateServeOption;
+            report_timeout_ms = std.fmt.parseInt(u32, value, 10) catch
+                return error.InvalidReportTimeout;
+            if (report_timeout_ms == 0 or report_timeout_ms > 2_000) {
+                return error.InvalidReportTimeout;
+            }
+            report_timeout_set = true;
         } else {
             return error.InvalidServeOption;
         }
@@ -240,6 +250,7 @@ fn parseServe(args: []const []const u8) !http_server.Options {
         .event_path = event_path orelse return error.MissingServeOption,
         .temp_directory = temp_directory orelse return error.MissingServeOption,
         .key_path = key_path orelse return error.MissingServeOption,
+        .report_timeout_ms = report_timeout_ms,
     };
 }
 

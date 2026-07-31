@@ -1,0 +1,30 @@
+:root{color-scheme:light dark;font:16px/1.5 system-ui,sans-serif;background:#f6f5f1;color:#20211f}
+*{box-sizing:border-box}
+body{margin:0}
+header,main{max-width:76rem;margin:auto;padding:1rem}
+header{display:flex;align-items:baseline;justify-content:space-between;border-bottom:1px solid #b8b7b2}
+h1,h2,h3{line-height:1.15}
+a{color:#315f57}
+nav{display:flex;gap:.35rem;flex-wrap:wrap;margin:1rem 0}
+nav a,.button,button{border:1px solid #777;border-radius:.25rem;padding:.45rem .7rem;background:#fff;color:#20211f;text-decoration:none;font:inherit}
+nav a[aria-current=page]{background:#315f57;color:#fff;border-color:#315f57}
+form.filters{display:grid;grid-template-columns:repeat(auto-fit,minmax(10rem,1fr));gap:.75rem;align-items:end}
+label{display:grid;gap:.25rem;font-weight:600}
+input,select,textarea{width:100%;font:inherit;padding:.45rem;border:1px solid #777;border-radius:.25rem;background:#fff;color:#20211f}
+textarea{min-height:7rem}
+button{cursor:pointer;font-weight:650}
+.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(9rem,1fr));gap:.75rem;padding:0}
+.metrics li,.panel{list-style:none;background:#fff;border:1px solid #d1d0cb;border-radius:.35rem;padding:1rem}
+.metrics strong{display:block;font-size:1.7rem}
+.notice{border-left:.3rem solid #315f57;background:#e9f2ef;padding:.75rem}
+.error{border-left:.3rem solid #a22;background:#f8e8e6;padding:.75rem}
+.muted{color:#64645f}
+.table-scroll{overflow:auto}
+table{width:100%;border-collapse:collapse;background:#fff}
+th,td{text-align:left;padding:.55rem;border-bottom:1px solid #d8d7d2}
+th{font-size:.85rem;text-transform:uppercase;letter-spacing:.04em}
+.split{display:grid;grid-template-columns:repeat(auto-fit,minmax(19rem,1fr));gap:1rem;margin-top:2rem}
+.inline{display:inline}
+.danger{border-color:#a22;color:#8d1f1f}
+footer{max-width:76rem;margin:2rem auto;padding:1rem;color:#64645f}
+@media(prefers-color-scheme:dark){:root{background:#191a18;color:#ecece8}nav a,.button,button,input,select,textarea,.metrics li,.panel,table{background:#252724;color:#ecece8}.notice{background:#1e3732}.error{background:#402522}a{color:#8fc8bd}}

@@ -23,7 +23,7 @@ pub const Sort = enum {
     count,
     label,
 
-    fn parse(value: []const u8) !Sort {
+    pub fn parse(value: []const u8) !Sort {
         if (std.mem.eql(u8, value, "count")) return .count;
         if (std.mem.eql(u8, value, "label")) return .label;
         return error.InvalidReportSort;
@@ -38,7 +38,7 @@ pub const CampaignDimension = enum {
     content,
     all,
 
-    fn parse(value: []const u8) !CampaignDimension {
+    pub fn parse(value: []const u8) !CampaignDimension {
         if (std.mem.eql(u8, value, "source")) return .source;
         if (std.mem.eql(u8, value, "medium")) return .medium;
         if (std.mem.eql(u8, value, "campaign")) return .campaign;
@@ -82,7 +82,7 @@ pub const Kind = enum {
         };
     }
 
-    fn parse(value: []const u8) !Kind {
+    pub fn parse(value: []const u8) !Kind {
         const enum_info = @typeInfo(Kind).@"enum";
         inline for (enum_info.field_values) |field_value| {
             const candidate: Kind = @fromBackingInt(@intCast(field_value));

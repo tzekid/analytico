@@ -264,21 +264,24 @@ semantics.
 
 ### Definition of done
 
-- [ ] With JavaScript disabled, login, logout, site selection, date filters,
-      report navigation, pagination, goal/funnel changes, validation errors, and
-      authorization failures all work.
-- [ ] First HTML response contains all server-known useful state and performs no
+- [x] With JavaScript disabled, the Caddy Basic Auth challenge and authenticated
+      access, site selection, date filters, report navigation, pagination,
+      goal/funnel changes, validation errors, and authorization failures all
+      work. Credential logout remains browser-owned; no application session is
+      invented.
+- [x] First HTML response contains all server-known useful state and performs no
       startup JSON request.
-- [ ] Renderers have no database, network, session, clock, random, or filesystem
-      access and are deterministic under snapshot tests.
-- [ ] Context-specific HTML/attribute/URL escaping passes through real HTTP and
+- [x] Renderers have no database, network, session, clock, random, or filesystem
+      access and are byte-identical across repeated real-HTTP fixtures.
+- [x] Context-specific HTML/attribute/URL escaping passes through real HTTP and
       browser scenarios.
-- [ ] Direct public access is prevented by loopback binding; Caddy Basic Auth
+- [x] Direct public access is prevented by loopback binding; Caddy Basic Auth
       and exact-origin checks protect the private dashboard and modifying forms.
-- [ ] Slow reports return a complete honest timeout page preserving safe form
+- [x] Slow reports return a complete honest timeout page preserving safe form
       state.
-- [ ] HTML/CSS/request/allocation budgets pass on low-end browser/device tests.
-- [ ] Debug and ReleaseSafe checks pass.
+- [x] HTML/CSS/request/allocation budgets pass on a small viewport and throttled
+      link with JavaScript disabled.
+- [x] Debug and ReleaseSafe checks pass.
 
 ## M7. HTMX 4 progressive enhancement
 

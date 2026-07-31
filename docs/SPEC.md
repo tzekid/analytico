@@ -150,7 +150,8 @@ confirmation flag when stdin is not interactive.
   are bound.
 - DuckDB external access and extension loading are disabled in the serving
   process.
-- Administration is local CLI-only until a server-side authenticated UI exists.
+- Administration is available through the local CLI and the loopback dashboard;
+  Caddy Basic Auth and exact-origin/CSRF checks protect the latter.
 
 ### Performance
 
@@ -164,7 +165,6 @@ confirmation flag when stdin is not interactive.
 
 The following are not part of the production MVP:
 
-- an administrative web dashboard;
 - HTMX or any other browser application runtime;
 - organization, team, invitation, or billing systems;
 - real-time concurrent-view counters;
@@ -192,16 +192,16 @@ The production MVP is successful when:
 7. A release artifact and direct-cutover runbook are ready for the owner to
    replace Plausible without requiring a parallel collection period.
 
-## 7. Later server-rendered UI
+## 7. Server-rendered UI
 
-The UI is deliberately downstream of the product core:
+The M6 UI remains deliberately downstream of the product core:
 
 1. A controller loads Turso configuration and DuckDB report rows.
 2. It creates an owned, typed view model.
 3. A deterministic renderer writes a full HTML response without I/O.
 4. Links and forms work with JavaScript disabled.
-5. Only then may the same endpoints return scoped HTML fragments to HTMX.
+5. Only M7 may let the same endpoints return scoped HTML fragments to HTMX.
 
-The UI does not fetch JSON after receiving the same state in HTML. It does not
-open the DuckDB file from a second process. The later Cloudio integration must
-choose one of the ownership-safe options in decision D13.
+The implemented UI does not fetch JSON after receiving the same state in HTML.
+It does not open the DuckDB file from a second process. The later Cloudio
+integration must choose one of the ownership-safe options in decision D13.
