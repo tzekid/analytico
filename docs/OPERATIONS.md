@@ -156,6 +156,12 @@ does not add accounts, cookies, sessions, password reset, or a misleading
 logout endpoint. To end a Basic Auth browser session, close all windows for
 that browser profile or clear its cached site credentials.
 
+This paragraph describes the released `0.1.0` deployment. Passkey-only owner
+authentication is now an accepted post-release design, not a current feature.
+Until the [passkey authentication specification](PASSKEY_AUTH_SPEC.md) is
+implemented and its staged cutover passes, do not remove this Basic Auth gate
+or advertise `/admin/login` as available.
+
 Dashboard modifying forms use POST/redirect/GET, a process token derived from
 the installation key, exact `Origin` comparison, and a same-origin referrer
 policy. A service restart invalidates forms opened from a different restored

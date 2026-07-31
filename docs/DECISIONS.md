@@ -31,6 +31,7 @@ semantic, or application state model is consequential and must be added here.
 | D20 | Collector concurrency | One bounded sequential accept loop | Accepted |
 | D21 | Session boundaries | Persist event-local boundaries at commit | Accepted |
 | D22 | Cloudio integration | Optional ordinary link to standalone Analytico | Accepted |
+| D23 | Private dashboard authentication | Passkey-only owner gate after staged Basic Auth cutover | Accepted design; not implemented |
 
 ## D01. MVP interface
 
@@ -401,7 +402,7 @@ secrets; exact origin validation and rate limits constrain them. For the later
 single-owner private dashboard, bind Analytico to loopback and use the existing
 Caddy boundary with Basic Auth plus exact-origin checks on modifying forms.
 Do not build accounts, password reset, sessions, or passkeys without a real
-multi-user requirement.
+owner requirement.
 
 ### M6 evidence
 
@@ -412,6 +413,11 @@ and context-specific escaping. Basic Auth has no server logout operation, so
 the dashboard deliberately has no fake logout route or second session model;
 the browser owns cached credential lifetime. Real Chromium with JavaScript
 disabled proves challenged and authenticated access plus all modifying forms.
+
+This was the accepted `0.1.0` boundary. The owner's later requirement for a
+Touch ID/Face ID login and application logout supersedes the permanent-auth
+part of this decision for post-`0.1.0` work; see D23. Basic Auth remains the
+deployed gate until that cutover is implemented and accepted.
 
 ## D16. Backup and retention
 
@@ -594,3 +600,28 @@ Cloudio still returned a complete `200` page. `/proc` file descriptors showed
 only the Analytico process owning `events.duckdb`. Removing the optional URL and
 restarting only Cloudio removed the link, while direct standalone Analytico
 remained healthy. No identity is forwarded and no shared abstraction was added.
+
+## D23. Passkey-only private dashboard authentication
+
+### Candidates
+
+| Candidate | Advantages | Costs |
+| --- | --- | --- |
+| Retain Caddy Basic Auth | Already released and operationally small | Password UX, cached browser credential lifetime, no real logout/revocation |
+| Passkey-only owner gate in Analytico | Touch ID/Face ID, origin-bound WebAuthn, revocable sessions, no password | Small browser API island plus verifier/session state |
+| External identity proxy | Mature authentication features | Another runtime and substantially more machinery than one owner needs |
+| Share Cloudio identity/session | One apparent login | Couples origins, cookies, releases, availability, and authorization |
+
+### Recommendation
+
+Add one discoverable, user-verified passkey owner and server-side revocable
+sessions inside Analytico. Keep the collector public and unchanged; keep all
+auth metadata in Turso; keep Caddy as the TLS, hostname, limit, and loopback
+boundary. Retain Caddy Basic Auth only during migration, then remove it after a
+real passkey enrollment/login/logout acceptance run.
+
+Port Cloudio's narrow, exercised WebAuthn verification semantics without
+sharing sessions or copying its unrelated framework. Extract shared code only
+after both concrete consumers demonstrate identical semantics. The complete
+route, storage, recovery, migration, threat-boundary, and end-to-end acceptance
+contract is in the [passkey authentication specification](PASSKEY_AUTH_SPEC.md).

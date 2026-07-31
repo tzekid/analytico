@@ -361,3 +361,11 @@ measurements trigger one of:
 Its definition of done must name the observed bottleneck or user requirement,
 the simpler candidates considered, the accepted cost, migration/rollback, and
 new performance/security/privacy gates.
+
+## Post-0.1.0 accepted work: passkey owner gate
+
+The owner has supplied a concrete post-release requirement for Touch ID,
+Face ID, hardware-key, and synced-passkey login. Its three independently
+checkable implementation milestones and definitions of done are specified in
+[`PASSKEY_AUTH_SPEC.md`](PASSKEY_AUTH_SPEC.md). The shipped Caddy Basic Auth
+gate remains in force until all three milestones and the staged cutover pass.
