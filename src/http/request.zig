@@ -4,6 +4,7 @@ pub const max_target_bytes = 4096;
 pub const max_header_count = 32;
 pub const max_header_bytes = 16 * 1024;
 pub const max_body_bytes = 8 * 1024;
+pub const max_v2_body_bytes = 16 * 1024;
 pub const max_auth_body_bytes = 192 * 1024;
 
 pub const Header = struct {
@@ -161,6 +162,8 @@ fn bodyLimit(target: []const u8) usize {
     return if (std.mem.startsWith(u8, path, "/admin/auth/") or
         std.mem.eql(u8, path, "/admin/security/passkeys/verify"))
         max_auth_body_bytes
+    else if (std.mem.eql(u8, path, "/v2/event"))
+        max_v2_body_bytes
     else
         max_body_bytes;
 }

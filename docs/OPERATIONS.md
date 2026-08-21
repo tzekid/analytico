@@ -117,8 +117,8 @@ caddy validate --config deploy/Caddyfile
 ```
 
 The vhost exposes `/tracker.aef65945.js`, `/tracker.js`, `/v1/event`,
-`/v1/p.gif`, `/admin`, and `/admin/*`. `/` redirects to `/admin`; all other
-paths, including health endpoints, receive `404`.
+`/v2/event`, `/v1/p.gif`, `/admin`, and `/admin/*`. `/` redirects to `/admin`;
+all other paths, including health endpoints, receive `404`.
 Caddy overwrites `X-Forwarded-For` and `X-Analytico-Country` before proxying.
 Do not trust `CF-IPCountry` unless the origin is network-restricted to
 Cloudflare. If Cloudflare is not used, clear the country header and Analytico
@@ -251,8 +251,10 @@ systemctl start analytico
 ```
 
 Migrations are numbered and transactional. Killing the process during the
-million-row v1-to-v2 DuckDB migration and retrying is an automated release
-gate. A binary refuses a database with a newer unknown schema.
+million-row v1-to-v3 DuckDB migration chain and retrying is an automated
+release gate. A binary refuses a database with a newer unknown schema. Event
+schema 3 requires database-pair restoration before an event-schema-2 binary is
+started for rollback.
 
 Keep the previous release directory and the verified pre-upgrade backup.
 Rollback means stopping the new binary, restoring both stores and the key from
@@ -269,10 +271,11 @@ analytico maintain /var/lib/analytico 2025-06-01
 ```
 
 The cutoff must be a valid UTC date at least 400 days old. The command deletes
-only event rows with `received_date_utc < cutoff`, then removes events and
-metadata for sites already marked disabled, checkpoints both stores, and
-reports exact before/expired/site/after counts. A too-recent cutoff fails
-before either store is opened.
+event rows with `received_date_utc < cutoff`, then identity links whose
+`(site_id, anonymous_id)` no longer exists in `events`. It then removes events,
+identity links, and metadata for sites already marked disabled, checkpoints
+both stores, and reports exact before/expired/site/after counts. A too-recent
+cutoff fails before either store is opened.
 
 Direct site deletion is also two phase:
 
@@ -281,8 +284,8 @@ analytico site disable /var/lib/analytico example
 analytico site delete /var/lib/analytico example --confirm example
 ```
 
-The second command removes DuckDB rows and checkpoints before deleting Turso
-metadata, making a retry safe.
+The second command removes DuckDB identity links and events, checkpoints, then
+deletes Turso metadata, making a retry safe.
 
 ## 12. Normalized export
 

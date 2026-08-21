@@ -169,7 +169,8 @@ pub fn run(
         "{{\"level\":\"info\",\"code\":\"serve_stopped\",\"accepted\":{d}," ++
             "\"rejected\":{d},\"rate_limited\":{d},\"bots\":{d}," ++
             "\"unknown_country\":{d},\"unknown_client\":{d}," ++
-            "\"write_failures\":{d},\"request_failures\":{d}}}\n",
+            "\"duplicates\":{d},\"conflicts\":{d},\"write_failures\":{d}," ++
+            "\"request_failures\":{d}}}\n",
         .{
             context.counters.accepted,
             context.counters.rejected,
@@ -177,6 +178,8 @@ pub fn run(
             context.counters.bots,
             context.counters.unknown_country,
             context.counters.unknown_client,
+            context.counters.duplicates,
+            context.counters.conflicts,
             context.counters.write_failures,
             context.counters.request_failures,
         },
@@ -190,6 +193,8 @@ const Counters = struct {
     bots: u64 = 0,
     unknown_country: u64 = 0,
     unknown_client: u64 = 0,
+    duplicates: u64 = 0,
+    conflicts: u64 = 0,
     write_failures: u64 = 0,
     request_failures: u64 = 0,
 };
@@ -409,6 +414,17 @@ fn handle(context: *Context, stream: std.Io.net.Stream) !void {
         }
         return;
     }
+    if (std.mem.eql(u8, path, "/v2/event")) {
+        if (!std.mem.eql(u8, request.method, "POST")) {
+            try methodNotAllowed(output, "POST");
+        } else {
+            postEventV2(context, allocator, request, output) catch |err| switch (err) {
+                error.DuplicateHeader => try writeError(output, 400),
+                else => return err,
+            };
+        }
+        return;
+    }
     if (std.mem.eql(u8, path, "/v1/p.gif")) {
         if (!std.mem.eql(u8, request.method, "GET")) {
             try methodNotAllowed(output, "GET");
@@ -487,6 +503,105 @@ fn postEvent(
         );
         return;
     }
+    var headers = std.Io.Writer.Allocating.init(allocator);
+    try headers.writer.print(
+        "{s}Access-Control-Allow-Origin: {s}\r\nVary: Origin\r\n",
+        .{ no_store_headers, origin },
+    );
+    try response.write(output, 204, "text/plain; charset=utf-8", headers.written(), "");
+}
+
+fn postEventV2(
+    context: *Context,
+    allocator: std.mem.Allocator,
+    request: request_mod.Request,
+    output: *std.Io.Writer,
+) !void {
+    if (!context.events_healthy) {
+        try reject(context, output, 503);
+        return;
+    }
+    if (!supportedContentType(try request.header("content-type")) or
+        (try request.header("content-encoding")) != null)
+    {
+        try reject(context, output, 415);
+        return;
+    }
+    const payload = collect.parsePostV2(allocator, request.body) catch {
+        try reject(context, output, 400);
+        return;
+    };
+    const policy = findPolicy(context.policies, payload.site) orelse {
+        try reject(context, output, 404);
+        return;
+    };
+    if (policy.disabled) {
+        try reject(context, output, 404);
+        return;
+    }
+    const raw_origin = (try request.header("origin")) orelse {
+        try reject(context, output, 403);
+        return;
+    };
+    const origin = domain.normalizeOrigin(allocator, raw_origin) catch {
+        try reject(context, output, 403);
+        return;
+    };
+    if (!policy.allowsOrigin(origin)) {
+        try reject(context, output, 403);
+        return;
+    }
+    const now = currentTime() catch {
+        try reject(context, output, 500);
+        return;
+    };
+    if (!(eventRateAllowed(
+        context,
+        request,
+        policy.id,
+        now.seconds,
+    ) catch {
+        try reject(context, output, 400);
+        return;
+    })) {
+        context.counters.rate_limited += 1;
+        context.counters.rejected += 1;
+        try response.write(
+            output,
+            429,
+            "text/plain; charset=utf-8",
+            no_store_headers ++ "Retry-After: 1\r\n",
+            "rate limited\n",
+        );
+        return;
+    }
+    const prepared = collect.preparePostV2(
+        allocator,
+        payload,
+        policy,
+        now.micros,
+    ) catch {
+        try reject(context, output, 400);
+        return;
+    };
+    acceptEventV2(
+        context,
+        allocator,
+        request,
+        prepared,
+        now,
+    ) catch |err| {
+        const status: u16 = switch (err) {
+            error.EventIdConflict,
+            error.IdentityConflict,
+            error.IdentityQualityConflict,
+            => 409,
+            error.EventWriteFailed => 500,
+            else => 400,
+        };
+        try reject(context, output, status);
+        return;
+    };
     var headers = std.Io.Writer.Allocating.init(allocator);
     try headers.writer.print(
         "{s}Access-Control-Allow-Origin: {s}\r\nVary: Origin\r\n",
@@ -619,6 +734,102 @@ fn acceptEvent(
     return true;
 }
 
+fn acceptEventV2(
+    context: *Context,
+    allocator: std.mem.Allocator,
+    request: request_mod.Request,
+    prepared: collect.PreparedV2,
+    now: CurrentTime,
+) !void {
+    const user_agent = (try request.header("user-agent")) orelse "";
+    if (user_agent.len > 1024) return error.InvalidUserAgent;
+    const client = classify.userAgent(user_agent);
+    const country_code = classify.country(try request.header("x-analytico-country"));
+    if (std.mem.eql(u8, client.device, "bot")) context.counters.bots += 1;
+    if (std.mem.eql(u8, country_code[0..], "ZZ")) {
+        context.counters.unknown_country += 1;
+    }
+    if (std.mem.eql(u8, client.browser, "Unknown") or
+        std.mem.eql(u8, client.browser, "Other"))
+    {
+        context.counters.unknown_client += 1;
+    }
+    const visitor_day_id = try domain.deriveVisitorDayCompatibilityId(
+        prepared.site_id,
+        &now.date,
+        prepared.anonymous_id,
+    );
+    const outcome = context.events.insertV2(allocator, .{
+        .event_id = prepared.event_id,
+        .site_id = prepared.site_id,
+        .received_at_utc_micros = now.micros,
+        .occurred_at_utc_micros = prepared.occurred_at_utc_micros,
+        .received_date_utc = &now.date,
+        .kind = prepared.kind,
+        .event_name = prepared.event_name,
+        .path = prepared.path,
+        .page_title = prepared.page_title,
+        .hostname = prepared.hostname,
+        .anonymous_id = prepared.anonymous_id,
+        .identity_quality = prepared.identity_quality,
+        .session_id = prepared.session_id,
+        .sequence = prepared.sequence,
+        .referrer_host = prepared.referrer_host,
+        .country_code = &country_code,
+        .browser_family = client.browser,
+        .os_family = client.os,
+        .device_category = client.device,
+        .utm_source = prepared.utm_source,
+        .utm_medium = prepared.utm_medium,
+        .utm_campaign = prepared.utm_campaign,
+        .utm_term = prepared.utm_term,
+        .utm_content = prepared.utm_content,
+        .properties_json = prepared.properties_json,
+        .identify_user_id = prepared.identify_user_id,
+        .user_traits_json = prepared.user_traits_json,
+        .value_amount = prepared.value_amount,
+        .value_currency = prepared.value_currency,
+        .engagement_ms = prepared.engagement_ms,
+        .max_scroll_depth = prepared.max_scroll_depth,
+        .visitor_day_id = visitor_day_id,
+        .event_payload_digest = &prepared.event_payload_digest,
+    }) catch |err| switch (err) {
+        error.EventIdConflict,
+        error.IdentityConflict,
+        error.IdentityQualityConflict,
+        => {
+            context.counters.conflicts += 1;
+            return err;
+        },
+        else => {
+            context.events_healthy = false;
+            context.counters.write_failures += 1;
+            return error.EventWriteFailed;
+        },
+    };
+    switch (outcome) {
+        .inserted => context.counters.accepted += 1,
+        .duplicate => context.counters.duplicates += 1,
+    }
+}
+
+fn eventRateAllowed(
+    context: *Context,
+    request: request_mod.Request,
+    site_id: []const u8,
+    now_seconds: i64,
+) !bool {
+    const client_ip = (try request.header("x-forwarded-for")) orelse "127.0.0.1";
+    if (client_ip.len == 0 or client_ip.len > 64 or
+        std.mem.findScalar(u8, client_ip, ',') != null)
+    {
+        return error.InvalidForwardedIp;
+    }
+    const rate_key = domain.networkPrefixHash(site_id, client_ip) catch
+        return error.InvalidForwardedIp;
+    return context.limiter.allow(rate_key, now_seconds);
+}
+
 fn pathsReady(context: *Context) bool {
     const meta_stat = std.Io.Dir.cwd().statFile(
         context.io,
@@ -746,6 +957,7 @@ fn writeError(output: *std.Io.Writer, status: u16) !void {
         400 => "bad request\n",
         403 => "forbidden\n",
         404 => "not found\n",
+        409 => "conflict\n",
         413 => "payload too large\n",
         415 => "unsupported media type\n",
         429 => "rate limited\n",

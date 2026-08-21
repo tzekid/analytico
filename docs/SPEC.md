@@ -9,13 +9,13 @@
 
 ## Version boundary
 
-- The current protocol-v1/event-schema-2 path uses cookieless daily
-  pseudonyms, UTC report dates, and sessions that cannot cross UTC midnight.
-  Those semantics remain metric v1 and continue to govern existing rows.
-- Decisions D26 and D27 accept persistent site-scoped first-party identity,
-  cross-midnight client sessions, and explicit site-local dates for new
-  compatible 1.0 data. They do not retroactively turn visitor-days into people
-  or claim that protocol v2 and event schema 3 are already implemented.
+- The frozen protocol-v1 path uses cookieless daily pseudonyms, UTC report
+  dates, and sessions that cannot cross UTC midnight. Those semantics remain
+  metric v1 and continue to govern compatibility rows and current reports.
+- Decision D28 implements the additive protocol-v2 collector and event-schema-3
+  storage foundation. Decisions D26 and D27 still require the dependent tracker,
+  metric, timezone, and migration evidence; schema 3 does not retroactively turn
+  visitor-days into people or claim site-local metric v2 is complete.
 - The current server-rendered `/admin` dashboard and optional HTMX enhancement
   shipped after M4. HTML, native navigation, and ordinary forms remain the
   application baseline.

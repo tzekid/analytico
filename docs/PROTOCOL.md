@@ -1,9 +1,9 @@
 # Collection protocol
 
-> **Status:** This is the shipped, frozen protocol-v1 wire contract. It remains
-> valid during the documented Analytico 1.0 compatibility window. Protocol v2
-> is an accepted target under decisions D26 and D27, not shipped behavior until
-> issue #6 and its dependent acceptance work land.
+> **Status:** Protocol v1 remains a shipped frozen compatibility contract.
+> Protocol v2 is the additive collector/storage foundation defined by D28.
+> Tracker persistence, browser sessions, and higher-level metric-v2 behavior
+> continue through issues #7–#13.
 
 Breaking changes require a new protocol version. They do not reinterpret
 accepted v1 events or metric-v1 visitor-day semantics.
@@ -15,6 +15,7 @@ accepted v1 events or metric-v1 visitor-day semantics.
 | `GET` | `/tracker.aef65945.js` | Immutable optional tracker | `200` JavaScript |
 | `GET` | `/tracker.js` | Short-cache installation alias | `200` JavaScript |
 | `POST` | `/v1/event` | Page view or custom event | `204` empty |
+| `POST` | `/v2/event` | Bounded version-2 event envelope | `204` empty |
 | `GET` | `/v1/p.gif` | JavaScript-free page view | `200` transparent GIF |
 | `GET` | `/healthz` | Process liveness, loopback only | `200` text |
 | `GET` | `/readyz` | Store readiness, loopback only | `200` or `503` |
@@ -31,16 +32,18 @@ Limits are checked before dynamic allocation where possible:
 | Request target | 4,096 bytes |
 | Header count | 32 |
 | Total header bytes | 16 KiB |
-| POST body | 8 KiB |
+| Protocol-v1 POST body | 8 KiB |
+| Protocol-v2 POST body | 16 KiB |
 | Site UUID text | 36 bytes |
 | Origin or referrer URL input | 2,048 bytes |
 | Path | 1,024 bytes |
 | Event name | 64 bytes |
-| Properties | 16 entries / 4 KiB canonical total |
+| Protocol-v1 properties | 16 entries / 4 KiB canonical total |
+| Protocol-v2 properties or traits | 16 entries each / 512-byte string |
 | Each UTM value | 256 bytes |
 
-Chunked bodies are accepted only when the decoded total remains within 8 KiB.
-Compressed request bodies are not accepted.
+Chunked bodies are accepted only when the decoded total remains within the
+route's limit. Compressed request bodies are not accepted.
 
 ## 3. POST event
 
@@ -103,6 +106,7 @@ numbers are rejected. The exact JSON parser behavior is covered by a corpus.
 | `400` | Malformed or semantically invalid |
 | `403` | Origin is not allowed |
 | `404` | Site is unknown or disabled |
+| `409` | Event-ID reuse or identity link conflicts |
 | `413` | Target, headers, or body exceed limits |
 | `415` | Unsupported content type or encoding |
 | `429` | Bounded rate limit exceeded |
@@ -111,7 +115,86 @@ numbers are rejected. The exact JSON parser behavior is covered by a corpus.
 
 Error bodies are fixed small text and do not echo request content.
 
-## 4. Pixel page view
+## 4. Protocol-v2 POST event
+
+Protocol v2 uses the same `text/plain;charset=UTF-8`, exact-origin, no-cookie,
+no-credentials, and fixed-error boundary as v1. It is accepted only at
+`/v2/event`, and `v` must be exactly `2`.
+
+The common required envelope is:
+
+```json
+{
+  "v": 2,
+  "site": "00000000-0000-4000-8000-000000000000",
+  "event_id": "00000000-0000-4000-8000-000000000001",
+  "anonymous_id": "00000000-0000-4000-8000-000000000002",
+  "identity_quality": "persistent",
+  "session_id": "00000000-0000-4000-8000-000000000003",
+  "sequence": 4,
+  "occurred_at_ms": 1787227532123,
+  "type": "event",
+  "name": "sign_up",
+  "page": {
+    "path": "/pricing",
+    "title": "Pricing",
+    "hostname": "example.com"
+  },
+  "properties": {
+    "plan": "pro",
+    "trial_days": 14,
+    "success": true
+  },
+  "value": {
+    "amount": "49.00",
+    "currency": "EUR"
+  }
+}
+```
+
+UUIDs are canonical lowercase text. Sequence is an unsigned 32-bit integer.
+Occurrence time must be no more than seven days behind or 24 hours ahead of
+server receipt time; receipt time remains authoritative for acceptance and
+date bucketing. `identity_quality` is exactly `persistent` or `ephemeral`.
+
+Event-specific fields are closed:
+
+| Type | Required | Optional | Canonical stored name |
+| --- | --- | --- | --- |
+| `pageview` | `page` | referrer, UTM | `page_view` |
+| `event` | `name` | page, referrer, UTM, properties, value | supplied name |
+| `engagement` | `page`, `engagement` | none | `engagement` |
+| `identify` | persistent identity, `user` | page and flat user traits | `identify` |
+
+Fields outside the selected row are rejected rather than ignored. Page path is
+required whenever `page` is present; title and hostname are optional and
+bounded to 512 UTF-8 bytes and 253 normalized bytes respectively. Path is
+normalized by the repository path contract, hostname is lowercase bounded
+ASCII, and referrer stores only a normalized external host. Absent and
+same-origin referrers store empty; a malformed referrer URL rejects the event.
+Engagement
+contains `active_ms` from 0–60,000 and integer `max_scroll_depth` from 0–100.
+
+Property and trait objects have at most 16 unique identifier keys. This
+foundation does not consult the protocol-v1 property allowlist. It accepts
+strings up to 512 UTF-8 bytes without control characters, signed integers,
+booleans, and null; arrays, nested objects, floating JSON numbers, and
+duplicate keys reject the whole event. Issue #10 owns exact
+decimal property tokens and query/type discovery. Value is available only on a
+custom event and requires both a decimal amount and three-uppercase-letter
+currency. Amount accepts an optional minus, no plus or exponent, at most 12
+integer and six fractional digits, and is stored at exact scale six.
+The identify `user` object requires `id` of 1–160 UTF-8 bytes without control
+characters and may contain the bounded `traits` object described above.
+
+`event_id` is idempotent within a site. A repeat whose normalized fields have
+the same canonical digest returns `204` and writes nothing. Reuse with any
+different normalized field, or an anonymous identity already linked to a
+different user, returns fixed `409`. An identify link and its event are one
+DuckDB transaction. No response echoes a property, trait, identity, or request
+body.
+
+## 5. Pixel page view
 
 Example server-rendered fallback:
 
@@ -146,7 +229,7 @@ Referrer-Policy: no-referrer
 The endpoint returns the GIF only after the event commits. Invalid requests use
 the corresponding error status rather than claiming a view.
 
-## 5. Tracker behavior
+## 6. Tracker behavior
 
 The tracker is not needed by Analytico's later admin UI; it is the optional
 collection helper embedded in measured sites.
@@ -182,7 +265,7 @@ window.analytico?.event("signup", { plan: "basic" });
 The global API is `window.analytico.event(name, properties)` and the site
 attribute is exactly `data-site`.
 
-## 6. Origin and proxy trust
+## 7. Origin and proxy trust
 
 - POST requires an exact `Origin` match.
 - Pixel GET requires the origin parsed from `Referer` to match.
@@ -197,7 +280,7 @@ attribute is exactly `data-site`.
 The site identifier is public and appears in browser markup. It is not an
 authorization credential.
 
-## 7. Rate limiting
+## 8. Rate limiting
 
 M2 begins with:
 
@@ -212,17 +295,17 @@ Rate limits are deployment defaults and may be changed only within documented
 hard maxima. Caddy may add a coarser outer limit, but correctness does not rely
 on it.
 
-## 8. Caching and CSP
+## 9. Caching and CSP
 
 - `/tracker.aef65945.js`: one-year immutable cache with Brotli/gzip variants.
 - `/tracker.js`: identical bytes with a five-minute cache.
-- Event and pixel routes: `no-store`.
+- Event and pixel routes, including `/v2/event`: `no-store`.
 - No collector route sets a cookie.
 - Measured sites must add the collector origin to `script-src` and
   `connect-src` when the tracker is hosted on a separate origin; the pixel
   origin must be present in `img-src`.
 
-## 9. Protocol versioning
+## 10. Protocol versioning
 
 `v: 1` is required. Additive optional fields still require an explicit
 acceptance test. A breaking payload or metric change uses a new protocol or
@@ -233,5 +316,6 @@ Protocol v2 adds persistent first-party identity, client session identity,
 optional explicit identification, and the event fields required by metric v2.
 Protocol-v1 requests continue through their existing bounded validation and
 privacy path and migrate as `legacy_daily`; they are never silently treated as
-persistent people. The v2 contract and exact compatibility-removal condition
-must land with issue #6 before implementation is considered complete.
+persistent people. V1 is not removed in 1.0. Removal requires a later decision
+and issue, deployed v2 tracker coverage for every active site, and operator
+evidence that no required v1 traffic was accepted for 30 consecutive days.

@@ -8,12 +8,12 @@ Milestones M0 through M8 are complete. M4 is the production-MVP boundary; the
 later milestones finish direct-cutover evidence, the private server-rendered
 dashboard, removable HTMX enhancement, and the optional Cloudio boundary. The
 executable owns the exact embedded
-stores, numbered schemas, validated sites/origins/property allowlists,
-goals/funnels, a private visitor key, daily visitor pseudonyms, direct durable
-event insertion, a bounded loopback HTTP collector, a tiny self-hosted tracker,
-a JavaScript-free pixel, complete typed CLI reports, verified lifecycle
-commands, a hardened single-service deployment, and checksummed release
-packaging.
+stores, numbered schemas, validated sites/origins and v1 property allowlists,
+goals/funnels, a private visitor key, dual bounded collector protocols, event
+schema 3, daily-identity compatibility, direct durable event insertion, a tiny
+self-hosted v1 tracker, a JavaScript-free pixel, complete typed CLI reports,
+verified lifecycle commands, a hardened single-service deployment, and
+checksummed release packaging.
 
 ## Selected shape
 

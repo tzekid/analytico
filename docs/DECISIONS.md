@@ -36,6 +36,7 @@ semantic, or application state model is consequential and must be added here.
 | D25 | Dashboard functional-quality pass | Separate native state transitions with minimal enhancement | Accepted for U1 |
 | D26 | 1.0 identity and sessions | Persistent first-party anonymous identity, explicit identify/reset, cross-midnight client sessions | Accepted for 1.0; implementation pending |
 | D27 | 1.0 site-local time | Explicit IANA zone with bounded host-TZif reader and stored local dates | Accepted for 1.0; implementation pending |
+| D28 | Protocol-v2 and event-schema-3 foundation | Separate bounded route, explicit identity quality, single-writer idempotency, transactional schema swap | Accepted for 1.0 issue #6 |
 
 ## D01. MVP interface
 
@@ -855,3 +856,95 @@ UTC and Europe/Berlin across DST and leap day, invalid/traversal/missing/corrupt
 zones, local range boundaries, ingestion stability, locked-zone behavior,
 legacy backfill, repeated migration, and database-pair rollback. Until that
 evidence lands, UTC remains the shipped reporting behavior.
+
+## D28. Protocol-v2 route and event-schema-3 foundation
+
+**Status:** Accepted for Analytico 1.0 issue #6
+
+**Date:** 2026-08-21
+
+**Issue:** #6
+
+### Context
+
+The package deliberately leaves the v2 route name and exact DuckDB enforcement
+mechanism open, and its sample envelope does not include the signal needed to
+distinguish persistent from storage-unavailable identity. Issue #6 must settle
+those details without changing the frozen protocol-v1 body limit, presenting a
+temporary UTC backfill as completed site-timezone work, or accepting identify
+events that violate D26's one-user-per-anonymous-ID rule.
+
+### Route candidates
+
+| Candidate | Advantages | Costs and risks |
+| --- | --- | --- |
+| Accept `v:2` on `/v1/event` | One POST route | The parser cannot select the v1 8 KiB versus v2 16 KiB limit before reading the body; the route name and compatibility telemetry are ambiguous |
+| Add `/v2/event` and keep `/v1/event` unchanged | Preserves the complete v1 contract; makes limits, tests, proxy policy, and later removal explicit | One additional narrow route |
+| Replace both with an unversioned `/event` | Clean future name | Adds redirects/compatibility behavior with no product benefit |
+
+Select `/v2/event`. The payload must still contain exactly `v:2`; a route never
+implies or repairs a missing/unknown version.
+
+### Identity-quality candidates
+
+| Candidate | Advantages | Costs and risks |
+| --- | --- | --- |
+| Infer persistence from UUID shape or protocol version | No new field | Impossible: persistent and page-lifetime ephemeral identities use the same random UUID grammar |
+| Send an `ephemeral` boolean | Small | Negative naming becomes unclear as more quality states exist |
+| Require `identity_quality` as `persistent` or `ephemeral` | Matches the stored concept and is explicit at the trust boundary | Adds one bounded string to every v2 event |
+
+Require the string field. It is untrusted analytics metadata, not an
+authentication claim. `legacy_daily` is storage-only and is rejected on the
+public v2 route. Identify requires persistent quality; an ephemeral identity
+cannot create a durable link.
+
+### Idempotency and migration candidates
+
+| Candidate | Advantages | Costs and risks |
+| --- | --- | --- |
+| Unique index plus raw-body comparison | Database-enforced uniqueness | Index cost over the million-row migration; semantically equal JSON with different key order conflicts |
+| Compare every stored column on reuse | No internal digest | Large duplicate query that must evolve in lockstep with every column |
+| Canonical normalized-field digest plus single-writer precheck | Small bounded comparison; semantically equal normalized payloads deduplicate; uses D20's established writer invariant | Direct out-of-process SQL writers would bypass it, but they are already forbidden |
+
+Use a BLAKE3 digest over length-delimited normalized fields and check it before
+the transactional insert. The same `(site_id,event_id)` and digest returns
+`204` without another row; any other reuse returns fixed `409`. The digest is an
+internal schema column, not user data. A v2 identify link and event commit in
+one transaction. The first accepted `(site_id,session_id)` event is marked as
+the session start. Issues #7–#9 still own tracker persistence/reset, rotation,
+browser behavior, profile resolution, and their full end-to-end acceptance.
+
+Migration 3 uses one transactional create/backfill/swap and retains the two
+metric-v1 visitor-day compatibility facts until their queries are retired.
+Legacy rows receive protocol/tracker version 1, `legacy_daily`, occurrence equal
+to receipt, deterministic day-scoped synthetic anonymous identity, and their
+existing event/session/data bytes. Because issue #11's explicit timezone
+metadata does not exist yet, migration 3 records the currently shipped UTC date
+and offset zero. This is a labeled compatibility value, not implementation of
+D27; issues #11 and #13 own the explicit-zone rebucket and its backup, DST,
+mixed-quality, repeated-migration, and rollback evidence before metric v2 uses
+those columns.
+
+### Wire and storage boundary
+
+- The server stamps event schema 3 and tracker version 2 for protocol-v2
+  envelopes. Protocol-v1 rows remain protocol/tracker version 1.
+- V2 property and trait values in this foundation are bounded strings, signed
+  integers, booleans, or null. Exact decimal event properties and query/type
+  discovery remain issue #10; exact `value.amount` is implemented now as
+  normalized `DECIMAL(18,6)`.
+- The server derives a temporary visitor-day compatibility key for v2 rows so
+  the shipped metric-v1 queries remain usable. It does not reinterpret that key
+  as persistent-person identity.
+- Protocol v1 is not removed in 1.0. Removal requires a later recorded decision,
+  an explicit migration issue, deployed v2 tracker coverage for every active
+  site, and operator evidence of no required v1 traffic for 30 consecutive
+  days.
+
+### Acceptance evidence
+
+Issue #6 must prove all four v2 event kinds, normalization and parser bounds,
+same/different-payload reuse, identity-link conflict atomicity, v1 compatibility,
+fresh and legacy DuckDB migration, the real loopback executable, and Debug and
+ReleaseSafe gates. The public Caddy allowlist and operational route inventory
+must change in the same release.
