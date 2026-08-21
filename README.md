@@ -63,6 +63,8 @@ That target is a plan, not a claim that the capabilities are already shipped.
 
 - [Normative repository doctrine and authority order](AGENTS.md)
 - [Analytico 1.0 scope contract](docs/SCOPE_1.0.md)
+- [Analytico 1.0 release contract](docs/RELEASE_CONTRACT_1.0.md)
+- [Analytico 1.0 requirement traceability](docs/REQUIREMENT_TRACEABILITY_1.0.csv)
 - [Product specification](docs/SPEC.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Decision register](docs/DECISIONS.md)
@@ -95,6 +97,15 @@ The machine-readable dependency intentions are in
 [`versions.json`](versions.json). A dependency is not considered adopted until
 its milestone integrates it and the Debug and ReleaseSafe gates pass.
 
+Validate the 1.0 requirement matrix against the integrity-verified planning
+package and live GitHub issue number/slug pairs with read-only `gh` access:
+
+```sh
+scripts/validate-1.0-traceability.sh \
+  tzekid/analytico \
+  ./analytico-1.0-specification
+```
+
 ## Repository map
 
 ```text
@@ -102,6 +113,7 @@ src/                 Zig source
 tests/               Real-process end-to-end gates
 bench/results/       Compact measured baselines
 docs/                Product, architecture, decisions, milestones, and contracts
+scripts/             Release packaging, rollback, and planning validators
 AGENTS.md             Normative server-first engineering doctrine
 versions.json         Exact evaluated tool and dependency versions
 ```

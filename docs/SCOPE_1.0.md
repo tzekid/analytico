@@ -215,6 +215,10 @@ Compatibility is an explicit release requirement:
 Every active 1.0 child issue has one native parent epic. The epic mapping below
 connects every issue to one or more required product questions; the native
 parent and dependency relationships on GitHub are the issue-level trace.
+Capability-level implementation and evidence ownership is normative in
+[`REQUIREMENT_TRACEABILITY_1.0.csv`](REQUIREMENT_TRACEABILITY_1.0.csv). The
+tag decision is governed by
+[`RELEASE_CONTRACT_1.0.md`](RELEASE_CONTRACT_1.0.md).
 
 | Epic | Child issues | Product questions or cross-cutting outcome |
 | --- | ---: | --- |
