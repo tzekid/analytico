@@ -1,5 +1,10 @@
 # Product specification
 
+> **Status:** This document defines the shipped MVP and its later accepted
+> dashboard increments. The target product scope for Analytico 1.0 is
+> [`SCOPE_1.0.md`](SCOPE_1.0.md); planned 1.0 behavior is not shipped behavior
+> until its implementation and acceptance evidence land.
+
 ## 1. Product statement
 
 Analytico answers a small set of website-usage questions without requiring a
