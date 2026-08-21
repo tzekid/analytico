@@ -1,5 +1,10 @@
 # Architecture
 
+> **Status:** Sections 1–10 describe the shipped v0.3 runtime and its
+> protocol-v1/event-schema-2 path. The accepted 1.0 evolution is stated
+> separately below; it preserves this runtime shape and is not shipped until
+> its implementation issues and acceptance evidence land.
+
 ## 1. Runtime shape
 
 ```mermaid
@@ -76,6 +81,7 @@ transactions:
 - site identity and allowed origins;
 - goal and funnel definitions;
 - allowlisted custom properties;
+- passkey credentials and revocable owner sessions;
 - database migration ledger.
 
 Remote synchronization, encryption, FTS, and Cloud access remain disabled until
@@ -83,11 +89,15 @@ a separately accepted requirement needs them.
 
 ### DuckDB
 
-DuckDB contains:
+The shipped DuckDB schema contains:
 
 - one append-oriented event table;
 - its own migration ledger;
 - report SQL over bounded site and time filters.
+
+Event schema 3 will add the accepted 1.0 event and identity-link fields through
+the same DuckDB ownership boundary. It does not move configuration into DuckDB
+or permit Turso to query analytics rows.
 
 The serving process configures one query thread, a bounded memory limit, a
 bounded temporary directory, no community extensions, and no external file or
@@ -116,8 +126,9 @@ offer distributed transactions.
 5. Domain normalization removes arbitrary query strings, canonicalizes the
    path and referral host, validates the event name and allowlisted properties,
    and derives coarse dimensions.
-6. A keyed daily pseudonym is derived from site, UTC date, normalized network
-   prefix, and coarse user-agent input. Raw inputs are then discarded.
+6. On the shipped protocol-v1 path, a keyed daily pseudonym is derived from
+   site, UTC date, normalized network prefix, and coarse user-agent input. Raw
+   inputs are then discarded.
 7. The DuckDB adapter inserts one event in a short transaction.
 8. Only after commit does the adapter return success.
 
@@ -125,9 +136,22 @@ At the target traffic level, direct durable inserts are simpler and more honest
 than an in-memory queue. A queue is reconsidered only after measured write
 latency violates the budget.
 
+### Accepted 1.0 collection evolution
+
+Protocol v2 supplies a random site-scoped first-party anonymous UUID, an
+optional bounded application user ID, and a random client session UUID plus
+sequence. The server validates and stores those values; it never derives a
+long-lived fingerprint. Sessions may cross UTC midnight. Server receipt time
+remains authoritative for acceptance and report bucketing.
+
+Protocol-v1 rows keep their daily visitor and session meaning under metric v1.
+Migration marks them `legacy_daily`, never links them across dates, and retains
+their existing session IDs. Decisions D26 and D27 govern this version boundary;
+issues #6–#13 own implementation and real-path acceptance.
+
 ## 6. Report flow
 
-1. Parse and validate site, UTC range, pagination, filters, and report kind.
+1. Parse and validate site, date range, pagination, filters, and report kind.
 2. Load the site and any goal/funnel definition from Turso with an application
    timeout.
 3. Build one of a closed set of report query plans.
@@ -135,6 +159,10 @@ latency violates the budget.
 5. Decode into an owned typed report.
 6. Render table, JSON, or CSV in the CLI, or deterministic HTML from the same
    report type in the dashboard.
+
+The shipped metric-v1 reports convert UTC dates directly. Metric v2 will
+resolve inclusive UI dates under the site's explicit IANA timezone and use the
+stored site-local date/offset required by D27 while retaining UTC timestamps.
 
 No report accepts arbitrary SQL, column names, sort expressions, or templates
 from the request. Enumerated sorts select a compiled query template.
@@ -174,7 +202,7 @@ one. Any later cache key must include site, exact time
 range, metric-version, filters, sort, and page; its invalidation watermark is
 the latest accepted event time for that site.
 
-## 10. Later UI and Cloudio
+## 10. Dashboard and Cloudio boundary
 
 DuckDB's writable-file ownership rules prohibit a later Cloudio process from
 opening the same file concurrently. The supported candidates are:
@@ -185,5 +213,6 @@ opening the same file concurrently. The supported candidates are:
 3. Have Cloudio request complete HTML from Analytico with a strict timeout,
    while Analytico remains the database owner.
 
-The choice is deferred to M8 and must be based on a real UI integration. The
-MVP does not create a generic API or shared package in anticipation.
+M8 selected candidate 1: Analytico remains standalone and Cloudio may expose an
+ordinary link to it. Decision D22 records the evidence. No identity forwarding,
+shared session, generic API, or shared package was added.

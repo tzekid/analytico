@@ -1,9 +1,15 @@
 # Data model and metric semantics
 
+> **Status:** Sections 1–9 define the shipped analytics-metadata subset in
+> Turso, DuckDB event schema 2, and metric semantics v1. Authentication storage
+> remains governed by its own specification. The daily-pseudonym and UTC-day
+> rules remain the compatibility contract for existing rows. Section 10 records
+> the accepted 1.0 transition; it is not a claim that schema 3 or metric v2 is
+> shipped.
+
 This document is the contract for durable fields and reported numbers. SQL
-shown here is a logical schema; M1 must validate the exact syntax against the
-pinned Turso and DuckDB versions and compile the final numbered migrations into
-the binary.
+shown here is the logical schema implemented and validated by the compiled
+numbered migrations against the pinned Turso and DuckDB versions.
 
 ## 1. Shared Zig types
 
@@ -246,7 +252,7 @@ keys are discarded.
 - Arrays, nested objects, floating-point special values, and duplicate keys are
   rejected.
 
-## 5. Visitor pseudonym
+## 5. Visitor pseudonym — metric v1
 
 For each accepted event:
 
@@ -269,7 +275,7 @@ This is an approximation. People sharing a network prefix and coarse client
 can collide; one person changing network/client can split. The product reports
 daily pseudonyms, not identified humans.
 
-## 6. Sessionization
+## 6. Sessionization — metric v1
 
 The collector commits events sequentially and server receipt time is
 authoritative. In the same single bound insert statement that writes an event:
@@ -288,7 +294,7 @@ persisted boundary facts instead of reconstructing the same windows. There is
 no rollup table, background task, or cache. This rule is deterministic and
 versioned as metric semantics v1.
 
-## 7. Metric definitions
+## 7. Metric definitions — metric v1
 
 ### Page views
 
@@ -359,16 +365,17 @@ Report entrants, completions at each step, step-to-step rate, and overall rate.
 Funnel evaluation is capped at eight steps and the requested date range is
 bounded by the report contract.
 
-## 8. Time ranges
+## 8. Time ranges — metric v1
 
-- Storage and MVP reports use UTC only.
+- Event schema 2 and metric-v1 reports use UTC only.
 - CLI date input is `[start_date, end_date]`, converted to the half-open instant
   range `[start 00:00:00Z, day_after_end 00:00:00Z)`.
 - Maximum interactive range is 400 days.
 - Export may exceed 400 days only with an explicit offline flag and service
   stopped.
-- Site-local time zones and DST-aware grouping are deferred because they would
-  require a timezone-data dependency and change session semantics.
+- The M0–M4 implementation deferred site-local time and DST-aware grouping.
+  Decision D27 now accepts them for metric v2 through a bounded host-TZif
+  reader; the metric-v1 compatibility query remains UTC-based.
 
 ## 9. Deletion
 
@@ -380,3 +387,54 @@ Deleting a site is two-phase:
 
 The command reports row counts and produces a signed/hashed operator audit
 record without visitor data. A failed second phase remains safely retryable.
+
+## 10. Accepted Analytico 1.0 transition
+
+Decisions D26 and D27 establish protocol v2, DuckDB event schema 3, and metric
+semantics v2 as a versioned extension rather than a reinterpretation of the
+schema above. Issues #6–#13 own the implementation and acceptance evidence.
+
+### Identity and sessions
+
+- New compatible tracker events carry a random site-scoped first-party
+  anonymous UUID and a random session UUID plus sequence. Sessions rotate
+  after more than 30 minutes of inactivity and may cross UTC midnight.
+- An optional bounded application user ID may link several anonymous IDs. One
+  anonymous ID maps to at most one user until `reset()` creates a new anonymous
+  identity; a conflicting link is rejected rather than merged.
+- Storage-unavailable events use a page-lifetime ephemeral identity. No IP/UA
+  fingerprint, cross-site identity, or claim of real-person identity is added.
+- Visitor and user identifiers remain untrusted analytics data. They are
+  bounded, escaped, unavailable to authorization decisions, and visible only
+  to the authenticated operator.
+
+### Legacy compatibility
+
+- Schema-2 rows migrate with `identity_quality=legacy_daily`. A deterministic
+  synthetic anonymous UUID is scoped only to `(site_id, received_date_utc,
+  visitor_day_id)` and is never linked across dates.
+- Existing event IDs, timestamps, fields, session IDs, and metric-v1 report
+  totals remain preserved. Mixed-data reports expose compatibility coverage.
+- New/returning classification, retention, cross-session visitor funnels, and
+  user profiles exclude legacy or ephemeral identities unless the result is
+  explicitly limited and labeled.
+
+### Site-local dates
+
+- Every site stores an explicitly selected IANA timezone. UTC is a valid
+  explicit choice; a server-inferred zone may be suggested but is never
+  silently selected.
+- Ingestion keeps authoritative UTC receipt time and also stores the derived
+  site-local date and UTC offset using a bounded TZif v2/v3 reader. Reports use
+  those stable stored dates for date-level metric-v2 grouping.
+- A missing, malformed, or traversal-bearing zone fails closed. A site's zone
+  is locked after its first event; changing it requires an offline backup,
+  rebucket, validation, and checkpoint operation.
+
+### Migration and rollback
+
+Migration requires the service to be stopped or not ready, an explicit zone
+for every existing site, and a verified Turso/DuckDB backup pair. It validates
+row counts, preserved bytes and IDs, metric-v1 totals, session IDs, local dates
+around DST, and absence of legacy identity links before swap. Rollback restores
+the pre-migration database pair because an older binary may not read schema 3.

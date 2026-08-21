@@ -20,11 +20,11 @@ packaging.
 - One Zig process.
 - One embedded Turso file for sites, goals, funnels, and schema metadata.
 - One embedded DuckDB file for append-only events and on-demand analytical SQL.
-- A small HTTP collector plus a CLI for configuration, reports, backup, and
-  maintenance.
-- No dashboard in the MVP.
-- Later dashboard work starts as server-rendered HTML; HTMX 4 may enhance it
-  only after native links and forms are complete.
+- A small HTTP collector, a CLI for configuration and operations, and a
+  passkey-protected server-rendered dashboard.
+- M4's historical production-MVP boundary predated dashboard work. The shipped
+  M6/M7 product adds complete HTML first and uses HTMX 4 only as a removable
+  enhancement to native links and forms.
 
 At the expected 20–50 unique visitors per week, Turso alone could technically
 handle the traffic. DuckDB is nevertheless a deliberate product choice: this
@@ -33,9 +33,9 @@ window and aggregation behavior fits entry/exit analysis and funnels. M0 proves
 the real integration and records its footprint; it does not rerun the project
 as a competing Turso-only implementation.
 
-## Product scope
+## Historical production-MVP scope
 
-The production MVP covers:
+The M0–M4 production MVP covered:
 
 - page views and privacy-preserving daily unique visitors;
 - popular, entry, and exit pages;
@@ -46,8 +46,10 @@ The production MVP covers:
 - CLI reports and machine-readable exports;
 - backup, restore, resource limits, and a single-service VPS deployment.
 
-The MVP intentionally excludes a web dashboard, teams, billing, email reports,
-real-time views, session replay, arbitrary user SQL, and distributed ingestion.
+That historical boundary excluded a web dashboard, teams, billing, email
+reports, real-time views, session replay, arbitrary user SQL, and distributed
+ingestion. M6–M8 and the passkey milestones subsequently added the current
+private dashboard without changing the one-process storage architecture.
 
 ## Analytico 1.0 target
 
@@ -59,6 +61,7 @@ That target is a plan, not a claim that the capabilities are already shipped.
 
 ## Documentation
 
+- [Normative repository doctrine and authority order](AGENTS.md)
 - [Analytico 1.0 scope contract](docs/SCOPE_1.0.md)
 - [Product specification](docs/SPEC.md)
 - [Architecture](docs/ARCHITECTURE.md)

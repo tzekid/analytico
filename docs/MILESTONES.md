@@ -357,11 +357,15 @@ measurements trigger one of:
 - Parquet archival;
 - access-log import;
 - richer offline GeoIP/UA classification;
-- SPA navigation tracking;
-- revenue metrics;
 - scheduled reports;
-- longer-range/cross-day identity semantics;
 - server analytics database.
+
+Before the Analytico 1.0 scope freeze, this trigger list also named SPA
+navigation, revenue metrics, and longer-range/cross-day identity. Those three
+are now approved 1.0 requirements governed by `SCOPE_1.0.md`, decisions D26 and
+D27 where applicable, and issues #6–#13; they are no longer optional M9 work.
+Their former placement remains recorded here rather than being silently
+rewritten as if they had always been in scope.
 
 Its definition of done must name the observed bottleneck or user requirement,
 the simpler candidates considered, the accepted cost, migration/rollback, and
@@ -414,9 +418,13 @@ consistent before beginning a design-led visual rewrite.
 - [x] The two-site real-browser journey, existing M6/M7/passkey gates, Debug,
       ReleaseSafe, release archive, and production smoke checks pass.
 
-## U2. Figma-led dashboard redesign
+## Historical U2. Figma-led dashboard redesign note
 
-U2 begins only after U1 is accepted. It will define user journeys and
-information architecture first, iterate on concepts in Figma, and implement an
-accepted direction afterward. U1 deliberately avoids choosing that future
-visual language.
+U2 was defined to begin only after U1 acceptance, with user journeys and
+information architecture preceding visual exploration and implementation. U1
+deliberately avoided choosing that future visual language.
+
+U1 is accepted. The approved Analytico 1.0 design-system and shell epic #14 now
+governs that work. Written responsive, accessibility, component, and route
+contracts are authoritative; exploration boards and reference images are
+non-binding and do not override server-rendered or no-JavaScript behavior.

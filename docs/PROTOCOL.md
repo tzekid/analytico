@@ -1,7 +1,12 @@
 # Collection protocol
 
-This is the frozen v1 wire contract. Breaking changes require a new protocol
-version.
+> **Status:** This is the shipped, frozen protocol-v1 wire contract. It remains
+> valid during the documented Analytico 1.0 compatibility window. Protocol v2
+> is an accepted target under decisions D26 and D27, not shipped behavior until
+> issue #6 and its dependent acceptance work land.
+
+Breaking changes require a new protocol version. They do not reinterpret
+accepted v1 events or metric-v1 visitor-day semantics.
 
 ## 1. Routes
 
@@ -146,7 +151,7 @@ the corresponding error status rather than claiming a view.
 The tracker is not needed by Analytico's later admin UI; it is the optional
 collection helper embedded in measured sites.
 
-MVP requirements:
+Protocol-v1 tracker requirements:
 
 - self-hosted by Analytico or copied byte-for-byte to the measured site;
 - loaded with `defer`;
@@ -223,3 +228,10 @@ on it.
 acceptance test. A breaking payload or metric change uses a new protocol or
 metric version; the server may temporarily accept two versions only with a
 dated removal milestone. Compatibility code is removed after migration.
+
+Protocol v2 adds persistent first-party identity, client session identity,
+optional explicit identification, and the event fields required by metric v2.
+Protocol-v1 requests continue through their existing bounded validation and
+privacy path and migrate as `legacy_daily`; they are never silently treated as
+persistent people. The v2 contract and exact compatibility-removal condition
+must land with issue #6 before implementation is considered complete.
