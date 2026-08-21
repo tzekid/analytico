@@ -198,9 +198,10 @@ links. No newer runtime or storage behavior was reverted to match the package.
 
 Compatibility is an explicit release requirement:
 
-- protocol v1, event schema 2, metric v1, current CLI/report routes, backup,
-  restore, and release operations remain valid through their documented
-  migration window;
+- protocol v1, metric v1, current CLI/report routes, backup, restore, and
+  release operations remain valid through their documented migration window;
+- event schema 2 upgrades forward to schema 3; an older binary is used only
+  with the restored pre-migration database pair;
 - historical daily pseudonyms remain visitor-days and are never retroactively
   linked into persistent people;
 - event schema 3 migration preserves accepted fields, IDs, session IDs, and

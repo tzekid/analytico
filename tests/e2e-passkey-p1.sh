@@ -50,7 +50,7 @@ DROP TABLE auth_config;
 DELETE FROM meta_migrations WHERE version = 2;
 SQL
 "$binary" migrate "$legacy" >"$fixture/upgrade.txt"
-grep -Fq 'metadata=v2 events=v2' "$fixture/upgrade.txt"
+grep -Fq 'metadata=v2 events=v3' "$fixture/upgrade.txt"
 "$binary" site list "$legacy" | grep -Fq $'preserved\t'
 
 site_id=$("$binary" site list "$data" | awk -F '\t' '$1 == "example" { print $2 }')

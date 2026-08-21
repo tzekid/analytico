@@ -1,9 +1,9 @@
 # Architecture
 
-> **Status:** Sections 1–10 describe the shipped v0.3 runtime and its
-> protocol-v1/event-schema-2 path. The accepted 1.0 evolution is stated
-> separately below; it preserves this runtime shape and is not shipped until
-> its implementation issues and acceptance evidence land.
+> **Status:** Sections 1–10 describe the shipped one-process runtime, its frozen
+> protocol-v1 compatibility path, additive protocol-v2 collector foundation,
+> and event schema 3. The remaining 1.0 evolution is stated separately below;
+> it preserves this runtime shape and lands only with its issue evidence.
 
 ## 1. Runtime shape
 
@@ -80,7 +80,7 @@ transactions:
 
 - site identity and allowed origins;
 - goal and funnel definitions;
-- allowlisted custom properties;
+- protocol-v1 custom-property allowlists;
 - passkey credentials and revocable owner sessions;
 - database migration ledger.
 
@@ -92,12 +92,14 @@ a separately accepted requirement needs them.
 The shipped DuckDB schema contains:
 
 - one append-oriented event table;
+- the protocol-v2 anonymous-identity link table;
 - its own migration ledger;
 - report SQL over bounded site and time filters.
 
-Event schema 3 will add the accepted 1.0 event and identity-link fields through
-the same DuckDB ownership boundary. It does not move configuration into DuckDB
-or permit Turso to query analytics rows.
+Event schema 3 adds the accepted protocol-v2 event and identity-link foundation
+through the same DuckDB ownership boundary. It does not move configuration into
+DuckDB or permit Turso to query analytics rows. Temporary visitor-day columns
+keep metric-v1 report SQL honest until versioned metric-v2 queries replace it.
 
 The serving process configures one query thread, a bounded memory limit, a
 bounded temporary directory, no community extensions, and no external file or
@@ -124,30 +126,36 @@ offer distributed transactions.
 3. It validates the exact `Origin` or request referrer origin.
 4. It parses a bounded payload into a domain `IncomingEvent`.
 5. Domain normalization removes arbitrary query strings, canonicalizes the
-   path and referral host, validates the event name and allowlisted properties,
-   and derives coarse dimensions.
+   path and referral host, validates the event name and bounded flat
+   properties, and derives coarse dimensions. The frozen v1 path additionally
+   enforces its configured property allowlist.
 6. On the shipped protocol-v1 path, a keyed daily pseudonym is derived from
    site, UTC date, normalized network prefix, and coarse user-agent input. Raw
    inputs are then discarded.
-7. The DuckDB adapter inserts one event in a short transaction.
+7. The DuckDB adapter inserts one event in a short transaction. V2 checks its
+   canonical digest for site-scoped idempotency and commits an identify link
+   atomically when applicable.
 8. Only after commit does the adapter return success.
 
 At the target traffic level, direct durable inserts are simpler and more honest
 than an in-memory queue. A queue is reconsidered only after measured write
 latency violates the budget.
 
-### Accepted 1.0 collection evolution
+### 1.0 collection evolution
 
-Protocol v2 supplies a random site-scoped first-party anonymous UUID, an
-optional bounded application user ID, and a random client session UUID plus
-sequence. The server validates and stores those values; it never derives a
-long-lived fingerprint. Sessions may cross UTC midnight. Server receipt time
-remains authoritative for acceptance and report bucketing.
+The shipped protocol-v2 foundation accepts a random site-scoped first-party
+anonymous UUID, an optional bounded application user ID, and a random client
+session UUID plus sequence. The server validates and stores those values; it
+never derives a long-lived fingerprint. The route and schema support sessions
+that cross UTC midnight, while issues #7 and #8 own the browser persistence and
+rotation behavior. Server receipt time remains authoritative for acceptance
+and report bucketing.
 
 Protocol-v1 rows keep their daily visitor and session meaning under metric v1.
 Migration marks them `legacy_daily`, never links them across dates, and retains
-their existing session IDs. Decisions D26 and D27 govern this version boundary;
-issues #6–#13 own implementation and real-path acceptance.
+their existing session IDs. Decisions D26–D28 govern this version boundary;
+issues #7–#13 own the remaining tracker, metric, timezone, and final migration
+acceptance.
 
 ## 6. Report flow
 

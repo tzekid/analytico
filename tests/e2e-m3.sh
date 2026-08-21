@@ -194,16 +194,16 @@ timeout_output=$(
 test "$timeout_output" = "report timeout interrupted and connection reused"
 grep -q 'Interrupted' "$fixture_dir/timeout.stderr"
 test "$("$binary" doctor "$fixture_dir")" = \
-    "ok metadata=v2 events=v2 sites=2 goals=3 funnels=1 stored_events=14 key=ok"
+    "ok metadata=v2 events=v3 sites=2 goals=3 funnels=1 stored_events=14 key=ok"
 
 legacy_dir="$fixture_dir/legacy"
 mkdir "$legacy_dir"
 test "$("$binary" m3 legacy-create "$legacy_dir")" = \
     "legacy event schema v1 fixture committed"
 test "$("$binary" m3 legacy-verify "$legacy_dir")" = \
-    "legacy event schema v1 migrated to v2"
+    "legacy event schema v1 migrated to v3"
 test "$("$binary" m3 legacy-verify "$legacy_dir")" = \
-    "legacy event schema v1 migrated to v2"
+    "legacy event schema v1 migrated to v3"
 
 if rg -n 'allocPrint.*SELECT|fmt.*SELECT' src/store/reports.zig >/dev/null; then
     echo "report SQL unexpectedly contains request-formatted query text" >&2

@@ -370,21 +370,43 @@ pub fn legacyVerify(
     var store = try events.Store.open(allocator, event_path);
     defer store.deinit();
     try store.migrate();
-    if (try store.migrationVersion() != 2) return error.LegacyMigrationVersion;
+    if (try store.migrationVersion() != 3) return error.LegacyMigrationVersion;
     var result = try store.database.query(
         \\SELECT count(*), count(DISTINCT session_id),
         \\       count(*) FILTER (WHERE visitor_day_start),
-        \\       count(*) FILTER (WHERE session_start)
+        \\       count(*) FILTER (WHERE session_start),
+        \\       count(*) FILTER (
+        \\         WHERE event_schema_version = 3
+        \\           AND protocol_version = 1 AND tracker_version = 1
+        \\           AND identity_quality = 3
+        \\           AND occurred_at_utc_micros = received_at_utc_micros
+        \\           AND site_local_date = received_date_utc
+        \\           AND site_utc_offset_minutes = 0
+        \\           AND user_id = '' AND page_title = '' AND hostname = ''
+        \\           AND language = '' AND user_traits_json = '{}'
+        \\           AND value_amount IS NULL AND value_currency = ''
+        \\           AND engagement_ms = 0 AND max_scroll_depth = 0
+        \\       ),
+        \\       count(DISTINCT anonymous_id), sum(sequence)
         \\FROM events
     );
     defer result.deinit();
-    if (result.rowCount() != 1 or result.columnCount() != 4 or
+    if (result.rowCount() != 1 or result.columnCount() != 7 or
         result.int64(0, 0) != 3 or result.int64(1, 0) != 2 or
-        result.int64(2, 0) != 1 or result.int64(3, 0) != 2)
+        result.int64(2, 0) != 1 or result.int64(3, 0) != 2 or
+        result.int64(4, 0) != 3 or result.int64(5, 0) != 1 or
+        result.int64(6, 0) != 1)
     {
         return error.LegacyMigrationSemantics;
     }
-    try output.writeAll("legacy event schema v1 migrated to v2\n");
+    var links = try store.database.query("SELECT count(*) FROM identity_links");
+    defer links.deinit();
+    if (links.rowCount() != 1 or links.columnCount() != 1 or
+        links.int64(0, 0) != 0)
+    {
+        return error.LegacyIdentityLink;
+    }
+    try output.writeAll("legacy event schema v1 migrated to v3\n");
 }
 
 const FixtureEvent = struct {

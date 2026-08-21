@@ -285,6 +285,212 @@ done
 expect_code 413 "${header_args[@]}" "$base/healthz"
 expect_fixed_error "payload too large"
 
+expect_code 405 -X GET "$base/v2/event"
+grep -qi '^Allow: POST' "$fixture_dir/headers"
+expect_fixed_error "method not allowed"
+
+occurred_seconds=$EPOCHSECONDS
+occurred_ms=$((occurred_seconds * 1000))
+occurred_micros=$((occurred_ms * 1000))
+v2_anonymous=00000000-0000-4000-8000-000000000202
+v2_session=00000000-0000-4000-8000-000000000203
+v2_page_id=00000000-0000-4000-8000-000000000201
+v2_custom_id=00000000-0000-4000-8000-000000000204
+v2_identify_id=00000000-0000-4000-8000-000000000205
+v2_engagement_id=00000000-0000-4000-8000-000000000211
+v2_ephemeral=00000000-0000-4000-8000-000000000212
+v2_ephemeral_session=00000000-0000-4000-8000-000000000213
+v2_page=$(
+    printf '{"v":2,"site":"%s","event_id":"%s","anonymous_id":"%s","identity_quality":"persistent","session_id":"%s","sequence":0,"occurred_at_ms":%s,"type":"pageview","page":{"path":"/home?v2-private-token","title":"Home","hostname":"EXAMPLE.COM"},"referrer":"https://Search.Example/results?q=v2-referrer-private-token","utm":{"source":"newsletter","medium":"email"}}' \
+        "$site_id" "$v2_page_id" "$v2_anonymous" "$v2_session" \
+        "$occurred_ms"
+)
+expect_code 204 -X POST "$base/v2/event" \
+    -H 'Content-Type: text/plain;charset=UTF-8' \
+    -H 'Origin: https://example.com' \
+    -H 'X-Forwarded-For: 198.18.10.1' \
+    -H 'X-Analytico-Country: de' \
+    -H 'User-Agent: Mozilla/5.0 (X11; Linux x86_64) Chrome/140.0' \
+    --data-binary "$v2_page"
+test ! -s "$fixture_dir/body"
+expect_no_store_headers
+grep -q '^Access-Control-Allow-Origin: https://example.com' \
+    "$fixture_dir/headers"
+
+v2_custom=$(
+    printf '{"v":2,"site":"%s","event_id":"%s","anonymous_id":"%s","identity_quality":"persistent","session_id":"%s","sequence":1,"occurred_at_ms":%s,"type":"event","name":"purchase","page":{"path":"/pricing?drop=yes","title":"Pricing","hostname":"EXAMPLE.COM"},"properties":{"z":2,"plan":"pro"},"value":{"amount":"49.00","currency":"EUR"}}' \
+        "$site_id" "$v2_custom_id" "$v2_anonymous" "$v2_session" \
+        "$occurred_ms"
+)
+expect_code 204 -X POST "$base/v2/event" \
+    -H 'Content-Type: text/plain' -H 'Origin: https://example.com' \
+    -H 'X-Forwarded-For: 198.18.10.1' \
+    -H 'X-Analytico-Country: de' \
+    -H 'User-Agent: Mozilla/5.0 (X11; Linux x86_64) Chrome/140.0' \
+    --data-binary "$v2_custom"
+
+v2_engagement=$(
+    printf '{"v":2,"site":"%s","event_id":"%s","anonymous_id":"%s","identity_quality":"ephemeral","session_id":"%s","sequence":0,"occurred_at_ms":%s,"type":"engagement","page":{"path":"/article","title":"Article","hostname":"example.com"},"engagement":{"active_ms":15000,"max_scroll_depth":92}}' \
+        "$site_id" "$v2_engagement_id" "$v2_ephemeral" \
+        "$v2_ephemeral_session" "$occurred_ms"
+)
+expect_code 204 -X POST "$base/v2/event" \
+    -H 'Content-Type: text/plain' -H 'Origin: https://example.com' \
+    -H 'X-Forwarded-For: 198.18.11.1' \
+    -H 'X-Analytico-Country: us' \
+    -H 'User-Agent: Mozilla/5.0 (X11; Linux x86_64) Firefox/140.0' \
+    --data-binary "$v2_engagement"
+
+v2_identify=$(
+    printf '{"v":2,"site":"%s","event_id":"%s","anonymous_id":"%s","identity_quality":"persistent","session_id":"%s","sequence":2,"occurred_at_ms":%s,"type":"identify","page":{"path":"/account","title":"Account","hostname":"example.com"},"user":{"id":"user_123","traits":{"tier":2,"plan":"pro"}}}' \
+        "$site_id" "$v2_identify_id" "$v2_anonymous" "$v2_session" \
+        "$occurred_ms"
+)
+expect_code 204 -X POST "$base/v2/event" \
+    -H 'Content-Type: text/plain' -H 'Origin: https://example.com' \
+    -H 'X-Forwarded-For: 198.18.10.1' \
+    -H 'X-Analytico-Country: de' \
+    -H 'User-Agent: Mozilla/5.0 (X11; Linux x86_64) Chrome/140.0' \
+    --data-binary "$v2_identify"
+
+# Protocol v2 does not consult the v1 property allowlist.
+v2_unlisted=$(
+    printf '{"v":2,"site":"%s","event_id":"00000000-0000-4000-8000-000000000207","anonymous_id":"%s","identity_quality":"persistent","session_id":"%s","sequence":5,"occurred_at_ms":%s,"type":"event","name":"docs","properties":{"source":"readme"}}' \
+        "$site_id" "$v2_anonymous" "$v2_session" "$occurred_ms"
+)
+expect_code 204 -X POST "$base/v2/event" \
+    -H 'Content-Type: text/plain' -H 'Origin: https://example.com' \
+    -H 'X-Forwarded-For: 198.18.10.1' \
+    -H 'X-Analytico-Country: de' \
+    -H 'User-Agent: Mozilla/5.0 (X11; Linux x86_64) Chrome/140.0' \
+    --data-binary "$v2_unlisted"
+
+# Normalized key order, hostname case, and stripped query are part of the
+# canonical digest, so this equivalent retry is a success/no-op.
+v2_custom_retry=$(
+    printf '{"type":"event","occurred_at_ms":%s,"sequence":1,"session_id":"%s","identity_quality":"persistent","anonymous_id":"%s","event_id":"%s","site":"%s","v":2,"name":"purchase","page":{"hostname":"example.com","title":"Pricing","path":"/pricing"},"properties":{"plan":"pro","z":2},"value":{"currency":"EUR","amount":"49.00"}}' \
+        "$occurred_ms" "$v2_session" "$v2_anonymous" "$v2_custom_id" \
+        "$site_id"
+)
+expect_code 204 -X POST "$base/v2/event" \
+    -H 'Content-Type: text/plain' -H 'Origin: https://example.com' \
+    -H 'X-Forwarded-For: 198.18.10.1' --data-binary "$v2_custom_retry"
+
+v2_custom_conflict=$(
+    printf '{"type":"event","occurred_at_ms":%s,"sequence":9,"session_id":"%s","identity_quality":"persistent","anonymous_id":"%s","event_id":"%s","site":"%s","v":2,"name":"purchase","page":{"hostname":"example.com","title":"Pricing","path":"/pricing"},"properties":{"plan":"pro","z":2},"value":{"currency":"EUR","amount":"49.00"}}' \
+        "$occurred_ms" "$v2_session" "$v2_anonymous" "$v2_custom_id" \
+        "$site_id"
+)
+expect_code 409 -X POST "$base/v2/event" \
+    -H 'Content-Type: text/plain' -H 'Origin: https://example.com' \
+    -H 'X-Forwarded-For: 198.18.10.1' --data-binary "$v2_custom_conflict"
+expect_fixed_error "conflict"
+
+v2_identity_conflict=$(
+    printf '{"v":2,"site":"%s","event_id":"00000000-0000-4000-8000-000000000206","anonymous_id":"%s","identity_quality":"persistent","session_id":"%s","sequence":3,"occurred_at_ms":%s,"type":"identify","user":{"id":"user_456"}}' \
+        "$site_id" "$v2_anonymous" "$v2_session" "$occurred_ms"
+)
+expect_code 409 -X POST "$base/v2/event" \
+    -H 'Content-Type: text/plain' -H 'Origin: https://example.com' \
+    -H 'X-Forwarded-For: 198.18.10.1' --data-binary "$v2_identity_conflict"
+expect_fixed_error "conflict"
+
+v2_nested=$(
+    printf '{"v":2,"site":"%s","event_id":"00000000-0000-4000-8000-000000000221","anonymous_id":"%s","identity_quality":"persistent","session_id":"%s","sequence":4,"occurred_at_ms":%s,"type":"event","name":"bad","properties":{"z":{"nested":true}}}' \
+        "$site_id" "$v2_anonymous" "$v2_session" "$occurred_ms"
+)
+expect_code 400 -X POST "$base/v2/event" \
+    -H 'Content-Type: text/plain' -H 'Origin: https://example.com' \
+    --data-binary "$v2_nested"
+v2_float=$(
+    printf '{"v":2,"site":"%s","event_id":"00000000-0000-4000-8000-000000000222","anonymous_id":"%s","identity_quality":"persistent","session_id":"%s","sequence":4,"occurred_at_ms":%s,"type":"event","name":"bad","properties":{"z":1.5}}' \
+        "$site_id" "$v2_anonymous" "$v2_session" "$occurred_ms"
+)
+expect_code 400 -X POST "$base/v2/event" \
+    -H 'Content-Type: text/plain' -H 'Origin: https://example.com' \
+    --data-binary "$v2_float"
+v2_bad_decimal=$(
+    printf '{"v":2,"site":"%s","event_id":"00000000-0000-4000-8000-000000000223","anonymous_id":"%s","identity_quality":"persistent","session_id":"%s","sequence":4,"occurred_at_ms":%s,"type":"event","name":"bad","value":{"amount":"1e2","currency":"EUR"}}' \
+        "$site_id" "$v2_anonymous" "$v2_session" "$occurred_ms"
+)
+expect_code 400 -X POST "$base/v2/event" \
+    -H 'Content-Type: text/plain' -H 'Origin: https://example.com' \
+    --data-binary "$v2_bad_decimal"
+v2_unknown_version=$(
+    printf '{"v":3,"site":"%s","event_id":"00000000-0000-4000-8000-000000000224","anonymous_id":"%s","identity_quality":"persistent","session_id":"%s","sequence":4,"occurred_at_ms":%s,"type":"pageview","page":{"path":"/"}}' \
+        "$site_id" "$v2_anonymous" "$v2_session" "$occurred_ms"
+)
+expect_code 400 -X POST "$base/v2/event" \
+    -H 'Content-Type: text/plain' -H 'Origin: https://example.com' \
+    --data-binary "$v2_unknown_version"
+expect_code 400 -X POST "$base/v1/event" \
+    -H 'Content-Type: text/plain' -H 'Origin: https://example.com' \
+    --data-binary "$v2_page"
+v2_ephemeral_identify=${v2_identify/persistent/ephemeral}
+expect_code 400 -X POST "$base/v2/event" \
+    -H 'Content-Type: text/plain' -H 'Origin: https://example.com' \
+    --data-binary "$v2_ephemeral_identify"
+v2_future=${v2_page/$occurred_ms/$((occurred_ms + 86460000))}
+expect_code 400 -X POST "$base/v2/event" \
+    -H 'Content-Type: text/plain' -H 'Origin: https://example.com' \
+    --data-binary "$v2_future"
+v2_past=${v2_page/$occurred_ms/$((occurred_ms - 604860000))}
+expect_code 400 -X POST "$base/v2/event" \
+    -H 'Content-Type: text/plain' -H 'Origin: https://example.com' \
+    --data-binary "$v2_past"
+v2_bad_uuid=${v2_page/00000000-0000-4000-8000-000000000201/AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA}
+expect_code 400 -X POST "$base/v2/event" \
+    -H 'Content-Type: text/plain' -H 'Origin: https://example.com' \
+    --data-binary "$v2_bad_uuid"
+v2_sequence_overflow=$(
+    printf '{"v":2,"site":"%s","event_id":"00000000-0000-4000-8000-000000000226","anonymous_id":"%s","identity_quality":"persistent","session_id":"%s","sequence":4294967296,"occurred_at_ms":%s,"type":"pageview","page":{"path":"/"}}' \
+        "$site_id" "$v2_anonymous" "$v2_session" "$occurred_ms"
+)
+expect_code 400 -X POST "$base/v2/event" \
+    -H 'Content-Type: text/plain' -H 'Origin: https://example.com' \
+    --data-binary "$v2_sequence_overflow"
+v2_engagement_overflow=${v2_engagement/15000/60001}
+expect_code 400 -X POST "$base/v2/event" \
+    -H 'Content-Type: text/plain' -H 'Origin: https://example.com' \
+    --data-binary "$v2_engagement_overflow"
+v2_decimal_overflow=${v2_bad_decimal/1e2/1234567890123.00}
+expect_code 400 -X POST "$base/v2/event" \
+    -H 'Content-Type: text/plain' -H 'Origin: https://example.com' \
+    --data-binary "$v2_decimal_overflow"
+v2_duplicate_field=$(
+    printf '{"v":2,"v":2,"site":"%s","event_id":"00000000-0000-4000-8000-000000000227","anonymous_id":"%s","identity_quality":"persistent","session_id":"%s","sequence":4,"occurred_at_ms":%s,"type":"pageview","page":{"path":"/"}}' \
+        "$site_id" "$v2_anonymous" "$v2_session" "$occurred_ms"
+)
+expect_code 400 -X POST "$base/v2/event" \
+    -H 'Content-Type: text/plain' -H 'Origin: https://example.com' \
+    --data-binary "$v2_duplicate_field"
+v2_bad_referrer=$(
+    printf '{"v":2,"site":"%s","event_id":"00000000-0000-4000-8000-000000000228","anonymous_id":"%s","identity_quality":"persistent","session_id":"%s","sequence":4,"occurred_at_ms":%s,"type":"pageview","page":{"path":"/"},"referrer":"not-a-url"}' \
+        "$site_id" "$v2_anonymous" "$v2_session" "$occurred_ms"
+)
+expect_code 400 -X POST "$base/v2/event" \
+    -H 'Content-Type: text/plain' -H 'Origin: https://example.com' \
+    --data-binary "$v2_bad_referrer"
+long_property=$(head -c 513 /dev/zero | tr '\0' x)
+v2_long_property=$(
+    printf '{"v":2,"site":"%s","event_id":"00000000-0000-4000-8000-000000000225","anonymous_id":"%s","identity_quality":"persistent","session_id":"%s","sequence":4,"occurred_at_ms":%s,"type":"event","name":"bad","properties":{"value":"%s"}}' \
+        "$site_id" "$v2_anonymous" "$v2_session" "$occurred_ms" \
+        "$long_property"
+)
+expect_code 400 -X POST "$base/v2/event" \
+    -H 'Content-Type: text/plain' -H 'Origin: https://example.com' \
+    --data-binary "$v2_long_property"
+
+v2_large_invalid=$(head -c 9000 /dev/zero | tr '\0' x)
+expect_code 400 -X POST "$base/v2/event" \
+    -H 'Content-Type: text/plain' -H 'Origin: https://example.com' \
+    --data-binary "$v2_large_invalid"
+v2_oversized=$(head -c 16400 /dev/zero | tr '\0' x)
+expect_code 413 -X POST "$base/v2/event" \
+    -H 'Content-Type: text/plain' -H 'Origin: https://example.com' \
+    --data-binary "$v2_oversized"
+expect_fixed_error "payload too large"
+
 expect_code 200 \
     -H 'Referer: https://example.com/rendered/page?private=yes' \
     -H 'X-Forwarded-For: 203.0.115.9' \
@@ -352,11 +558,26 @@ exec 9<&-
 server_pid=
 
 test "$("$binary" doctor "$fixture_dir")" = \
-    "ok metadata=v2 events=v2 sites=2 goals=0 funnels=0 stored_events=36 key=ok"
+    "ok metadata=v2 events=v3 sites=2 goals=0 funnels=0 stored_events=41 key=ok"
 pageview_row=$("$binary" event inspect "$fixture_dir" pageview)
 test "$pageview_row" = $'pageview\t/pricing\tsearch.example\tDE\tFirefox\tLinux\tdesktop\tnewsletter\t{}'
 custom_row=$("$binary" event inspect "$fixture_dir" signup)
 test "$custom_row" = $'signup\t/welcome\t\tUS\tChrome\tWindows\tdesktop\t\t{\"plan\":\"basic\",\"z\":2}'
+
+received_date=$(date --utc --date="@$occurred_seconds" +%F)
+v2_page_row=$("$binary" m2 v2-inspect "$fixture_dir" "$site_id" "$v2_page_id")
+test "$v2_page_row" = \
+    "{\"event_schema_version\":3,\"protocol_version\":2,\"tracker_version\":2,\"event_id\":\"$v2_page_id\",\"occurred_at_utc_micros\":$occurred_micros,\"received_date_utc\":\"$received_date\",\"site_local_date\":\"$received_date\",\"site_utc_offset_minutes\":0,\"kind\":1,\"event_name\":\"page_view\",\"path\":\"/home\",\"page_title\":\"Home\",\"hostname\":\"example.com\",\"anonymous_id\":\"$v2_anonymous\",\"identity_quality\":1,\"user_id\":\"\",\"session_id\":\"$v2_session\",\"sequence\":0,\"session_start\":true,\"referrer_host\":\"search.example\",\"country_code\":\"DE\",\"language\":\"\",\"browser_family\":\"Chrome\",\"os_family\":\"Linux\",\"device_category\":\"desktop\",\"utm_source\":\"newsletter\",\"utm_medium\":\"email\",\"utm_campaign\":\"\",\"utm_term\":\"\",\"utm_content\":\"\",\"properties_json\":\"{}\",\"user_traits_json\":\"{}\",\"value_amount\":null,\"value_currency\":\"\",\"engagement_ms\":0,\"max_scroll_depth\":0,\"linked_user_id\":\"user_123\"}"
+v2_custom_row=$("$binary" m2 v2-inspect "$fixture_dir" "$site_id" "$v2_custom_id")
+test "$v2_custom_row" = \
+    "{\"event_schema_version\":3,\"protocol_version\":2,\"tracker_version\":2,\"event_id\":\"$v2_custom_id\",\"occurred_at_utc_micros\":$occurred_micros,\"received_date_utc\":\"$received_date\",\"site_local_date\":\"$received_date\",\"site_utc_offset_minutes\":0,\"kind\":2,\"event_name\":\"purchase\",\"path\":\"/pricing\",\"page_title\":\"Pricing\",\"hostname\":\"example.com\",\"anonymous_id\":\"$v2_anonymous\",\"identity_quality\":1,\"user_id\":\"\",\"session_id\":\"$v2_session\",\"sequence\":1,\"session_start\":false,\"referrer_host\":\"\",\"country_code\":\"DE\",\"language\":\"\",\"browser_family\":\"Chrome\",\"os_family\":\"Linux\",\"device_category\":\"desktop\",\"utm_source\":\"\",\"utm_medium\":\"\",\"utm_campaign\":\"\",\"utm_term\":\"\",\"utm_content\":\"\",\"properties_json\":\"{\\\"plan\\\":\\\"pro\\\",\\\"z\\\":2}\",\"user_traits_json\":\"{}\",\"value_amount\":\"49.000000\",\"value_currency\":\"EUR\",\"engagement_ms\":0,\"max_scroll_depth\":0,\"linked_user_id\":\"user_123\"}"
+v2_engagement_row=$("$binary" m2 v2-inspect "$fixture_dir" "$site_id" "$v2_engagement_id")
+test "$v2_engagement_row" = \
+    "{\"event_schema_version\":3,\"protocol_version\":2,\"tracker_version\":2,\"event_id\":\"$v2_engagement_id\",\"occurred_at_utc_micros\":$occurred_micros,\"received_date_utc\":\"$received_date\",\"site_local_date\":\"$received_date\",\"site_utc_offset_minutes\":0,\"kind\":3,\"event_name\":\"engagement\",\"path\":\"/article\",\"page_title\":\"Article\",\"hostname\":\"example.com\",\"anonymous_id\":\"$v2_ephemeral\",\"identity_quality\":2,\"user_id\":\"\",\"session_id\":\"$v2_ephemeral_session\",\"sequence\":0,\"session_start\":true,\"referrer_host\":\"\",\"country_code\":\"US\",\"language\":\"\",\"browser_family\":\"Firefox\",\"os_family\":\"Linux\",\"device_category\":\"desktop\",\"utm_source\":\"\",\"utm_medium\":\"\",\"utm_campaign\":\"\",\"utm_term\":\"\",\"utm_content\":\"\",\"properties_json\":\"{}\",\"user_traits_json\":\"{}\",\"value_amount\":null,\"value_currency\":\"\",\"engagement_ms\":15000,\"max_scroll_depth\":92,\"linked_user_id\":\"\"}"
+v2_identify_row=$("$binary" m2 v2-inspect "$fixture_dir" "$site_id" "$v2_identify_id")
+test "$v2_identify_row" = \
+    "{\"event_schema_version\":3,\"protocol_version\":2,\"tracker_version\":2,\"event_id\":\"$v2_identify_id\",\"occurred_at_utc_micros\":$occurred_micros,\"received_date_utc\":\"$received_date\",\"site_local_date\":\"$received_date\",\"site_utc_offset_minutes\":0,\"kind\":4,\"event_name\":\"identify\",\"path\":\"/account\",\"page_title\":\"Account\",\"hostname\":\"example.com\",\"anonymous_id\":\"$v2_anonymous\",\"identity_quality\":1,\"user_id\":\"user_123\",\"session_id\":\"$v2_session\",\"sequence\":2,\"session_start\":false,\"referrer_host\":\"\",\"country_code\":\"DE\",\"language\":\"\",\"browser_family\":\"Chrome\",\"os_family\":\"Linux\",\"device_category\":\"desktop\",\"utm_source\":\"\",\"utm_medium\":\"\",\"utm_campaign\":\"\",\"utm_term\":\"\",\"utm_content\":\"\",\"properties_json\":\"{}\",\"user_traits_json\":\"{\\\"plan\\\":\\\"pro\\\",\\\"tier\\\":2}\",\"value_amount\":null,\"value_currency\":\"\",\"engagement_ms\":0,\"max_scroll_depth\":0,\"linked_user_id\":\"user_123\"}"
+test "$("$binary" m2 identity-links "$fixture_dir")" = 1
 
 probe=$("$binary" m2 rate-probe)
 test "$probe" = \
@@ -372,7 +593,9 @@ for forbidden in \
     '203.0.113.42' \
     'Firefox/140.0' \
     'current-private-token' \
-    'referrer-private-token'
+    'referrer-private-token' \
+    'v2-private-token' \
+    'v2-referrer-private-token'
 do
     if grep -aF "$forbidden" "$fixture_dir/meta.db" \
         "$fixture_dir/events.duckdb" "$fixture_dir/server.stdout" \
@@ -382,6 +605,11 @@ do
         exit 1
     fi
 done
+
+"$binary" site disable "$fixture_dir" example >/dev/null
+test "$("$binary" site delete "$fixture_dir" example --confirm example)" = \
+    "site deleted example"
+test "$("$binary" m2 identity-links "$fixture_dir")" = 0
 
 # Remove the store path under a second live process to exercise the real
 # DuckDB commit-failure path. A write failure makes readiness dishonest until
@@ -427,6 +655,6 @@ kill -TERM "$server_pid"
 wait "$server_pid"
 server_pid=
 test "$("$binary" doctor "$fault_dir")" = \
-    "ok metadata=v2 events=v2 sites=1 goals=0 funnels=0 stored_events=0 key=ok"
+    "ok metadata=v2 events=v3 sites=1 goals=0 funnels=0 stored_events=0 key=ok"
 
 echo "M2 bounded real-HTTP collection checks passed"

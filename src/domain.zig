@@ -35,6 +35,43 @@ pub const Event = struct {
     properties_json: []const u8 = "{}",
 };
 
+pub const EventV2 = struct {
+    event_id: []const u8,
+    site_id: []const u8,
+    received_at_utc_micros: i64,
+    occurred_at_utc_micros: i64,
+    received_date_utc: []const u8,
+    kind: u8,
+    event_name: []const u8,
+    path: []const u8,
+    page_title: []const u8,
+    hostname: []const u8,
+    anonymous_id: []const u8,
+    identity_quality: u8,
+    session_id: []const u8,
+    sequence: u32,
+    referrer_host: []const u8,
+    country_code: []const u8,
+    language: []const u8 = "",
+    browser_family: []const u8,
+    os_family: []const u8,
+    device_category: []const u8,
+    utm_source: []const u8,
+    utm_medium: []const u8,
+    utm_campaign: []const u8,
+    utm_term: []const u8,
+    utm_content: []const u8,
+    properties_json: []const u8,
+    identify_user_id: []const u8,
+    user_traits_json: []const u8,
+    value_amount: ?[]const u8,
+    value_currency: []const u8,
+    engagement_ms: u32,
+    max_scroll_depth: u8,
+    visitor_day_id: [16]u8,
+    event_payload_digest: []const u8,
+};
+
 pub fn validateSlug(value: []const u8) !void {
     if (value.len == 0 or value.len > 48) return error.InvalidSlug;
     if (!std.ascii.isAlphanumeric(value[0]) or
@@ -200,6 +237,26 @@ pub fn deriveVisitorDayId(
     visitor_hasher.update(coarse_client_key);
     var output: [16]u8 = undefined;
     visitor_hasher.final(&output);
+    return output;
+}
+
+pub fn deriveVisitorDayCompatibilityId(
+    site_id: []const u8,
+    utc_date: []const u8,
+    anonymous_id: []const u8,
+) ![16]u8 {
+    try validateUuid(site_id);
+    try validateDate(utc_date);
+    try validateUuid(anonymous_id);
+    var hasher = std.crypto.hash.Blake3.init(.{});
+    hasher.update("analytico/visitor-day-compat/v1\x00");
+    hasher.update(site_id);
+    hasher.update("\x00");
+    hasher.update(utc_date);
+    hasher.update("\x00");
+    hasher.update(anonymous_id);
+    var output: [16]u8 = undefined;
+    hasher.final(&output);
     return output;
 }
 

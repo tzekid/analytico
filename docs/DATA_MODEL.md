@@ -1,11 +1,11 @@
 # Data model and metric semantics
 
 > **Status:** Sections 1–9 define the shipped analytics-metadata subset in
-> Turso, DuckDB event schema 2, and metric semantics v1. Authentication storage
+> Turso, DuckDB event schema 3, and metric semantics v1. Authentication storage
 > remains governed by its own specification. The daily-pseudonym and UTC-day
-> rules remain the compatibility contract for existing rows. Section 10 records
-> the accepted 1.0 transition; it is not a claim that schema 3 or metric v2 is
-> shipped.
+> rules remain the compatibility contract for existing rows and current
+> reports. Section 10 records the remaining 1.0 transition; event schema 3 does
+> not by itself claim that metric v2 or site-local reporting is shipped.
 
 This document is the contract for durable fields and reported numbers. SQL
 shown here is the logical schema implemented and validated by the compiled
@@ -155,24 +155,34 @@ CREATE TABLE event_migrations (
 );
 ```
 
-### `events`
+### `events` — event schema migration 3
 
 ```sql
 CREATE TABLE events (
-    schema_version UTINYINT NOT NULL,
+    event_schema_version UTINYINT NOT NULL,
+    protocol_version UTINYINT NOT NULL,
+    tracker_version UTINYINT NOT NULL,
     event_id UUID NOT NULL,
     site_id VARCHAR NOT NULL,
     received_at_utc_micros BIGINT NOT NULL,
+    occurred_at_utc_micros BIGINT NOT NULL,
     received_date_utc DATE NOT NULL,
+    site_local_date DATE NOT NULL,
+    site_utc_offset_minutes SMALLINT NOT NULL,
     kind UTINYINT NOT NULL,
     event_name VARCHAR NOT NULL,
     path VARCHAR NOT NULL,
-    visitor_day_id BLOB NOT NULL,
+    page_title VARCHAR NOT NULL,
+    hostname VARCHAR NOT NULL,
+    anonymous_id UUID NOT NULL,
+    identity_quality UTINYINT NOT NULL,
+    user_id VARCHAR NOT NULL,
     session_id UUID NOT NULL,
-    visitor_day_start BOOLEAN NOT NULL,
+    sequence UINTEGER NOT NULL,
     session_start BOOLEAN NOT NULL,
     referrer_host VARCHAR NOT NULL,
     country_code VARCHAR NOT NULL,
+    language VARCHAR NOT NULL,
     browser_family VARCHAR NOT NULL,
     os_family VARCHAR NOT NULL,
     device_category VARCHAR NOT NULL,
@@ -181,30 +191,66 @@ CREATE TABLE events (
     utm_campaign VARCHAR NOT NULL,
     utm_term VARCHAR NOT NULL,
     utm_content VARCHAR NOT NULL,
-    properties_json VARCHAR NOT NULL
+    properties_json VARCHAR NOT NULL,
+    user_traits_json VARCHAR NOT NULL,
+    value_amount DECIMAL(18,6),
+    value_currency VARCHAR NOT NULL,
+    engagement_ms UINTEGER NOT NULL,
+    max_scroll_depth UTINYINT NOT NULL,
+
+    visitor_day_id BLOB NOT NULL,
+    visitor_day_start BOOLEAN NOT NULL,
+    event_payload_digest VARCHAR NOT NULL
+);
+
+CREATE TABLE identity_links (
+    site_id VARCHAR NOT NULL,
+    anonymous_id UUID NOT NULL,
+    user_id VARCHAR NOT NULL,
+    linked_at_utc_micros BIGINT NOT NULL,
+    event_id UUID NOT NULL,
+    PRIMARY KEY (site_id, anonymous_id)
 );
 ```
 
 Conventions:
 
-- `kind = 1` is a page view and `event_name = 'pageview'`.
-- `kind = 2` is a custom event.
+- `kind` values 1–4 are page view, custom event, engagement, and identify.
+- `identity_quality` values 1–3 are persistent, ephemeral, and migrated
+  legacy daily identity.
+- `event_schema_version=3`; protocol/tracker versions are 1 for compatibility
+  events and 2 for v2 envelopes.
 - Absent optional strings are empty rather than `NULL` to simplify bounded
-  grouping and decoding.
-- `properties_json` is canonical flat JSON produced by the application. The
-  MVP stores it for export but does not run goal or funnel SQL against it.
-- `event_id` is an application-generated UUID. It supports audit
-  correlation and later deduplication but no index is added without evidence.
-- `session_id` is the UUID of the first accepted event in the session.
-  `visitor_day_start` and `session_start` are event-local boundary facts, not
-  aggregate counters. DuckDB event migration v2 derives all three for v1 rows.
-- `received_at_utc_micros` is the server clock. Client time is not accepted as
-  authoritative.
+  grouping and decoding; only absent exact value amount is `NULL`.
+- `properties_json` and `user_traits_json` are canonical bounded flat JSON.
+  Query/type discovery remains issue #10 and begins with pinned built-in JSON
+  functions rather than an EAV table.
+- `event_id` is supplied by protocol v2 and is site-idempotent. The internal
+  digest is BLAKE3 over length-delimited normalized fields. D20's one writer
+  checks `(site_id,event_id)` before insert; no secondary unique index is added
+  to the million-row table without measured need.
+- `session_id` is supplied by protocol v2. `session_start` is true only for the
+  first committed `(site_id,session_id)` row. Protocol-v1 insertion retains its
+  frozen derived session behavior.
+- `received_at_utc_micros` is the authoritative server clock. Plausible client
+  time is stored separately for timeline ordering.
+- An identify event and a new `identity_links` row commit atomically. Repeating
+  the same link is idempotent; a different user for the same anonymous identity
+  rejects before either write.
 - `site_id` is duplicated deliberately. DuckDB does not enforce a foreign key
   into Turso.
+- `visitor_day_id` and `visitor_day_start` are temporary compatibility columns
+  consumed only by metric-v1 queries. They never define persistent identity.
 
-No secondary index is selected initially. The expected workload is an
-append-oriented table scanned by site and date; M0 measures the actual plan.
+Migration 3 performs a transactional create/backfill/swap. Existing rows keep
+event IDs, receipt time/date, kind/name/path, sessions, dimensions, UTM, and
+property bytes; occurrence equals receipt; protocol/tracker are 1; identity is
+`legacy_daily` with one deterministic synthetic UUID per existing
+`(site,date,visitor_day_id)`; sequence follows stored session order; other new
+fields are empty/zero. Until D27 is implemented, site-local date equals the
+shipped UTC date and offset is zero. Issues #11 and #13 own explicit-zone
+rebucketing and final migration/rollback evidence before metric-v2 date queries
+consume those values.
 
 ## 4. Normalization
 
@@ -224,7 +270,10 @@ append-oriented table scanned by site and date; M0 measures the actual plan.
 - If the host matches any configured site origin, store an empty external
   referrer.
 - Discard user info, port, path, query, and fragment.
-- Invalid, absent, or policy-suppressed referrers become empty/direct.
+- Protocol v1: invalid, absent, or policy-suppressed referrers become
+  empty/direct.
+- Protocol v2: absent and same-origin referrers become empty; a malformed
+  referrer URL rejects the event.
 
 ### Campaigns
 
@@ -243,14 +292,27 @@ keys are discarded.
 
 ### Custom events
 
+Shared rules:
+
 - Event name: 1–64 bytes, ASCII letters/digits plus `_`, `-`, `.`, and `:`.
-- Property count: at most 16.
-- Property key: 1–64 bytes and must be allowlisted for the site.
-- Property scalar value: string, integer, boolean, or null.
-- Encoded value: at most 256 bytes.
+- Property count: at most 16 unique identifier keys of 1–64 bytes.
+- Scalar values only: string, signed integer, boolean, or null.
+- Arrays, nested objects, floating-point values, and duplicate keys reject the
+  whole event.
+
+Protocol-v1 additional rules:
+
+- Property keys must be allowlisted for the site.
+- Encoded string value: at most 256 bytes.
 - Canonical total JSON: at most 4,096 bytes.
-- Arrays, nested objects, floating-point special values, and duplicate keys are
-  rejected.
+
+Protocol-v2 additional rules:
+
+- Property keys are not allowlisted at ingest; query/type discovery is issue
+  #10.
+- Encoded string value: at most 512 UTF-8 bytes without control characters.
+- Exact decimal property tokens remain issue #10. Exact `value.amount` is
+  `DECIMAL(18,6)`.
 
 ## 5. Visitor pseudonym — metric v1
 
@@ -367,7 +429,7 @@ bounded by the report contract.
 
 ## 8. Time ranges — metric v1
 
-- Event schema 2 and metric-v1 reports use UTC only.
+- Metric-v1 compatibility reports over event schema 3 use UTC only.
 - CLI date input is `[start_date, end_date]`, converted to the half-open instant
   range `[start 00:00:00Z, day_after_end 00:00:00Z)`.
 - Maximum interactive range is 400 days.
@@ -382,17 +444,22 @@ bounded by the report contract.
 Deleting a site is two-phase:
 
 1. Disable it in Turso so new events are rejected.
-2. With the service stopped, delete its DuckDB rows, checkpoint, then delete the
-   Turso configuration in a transaction.
+2. With the service stopped, delete its DuckDB `identity_links` and `events`
+   rows, checkpoint, then delete the Turso configuration in a transaction.
+
+Retention deletes expired `events` rows, then deletes `identity_links` whose
+`(site_id, anonymous_id)` no longer exists in `events`.
 
 The command reports row counts and produces a signed/hashed operator audit
 record without visitor data. A failed second phase remains safely retryable.
 
 ## 10. Accepted Analytico 1.0 transition
 
-Decisions D26 and D27 establish protocol v2, DuckDB event schema 3, and metric
+Decisions D26–D28 establish protocol v2, DuckDB event schema 3, and metric
 semantics v2 as a versioned extension rather than a reinterpretation of the
-schema above. Issues #6–#13 own the implementation and acceptance evidence.
+legacy fields. Issue #6 provides the collector/storage foundation; issues
+#7–#13 own the remaining tracker, identity, session, property, timezone,
+metric, and migration acceptance evidence.
 
 ### Identity and sessions
 
