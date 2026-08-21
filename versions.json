@@ -49,6 +49,19 @@
     "third_party_dependencies": 0,
     "status": "accepted M2 project-authored asset"
   },
+  "tracker_v2": {
+    "protocol": 2,
+    "minified_bytes": 1884,
+    "brotli_bytes": 865,
+    "gzip_bytes": 1014,
+    "minified_sha256": "fb64c48638c240656d0627fb3087bdf84cdd6ed3570efa363869b9eea16c97d2",
+    "brotli_sha256": "28d852ffd24b3d93aee13c70aa1c1cb31007acd0e4b687cd7cf156263528d45e",
+    "gzip_sha256": "23693693dbb6b18ec91439a520e14024d279435da64f79175cf90015ae9cf346",
+    "content_hash_path": "/tracker.fb64c486.js",
+    "local_storage_keys_per_site": 2,
+    "third_party_dependencies": 0,
+    "status": "accepted 1.0 identity tracker"
+  },
   "browser_e2e": {
     "playwright": "1.62.0",
     "test_image": "mcr.microsoft.com/playwright:v1.62.0-noble",

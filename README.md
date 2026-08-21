@@ -11,7 +11,7 @@ executable owns the exact embedded
 stores, numbered schemas, validated sites/origins and v1 property allowlists,
 goals/funnels, a private visitor key, dual bounded collector protocols, event
 schema 3, daily-identity compatibility, direct durable event insertion, a tiny
-self-hosted v1 tracker, a JavaScript-free pixel, complete typed CLI reports,
+self-hosted v1 tracker plus a v2 identity tracker, a JavaScript-free pixel, complete typed CLI reports,
 verified lifecycle commands, a hardened single-service deployment, and
 checksummed release packaging.
 
@@ -198,11 +198,11 @@ analytico serve \
   --visitor-key-file /var/lib/analytico/visitor.key
 ```
 
-Use the content-hashed production tracker:
+Use the content-hashed protocol-v2 tracker:
 
 ```html
 <script defer
-  src="https://analytics.example/tracker.aef65945.js"
+  src="https://analytics.example/tracker.fb64c486.js"
   data-site="YOUR-SITE-UUID"></script>
 <noscript>
   <img alt="" width="1" height="1"

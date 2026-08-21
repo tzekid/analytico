@@ -12,10 +12,14 @@ const dashboard_render = @import("../web/render.zig");
 const auth_http = @import("../auth/http.zig");
 const auth_store = @import("../auth/store.zig");
 
+const tracker_v1 = @embedFile("tracker.v1.min.js");
+const tracker_v1_br = @embedFile("tracker.v1.min.js.br");
+const tracker_v1_gzip = @embedFile("tracker.v1.min.js.gz");
 const tracker = @embedFile("tracker.min.js");
 const tracker_br = @embedFile("tracker.min.js.br");
 const tracker_gzip = @embedFile("tracker.min.js.gz");
-const tracker_versioned_path = "/tracker.aef65945.js";
+const tracker_v1_path = "/tracker.aef65945.js";
+const tracker_v2_path = "/tracker.fb64c486.js";
 const transparent_gif =
     "GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff" ++
     "!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00" ++
@@ -345,12 +349,15 @@ fn handle(context: *Context, stream: std.Io.net.Stream) !void {
         if (handled) return;
     }
     if (std.mem.eql(u8, path, "/tracker.js") or
-        std.mem.eql(u8, path, tracker_versioned_path))
+        std.mem.eql(u8, path, tracker_v1_path) or
+        std.mem.eql(u8, path, tracker_v2_path))
     {
         if (!std.mem.eql(u8, request.method, "GET")) {
             try methodNotAllowed(output, "GET");
         } else {
-            const immutable = std.mem.eql(u8, path, tracker_versioned_path);
+            const immutable = std.mem.eql(u8, path, tracker_v1_path) or
+                std.mem.eql(u8, path, tracker_v2_path);
+            const use_v1 = std.mem.eql(u8, path, tracker_v1_path);
             const encoding = request.header("accept-encoding") catch null;
             const use_brotli = if (encoding) |value|
                 acceptsEncoding(value, "br")
@@ -393,7 +400,9 @@ fn handle(context: *Context, stream: std.Io.net.Stream) !void {
                 200,
                 "text/javascript; charset=utf-8",
                 tracker_headers,
-                if (use_brotli)
+                if (use_v1)
+                    if (use_brotli) tracker_v1_br else if (use_gzip) tracker_v1_gzip else tracker_v1
+                else if (use_brotli)
                     tracker_br
                 else if (use_gzip)
                     tracker_gzip
