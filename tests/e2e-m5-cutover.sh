@@ -63,7 +63,7 @@ site_id=$("$binary" site list "$data" |
 
 snippet=$("$binary" site install "$data" cutover "$collector")
 [[ "$snippet" == *\
-'src="'"$collector"'/tracker.fb64c486.js" data-site="'"$site_id"'"'* ]]
+'src="'"$collector"'/tracker.78135195.js" data-site="'"$site_id"'"'* ]]
 [[ "$snippet" == *$'CSP merge:\n  script-src '"$collector"$'\n  connect-src '"$collector"$'\n  img-src '"$collector" ]]
 
 "$binary" serve --listen "127.0.0.1:$collector_port" \
@@ -157,7 +157,7 @@ grep -Fq '/var/lib/analytico/visitor.key' \
 grep -Fq '/var/lib/analytico/visitor.key' \
     "$release_root/docs/OPERATIONS.md"
 grep -Fq '/tracker.aef65945.js' "$release_root/deploy/Caddyfile"
-grep -Fq '/tracker.fb64c486.js' "$release_root/deploy/Caddyfile"
+grep -Fq '/tracker.78135195.js' "$release_root/deploy/Caddyfile"
 grep -Fq '/v1/p.gif' "$release_root/deploy/Caddyfile"
 
 cat "$fixture/browser.json"

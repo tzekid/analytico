@@ -103,6 +103,12 @@ grep -q '"distinct_site_keys":true' \
     "$fixture_dir/browser-result.json"
 grep -q '"uuid_getRandomValues_fallback":true' \
     "$fixture_dir/browser-result.json"
+grep -q '"session_reused_at_30_minutes":true' \
+    "$fixture_dir/browser-result.json"
+grep -q '"session_rotates_after_30_minutes":true' \
+    "$fixture_dir/browser-result.json"
+grep -q '"session_survives_utc_midnight":true' \
+    "$fixture_dir/browser-result.json"
 
 kill -TERM "$collector_pid"
 wait "$collector_pid" 2>/dev/null || true
@@ -121,4 +127,4 @@ then
 fi
 
 cat "$fixture_dir/browser-result.json"
-echo "identity browser persistence, reset, and storage-failure checks passed"
+echo "identity and session browser checks passed"

@@ -202,7 +202,7 @@ Use the content-hashed protocol-v2 tracker:
 
 ```html
 <script defer
-  src="https://analytics.example/tracker.fb64c486.js"
+  src="https://analytics.example/tracker.78135195.js"
   data-site="YOUR-SITE-UUID"></script>
 <noscript>
   <img alt="" width="1" height="1"

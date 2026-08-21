@@ -19,7 +19,7 @@ const tracker = @embedFile("tracker.min.js");
 const tracker_br = @embedFile("tracker.min.js.br");
 const tracker_gzip = @embedFile("tracker.min.js.gz");
 const tracker_v1_path = "/tracker.aef65945.js";
-const tracker_v2_path = "/tracker.fb64c486.js";
+const tracker_v2_path = "/tracker.78135195.js";
 const transparent_gif =
     "GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff" ++
     "!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00" ++

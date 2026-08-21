@@ -705,9 +705,9 @@ exploration images are non-binding.
 
 ## D26. Persistent first-party identity and cross-midnight sessions
 
-**Status:** Accepted for Analytico 1.0; collector/schema (#6) and tracker
-anonymous identity/`reset()` (#7) implemented; session rotation, identify, and
-legacy identity migration remain pending
+**Status:** Accepted for Analytico 1.0; collector/schema (#6), tracker
+anonymous identity/`reset()` (#7), and 30-minute client session rotation (#8)
+implemented; identify and legacy identity migration remain pending
 
 **Date:** 2026-08-21
 
@@ -786,7 +786,8 @@ handling, no inferred cross-device link, legacy coverage, repeated migration,
 and database-pair rollback through the real tracker, collector, executable,
 and on-disk stores. Issue #6 landed collector/schema evidence. Issue #7 landed
 real-browser persistence, storage-unavailable ephemeral marking, reset, and
-site-scoped keys. Session rotation, identify, and legacy identity migration
+site-scoped keys. Issue #8 landed 30-minute inactivity rotation, persisted
+sequence, and cross-midnight reuse. Identify and legacy identity migration
 remain target behavior until their issues land.
 
 ## D27. Explicit site-local dates through bounded TZif parsing
@@ -916,8 +917,8 @@ the transactional insert. The same `(site_id,event_id)` and digest returns
 `204` without another row; any other reuse returns fixed `409`. The digest is an
 internal schema column, not user data. A v2 identify link and event commit in
 one transaction. The first accepted `(site_id,session_id)` event is marked as
-the session start. Issues #8 and #9 still own session rotation, identify,
-profile resolution, and their remaining end-to-end acceptance.
+the session start. Issue #9 still owns identify, profile resolution, and its
+remaining end-to-end acceptance.
 
 Migration 3 uses one transactional create/backfill/swap and retains the two
 metric-v1 visitor-day compatibility facts until their queries are retired.

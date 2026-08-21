@@ -42,6 +42,13 @@ pub fn main(init: std.process.Init) !void {
         try m2_probe.inspectV2(allocator, output, args[3], args[4], args[5]);
         return;
     }
+    if (args.len == 6 and
+        std.mem.eql(u8, args[1], "m2") and
+        std.mem.eql(u8, args[2], "session-timeline"))
+    {
+        try m2_probe.sessionTimeline(allocator, output, args[3], args[4], args[5]);
+        return;
+    }
     if (args.len == 4 and
         std.mem.eql(u8, args[1], "m2") and
         std.mem.eql(u8, args[2], "identity-links"))
@@ -126,6 +133,7 @@ pub fn main(init: std.process.Init) !void {
         \\  analytico m0 benchmark <directory>
         \\  analytico m2 rate-probe
         \\  analytico m2 v2-inspect <directory> <site-id> <event-id>
+        \\  analytico m2 session-timeline <directory> <site-id> <session-id>
         \\  analytico m2 identity-links <directory>
         \\  analytico m3 seed <directory> <site-id>
         \\  analytico m3 million <directory> <site-id>
