@@ -457,9 +457,10 @@ record without visitor data. A failed second phase remains safely retryable.
 
 Decisions D26–D28 establish protocol v2, DuckDB event schema 3, and metric
 semantics v2 as a versioned extension rather than a reinterpretation of the
-legacy fields. Issue #6 provides the collector/storage foundation; issues
-#7–#13 own the remaining tracker, identity, session, property, timezone,
-metric, and migration acceptance evidence.
+legacy fields. Issue #6 provides the collector/storage foundation and issue #7
+provides tracker anonymous identity and `reset()`. Issues #8–#13 own the
+remaining session, identify, property, timezone, metric, and migration
+acceptance evidence.
 
 ### Identity and sessions
 

@@ -13,7 +13,8 @@
   dates, and sessions that cannot cross UTC midnight. Those semantics remain
   metric v1 and continue to govern compatibility rows and current reports.
 - Decision D28 implements the additive protocol-v2 collector and event-schema-3
-  storage foundation. Decisions D26 and D27 still require the dependent tracker,
+  storage foundation. Issue #7 implements protocol-v2 tracker anonymous identity
+  and `reset()`. Decisions D26 and D27 still require session rotation, identify,
   metric, timezone, and migration evidence; schema 3 does not retroactively turn
   visitor-days into people or claim site-local metric v2 is complete.
 - The current server-rendered `/admin` dashboard and optional HTMX enhancement

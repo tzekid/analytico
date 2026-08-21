@@ -58,7 +58,7 @@ expect_failure "$binary" site property-add "$fixture_dir" example nested/value
 install_snippet=$("$binary" site install "$fixture_dir" example \
     https://analytics.example)
 [[ "$install_snippet" == *\
-'<script defer src="https://analytics.example/tracker.aef65945.js" data-site="'"$site_id"'"></script>'* ]]
+'<script defer src="https://analytics.example/tracker.fb64c486.js" data-site="'"$site_id"'"></script>'* ]]
 [[ "$install_snippet" == *\
 'src="https://analytics.example/v1/p.gif?site='"$site_id"'&amp;path=%2F"'* ]]
 [[ "$install_snippet" == *$'CSP merge:\n  script-src https://analytics.example\n  connect-src https://analytics.example\n  img-src https://analytics.example' ]]

@@ -136,6 +136,14 @@ pub fn build(b: *std.Build) void {
         "Run M2 in real Chromium, Firefox, and WebKit processes",
     ).dependOn(&m2_browser_e2e.step);
 
+    const identity_browser_e2e = b.addSystemCommand(&.{ "bash", "tests/e2e-identity-browser.sh" });
+    identity_browser_e2e.addArtifactArg(app);
+    identity_browser_e2e.step.dependOn(b.getInstallStep());
+    b.step(
+        "e2e-identity-browser",
+        "Run protocol-v2 identity persistence and reset in a real browser",
+    ).dependOn(&identity_browser_e2e.step);
+
     const m2_benchmark = b.addSystemCommand(&.{ "bash", "bench/m2-collection.sh" });
     m2_benchmark.addArtifactArg(app);
     m2_benchmark.step.dependOn(b.getInstallStep());

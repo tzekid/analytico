@@ -2,8 +2,9 @@
 
 > **Status:** Protocol v1 remains a shipped frozen compatibility contract.
 > Protocol v2 is the additive collector/storage foundation defined by D28.
-> Tracker persistence, browser sessions, and higher-level metric-v2 behavior
-> continue through issues #7–#13.
+> Protocol-v2 tracker anonymous identity and `reset()` are implemented.
+> Session rotation, `identify()`, SPA/engagement, and metric-v2 continue
+> through issues #8–#13.
 
 Breaking changes require a new protocol version. They do not reinterpret
 accepted v1 events or metric-v1 visitor-day semantics.
@@ -12,8 +13,9 @@ accepted v1 events or metric-v1 visitor-day semantics.
 
 | Method | Route | Purpose | Success |
 | --- | --- | --- | --- |
-| `GET` | `/tracker.aef65945.js` | Immutable optional tracker | `200` JavaScript |
-| `GET` | `/tracker.js` | Short-cache installation alias | `200` JavaScript |
+| `GET` | `/tracker.aef65945.js` | Immutable protocol-v1 tracker | `200` JavaScript |
+| `GET` | `/tracker.fb64c486.js` | Immutable protocol-v2 tracker | `200` JavaScript |
+| `GET` | `/tracker.js` | Short-cache alias of the protocol-v2 tracker | `200` JavaScript |
 | `POST` | `/v1/event` | Page view or custom event | `204` empty |
 | `POST` | `/v2/event` | Bounded version-2 event envelope | `204` empty |
 | `GET` | `/v1/p.gif` | JavaScript-free page view | `200` transparent GIF |
@@ -234,18 +236,28 @@ the corresponding error status rather than claiming a view.
 The tracker is not needed by Analytico's later admin UI; it is the optional
 collection helper embedded in measured sites.
 
-Protocol-v1 tracker requirements:
+Protocol-v1 tracker requirements remain for `/tracker.aef65945.js`. That asset
+still posts `v:1` to `/v1/event`, uses no browser storage, and exposes
+`window.analytico.event(name, properties)`.
+
+Protocol-v2 tracker requirements for `/tracker.js` and `/tracker.fb64c486.js`:
 
 - self-hosted by Analytico or copied byte-for-byte to the measured site;
 - loaded with `defer`;
-- no cookies, local storage, fingerprint API, dynamic import, or third-party
-  request;
+- no cookies, fingerprint API, dynamic import, or third-party request;
 - no DOM mutation;
 - one page-view request per ordinary document load;
-- custom events only through an explicit small function;
-- request payload constructed from `location.pathname`, `document.referrer`,
-  and the five recognized UTM parameters;
-- tracker errors never break the measured page;
+- site-scoped first-party `localStorage` keys `anl:<site-uuid>:a` (anonymous
+  UUID) and `anl:<site-uuid>:s` (session UUID);
+- when storage throws, in-memory IDs are used and events are marked
+  `identity_quality=ephemeral`;
+- when UUID generation fails, the tracker does not send;
+- storage, serialization, beacon, and fetch failures never throw into the host
+  page;
+- `analytico.reset()` clears identified storage and creates a new anonymous
+  and session UUID;
+- custom events through `analytico.track(name, properties)`;
+- SPA, engagement, and `identify()` remain later issues;
 - minified and compressed bytes recorded by the performance gate.
 
 Usage:
@@ -253,17 +265,18 @@ Usage:
 ```html
 <script
   defer
-  src="https://analytics.example/tracker.aef65945.js"
+  src="https://analytics.example/tracker.fb64c486.js"
   data-site="00000000-0000-4000-8000-000000000000"
 ></script>
 ```
 
 ```js
-window.analytico?.event("signup", { plan: "basic" });
+window.analytico?.track("signup", { plan: "basic" });
+window.analytico?.reset();
 ```
 
-The global API is `window.analytico.event(name, properties)` and the site
-attribute is exactly `data-site`.
+The site attribute is exactly `data-site`. Existing hashed v1 URLs continue to
+serve the frozen protocol-v1 bytes.
 
 ## 7. Origin and proxy trust
 
@@ -297,8 +310,11 @@ on it.
 
 ## 9. Caching and CSP
 
-- `/tracker.aef65945.js`: one-year immutable cache with Brotli/gzip variants.
-- `/tracker.js`: identical bytes with a five-minute cache.
+- `/tracker.aef65945.js`: frozen protocol-v1 bytes, one-year immutable cache
+  with Brotli/gzip variants.
+- `/tracker.fb64c486.js`: protocol-v2 identity tracker, one-year immutable
+  cache with Brotli/gzip variants.
+- `/tracker.js`: identical protocol-v2 bytes with a five-minute cache.
 - Event and pixel routes, including `/v2/event`: `no-store`.
 - No collector route sets a cookie.
 - Measured sites must add the collector origin to `script-src` and

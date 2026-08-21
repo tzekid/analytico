@@ -5,8 +5,10 @@
 > budgets govern new feature paths and must be reconciled with measured evidence
 > by their implementation issues. D26 explicitly replaces protocol v1's
 > zero-persistent-storage tracker rule for new compatible events. The 1.0 target
-> keeps zero dependencies and a tracker-v2 budget below 5 KiB Brotli; issues #7
-> and #12 must add exact storage bounds and measured evidence.
+> keeps zero dependencies and a tracker-v2 budget below 5 KiB Brotli. Issue #7
+> bounds identity storage to two site-scoped `localStorage` UUID keys plus an
+> unused identified key reserved for `reset()`. Issues #8 and #12 still add
+> session-record bytes and measured SPA/engagement size.
 
 The numbers in this file are budgets, not claims. M0 records the first measured
 baseline on the target VPS. A release passes both the absolute budget and the
@@ -130,12 +132,13 @@ M2 gates the production tracker:
 The embedding page loads it with `defer`; analytics failure cannot delay or
 break the host page's useful HTML.
 
-Decision D26 intentionally supersedes only the table's zero-persistent-storage
-row for new protocol-v2 compatible events. The v2 tracker remains
-dependency-free with a target below 5 KiB Brotli, preferably 2–3 KiB. Issues #7
-and #12 must define bounded per-site key/value counts and bytes and prove
-storage-unavailable and minified/compressed behavior before acceptance.
-Protocol v1 retains the zero-storage contract during compatibility.
+Protocol-v1 retains the zero-storage contract at `/tracker.aef65945.js`.
+Protocol-v2 identity storage is two site-scoped `localStorage` keys with UUID
+values (`anl:<site-uuid>:a` and `anl:<site-uuid>:s`), plus an optional later
+identified-user key cleared by `reset()`. Issues #8, #9, and #12 add session
+rotation, identify, and SPA/engagement without new dependencies. The v2
+minified/Brotli budgets remain ≤ 3 KiB / ≤ 1.5 KiB until those issues prove a
+new measured ceiling below 5 KiB Brotli.
 
 ### M2 measured baseline
 
