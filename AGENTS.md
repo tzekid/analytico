@@ -97,6 +97,9 @@ connections, low-end hardware, older browsers, and JavaScript-disabled clients.
 
 ## Definition of done
 
+- Analytico `1.0.0` additionally satisfies every gate in
+  `docs/RELEASE_CONTRACT_1.0.md` for one exact candidate artifact. Passing a
+  compiler or narrow test command alone is not release acceptance.
 - The first view is useful before JavaScript executes.
 - Native navigation and ordinary forms work without JavaScript.
 - Input-controlled memory and work are bounded.
