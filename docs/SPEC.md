@@ -14,9 +14,10 @@
   metric v1 and continue to govern compatibility rows and current reports.
 - Decision D28 implements the additive protocol-v2 collector and event-schema-3
   storage foundation. Issue #7 implements protocol-v2 tracker anonymous identity
-  and `reset()`. Decisions D26 and D27 still require session rotation, identify,
-  metric, timezone, and migration evidence; schema 3 does not retroactively turn
-  visitor-days into people or claim site-local metric v2 is complete.
+  and `reset()`. Issue #8 implements 30-minute client session rotation.
+  Decisions D26 and D27 still require identify, metric, timezone, and migration
+  evidence; schema 3 does not retroactively turn visitor-days into people or
+  claim site-local metric v2 is complete.
 - The current server-rendered `/admin` dashboard and optional HTMX enhancement
   shipped after M4. HTML, native navigation, and ordinary forms remain the
   application baseline.

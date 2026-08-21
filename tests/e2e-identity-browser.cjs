@@ -24,7 +24,7 @@ function html(site) {
 <meta charset="utf-8">
 <title>Analytico identity fixture</title>
 <main><h1>Useful server-rendered state</h1><p>${site}</p></main>
-<script defer src="${collector}/tracker.fb64c486.js" data-site="${site}"></script>
+<script defer src="${collector}/tracker.78135195.js" data-site="${site}"></script>
 </html>`;
 }
 
@@ -79,9 +79,21 @@ function assertUuid(value, label) {
 async function storageKeys(page, site) {
   return page.evaluate((id) => {
     const prefix = `anl:${id}`;
+    const raw = localStorage.getItem(`${prefix}:s`);
+    let session = null;
+    let sequence = null;
+    let lastActivity = null;
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      session = parsed.id;
+      sequence = parsed.sequence;
+      lastActivity = parsed.last_activity_ms;
+    }
     return {
       anonymous: localStorage.getItem(`${prefix}:a`),
-      session: localStorage.getItem(`${prefix}:s`),
+      session,
+      sequence,
+      lastActivity,
       identified: localStorage.getItem(`${prefix}:u`),
       keys: Object.keys(localStorage).sort(),
     };
@@ -102,9 +114,11 @@ async function verifyPersistenceAndReset() {
     assert.equal(first.identity_quality, "persistent");
     assertUuid(first.anonymous_id, "anonymous_id");
     assertUuid(first.session_id, "session_id");
+    assert.equal(first.sequence, 0);
     const stored = await storageKeys(page, siteA);
     assert.equal(stored.anonymous, first.anonymous_id);
     assert.equal(stored.session, first.session_id);
+    assert.equal(stored.sequence, 1);
     assert.equal(stored.identified, null);
     assert.deepEqual(stored.keys, [`anl:${siteA}:a`, `anl:${siteA}:s`]);
     assert.equal(await page.evaluate(() => document.cookie), "");
@@ -118,6 +132,7 @@ async function verifyPersistenceAndReset() {
     const reloaded = await accepted;
     assert.equal(reloaded.anonymous_id, first.anonymous_id);
     assert.equal(reloaded.session_id, first.session_id);
+    assert.equal(reloaded.sequence, 1);
     assert.equal(reloaded.identity_quality, "persistent");
     assert.notEqual(reloaded.event_id, first.event_id);
 
@@ -148,6 +163,7 @@ async function verifyPersistenceAndReset() {
       assertUuid(afterReset.session, "reset session");
       assert.notEqual(afterReset.anonymous, first.anonymous_id);
       assert.notEqual(afterReset.session, first.session_id);
+      assert.equal(afterReset.sequence, 0);
       assert.equal(afterReset.identified, null);
       assert.deepEqual(afterReset.keys, [`anl:${siteA}:a`, `anl:${siteA}:s`]);
 
@@ -158,6 +174,7 @@ async function verifyPersistenceAndReset() {
       assert.equal(tracked.name, "after-reset");
       assert.equal(tracked.anonymous_id, afterReset.anonymous);
       assert.equal(tracked.session_id, afterReset.session);
+      assert.equal(tracked.sequence, 0);
       assert.equal(tracked.identity_quality, "persistent");
 
       accepted = nextV2(restoredPage);
@@ -182,6 +199,83 @@ async function verifyPersistenceAndReset() {
   } catch (error) {
     await browser.close().catch(() => {});
     throw error;
+  }
+}
+
+async function verifySessionRotation() {
+  const browser = await launch();
+  try {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    let accepted = nextV2(page);
+    await page.goto(`${fixtureOrigin}/a-session`, { waitUntil: "load" });
+    const first = await accepted;
+    assert.equal(first.sequence, 0);
+    const initial = await storageKeys(page, siteA);
+
+    await page.evaluate(
+      ({ key, last }) => {
+        const parsed = JSON.parse(localStorage.getItem(key));
+        parsed.last_activity_ms = last;
+        localStorage.setItem(key, JSON.stringify(parsed));
+      },
+      { key: `anl:${siteA}:s`, last: Date.now() - 29 * 60 * 1000 },
+    );
+    accepted = nextV2(page);
+    await page.reload({ waitUntil: "load" });
+    const atThreshold = await accepted;
+    assert.equal(atThreshold.session_id, first.session_id);
+    assert.equal(atThreshold.anonymous_id, first.anonymous_id);
+
+    await page.evaluate(
+      ({ key, last }) => {
+        const parsed = JSON.parse(localStorage.getItem(key));
+        parsed.last_activity_ms = last;
+        localStorage.setItem(key, JSON.stringify(parsed));
+      },
+      { key: `anl:${siteA}:s`, last: Date.now() - 31 * 60 * 1000 },
+    );
+    accepted = nextV2(page);
+    await page.reload({ waitUntil: "load" });
+    const rotated = await accepted;
+    assert.equal(rotated.anonymous_id, first.anonymous_id);
+    assert.notEqual(rotated.session_id, first.session_id);
+    assert.equal(rotated.sequence, 0);
+
+    const midnight = Math.floor(Date.now() / 86400000) * 86400000;
+    const beforeMidnight = midnight - 10 * 60 * 1000;
+    const afterMidnight = midnight + 10 * 60 * 1000;
+    const midnightContext = await browser.newContext();
+    await midnightContext.addInitScript(
+      ({ anonymousKey, sessionKey, anonymous, record, frozen }) => {
+        Object.defineProperty(Date, "now", { value: () => frozen });
+        localStorage.setItem(anonymousKey, anonymous);
+        localStorage.setItem(sessionKey, JSON.stringify(record));
+      },
+      {
+        anonymousKey: `anl:${siteA}:a`,
+        sessionKey: `anl:${siteA}:s`,
+        anonymous: first.anonymous_id,
+        record: {
+          id: rotated.session_id,
+          last_activity_ms: beforeMidnight,
+          sequence: 1,
+        },
+        frozen: afterMidnight,
+      },
+    );
+    const midnightPage = await midnightContext.newPage();
+    accepted = nextV2(midnightPage);
+    await midnightPage.goto(`${fixtureOrigin}/a-midnight`, { waitUntil: "load" });
+    const crossedMidnight = await accepted;
+    assert.equal(crossedMidnight.anonymous_id, first.anonymous_id);
+    assert.equal(crossedMidnight.session_id, rotated.session_id);
+    assert.equal(crossedMidnight.occurred_at_ms, afterMidnight);
+    assert.equal(initial.session, first.session_id);
+    await midnightContext.close();
+    await context.close();
+  } finally {
+    await browser.close();
   }
 }
 
@@ -244,6 +338,7 @@ async function main() {
   });
   try {
     await verifyPersistenceAndReset();
+    await verifySessionRotation();
     await verifyStorageException();
     await verifyRandomValuesFallback();
     process.stdout.write(
@@ -257,6 +352,9 @@ async function main() {
         reset_cleared_identified_key: true,
         distinct_site_keys: true,
         uuid_getRandomValues_fallback: true,
+        session_reused_at_30_minutes: true,
+        session_rotates_after_30_minutes: true,
+        session_survives_utc_midnight: true,
       }) + "\n",
     );
   } finally {

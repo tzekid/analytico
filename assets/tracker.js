@@ -7,6 +7,7 @@
   const anonymousKey = prefix + ":a";
   const sessionKey = prefix + ":s";
   const identifiedKey = prefix + ":u";
+  const idleLimitMs = 30 * 60 * 1000;
 
   function uuid() {
     try {
@@ -48,13 +49,43 @@
   }
 
   let identityQuality = "persistent";
-  let anonymousId = read(anonymousKey);
-  let sessionId = read(sessionKey);
+  let anonymousId = "";
+  let session = null;
+
+  function persistSession() {
+    if (!session) return 0;
+    return write(sessionKey, JSON.stringify(session));
+  }
+
+  function createSession(now) {
+    const id = uuid();
+    if (!id) return null;
+    return { id, last_activity_ms: now, sequence: 0 };
+  }
+
+  function loadSession(now) {
+    const raw = read(sessionKey);
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw);
+        if (parsed && parsed.id &&
+            typeof parsed.last_activity_ms === "number" &&
+            typeof parsed.sequence === "number" &&
+            now - parsed.last_activity_ms <= idleLimitMs) {
+          return parsed;
+        }
+      } catch (_) {}
+    }
+    const created = createSession(now);
+    if (!created) return null;
+    if (!write(sessionKey, JSON.stringify(created))) identityQuality = "ephemeral";
+    return created;
+  }
 
   function loadIdentity() {
-    anonymousId = read(anonymousKey);
-    sessionId = read(sessionKey);
+    const now = Date.now();
     identityQuality = "persistent";
+    anonymousId = read(anonymousKey);
     if (!anonymousId) {
       const next = uuid();
       if (!next) {
@@ -64,26 +95,30 @@
       anonymousId = next;
       if (!write(anonymousKey, next)) identityQuality = "ephemeral";
     }
-    if (!sessionId) {
-      const next = uuid();
-      if (!next) {
-        identityQuality = "ephemeral";
-        return;
-      }
-      sessionId = next;
-      if (!write(sessionKey, next)) identityQuality = "ephemeral";
+    session = loadSession(now);
+    if (!session) {
+      identityQuality = "ephemeral";
+      return;
     }
   }
 
   loadIdentity();
-  let sequence = 0;
 
   function send(type, extra) {
-    if (!anonymousId || !sessionId) loadIdentity();
-    if (!anonymousId || !sessionId) return;
+    if (!anonymousId || !session) loadIdentity();
+    if (!anonymousId || !session) return;
     const eventId = uuid();
     if (!eventId) return;
     try {
+      const now = Date.now();
+      if (now - session.last_activity_ms > idleLimitMs) {
+        session = loadSession(now);
+        if (!session) return;
+      }
+      const sequence = session.sequence;
+      session.sequence = sequence + 1;
+      session.last_activity_ms = now;
+      if (!persistSession()) identityQuality = "ephemeral";
       const utm = {};
       const params = new URLSearchParams(location.search);
       for (const field of ["source", "medium", "campaign", "term", "content"]) {
@@ -97,9 +132,9 @@
         event_id: eventId,
         anonymous_id: anonymousId,
         identity_quality: identityQuality,
-        session_id: sessionId,
-        sequence: sequence++,
-        occurred_at_ms: Date.now(),
+        session_id: session.id,
+        sequence,
+        occurred_at_ms: now,
         type,
         page: {
           path: location.pathname,
@@ -125,8 +160,7 @@
     remove(sessionKey);
     remove(identifiedKey);
     anonymousId = "";
-    sessionId = "";
-    sequence = 0;
+    session = null;
     loadIdentity();
   }
 

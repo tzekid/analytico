@@ -742,6 +742,34 @@ pub const Store = struct {
         return decodeStoredEvent(allocator, &result);
     }
 
+    pub fn sessionTimelineIds(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        site_id: []const u8,
+        session_id: []const u8,
+    ) ![][]const u8 {
+        try domain.validateUuid(site_id);
+        try domain.validateUuid(session_id);
+        var statement = try self.database.prepare(
+            \\SELECT CAST(event_id AS VARCHAR)
+            \\FROM events
+            \\WHERE site_id = ? AND session_id = CAST(? AS UUID)
+            \\ORDER BY occurred_at_utc_micros, sequence, received_at_utc_micros,
+            \\         CAST(event_id AS VARCHAR)
+        );
+        defer statement.deinit();
+        try statement.bindText(1, site_id);
+        try statement.bindText(2, session_id);
+        var result = try statement.execute();
+        defer result.deinit();
+        if (result.columnCount() != 1) return error.InvalidSessionTimeline;
+        const ids = try allocator.alloc([]const u8, result.rowCount());
+        for (ids, 0..) |*id, index| {
+            id.* = try result.text(allocator, 0, index);
+        }
+        return ids;
+    }
+
     pub fn inspectV2(
         self: *Store,
         allocator: std.mem.Allocator,

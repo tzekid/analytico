@@ -112,7 +112,7 @@ expect_code 200 "$base/tracker.js"
 cmp "$fixture_dir/body" public/tracker.js
 grep -qi '^Content-Type: text/javascript; charset=utf-8' \
     "$fixture_dir/headers"
-grep -qi '^Content-Length: 1884' "$fixture_dir/headers"
+grep -qi '^Content-Length: 2338' "$fixture_dir/headers"
 grep -qi '^Cache-Control: public, max-age=300' "$fixture_dir/headers"
 grep -qi '^X-Content-Type-Options: nosniff' "$fixture_dir/headers"
 grep -qi '^Vary: Accept-Encoding' "$fixture_dir/headers"
@@ -138,7 +138,7 @@ grep -qi '^Cache-Control: public, max-age=31536000, immutable' \
     "$fixture_dir/headers"
 grep -qi '^Content-Encoding: br' "$fixture_dir/headers"
 cmp "$fixture_dir/body" src/http/tracker.v1.min.js.br
-expect_code 200 -H 'Accept-Encoding: br' "$base/tracker.fb64c486.js"
+expect_code 200 -H 'Accept-Encoding: br' "$base/tracker.78135195.js"
 grep -qi '^Cache-Control: public, max-age=31536000, immutable' \
     "$fixture_dir/headers"
 grep -qi '^Content-Encoding: br' "$fixture_dir/headers"
@@ -548,6 +548,49 @@ expect_code 204 -X POST "$base/v1/event" \
     -H 'User-Agent: Mozilla/5.0 (Windows NT 10.0) Chrome/140.0' \
     --data-binary "$custom"
 
+# Same occurred time, reverse arrival: sequence then event ID must order them.
+v2_order_later=00000000-0000-4000-8000-000000000240
+v2_order_earlier=00000000-0000-4000-8000-000000000241
+v2_order_later_body=$(
+    printf '{"v":2,"site":"%s","event_id":"%s","anonymous_id":"%s","identity_quality":"persistent","session_id":"%s","sequence":4,"occurred_at_ms":%s,"type":"event","name":"later"}' \
+        "$site_id" "$v2_order_later" "$v2_anonymous" "$v2_session" \
+        "$occurred_ms"
+)
+v2_order_earlier_body=$(
+    printf '{"v":2,"site":"%s","event_id":"%s","anonymous_id":"%s","identity_quality":"persistent","session_id":"%s","sequence":3,"occurred_at_ms":%s,"type":"event","name":"earlier"}' \
+        "$site_id" "$v2_order_earlier" "$v2_anonymous" "$v2_session" \
+        "$occurred_ms"
+)
+expect_code 204 -X POST "$base/v2/event" \
+    -H 'Content-Type: text/plain' -H 'Origin: https://example.com' \
+    -H 'X-Forwarded-For: 198.18.10.1' --data-binary "$v2_order_later_body"
+expect_code 204 -X POST "$base/v2/event" \
+    -H 'Content-Type: text/plain' -H 'Origin: https://example.com' \
+    -H 'X-Forwarded-For: 198.18.10.1' --data-binary "$v2_order_earlier_body"
+
+midnight_ms=$(( (occurred_seconds / 86400) * 86400 * 1000 ))
+before_midnight_ms=$((midnight_ms - 600000))
+after_midnight_ms=$((midnight_ms + 600000))
+v2_midnight_session=00000000-0000-4000-8000-000000000250
+v2_midnight_first=00000000-0000-4000-8000-000000000251
+v2_midnight_second=00000000-0000-4000-8000-000000000252
+v2_midnight_first_body=$(
+    printf '{"v":2,"site":"%s","event_id":"%s","anonymous_id":"%s","identity_quality":"persistent","session_id":"%s","sequence":0,"occurred_at_ms":%s,"type":"pageview","page":{"path":"/pre-midnight","hostname":"example.com"}}' \
+        "$site_id" "$v2_midnight_first" "$v2_anonymous" "$v2_midnight_session" \
+        "$before_midnight_ms"
+)
+v2_midnight_second_body=$(
+    printf '{"v":2,"site":"%s","event_id":"%s","anonymous_id":"%s","identity_quality":"persistent","session_id":"%s","sequence":1,"occurred_at_ms":%s,"type":"pageview","page":{"path":"/post-midnight","hostname":"example.com"}}' \
+        "$site_id" "$v2_midnight_second" "$v2_anonymous" "$v2_midnight_session" \
+        "$after_midnight_ms"
+)
+expect_code 204 -X POST "$base/v2/event" \
+    -H 'Content-Type: text/plain' -H 'Origin: https://example.com' \
+    -H 'X-Forwarded-For: 198.18.10.1' --data-binary "$v2_midnight_first_body"
+expect_code 204 -X POST "$base/v2/event" \
+    -H 'Content-Type: text/plain' -H 'Origin: https://example.com' \
+    -H 'X-Forwarded-For: 198.18.10.1' --data-binary "$v2_midnight_second_body"
+
 # Hold a bounded request open to prove SIGTERM interrupts active I/O without
 # manufacturing or acknowledging an event.
 exec 9<>"/dev/tcp/127.0.0.1/$port"
@@ -563,7 +606,7 @@ exec 9<&-
 server_pid=
 
 test "$("$binary" doctor "$fixture_dir")" = \
-    "ok metadata=v2 events=v3 sites=2 goals=0 funnels=0 stored_events=41 key=ok"
+    "ok metadata=v2 events=v3 sites=2 goals=0 funnels=0 stored_events=45 key=ok"
 pageview_row=$("$binary" event inspect "$fixture_dir" pageview)
 test "$pageview_row" = $'pageview\t/pricing\tsearch.example\tDE\tFirefox\tLinux\tdesktop\tnewsletter\t{}'
 custom_row=$("$binary" event inspect "$fixture_dir" signup)
@@ -583,6 +626,14 @@ v2_identify_row=$("$binary" m2 v2-inspect "$fixture_dir" "$site_id" "$v2_identif
 test "$v2_identify_row" = \
     "{\"event_schema_version\":3,\"protocol_version\":2,\"tracker_version\":2,\"event_id\":\"$v2_identify_id\",\"occurred_at_utc_micros\":$occurred_micros,\"received_date_utc\":\"$received_date\",\"site_local_date\":\"$received_date\",\"site_utc_offset_minutes\":0,\"kind\":4,\"event_name\":\"identify\",\"path\":\"/account\",\"page_title\":\"Account\",\"hostname\":\"example.com\",\"anonymous_id\":\"$v2_anonymous\",\"identity_quality\":1,\"user_id\":\"user_123\",\"session_id\":\"$v2_session\",\"sequence\":2,\"session_start\":false,\"referrer_host\":\"\",\"country_code\":\"DE\",\"language\":\"\",\"browser_family\":\"Chrome\",\"os_family\":\"Linux\",\"device_category\":\"desktop\",\"utm_source\":\"\",\"utm_medium\":\"\",\"utm_campaign\":\"\",\"utm_term\":\"\",\"utm_content\":\"\",\"properties_json\":\"{}\",\"user_traits_json\":\"{\\\"plan\\\":\\\"pro\\\",\\\"tier\\\":2}\",\"value_amount\":null,\"value_currency\":\"\",\"engagement_ms\":0,\"max_scroll_depth\":0,\"linked_user_id\":\"user_123\"}"
 test "$("$binary" m2 identity-links "$fixture_dir")" = 1
+test "$("$binary" m2 session-timeline "$fixture_dir" "$site_id" "$v2_session")" = \
+    "[\"$v2_page_id\",\"$v2_custom_id\",\"$v2_identify_id\",\"$v2_order_earlier\",\"$v2_order_later\",\"00000000-0000-4000-8000-000000000207\"]"
+v2_midnight_first_row=$("$binary" m2 v2-inspect "$fixture_dir" "$site_id" "$v2_midnight_first")
+v2_midnight_second_row=$("$binary" m2 v2-inspect "$fixture_dir" "$site_id" "$v2_midnight_second")
+[[ "$v2_midnight_first_row" == *'"session_start":true'* ]]
+[[ "$v2_midnight_second_row" == *'"session_start":false'* ]]
+[[ "$v2_midnight_first_row" == *'"session_id":"'"$v2_midnight_session"'"'* ]]
+[[ "$v2_midnight_second_row" == *'"session_id":"'"$v2_midnight_session"'"'* ]]
 
 probe=$("$binary" m2 rate-probe)
 test "$probe" = \
@@ -592,7 +643,7 @@ cmp public/tracker.js src/http/tracker.min.js
 test "$(stat -c '%s' public/tracker.js)" -le 3072
 test "$(stat -c '%s' public/tracker.js.br)" -le 1536
 test "$(sha256sum public/tracker.js | cut -d' ' -f1)" = \
-    "fb64c48638c240656d0627fb3087bdf84cdd6ed3570efa363869b9eea16c97d2"
+    "7813519555b9ea0625a90c1d42c1adfb5db78d3d33b5229809e6b654830ffcf7"
 test "$(sha256sum src/http/tracker.v1.min.js | cut -d' ' -f1)" = \
     "aef659456671d0dbc0a63e7732b14edc40ad0b08523fd91081f36004c99aa116"
 

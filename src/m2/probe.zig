@@ -40,6 +40,22 @@ pub fn inspectV2(
     try output.writeByte('\n');
 }
 
+pub fn sessionTimeline(
+    allocator: std.mem.Allocator,
+    output: *std.Io.Writer,
+    directory: []const u8,
+    site_id: []const u8,
+    session_id: []const u8,
+) !void {
+    const path = try std.fs.path.join(allocator, &.{ directory, "events.duckdb" });
+    var store = try events.Store.open(allocator, path);
+    defer store.deinit();
+    try store.requireCurrent();
+    const ids = try store.sessionTimelineIds(allocator, site_id, session_id);
+    try std.json.Stringify.value(ids, .{}, output);
+    try output.writeByte('\n');
+}
+
 pub fn identityLinkCount(
     allocator: std.mem.Allocator,
     output: *std.Io.Writer,

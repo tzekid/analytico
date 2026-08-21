@@ -2,9 +2,9 @@
 
 > **Status:** Sections 1–10 describe the shipped one-process runtime, its frozen
 > protocol-v1 compatibility path, additive protocol-v2 collector foundation,
-> event schema 3, and protocol-v2 tracker anonymous identity. The remaining 1.0
-> evolution is stated separately below; it preserves this runtime shape and
-> lands only with its issue evidence.
+> event schema 3, protocol-v2 tracker anonymous identity, and 30-minute client
+> sessions. The remaining 1.0 evolution is stated separately below; it
+> preserves this runtime shape and lands only with its issue evidence.
 
 ## 1. Runtime shape
 
@@ -148,15 +148,16 @@ The shipped protocol-v2 foundation accepts a random site-scoped first-party
 anonymous UUID, an optional bounded application user ID, and a random client
 session UUID plus sequence. The server validates and stores those values; it
 never derives a long-lived fingerprint. The protocol-v2 tracker persists
-site-scoped anonymous and session UUIDs in first-party `localStorage` and
-exposes `reset()`. Issue #8 owns 30-minute session rotation. Server receipt
-time remains authoritative for acceptance and report bucketing.
+site-scoped anonymous identity and a session record in first-party
+`localStorage`, exposes `reset()`, and rotates the session after more than 30
+minutes of inactivity without splitting at UTC midnight. Server receipt time
+remains authoritative for acceptance and report bucketing.
 
 Protocol-v1 rows keep their daily visitor and session meaning under metric v1.
 Migration marks them `legacy_daily`, never links them across dates, and retains
 their existing session IDs. Decisions D26–D28 govern this version boundary;
-issues #8–#13 own session rotation, identify, SPA, metric, timezone, and the
-remaining migration acceptance.
+issues #9–#13 own identify, SPA, metric, timezone, and the remaining migration
+acceptance.
 
 ## 6. Report flow
 
