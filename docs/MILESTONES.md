@@ -4,6 +4,11 @@ Milestones are sequential unless a task explicitly says otherwise. “Done”
 means every checkbox passes in both Debug and ReleaseSafe where applicable;
 demonstrating a happy path is not sufficient.
 
+M0–M8 and the later accepted entries below record the shipped path through the
+current release. The separate target scope and GitHub plan for Analytico 1.0
+are governed by [`SCOPE_1.0.md`](SCOPE_1.0.md); this historical release map does
+not silently add or remove 1.0 requirements.
+
 ## Release map
 
 ```text

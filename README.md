@@ -49,8 +49,17 @@ The production MVP covers:
 The MVP intentionally excludes a web dashboard, teams, billing, email reports,
 real-time views, session replay, arbitrary user SQL, and distributed ingestion.
 
+## Analytico 1.0 target
+
+The sections above describe the shipped MVP boundary and its historical
+milestones. The approved target product is governed separately by the
+[Analytico 1.0 scope contract](docs/SCOPE_1.0.md) and tracked in the
+[`Analytico 1.0` GitHub milestone](https://github.com/tzekid/analytico/milestone/1).
+That target is a plan, not a claim that the capabilities are already shipped.
+
 ## Documentation
 
+- [Analytico 1.0 scope contract](docs/SCOPE_1.0.md)
 - [Product specification](docs/SPEC.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Decision register](docs/DECISIONS.md)
