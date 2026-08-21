@@ -188,6 +188,28 @@ The final item does not weaken privacy or security requirements. The product
 must still avoid accidental sensitive-data collection, enforce authentication
 and authorization server-side, and retain explicit data-safety controls.
 
+## Inspected baseline and compatibility
+
+The planning package was prepared from repository commit
+`8f7a68db376c95fff5ebddb9081e32e20928b5b6` on `master`. This reconciliation
+started from `c90380e09d98738035defdfec7ce66d3131bc6f4`; the intervening repository
+change was issue #2's approved 1.0 scope contract and its README/spec/milestone
+links. No newer runtime or storage behavior was reverted to match the package.
+
+Compatibility is an explicit release requirement:
+
+- protocol v1, event schema 2, metric v1, current CLI/report routes, backup,
+  restore, and release operations remain valid through their documented
+  migration window;
+- historical daily pseudonyms remain visitor-days and are never retroactively
+  linked into persistent people;
+- event schema 3 migration preserves accepted fields, IDs, session IDs, and
+  metric-v1 totals and rolls back by restoring the pre-migration database pair;
+- current `/admin` routes retain a documented redirect/compatibility boundary
+  while the 1.0 information architecture lands;
+- release notes and result documents remain evidence of the version they
+  tested; planned behavior never rewrites that evidence.
+
 ## Plan traceability
 
 Every active 1.0 child issue has one native parent epic. The epic mapping below
@@ -228,15 +250,37 @@ completing a narrower ticket.
 
 ## Authority and implementation boundary
 
+The repository authority order is:
+
+1. [`AGENTS.md`](../AGENTS.md) for enduring engineering, safety, testing, and
+   operational doctrine.
+2. This document for approved 1.0 product scope and non-goals.
+3. Accepted entries in [`DECISIONS.md`](DECISIONS.md) for consequential
+   mechanisms and explicit supersession/version boundaries.
+4. For detailed 1.0 target behavior, the integrity-verified planning package's
+   written functional/data specifications, then its technical specifications,
+   following the package's internal hierarchy.
+5. Versioned repository product, architecture, data, protocol, performance,
+   security, and operations contracts for shipped behavior and compatibility
+   unless clearly labeled as target behavior.
+6. [`MILESTONES.md`](MILESTONES.md) and GitHub issues for sequence and
+   acceptance without authority to silently override the sources above.
+7. Written package product/design rules and its deterministic prototype for
+   presentation after functional/data/technical contracts; AI exploration
+   images remain non-binding.
+8. Release notes and result documents as immutable historical evidence.
+
+The package does not override items 1–3 or newer correct repository work merely
+because it was prepared from an older baseline. Decisions D26 and D27 reconcile
+its persistent-identity and site-local-time mechanisms into the repository;
+implementation remains pending the linked issues and acceptance evidence.
+
 This document decides product scope, not every data or architecture mechanism.
 Consequential identity, timezone, migration, dependency, security, and storage
-choices still require the candidate comparison and recommendation required by
-[`docs/DECISIONS.md`](DECISIONS.md). Issue
-[#3](https://github.com/tzekid/analytico/issues/3) reconciles the repository's
-historical doctrine and records the first 1.0 semantic decisions before those
-changes are implemented.
+changes still require candidate comparison and recommendation in
+`docs/DECISIONS.md`, with their compatibility and rollback effects recorded.
 
 If this document, an issue, current repository doctrine, or an accepted
 operational contract conflicts materially, stop and resolve the written
-conflict. Do not silently weaken an existing guarantee or claim planned 1.0
-behavior as shipped.
+conflict in the governing repository documents before implementation. Do not
+silently weaken an existing guarantee or claim planned 1.0 behavior as shipped.

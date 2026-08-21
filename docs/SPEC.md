@@ -3,7 +3,22 @@
 > **Status:** This document defines the shipped MVP and its later accepted
 > dashboard increments. The target product scope for Analytico 1.0 is
 > [`SCOPE_1.0.md`](SCOPE_1.0.md); planned 1.0 behavior is not shipped behavior
-> until its implementation and acceptance evidence land.
+> until its implementation and acceptance evidence land. Statements labeled
+> “MVP” below are the historical M0–M4 and metric-v1 contract, not timeless
+> constraints on the approved 1.0 target.
+
+## Version boundary
+
+- The current protocol-v1/event-schema-2 path uses cookieless daily
+  pseudonyms, UTC report dates, and sessions that cannot cross UTC midnight.
+  Those semantics remain metric v1 and continue to govern existing rows.
+- Decisions D26 and D27 accept persistent site-scoped first-party identity,
+  cross-midnight client sessions, and explicit site-local dates for new
+  compatible 1.0 data. They do not retroactively turn visitor-days into people
+  or claim that protocol v2 and event schema 3 are already implemented.
+- The current server-rendered `/admin` dashboard and optional HTMX enhancement
+  shipped after M4. HTML, native navigation, and ordinary forms remain the
+  application baseline.
 
 ## 1. Product statement
 
@@ -135,7 +150,7 @@ confirmation flag when stdin is not interactive.
 - Reports expose their UTC range and applied filters.
 - Partial upstream/enrichment failure does not invent data.
 
-### Privacy
+### Historical metric-v1 privacy
 
 - No cookies or local storage in the MVP.
 - No raw IP address or full user-agent string is persisted.
@@ -167,9 +182,10 @@ confirmation flag when stdin is not interactive.
 - The performance and resource budgets in
   [PERFORMANCE.md](PERFORMANCE.md) are release gates.
 
-## 5. Explicit non-goals
+## 5. Historical M0–M4 non-goals
 
-The following are not part of the production MVP:
+The following were not part of the M0–M4 production MVP. They do not override
+the later accepted dashboard increments or the 1.0 scope contract:
 
 - HTMX or any other browser application runtime;
 - organization, team, invitation, or billing systems;
@@ -206,8 +222,10 @@ The M6 UI remains deliberately downstream of the product core:
 2. It creates an owned, typed view model.
 3. A deterministic renderer writes a full HTML response without I/O.
 4. Links and forms work with JavaScript disabled.
-5. Only M7 may let the same endpoints return scoped HTML fragments to HTMX.
+5. M7 may enhance the same endpoints with body-level swaps of the same complete
+   server HTML; it does not introduce a fragment renderer or second state model.
 
 The implemented UI does not fetch JSON after receiving the same state in HTML.
 It does not open the DuckDB file from a second process. The later Cloudio
-integration must choose one of the ownership-safe options in decision D13.
+integration selected the ownership-safe ordinary-link boundary in decision
+D22.

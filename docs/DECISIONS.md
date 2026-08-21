@@ -9,14 +9,14 @@ semantic, or application state model is consequential and must be added here.
 
 | ID | Decision | Recommendation | Status |
 | --- | --- | --- | --- |
-| D01 | MVP interface | Collector + local CLI, no dashboard | Accepted |
+| D01 | Historical M0–M4 interface | Collector + local CLI before dashboard work | Superseded after M4 by D13/D23/D24 |
 | D02 | ClickHouse replacement | DuckDB | Accepted |
 | D03 | Storage topology | Turso metadata + DuckDB events | Accepted |
 | D04 | DuckDB integration | Direct pinned LTS C API | Accepted |
 | D05 | Zig and Turso channel | Exact local development pins | Accepted |
 | D06 | Ingestion durability | Direct synchronous insert | Accepted |
-| D07 | Visitor/session identity | Cookieless site-scoped daily pseudonym | Accepted |
-| D08 | Persisted visitor data | Derived dimensions only | Accepted |
+| D07 | Metric-v1 visitor/session identity | Cookieless site-scoped daily pseudonym | Accepted for v1; superseded for new 1.0 data by D26 |
+| D08 | Metric-v1 persisted visitor data | Derived dimensions and daily pseudonym only | Accepted for v1; extended by D26 |
 | D09 | Country and client classification | Trusted country header + small local classifiers | Accepted |
 | D10 | Collection transport | POST beacon plus optional GET pixel | Accepted |
 | D11 | Aggregation | Query raw events on demand | Accepted |
@@ -29,11 +29,13 @@ semantic, or application state model is consequential and must be added here.
 | D18 | Plausible migration | Fresh start and direct cutover | Accepted |
 | D19 | Metadata writes on pinned Turso | Durable autocommits with compensation | Accepted |
 | D20 | Collector concurrency | One bounded sequential accept loop | Accepted |
-| D21 | Session boundaries | Persist event-local boundaries at commit | Accepted |
+| D21 | Metric-v1 session boundaries | Persist event-local boundaries at commit | Accepted for v1; extended by D26 |
 | D22 | Cloudio integration | Optional ordinary link to standalone Analytico | Accepted |
 | D23 | Private dashboard authentication | Passkey-only owner gate after staged Basic Auth cutover | Accepted and deployed |
 | D24 | Public and dashboard URL topology | One canonical hostname with strict path routing | Accepted and deployed |
 | D25 | Dashboard functional-quality pass | Separate native state transitions with minimal enhancement | Accepted for U1 |
+| D26 | 1.0 identity and sessions | Persistent first-party anonymous identity, explicit identify/reset, cross-midnight client sessions | Accepted for 1.0; implementation pending |
+| D27 | 1.0 site-local time | Explicit IANA zone with bounded host-TZif reader and stored local dates | Accepted for 1.0; implementation pending |
 
 ## D01. MVP interface
 
@@ -55,6 +57,12 @@ models.
 
 M6, after M4 is deployed and the operator can name the first high-value UI
 workflow.
+
+### Historical status
+
+M6, M7, and the passkey milestones are now shipped. This decision remains the
+M0–M4 sequencing record, not a current claim that Analytico lacks a dashboard.
+Decisions D13, D23, and D24 govern the deployed server-rendered `/admin` UI.
 
 ## D02. Analytics engine replacing ClickHouse
 
@@ -203,6 +211,13 @@ Sessionize within a UTC day using 30 minutes of inactivity.
 
 This trades cross-day accuracy for an honest cookieless privacy boundary.
 
+### Version boundary
+
+D07 remains authoritative for protocol-v1/event-schema-2 rows and metric-v1
+compatibility reports. D26 supersedes it only for new compatible 1.0 data.
+Migration must mark old rows `legacy_daily`, preserve visitor-day totals, and
+never link their pseudonyms across UTC dates.
+
 ## D08. Persisted visitor data
 
 ### Candidates
@@ -218,6 +233,11 @@ This trades cross-day accuracy for an honest cookieless privacy boundary.
 Persist only the daily pseudonym, country code, browser family, OS family, and
 device category. Unknown values remain unknown. Never log or persist the raw
 inputs.
+
+D26 extends this choice for protocol-v2 rows with random first-party anonymous
+IDs and optional bounded application user IDs. The enduring boundary remains:
+never persist raw IP addresses, full user-agent strings, or a fingerprint
+derived from them.
 
 ## D09. Country and browser/OS/device classification
 
@@ -560,6 +580,11 @@ at 111 ms and an eight-step funnel p95 at 982 ms across ten full CLI processes.
 The changed durable insert path measured 11.326 ms p95, within its 25 ms
 budget. All remain within the existing gates.
 
+D21 remains the metric-v1 and legacy-row contract. D26 lets new compatible
+events supply a validated random session UUID and sequence, preserves the
+event-local `session_start` fact, and permits that client session to cross UTC
+midnight. Existing session IDs are not recomputed during migration.
+
 ## D22. Optional Cloudio integration
 
 ### Candidates
@@ -670,4 +695,163 @@ current applicable report and resets pagination. A tiny self-hosted script may
 call the site form's native `requestSubmit`; the visible submit button remains
 the baseline. Keep goal and funnel management in one native collapsed
 disclosure for U1. Apply a consistency pass now, then make the visual and
-information-architecture decisions in the Figma-led U2 milestone.
+information-architecture decisions in the planned follow-on design milestone.
+
+That recommendation records the U1 boundary. U1 is now accepted, and the
+Analytico 1.0 design-system and shell epic #14 supersedes the U2 label for
+follow-on design work. Written responsive/accessibility contracts govern;
+exploration images are non-binding.
+
+## D26. Persistent first-party identity and cross-midnight sessions
+
+**Status:** Accepted for Analytico 1.0; implementation pending
+
+**Date:** 2026-08-21
+
+**Issues:** #6–#9 and #13
+
+### Context
+
+Retention, returning visitors, cross-session funnels, session timelines, and
+identified-user history cannot be represented honestly by D07's rotating
+visitor-day pseudonym. The 1.0 scope requires those answers while retaining the
+one-process runtime, explicit privacy limits, protocol-v1 compatibility, and
+honest treatment of existing rows.
+
+### Candidates
+
+| Candidate | Advantages | Costs and risks |
+| --- | --- | --- |
+| Keep the daily IP-prefix/client pseudonym | No browser storage; current privacy boundary and metrics remain unchanged | Cannot answer required cross-day or cross-session questions |
+| Random site-scoped first-party anonymous UUID plus explicit `identify()`/`reset()` and client session UUID | Stable anonymous continuity without fingerprinting; explicit cross-device link; sessions can cross midnight | Adds bounded first-party storage, identity migration, conflict rules, and compatible-data coverage |
+| Stable server hash of IP and user agent | No tracker storage | Creates a long-lived fingerprint, remains inaccurate, and increases privacy risk |
+| Application-supplied user ID only | Strong meaning when logged in | Excludes anonymous traffic and pushes identity requirements onto every measured site |
+| Browser fingerprint graph | Broad continuity | Explicitly outside scope and unacceptable |
+
+### Recommendation
+
+Select the random first-party design for protocol-v2 compatible events:
+
+- The tracker stores a random anonymous UUID in `localStorage` under a per-site
+  key on the measured origin. When storage is unavailable, it uses a
+  page-lifetime random ID and marks the event `ephemeral`; analytics failure
+  never breaks the site.
+- The tracker stores a random session UUID, last-activity time, and sequence.
+  It rotates the session after more than 30 minutes of inactivity, not at
+  midnight. The server validates and persists the supplied UUID/sequence and
+  marks the first accepted event as the session start.
+- `identify(user_id, traits)` accepts bounded untrusted application data. One
+  anonymous ID may link to at most one user until `reset()` creates a new
+  anonymous and session ID. Repeating the same link is idempotent; a different
+  user without reset is rejected as `identity_conflict` and never merged.
+- One user ID may link multiple anonymous IDs only through explicit equal IDs.
+  Anonymous devices are never joined by inference. User IDs and traits are not
+  authentication or authorization inputs.
+- No tracker cookie, raw IP, full user agent, fingerprint API, cross-site
+  identifier, or claim that an anonymous ID equals a real person is introduced.
+
+Protocol v1 remains accepted during a documented compatibility window. Schema
+2 rows migrate with `identity_quality=legacy_daily` and a deterministic
+synthetic UUID scoped only to `(site_id, received_date_utc, visitor_day_id)`.
+They are never linked across dates. Traffic totals retain metric-v1
+compatibility; new/returning classification, retention, user profiles, and
+cross-session visitor funnels exclude incompatible rows or expose an explicit
+coverage-limited result.
+
+### Consequences
+
+- D07, D08, and D21 remain authoritative for metric-v1 and legacy rows and are
+  superseded only for new compatible 1.0 events.
+- DuckDB event schema 3 and `identity_links` remain inside the single owning
+  process. Turso does not query them. The browser tracker gains no dependency
+  or background communication primitive.
+- Identity, traits, storage, payload, sequence, and conflict work is bounded
+  and output-escaped. The existing origin, CSRF, passkey, SQL, and raw-request
+  privacy boundaries remain in force.
+- Migration requires a verified database-pair backup and preserves event IDs,
+  current fields, session IDs, and metric-v1 totals. Rollback restores the
+  pre-migration pair rather than opening schema 3 with the old binary.
+
+**Affected contracts:** `SCOPE_1.0.md`, `SPEC.md`, `ARCHITECTURE.md`,
+`DATA_MODEL.md`, and `PROTOCOL.md`.
+
+### Acceptance evidence
+
+Issues #6–#9 and #13 must prove protocol compatibility, storage-unavailable and
+multi-tab behavior, exact 30-minute and midnight boundaries, reset and conflict
+handling, no inferred cross-device link, legacy coverage, repeated migration,
+and database-pair rollback through the real tracker, collector, executable,
+and on-disk stores. Until that evidence lands, this is target behavior only.
+
+## D27. Explicit site-local dates through bounded TZif parsing
+
+**Status:** Accepted for Analytico 1.0; implementation pending
+
+**Date:** 2026-08-21
+
+**Issues:** #6, #11, and #13
+
+### Context
+
+UTC-only metric-v1 dates split ordinary local days and make range presets,
+comparisons, retention, and session presentation surprising. Analytico 1.0
+requires each site to use an explicit IANA reporting timezone without adding a
+large internationalization runtime or allowing timezone changes to silently
+rewrite historical totals.
+
+### Candidates
+
+| Candidate | Advantages | Costs and risks |
+| --- | --- | --- |
+| Keep UTC-only reporting | No parser, data, or migration change | Does not meet the approved reporting contract |
+| Process-global libc timezone conversion | Uses host data | Global mutable state is unsafe for multiple sites and behavior is difficult to bound |
+| Bundle a timezone library and tzdb | Broad mature API and reproducible data | Adds dependency, binary/data size, update, provenance, and maintenance cost |
+| Read configured host TZif v2/v3 files with a narrow Zig parser | Small auditable surface; supports multiple sites; no runtime download | Requires careful bounds, DST policy, corrupt-file handling, and host tzdb operations |
+
+### Recommendation
+
+Select a small Zig reader for IANA TZif v2/v3 files from a configured zoneinfo
+root, defaulting to `/usr/share/zoneinfo`:
+
+- Validate zone-name segments and reject absolute paths, `.`, `..`, NUL, and
+  traversal. Bound file bytes, transition/type counts, and abbreviations; parse
+  the 64-bit transition section.
+- A site stores an explicitly selected IANA zone. A server-derived zone may be
+  offered as a form suggestion but is never silently selected. Existing sites
+  must receive an explicit migration choice; `UTC` is valid.
+- UTC receipt time remains authoritative. At ingestion, store the derived
+  `site_local_date` and UTC offset from the site-policy snapshot so ordinary
+  historical grouping does not change when host tzdb later changes.
+- Inclusive local-date UI ranges resolve to UTC instants with explicit DST
+  gap/overlap behavior. A nonexistent local midnight advances to the first
+  valid instant; tests define earliest-start and latest-next-boundary behavior
+  for an ambiguous midnight.
+- Missing or corrupt configured zone data fails site creation or site-policy
+  loading. It never falls back to the process/server timezone.
+- A timezone locks after the site's first accepted event. A change requires an
+  offline backup, service stop, full rebucket from receipt time, count/date
+  validation, setting revision, and checkpoint.
+
+### Consequences
+
+- Turso gains explicit site timezone metadata; DuckDB schema 3 stores the
+  derived local date and offset while retaining UTC timestamps.
+- No network lookup, runtime extension download, ICU dependency, process-global
+  timezone mutation, or speculative shared abstraction is introduced. The host
+  zoneinfo installation becomes an explicit readiness and deployment input.
+- Metric-v1 compatibility queries remain UTC-based. Migration derives local
+  dates under the operator-selected site zone and records that choice; it does
+  not alter existing event timestamps or session IDs.
+- Rollback restores the verified pre-migration Turso/DuckDB pair. An older
+  binary is not expected to understand the new metadata or schema.
+
+**Affected contracts:** `SCOPE_1.0.md`, `SPEC.md`, `ARCHITECTURE.md`,
+`DATA_MODEL.md`, `PROTOCOL.md`, `OPERATIONS.md`, and `PERFORMANCE.md`.
+
+### Acceptance evidence
+
+Issues #6, #11, and #13 must cover bounded pure-parser fixtures, real zoneinfo,
+UTC and Europe/Berlin across DST and leap day, invalid/traversal/missing/corrupt
+zones, local range boundaries, ingestion stability, locked-zone behavior,
+legacy backfill, repeated migration, and database-pair rollback. Until that
+evidence lands, UTC remains the shipped reporting behavior.

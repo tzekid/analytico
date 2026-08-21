@@ -1,5 +1,13 @@
 # Performance and resource contract
 
+> **Status:** These are the shipped v0.3 budgets and measured baselines. They
+> remain regression guards; the written package's stricter Analytico 1.0 target
+> budgets govern new feature paths and must be reconciled with measured evidence
+> by their implementation issues. D26 explicitly replaces protocol v1's
+> zero-persistent-storage tracker rule for new compatible events. The 1.0 target
+> keeps zero dependencies and a tracker-v2 budget below 5 KiB Brotli; issues #7
+> and #12 must add exact storage bounds and measured evidence.
+
 The numbers in this file are budgets, not claims. M0 records the first measured
 baseline on the target VPS. A release passes both the absolute budget and the
 regression comparison against its checked-in baseline.
@@ -68,7 +76,9 @@ varying request input.
 
 ## 4. Report work bounds
 
-- Interactive date range: at most 400 UTC days.
+- Interactive date range: at most 400 UTC days for metric v1. Metric v2 retains
+  an explicit bounded site-local range; issue #25 must record the exact bound
+  rather than inheriting UTC semantics by accident.
 - List page size: default 25, maximum 100.
 - Funnel steps: 2–8.
 - Concurrent interactive reports: default 2, hard maximum 4.
@@ -105,7 +115,7 @@ Explicit report ordering makes insertion-order preservation unnecessary.
 Disabling it also keeps analytical intermediates within the configured memory
 limit; it does not change event or metric ordering.
 
-## 6. Tracker budgets
+## 6. Protocol-v1 tracker budgets
 
 M2 gates the production tracker:
 
@@ -119,6 +129,13 @@ M2 gates the production tracker:
 
 The embedding page loads it with `defer`; analytics failure cannot delay or
 break the host page's useful HTML.
+
+Decision D26 intentionally supersedes only the table's zero-persistent-storage
+row for new protocol-v2 compatible events. The v2 tracker remains
+dependency-free with a target below 5 KiB Brotli, preferably 2–3 KiB. Issues #7
+and #12 must define bounded per-site key/value counts and bytes and prove
+storage-unavailable and minified/compressed behavior before acceptance.
+Protocol v1 retains the zero-storage contract during compatibility.
 
 ### M2 measured baseline
 
