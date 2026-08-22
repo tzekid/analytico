@@ -17,6 +17,31 @@ pub fn run(
     try store.migrate();
     if (try store.eventCount() != 0) return error.AnalysisProbeRequiresEmptyStore;
     try analysis_store.seedSemanticFixture(&store.database);
+    const delayed_evidence = evidence: {
+        var statement = try store.database.prepare(
+            "SELECT received_at_utc_micros, occurred_at_utc_micros, " ++
+                "site_utc_offset_minutes FROM events " ++
+                "WHERE site_id = ? AND event_id = CAST(? AS UUID)",
+        );
+        defer statement.deinit();
+        try statement.bindText(1, site);
+        try statement.bindText(2, "00000000-0000-4000-8000-000000000112");
+        var result = try statement.execute();
+        defer result.deinit();
+        if (result.rowCount() != 1 or result.columnCount() != 3) {
+            return error.InvalidDelayedEventFixture;
+        }
+        break :evidence .{
+            .received_at = result.int64(0, 0),
+            .occurred_at = result.int64(1, 0),
+            .offset_minutes = result.int64(2, 0),
+        };
+    };
+    if (delayed_evidence.received_at - delayed_evidence.occurred_at !=
+        3_600_000_000 or delayed_evidence.offset_minutes != 60)
+    {
+        return error.InvalidDelayedEventFixture;
+    }
 
     const range = analysis.LocalDateRange{
         .start = "2026-01-02",
@@ -31,6 +56,21 @@ pub fn run(
     })).trend;
     const returning_result = (try analysis_store.execute(allocator, &store, .{
         .query = trendQuery(range, .returning_visitors),
+    })).trend;
+    const delayed_result = (try analysis_store.execute(allocator, &store, .{
+        .query = .{
+            .site_id = site,
+            .range = .{ .start = "2026-01-03", .end = "2026-01-03" },
+            .mode = .trend,
+            .metric = .{
+                .kind = .event_count,
+                .selector = .{
+                    .kind = .exact_event,
+                    .value = "delayed_event",
+                },
+            },
+            .interval = .hour,
+        },
     })).trend;
 
     const session_values = [_][]const u8{"desktop"};
@@ -179,6 +219,17 @@ pub fn run(
     {
         return error.InvalidAnalysisSemanticEvidence;
     }
+    if (delayed_result.points.len != 1 or
+        !std.mem.eql(
+            u8,
+            delayed_result.points[0].bucket,
+            "2026-01-03T01:00",
+        ) or
+        delayed_result.points[0].measure != .count or
+        delayed_result.points[0].measure.count != 1)
+    {
+        return error.InvalidReceiptHourBucket;
+    }
     try analysis_store.timeoutProbe(&store);
     try std.json.Stringify.value(.{
         .metric_version = analysis.metric_version,
@@ -197,6 +248,9 @@ pub fn run(
         .comparison_points = comparison_result.comparison_points.?.len,
         .comparison_total = comparison_result.comparison_total.?[0].count,
         .comparison_persistent_people = comparison_result.comparison_completeness.?.persistent_people,
+        .delayed_event_delay_micros = delayed_evidence.received_at - delayed_evidence.occurred_at,
+        .delayed_event_offset_minutes = delayed_evidence.offset_minutes,
+        .delayed_event_hour = delayed_result.points[0].bucket,
         .cross_midnight_landing_preserved = true,
         .channel_v1_paid_search = true,
         .semantic_elapsed_ms = semantic_elapsed_ms,

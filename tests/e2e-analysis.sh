@@ -28,6 +28,9 @@ jq -e '
     .comparison_points == 1 and
     .comparison_total == 1 and
     .comparison_persistent_people == 1 and
+    .delayed_event_delay_micros == 3600000000 and
+    .delayed_event_offset_minutes == 60 and
+    .delayed_event_hour == "2026-01-03T01:00" and
     .cross_midnight_landing_preserved == true and
     .channel_v1_paid_search == true and
     (.semantic_elapsed_ms | type) == "number" and
