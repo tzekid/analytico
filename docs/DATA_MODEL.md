@@ -244,8 +244,13 @@ Conventions:
 - Absent optional strings are empty rather than `NULL` to simplify bounded
   grouping and decoding; only absent exact value amount is `NULL`.
 - `properties_json` and `user_traits_json` are canonical bounded flat JSON.
-  Query/type discovery remains issue #10 and begins with pinned built-in JSON
-  functions rather than an EAV table.
+  Keys are bytewise sorted. Strings, signed integers, exact scale-six decimals,
+  booleans, and null retain distinct JSON types; absent remains distinct from
+  explicit null.
+- Property discovery, filters, and breakdown primitives use DuckDB 1.4.5's
+  built-in JSON functions over these columns. Property names become bound JSON
+  Pointer values after identifier validation; no request value becomes SQL and
+  no extension download or EAV projection is used.
 - `event_id` is supplied by protocol v2 and is site-idempotent. The internal
   digest is BLAKE3 over length-delimited normalized fields. D20's one writer
   checks `(site_id,event_id)` before insert; no secondary unique index is added
@@ -326,9 +331,10 @@ Shared rules:
 
 - Event name: 1–64 bytes, ASCII letters/digits plus `_`, `-`, `.`, and `:`.
 - Property count: at most 16 unique identifier keys of 1–64 bytes.
-- Scalar values only: string, signed integer, boolean, or null.
-- Arrays, nested objects, floating-point values, and duplicate keys reject the
-  whole event.
+- Scalar values only. Protocol v1 accepts string, signed integer, boolean, or
+  null. Protocol v2 additionally accepts the exact decimal form below.
+- Arrays, nested objects, non-finite/out-of-range numbers, and duplicate keys
+  reject the whole event.
 
 Protocol-v1 additional rules:
 
@@ -338,11 +344,35 @@ Protocol-v1 additional rules:
 
 Protocol-v2 additional rules:
 
-- Property keys are not allowlisted at ingest; query/type discovery is issue
-  #10.
+- Property keys are not allowlisted at ingest; bounded DuckDB discovery reads
+  the canonical JSON directly.
 - Encoded string value: at most 512 UTF-8 bytes without control characters.
-- Exact decimal property tokens remain issue #10. Exact `value.amount` is
-  `DECIMAL(18,6)`.
+- Exact decimal property tokens use an optional minus, 1–12 integer digits, an
+  explicit decimal point, and 1–6 fractional digits. Plus signs and exponents
+  reject. Canonical JSON stores six fractional digits, matching
+  `DECIMAL(18,6)` query values. Exact `value.amount` uses the same scale.
+
+### Typed property query primitives
+
+Property queries are site-scoped, use a half-open UTC instant range no longer
+than 400 days, and optionally prefilter one exact event name. Event properties
+read only custom-event rows; user traits read only identify rows. The source
+column and every SQL fragment are selected by closed Zig enums.
+
+- Discovery returns at most 100 bytewise-ordered property names and observed
+  scalar types, with total-name metadata when more exist.
+- Exact typed filters distinguish string, integer, decimal, boolean, null, and
+  missing without coercion. Numeric compatibility beyond exact typed equality
+  belongs to the typed AnalysisQuery work.
+- Breakdown groups by `(type,value)`, includes separate null and missing
+  buckets, orders by count then stable type/value ties, returns at most 100
+  rows, and reports exact bucket cardinality/truncation.
+- Property names use bound JSON Pointer paths. Site, time, event, value, and
+  limits are bound values; arbitrary SQL and request-selected identifiers are
+  impossible.
+
+The million-event property fixture benchmarks this JSON-first design before an
+EAV/projection table, cache, or new dependency may be considered.
 
 ## 5. Visitor pseudonym — metric v1
 
@@ -490,8 +520,10 @@ semantics v2 as a versioned extension rather than a reinterpretation of the
 legacy fields. Issue #6 provides the collector/storage foundation, issue #7
 provides tracker anonymous identity and `reset()`, and issue #8 provides
 30-minute client session rotation. Issue #9 provides explicit identify,
-canonical-person resolution, and latest-trait selection. Issues #10–#13 own
-property, timezone, metric, and migration acceptance evidence.
+canonical-person resolution, and latest-trait selection. Issue #10 provides
+typed property canonicalization and DuckDB query primitives, and issue #11
+provides explicit TZif-backed site-local dates. Issues #12–#13 own the remaining
+tracker and migration acceptance evidence.
 
 ### Identity and sessions
 

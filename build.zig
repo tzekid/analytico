@@ -136,6 +136,22 @@ pub fn build(b: *std.Build) void {
         "Run site timezone ingestion and rebucketing through real stores and HTTP",
     ).dependOn(&timezone_e2e.step);
 
+    const properties_e2e = b.addSystemCommand(&.{ "bash", "tests/e2e-properties.sh" });
+    properties_e2e.addArtifactArg(app);
+    properties_e2e.step.dependOn(b.getInstallStep());
+    b.step(
+        "e2e-properties",
+        "Run typed property ingestion and queries through real HTTP and DuckDB",
+    ).dependOn(&properties_e2e.step);
+
+    const properties_benchmark = b.addSystemCommand(&.{ "bash", "bench/properties.sh" });
+    properties_benchmark.addArtifactArg(app);
+    properties_benchmark.step.dependOn(b.getInstallStep());
+    b.step(
+        "bench-properties",
+        "Measure bounded property queries over one million real DuckDB rows",
+    ).dependOn(&properties_benchmark.step);
+
     const m2_browser_e2e = b.addSystemCommand(&.{ "bash", "tests/e2e-m2-browser.sh" });
     m2_browser_e2e.addArtifactArg(app);
     m2_browser_e2e.step.dependOn(b.getInstallStep());

@@ -1,5 +1,6 @@
 const std = @import("std");
 const domain = @import("../domain.zig");
+const property = @import("../property.zig");
 const meta = @import("../store/meta.zig");
 
 pub const Utm = struct {
@@ -136,6 +137,7 @@ pub fn parsePostV2(
         .duplicate_field_behavior = .@"error",
         .ignore_unknown_fields = false,
         .max_value_len = 16 * 1024,
+        .parse_numbers = false,
     }) catch return error.InvalidJson;
 }
 
@@ -538,7 +540,14 @@ fn canonicalFlatV2(
         if (index != 0) try output.writer.writeByte(',');
         try std.json.Stringify.value(key, .{}, &output.writer);
         try output.writer.writeByte(':');
-        try std.json.Stringify.value(object.get(key).?, .{}, &output.writer);
+        const scalar = object.get(key).?;
+        switch (scalar) {
+            .number_string => |number| try property.writeCanonicalNumber(
+                &output.writer,
+                number,
+            ),
+            else => try std.json.Stringify.value(scalar, .{}, &output.writer),
+        }
     }
     try output.writer.writeByte('}');
     if (output.written().len > 16 * 1024) return error.PropertiesTooLarge;
@@ -548,6 +557,7 @@ fn canonicalFlatV2(
 fn validateV2Scalar(value: std.json.Value) !void {
     switch (value) {
         .null, .bool, .integer => {},
+        .number_string => |number| _ = try property.numberType(number),
         .string => |string| try validateV2Text(string, 512, true),
         else => return error.InvalidPropertyValue,
     }

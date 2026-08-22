@@ -349,8 +349,10 @@ For the exact pinned environment:
 ```sh
 zig build test -Doptimize=ReleaseSafe \
   -Dturso-native-path=<exact-prefix>
-zig build e2e-m0 e2e-m1 e2e-m2 e2e-m2-browser e2e-m3 e2e-m4 e2e-m6 \
+zig build e2e-m0 e2e-m1 e2e-m2 e2e-properties e2e-m2-browser e2e-m3 e2e-m4 e2e-m6 \
   e2e-m7 e2e-passkey-p1 \
+  -Doptimize=ReleaseSafe -Dturso-native-path=<exact-prefix>
+zig build bench-properties \
   -Doptimize=ReleaseSafe -Dturso-native-path=<exact-prefix>
 zig build e2e-rollback \
   -Doptimize=ReleaseSafe -Dturso-native-path=<exact-prefix>

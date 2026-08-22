@@ -2,9 +2,10 @@
 
 > **Status:** Protocol v1 remains a shipped frozen compatibility contract.
 > Protocol v2 is the additive collector/storage foundation defined by D28.
-> Protocol-v2 tracker anonymous identity, `identify()`, `reset()`, and
-> 30-minute client session rotation are implemented. SPA/engagement and
-> metric-v2 continue through issues #10–#13.
+> Protocol-v2 tracker anonymous identity, `identify()`, `reset()`, 30-minute
+> client session rotation, explicit site timezone bucketing, and typed property
+> storage/query primitives are implemented. SPA/engagement and the remaining
+> metric-v2 migration work continue through issues #12–#13.
 
 Breaking changes require a new protocol version. They do not reinterpret
 accepted v1 events or metric-v1 visitor-day semantics.
@@ -182,15 +183,18 @@ same-origin referrers store empty; a malformed referrer URL rejects the event.
 Engagement
 contains `active_ms` from 0–60,000 and integer `max_scroll_depth` from 0–100.
 
-Property and trait objects have at most 16 unique identifier keys. This
-foundation does not consult the protocol-v1 property allowlist. It accepts
-strings up to 512 UTF-8 bytes without control characters, signed integers,
-booleans, and null; arrays, nested objects, floating JSON numbers, and
-duplicate keys reject the whole event. Issue #10 owns exact
-decimal property tokens and query/type discovery. Value is available only on a
-custom event and requires both a decimal amount and three-uppercase-letter
-currency. Amount accepts an optional minus, no plus or exponent, at most 12
-integer and six fractional digits, and is stored at exact scale six.
+Property and trait objects have at most 16 unique identifier keys and do not
+consult the protocol-v1 property allowlist. They accept strings up to 512 UTF-8
+bytes without control characters, signed 64-bit integers, exact decimal JSON
+tokens, booleans, and null. A decimal accepts an optional minus, no plus or
+exponent, at most 12 integer and six fractional digits, and is canonicalized to
+six fractional digits. An integer token remains an integer, so `1`, `1.000000`,
+`"1"`, null, and an absent key remain distinct. Arrays, nested objects,
+out-of-range numbers, and duplicate keys reject the whole event.
+
+Value is available only on a custom event and requires both a decimal amount
+and three-uppercase-letter currency. Amount uses the same decimal grammar and
+is stored at exact scale six.
 The identify `user` object requires `id` of 1–160 UTF-8 bytes without control
 characters and may contain the bounded `traits` object described above.
 

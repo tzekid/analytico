@@ -2,6 +2,7 @@ pub const version = @import("version.zig").value;
 
 comptime {
     _ = @import("domain.zig");
+    _ = @import("property.zig");
     _ = @import("version.zig");
     _ = @import("timezone.zig");
     _ = @import("report.zig");
@@ -10,6 +11,7 @@ comptime {
     _ = @import("store/duckdb.zig");
     _ = @import("store/events.zig");
     _ = @import("store/meta.zig");
+    _ = @import("store/properties.zig");
     _ = @import("store/reports.zig");
     _ = @import("auth/passkeys.zig");
     _ = @import("auth/store.zig");

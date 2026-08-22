@@ -159,6 +159,28 @@ measured overview p50/p95/p99 at 86/111/111 ms and the funnel at
 920/982/982 ms. The DuckDB file was 15,740,928 bytes. Full environment and
 fixture details are in `bench/results/m3-reports-release-safe.json`.
 
+### Analytico 1.0 property-query gate
+
+Issue #10 adds a separate ReleaseSafe fixture with 1,000,000 event-schema-3
+rows and 12 flat properties spanning string, signed integer, exact decimal,
+boolean, null/missing, mixed-type conflict, and one high-cardinality value. It
+uses the serving DuckDB limits above, one warmup, and ten samples for the
+bounded low-cardinality property breakdown. Its p95 budget is 700 ms.
+
+The same run exercises exact typed filters, type discovery, a 100-row bounded
+high-cardinality breakdown, cardinality/truncation metadata, database bytes,
+and fixture generation time. High-cardinality latency is recorded rather than
+silently treated as an ordinary-cardinality budget; a miss must follow the
+regression policy before any projection, cache, or schema change is proposed.
+
+The issue #10 ReleaseSafe confirmation run on Linux 7.1.4, an AMD EPYC 9354P,
+eight visible cores, 32 GiB RAM, and Btrfs measured the low-cardinality
+breakdown at 362/442/442 ms p50/p95/p99. A separate complete run measured p95
+415 ms; both pass the 700 ms budget. The 100,000-bucket property returned 100
+rows plus exact truncation/cardinality metadata in 383 ms. Fixture generation
+took 4,269 ms and the checkpointed DuckDB file was 52,703,232 bytes. The
+compact reproducible record is `bench/results/properties-release-safe.json`.
+
 ### M4 production-MVP baseline
 
 The current ReleaseSafe package contains a 26,341,344-byte executable and a

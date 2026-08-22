@@ -418,13 +418,13 @@ v2_nested=$(
 expect_code 400 -X POST "$base/v2/event" \
     -H 'Content-Type: text/plain' -H 'Origin: https://example.com' \
     --data-binary "$v2_nested"
-v2_float=$(
-    printf '{"v":2,"site":"%s","event_id":"00000000-0000-4000-8000-000000000222","anonymous_id":"%s","identity_quality":"persistent","session_id":"%s","sequence":4,"occurred_at_ms":%s,"type":"event","name":"bad","properties":{"z":1.5}}' \
+v2_exponent_property=$(
+    printf '{"v":2,"site":"%s","event_id":"00000000-0000-4000-8000-000000000222","anonymous_id":"%s","identity_quality":"persistent","session_id":"%s","sequence":4,"occurred_at_ms":%s,"type":"event","name":"bad","properties":{"z":1e2}}' \
         "$site_id" "$v2_anonymous" "$v2_session" "$occurred_ms"
 )
 expect_code 400 -X POST "$base/v2/event" \
     -H 'Content-Type: text/plain' -H 'Origin: https://example.com' \
-    --data-binary "$v2_float"
+    --data-binary "$v2_exponent_property"
 v2_bad_decimal=$(
     printf '{"v":2,"site":"%s","event_id":"00000000-0000-4000-8000-000000000223","anonymous_id":"%s","identity_quality":"persistent","session_id":"%s","sequence":4,"occurred_at_ms":%s,"type":"event","name":"bad","value":{"amount":"1e2","currency":"EUR"}}' \
         "$site_id" "$v2_anonymous" "$v2_session" "$occurred_ms"
