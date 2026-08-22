@@ -75,7 +75,8 @@ storage_state="$fixture/cloudio-state.json"
 analytico_cookie_file="$fixture/analytico-session.cookie"
 
 "$binary" init "$data" >/dev/null
-"$binary" site add "$data" example Example https://example.com >/dev/null
+"$binary" site add "$data" example Example https://example.com \
+    --timezone UTC >/dev/null
 site_id=$("$binary" site list "$data" |
     awk -F '\t' '$1 == "example" { print $2 }')
 "$binary" m3 seed "$data" "$site_id" >/dev/null

@@ -153,8 +153,11 @@ site-scoped anonymous identity and a session record in first-party
 after more than 30 minutes of inactivity without splitting at UTC midnight.
 Identity links remain server-authoritative. Canonical people and latest traits
 are derived from links and accepted identify events rather than a mutable
-profile store. Server receipt time remains authoritative for acceptance and
-report bucketing.
+profile store. Server receipt time remains authoritative for acceptance. The
+runtime loads each site's explicitly configured TZif policy once at startup
+and derives the stable local date and exact minute offset for both protocol
+paths from receipt time. Missing, pending, or invalid zone policy prevents
+startup rather than falling back to process-local time.
 
 Protocol-v1 rows keep their daily visitor and session meaning under metric v1.
 Migration marks them `legacy_daily`, never links them across dates, and retains
@@ -173,9 +176,11 @@ migration acceptance.
 6. Render table, JSON, or CSV in the CLI, or deterministic HTML from the same
    report type in the dashboard.
 
-The shipped metric-v1 reports convert UTC dates directly. Metric v2 will
-resolve inclusive UI dates under the site's explicit IANA timezone and use the
-stored site-local date/offset required by D27 while retaining UTC timestamps.
+The shipped metric-v1 reports continue to convert UTC dates directly. The D27
+range resolver converts inclusive local dates into half-open UTC instants with
+defined gap/overlap behavior, and metric-v2 report work consumes that resolver
+and the stored site-local date/offset while retaining UTC timestamps. Loading
+the resolver does not silently reinterpret metric-v1 totals.
 
 No report accepts arbitrary SQL, column names, sort expressions, or templates
 from the request. Enumerated sorts select a compiled query template.

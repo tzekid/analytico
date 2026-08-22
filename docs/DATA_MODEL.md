@@ -80,6 +80,27 @@ CREATE TABLE site_origins (
 An origin is an exact normalized `scheme://host[:port]`. Wildcards are not
 accepted in the MVP.
 
+### `site_timezones`
+
+```sql
+CREATE TABLE site_timezones (
+    site_id TEXT PRIMARY KEY,
+    zone_name TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    rebucket_pending INTEGER NOT NULL,
+    FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE CASCADE,
+    CHECK (length(zone_name) BETWEEN 1 AND 255),
+    CHECK (revision >= 1),
+    CHECK (rebucket_pending IN (0, 1))
+);
+```
+
+Every new site receives one explicitly selected zone during creation. Metadata
+migration 3 deliberately creates no row for an existing site: the operator
+must select a zone, and serving fails closed until that choice and any required
+rebucket complete. `rebucket_pending=1` is a narrow recovery marker for the
+cross-store offline operation; it is never a usable site policy.
+
 ### `site_event_properties`
 
 ```sql
@@ -255,10 +276,11 @@ event IDs, receipt time/date, kind/name/path, sessions, dimensions, UTM, and
 property bytes; occurrence equals receipt; protocol/tracker are 1; identity is
 `legacy_daily` with one deterministic synthetic UUID per existing
 `(site,date,visitor_day_id)`; sequence follows stored session order; other new
-fields are empty/zero. Until D27 is implemented, site-local date equals the
-shipped UTC date and offset is zero. Issues #11 and #13 own explicit-zone
-rebucketing and final migration/rollback evidence before metric-v2 date queries
-consume those values.
+fields are empty/zero. Migration 3 initially writes the shipped UTC date and
+  offset zero. Issue #11 replaces those placeholders under an explicit site
+  zone before the site may serve; issue #13 owns the remaining exact-baseline,
+  mixed-data, backup, and rollback evidence before metric-v2 date queries
+  consume those values.
 
 ## 4. Normalization
 
@@ -444,8 +466,8 @@ bounded by the report contract.
 - Export may exceed 400 days only with an explicit offline flag and service
   stopped.
 - The M0–M4 implementation deferred site-local time and DST-aware grouping.
-  Decision D27 now accepts them for metric v2 through a bounded host-TZif
-  reader; the metric-v1 compatibility query remains UTC-based.
+  Decision D27 uses a bounded host-TZif reader for metric v2; the metric-v1
+  compatibility query remains UTC-based.
 
 ## 9. Deletion
 
@@ -504,9 +526,16 @@ property, timezone, metric, and migration acceptance evidence.
 - Ingestion keeps authoritative UTC receipt time and also stores the derived
   site-local date and UTC offset using a bounded TZif v2/v3 reader. Reports use
   those stable stored dates for date-level metric-v2 grouping.
-- A missing, malformed, or traversal-bearing zone fails closed. A site's zone
-  is locked after its first event; changing it requires an offline backup,
-  rebucket, validation, and checkpoint operation.
+- The reader uses the configured absolute zoneinfo root (default
+  `/usr/share/zoneinfo`), the 64-bit TZif data block, and a bounded footer rule
+  when future transitions depend on it. Leap-second files, malformed data,
+  traversal-bearing names, missing files, and offsets that cannot be stored as
+  exact minutes fail closed.
+- A site's zone is locked after its first event during ordinary operation.
+  Initial assignment or a later change with events requires the service to be
+  stopped, an explicit offline rebucket, validation, and checkpoint. The
+  metadata stays pending until the DuckDB transaction succeeds, so a partial
+  cross-store operation cannot become a serving policy.
 
 ### Migration and rollback
 

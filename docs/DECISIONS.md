@@ -35,7 +35,7 @@ semantic, or application state model is consequential and must be added here.
 | D24 | Public and dashboard URL topology | One canonical hostname with strict path routing | Accepted and deployed |
 | D25 | Dashboard functional-quality pass | Separate native state transitions with minimal enhancement | Accepted for U1 |
 | D26 | 1.0 identity and sessions | Persistent first-party anonymous identity, explicit identify/reset, cross-midnight client sessions | Accepted for 1.0; #6–#9 implemented, legacy migration pending |
-| D27 | 1.0 site-local time | Explicit IANA zone with bounded host-TZif reader and stored local dates | Accepted for 1.0; implementation pending |
+| D27 | 1.0 site-local time | Explicit IANA zone with bounded host-TZif reader and stored local dates | Accepted; issue #11 implementation, issue #13 release evidence |
 | D28 | Protocol-v2 and event-schema-3 foundation | Separate bounded route, explicit identity quality, single-writer idempotency, transactional schema swap | Accepted for 1.0 issue #6 |
 
 ## D01. MVP interface
@@ -803,7 +803,7 @@ issue #13 lands.
 
 ## D27. Explicit site-local dates through bounded TZif parsing
 
-**Status:** Accepted for Analytico 1.0; implementation pending
+**Status:** Accepted for Analytico 1.0; implemented by issue #11, with final migration evidence owned by issue #13
 
 **Date:** 2026-08-21
 
@@ -833,7 +833,9 @@ root, defaulting to `/usr/share/zoneinfo`:
 
 - Validate zone-name segments and reject absolute paths, `.`, `..`, NUL, and
   traversal. Bound file bytes, transition/type counts, and abbreviations; parse
-  the 64-bit transition section.
+  the 64-bit transition section. A bounded POSIX footer rule supplies future
+  transitions when the TZif table delegates to it; malformed, leap-second, or
+  unsupported data fails closed.
 - A site stores an explicitly selected IANA zone. A server-derived zone may be
   offered as a form suggestion but is never silently selected. Existing sites
   must receive an explicit migration choice; `UTC` is valid.
@@ -846,6 +848,8 @@ root, defaulting to `/usr/share/zoneinfo`:
   for an ambiguous midnight.
 - Missing or corrupt configured zone data fails site creation or site-policy
   loading. It never falls back to the process/server timezone.
+- Offsets persisted in the schema's minute field must be exactly representable;
+  historical second-resolution offsets fail rebucketing rather than rounding.
 - A timezone locks after the site's first accepted event. A change requires an
   offline backup, service stop, full rebucket from receipt time, count/date
   validation, setting revision, and checkpoint.
@@ -854,6 +858,9 @@ root, defaulting to `/usr/share/zoneinfo`:
 
 - Turso gains explicit site timezone metadata; DuckDB schema 3 stores the
   derived local date and offset while retaining UTC timestamps.
+- A narrow pending marker keeps the site non-runnable while the two-file
+  offline rebucket is incomplete. Retry is idempotent; no distributed
+  transaction is implied.
 - No network lookup, runtime extension download, ICU dependency, process-global
   timezone mutation, or speculative shared abstraction is introduced. The host
   zoneinfo installation becomes an explicit readiness and deployment input.
@@ -936,10 +943,9 @@ Migration 3 uses one transactional create/backfill/swap and retains the two
 metric-v1 visitor-day compatibility facts until their queries are retired.
 Legacy rows receive protocol/tracker version 1, `legacy_daily`, occurrence equal
 to receipt, deterministic day-scoped synthetic anonymous identity, and their
-existing event/session/data bytes. Because issue #11's explicit timezone
-metadata does not exist yet, migration 3 records the currently shipped UTC date
-and offset zero. This is a labeled compatibility value, not implementation of
-D27; issues #11 and #13 own the explicit-zone rebucket and its backup, DST,
+existing event/session/data bytes. Migration 3 initially records the shipped
+UTC date and offset zero. This is a labeled compatibility value until issue
+#11's explicit-zone rebucket replaces it; issue #13 owns the remaining backup,
 mixed-quality, repeated-migration, and rollback evidence before metric v2 uses
 those columns.
 

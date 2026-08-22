@@ -437,6 +437,8 @@ fn insertFixture(
         .site_id = site_id,
         .received_at_utc_micros = row.at,
         .received_date_utc = row.date,
+        .site_local_date = row.date,
+        .site_utc_offset_minutes = 0,
         .kind = row.kind,
         .event_name = row.name,
         .path = row.path,

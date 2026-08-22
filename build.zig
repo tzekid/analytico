@@ -128,6 +128,14 @@ pub fn build(b: *std.Build) void {
     m2_e2e.step.dependOn(b.getInstallStep());
     b.step("e2e-m2", "Run M2 through the real loopback HTTP collector").dependOn(&m2_e2e.step);
 
+    const timezone_e2e = b.addSystemCommand(&.{ "bash", "tests/e2e-timezone.sh" });
+    timezone_e2e.addArtifactArg(app);
+    timezone_e2e.step.dependOn(b.getInstallStep());
+    b.step(
+        "e2e-timezone",
+        "Run site timezone ingestion and rebucketing through real stores and HTTP",
+    ).dependOn(&timezone_e2e.step);
+
     const m2_browser_e2e = b.addSystemCommand(&.{ "bash", "tests/e2e-m2-browser.sh" });
     m2_browser_e2e.addArtifactArg(app);
     m2_browser_e2e.step.dependOn(b.getInstallStep());

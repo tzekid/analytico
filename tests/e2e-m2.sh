@@ -66,14 +66,14 @@ expect_fixed_error() {
 
 "$binary" init "$fixture_dir" >/dev/null
 "$binary" site add "$fixture_dir" example "Example Site" \
-    "https://example.com" >/dev/null
+    "https://example.com" --timezone UTC >/dev/null
 "$binary" site property-add "$fixture_dir" example plan >/dev/null
 "$binary" site property-add "$fixture_dir" example z >/dev/null
 "$binary" site origin-add "$fixture_dir" example \
     "https://xn--bcher-kva.example" >/dev/null
 site_id=$("$binary" site list "$fixture_dir" | awk -F '\t' '$1 == "example" { print $2 }')
 "$binary" site add "$fixture_dir" disabled "Disabled Site" \
-    "https://disabled.example" >/dev/null
+    "https://disabled.example" --timezone UTC >/dev/null
 disabled_id=$("$binary" site list "$fixture_dir" | awk -F '\t' '$1 == "disabled" { print $2 }')
 "$binary" site disable "$fixture_dir" disabled >/dev/null
 
@@ -617,7 +617,7 @@ exec 9<&-
 server_pid=
 
 test "$("$binary" doctor "$fixture_dir")" = \
-    "ok metadata=v2 events=v3 sites=2 goals=0 funnels=0 stored_events=45 key=ok"
+    "ok metadata=v3 events=v3 sites=2 goals=0 funnels=0 stored_events=45 key=ok"
 pageview_row=$("$binary" event inspect "$fixture_dir" pageview)
 test "$pageview_row" = $'pageview\t/pricing\tsearch.example\tDE\tFirefox\tLinux\tdesktop\tnewsletter\t{}'
 custom_row=$("$binary" event inspect "$fixture_dir" signup)
@@ -693,7 +693,7 @@ fault_port=$((port + 1000))
 fault_base="http://127.0.0.1:$fault_port"
 "$binary" init "$fault_dir" >/dev/null
 "$binary" site add "$fault_dir" fault "Fault fixture" \
-    "https://fault.example" >/dev/null
+    "https://fault.example" --timezone UTC >/dev/null
 fault_site=$("$binary" site list "$fault_dir" |
     awk -F '\t' '$1 == "fault" { print $2 }')
 "$binary" serve --listen "127.0.0.1:$fault_port" \
@@ -728,7 +728,7 @@ kill -TERM "$server_pid"
 wait "$server_pid"
 server_pid=
 test "$("$binary" doctor "$fault_dir")" = \
-    "ok metadata=v2 events=v3 sites=1 goals=0 funnels=0 stored_events=0 key=ok"
+    "ok metadata=v3 events=v3 sites=1 goals=0 funnels=0 stored_events=0 key=ok"
 test "$("$binary" m2 identity-links "$fault_dir")" = 0
 if grep -aE 'fault_user|private-plan' \
     "$fault_dir/server.stdout" "$fault_dir/server.stderr" >/dev/null

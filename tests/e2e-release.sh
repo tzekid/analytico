@@ -49,11 +49,12 @@ grep -q 'Overall exposure level.*OK' "$fixture/systemd-security.txt"
 
 data="$fixture/data"
 "$release_binary" init "$data" >/dev/null
-"$release_binary" site add "$data" release Release https://release.example >/dev/null
+"$release_binary" site add "$data" release Release https://release.example \
+    --timezone UTC >/dev/null
 "$release_binary" event add "$data" release pageview / \
     1785456000000000 2026-07-31 203.0.113.1 Chrome Linux desktop >/dev/null
 test "$("$release_binary" doctor "$data")" = \
-    "ok metadata=v2 events=v3 sites=1 goals=0 funnels=0 stored_events=1 key=ok"
+    "ok metadata=v3 events=v3 sites=1 goals=0 funnels=0 stored_events=1 key=ok"
 report=$("$release_binary" report "$data" release 2026-07-31 2026-07-31 \
     overview --format json)
 test "$report" = \

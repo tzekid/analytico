@@ -86,7 +86,7 @@ verified backups, upgrades the binary, and can restore the two embedded files.
 
 ### F4. Reports
 
-For a site and inclusive UTC date range, report:
+For a site and inclusive UTC date range under metric v1, report:
 
 - page views;
 - daily unique visitors;
@@ -108,7 +108,7 @@ The production MVP provides these command families:
 
 ```text
 analytico init
-analytico site add|list|disable|delete
+analytico site add|list|disable|delete|timezone-set
 analytico goal add|list|delete
 analytico funnel add|show|delete
 analytico serve
@@ -123,6 +123,10 @@ analytico doctor
 Commands use explicit paths or the same validated configuration file as the
 service. Destructive commands require the exact site slug and an explicit
 confirmation flag when stdin is not interactive.
+
+Site creation requires an explicit IANA timezone. Existing sites upgraded to
+metadata schema 3 require `site timezone-set`; a site that already has events
+requires the service to be stopped and the explicit offline-rebucket flag.
 
 ### F6. Tracker
 

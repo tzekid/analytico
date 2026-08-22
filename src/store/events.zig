@@ -1,6 +1,7 @@
 const std = @import("std");
 const domain = @import("../domain.zig");
 const duckdb = @import("duckdb.zig");
+const timezone = @import("../timezone.zig");
 
 pub const schema_version: i64 = 3;
 
@@ -84,6 +85,12 @@ pub const ResolvedPerson = struct {
     user_id: []u8,
     latest_traits_json: []u8,
     linked_anonymous_ids: i64,
+};
+
+pub const SiteEventBounds = struct {
+    count: i64,
+    minimum_utc_micros: i64,
+    maximum_utc_micros: i64,
 };
 
 pub const Store = struct {
@@ -322,6 +329,7 @@ pub const Store = struct {
         try domain.validateUuid(event.event_id);
         try domain.validateUuid(event.site_id);
         try domain.validateDate(event.received_date_utc);
+        try domain.validateDate(event.site_local_date);
         try domain.validateIdentifier(event.event_name);
         _ = try domain.normalizePath(event.path);
         if (event.kind != 1 and event.kind != 2) return error.InvalidEventKind;
@@ -330,13 +338,14 @@ pub const Store = struct {
             \\INSERT INTO events
             \\WITH incoming (
             \\  event_id, site_id, received_at_utc_micros, received_date_utc,
+            \\  site_local_date, site_utc_offset_minutes,
             \\  kind, event_name, path, visitor_day_id, referrer_host,
             \\  country_code, browser_family, os_family, device_category,
             \\  utm_source, utm_medium, utm_campaign, utm_term, utm_content,
             \\  properties_json
             \\) AS (
-            \\  SELECT ?, ?, ?, CAST(? AS DATE), ?, ?, ?, ?, ?, ?, ?, ?, ?,
-            \\         ?, ?, ?, ?, ?, ?
+            \\  SELECT ?, ?, ?, CAST(? AS DATE), CAST(? AS DATE), ?,
+            \\         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             \\),
             \\resolved AS (
             \\  SELECT i.*, p.session_id AS prior_session_id,
@@ -366,7 +375,8 @@ pub const Store = struct {
             \\SELECT
             \\  3, 1, 1, CAST(i.event_id AS UUID), i.site_id,
             \\  i.received_at_utc_micros, i.received_at_utc_micros,
-            \\  i.received_date_utc, i.received_date_utc, 0,
+            \\  i.received_date_utc, i.site_local_date,
+            \\  i.site_utc_offset_minutes,
             \\  i.kind, i.event_name, i.path, '', '',
             \\  COALESCE(i.prior_anonymous_id, CAST(i.event_id AS UUID)), 3, '',
             \\  CASE
@@ -393,21 +403,23 @@ pub const Store = struct {
         try statement.bindText(2, event.site_id);
         try statement.bindInt64(3, event.received_at_utc_micros);
         try statement.bindText(4, event.received_date_utc);
-        try statement.bindInt64(5, event.kind);
-        try statement.bindText(6, event.event_name);
-        try statement.bindText(7, event.path);
-        try statement.bindBlob(8, &event.visitor_day_id);
-        try statement.bindText(9, event.referrer_host);
-        try statement.bindText(10, event.country_code);
-        try statement.bindText(11, event.browser_family);
-        try statement.bindText(12, event.os_family);
-        try statement.bindText(13, event.device_category);
-        try statement.bindText(14, event.utm_source);
-        try statement.bindText(15, event.utm_medium);
-        try statement.bindText(16, event.utm_campaign);
-        try statement.bindText(17, event.utm_term);
-        try statement.bindText(18, event.utm_content);
-        try statement.bindText(19, event.properties_json);
+        try statement.bindText(5, event.site_local_date);
+        try statement.bindInt64(6, event.site_utc_offset_minutes);
+        try statement.bindInt64(7, event.kind);
+        try statement.bindText(8, event.event_name);
+        try statement.bindText(9, event.path);
+        try statement.bindBlob(10, &event.visitor_day_id);
+        try statement.bindText(11, event.referrer_host);
+        try statement.bindText(12, event.country_code);
+        try statement.bindText(13, event.browser_family);
+        try statement.bindText(14, event.os_family);
+        try statement.bindText(15, event.device_category);
+        try statement.bindText(16, event.utm_source);
+        try statement.bindText(17, event.utm_medium);
+        try statement.bindText(18, event.utm_campaign);
+        try statement.bindText(19, event.utm_term);
+        try statement.bindText(20, event.utm_content);
+        try statement.bindText(21, event.properties_json);
         var result = try statement.execute();
         result.deinit();
     }
@@ -422,6 +434,7 @@ pub const Store = struct {
         try domain.validateUuid(event.anonymous_id);
         try domain.validateUuid(event.session_id);
         try domain.validateDate(event.received_date_utc);
+        try domain.validateDate(event.site_local_date);
         try domain.validateIdentifier(event.event_name);
         if (event.path.len != 0) _ = try domain.normalizePath(event.path);
         if (event.kind < 1 or event.kind > 4 or
@@ -488,6 +501,7 @@ pub const Store = struct {
             \\INSERT INTO events
             \\WITH incoming (
             \\  event_id, site_id, received_at, occurred_at, received_date,
+            \\  site_local_date, site_utc_offset_minutes,
             \\  kind, event_name, path, page_title, hostname,
             \\  anonymous_id, identity_quality, user_id, session_id, sequence,
             \\  referrer_host, country_code, language, browser_family,
@@ -496,14 +510,15 @@ pub const Store = struct {
             \\  user_traits_json, value_amount, value_currency, engagement_ms,
             \\  max_scroll_depth, visitor_day_id, payload_digest
             \\) AS (
-            \\  SELECT ?, ?, ?, ?, CAST(? AS DATE), ?, ?, ?, ?, ?,
+            \\  SELECT ?, ?, ?, ?, CAST(? AS DATE), CAST(? AS DATE), ?,
             \\         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-            \\         ?, ?, ?, ?, ?, ?, ?
+            \\         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             \\)
             \\SELECT
             \\  3, 2, 2, CAST(i.event_id AS UUID), i.site_id,
             \\  i.received_at, i.occurred_at, i.received_date,
-            \\  i.received_date, 0, i.kind, i.event_name, i.path,
+            \\  i.site_local_date, i.site_utc_offset_minutes,
+            \\  i.kind, i.event_name, i.path,
             \\  i.page_title, i.hostname, CAST(i.anonymous_id AS UUID),
             \\  i.identity_quality, i.user_id, CAST(i.session_id AS UUID),
             \\  i.sequence,
@@ -538,35 +553,37 @@ pub const Store = struct {
         try statement.bindInt64(3, event.received_at_utc_micros);
         try statement.bindInt64(4, event.occurred_at_utc_micros);
         try statement.bindText(5, event.received_date_utc);
-        try statement.bindInt64(6, event.kind);
-        try statement.bindText(7, event.event_name);
-        try statement.bindText(8, event.path);
-        try statement.bindText(9, event.page_title);
-        try statement.bindText(10, event.hostname);
-        try statement.bindText(11, event.anonymous_id);
-        try statement.bindInt64(12, event.identity_quality);
-        try statement.bindText(13, stored_user_id);
-        try statement.bindText(14, event.session_id);
-        try statement.bindInt64(15, event.sequence);
-        try statement.bindText(16, event.referrer_host);
-        try statement.bindText(17, event.country_code);
-        try statement.bindText(18, event.language);
-        try statement.bindText(19, event.browser_family);
-        try statement.bindText(20, event.os_family);
-        try statement.bindText(21, event.device_category);
-        try statement.bindText(22, event.utm_source);
-        try statement.bindText(23, event.utm_medium);
-        try statement.bindText(24, event.utm_campaign);
-        try statement.bindText(25, event.utm_term);
-        try statement.bindText(26, event.utm_content);
-        try statement.bindText(27, event.properties_json);
-        try statement.bindText(28, event.user_traits_json);
-        try statement.bindText(29, event.value_amount orelse "");
-        try statement.bindText(30, event.value_currency);
-        try statement.bindInt64(31, event.engagement_ms);
-        try statement.bindInt64(32, event.max_scroll_depth);
-        try statement.bindBlob(33, &event.visitor_day_id);
-        try statement.bindText(34, event.event_payload_digest);
+        try statement.bindText(6, event.site_local_date);
+        try statement.bindInt64(7, event.site_utc_offset_minutes);
+        try statement.bindInt64(8, event.kind);
+        try statement.bindText(9, event.event_name);
+        try statement.bindText(10, event.path);
+        try statement.bindText(11, event.page_title);
+        try statement.bindText(12, event.hostname);
+        try statement.bindText(13, event.anonymous_id);
+        try statement.bindInt64(14, event.identity_quality);
+        try statement.bindText(15, stored_user_id);
+        try statement.bindText(16, event.session_id);
+        try statement.bindInt64(17, event.sequence);
+        try statement.bindText(18, event.referrer_host);
+        try statement.bindText(19, event.country_code);
+        try statement.bindText(20, event.language);
+        try statement.bindText(21, event.browser_family);
+        try statement.bindText(22, event.os_family);
+        try statement.bindText(23, event.device_category);
+        try statement.bindText(24, event.utm_source);
+        try statement.bindText(25, event.utm_medium);
+        try statement.bindText(26, event.utm_campaign);
+        try statement.bindText(27, event.utm_term);
+        try statement.bindText(28, event.utm_content);
+        try statement.bindText(29, event.properties_json);
+        try statement.bindText(30, event.user_traits_json);
+        try statement.bindText(31, event.value_amount orelse "");
+        try statement.bindText(32, event.value_currency);
+        try statement.bindInt64(33, event.engagement_ms);
+        try statement.bindInt64(34, event.max_scroll_depth);
+        try statement.bindBlob(35, &event.visitor_day_id);
+        try statement.bindText(36, event.event_payload_digest);
         var result = try statement.execute();
         result.deinit();
         try self.database.exec("COMMIT");
@@ -577,6 +594,152 @@ pub const Store = struct {
         const current = try self.migrationVersion();
         if (current > schema_version) return error.NewerEventSchema;
         if (current < schema_version) return error.EventMigrationRequired;
+    }
+
+    pub fn siteEventBounds(self: *Store, site_id: []const u8) !SiteEventBounds {
+        try domain.validateUuid(site_id);
+        var statement = try self.database.prepare(
+            \\SELECT count(*),
+            \\       COALESCE(min(received_at_utc_micros), 0),
+            \\       COALESCE(max(received_at_utc_micros), 0)
+            \\FROM events WHERE site_id = ?
+        );
+        defer statement.deinit();
+        try statement.bindText(1, site_id);
+        var result = try statement.execute();
+        defer result.deinit();
+        if (result.rowCount() != 1 or result.columnCount() != 3) {
+            return error.InvalidSiteEventBounds;
+        }
+        return .{
+            .count = result.int64(0, 0),
+            .minimum_utc_micros = result.int64(1, 0),
+            .maximum_utc_micros = result.int64(2, 0),
+        };
+    }
+
+    pub fn rebucketSite(
+        self: *Store,
+        site_id: []const u8,
+        intervals: []const timezone.RebucketInterval,
+        expected_count: i64,
+    ) !void {
+        if (expected_count <= 0 or intervals.len == 0) return error.InvalidRebucket;
+        var index: usize = 0;
+        while (index < intervals.len) : (index += 1) {
+            const interval = intervals[index];
+            const expected_start = if (index == 0)
+                interval.start_utc_micros
+            else
+                std.math.add(
+                    i64,
+                    intervals[index - 1].end_utc_micros,
+                    1,
+                ) catch return error.InvalidRebucketIntervals;
+            if (interval.end_utc_micros < interval.start_utc_micros or
+                interval.start_utc_micros != expected_start)
+            {
+                return error.InvalidRebucketIntervals;
+            }
+        }
+        try self.database.exec(
+            \\CREATE TEMP TABLE IF NOT EXISTS timezone_rebucket_intervals (
+            \\  start_utc_micros BIGINT NOT NULL,
+            \\  end_utc_micros BIGINT NOT NULL,
+            \\  offset_minutes SMALLINT NOT NULL
+            \\)
+        );
+        defer self.database.exec("DROP TABLE timezone_rebucket_intervals") catch {};
+        var interval_statement = try self.database.prepare(
+            \\INSERT INTO timezone_rebucket_intervals VALUES (?, ?, ?)
+        );
+        defer interval_statement.deinit();
+        for (intervals) |interval| {
+            try interval_statement.bindInt64(1, interval.start_utc_micros);
+            try interval_statement.bindInt64(2, interval.end_utc_micros);
+            try interval_statement.bindInt64(3, interval.offset_minutes);
+            var result = try interval_statement.execute();
+            result.deinit();
+            try interval_statement.clear();
+        }
+        var coverage_statement = try self.database.prepare(
+            \\SELECT count(*)
+            \\FROM events e
+            \\JOIN timezone_rebucket_intervals i
+            \\  ON e.received_at_utc_micros BETWEEN
+            \\     i.start_utc_micros AND i.end_utc_micros
+            \\WHERE e.site_id = ?
+        );
+        defer coverage_statement.deinit();
+        try coverage_statement.bindText(1, site_id);
+        var coverage = try coverage_statement.execute();
+        defer coverage.deinit();
+        if (coverage.rowCount() != 1 or coverage.int64(0, 0) != expected_count) {
+            return error.IncompleteRebucketCoverage;
+        }
+
+        try self.database.exec("BEGIN TRANSACTION");
+        errdefer self.database.exec("ROLLBACK") catch {};
+        var update = try self.database.prepare(
+            \\UPDATE events AS e
+            \\SET site_utc_offset_minutes = i.offset_minutes,
+            \\    site_local_date = DATE '1970-01-01' + CAST(
+            \\      CASE WHEN
+            \\        CAST(e.received_at_utc_micros AS HUGEINT) +
+            \\        CAST(i.offset_minutes AS HUGEINT) * 60000000 >= 0
+            \\      THEN (
+            \\        CAST(e.received_at_utc_micros AS HUGEINT) +
+            \\        CAST(i.offset_minutes AS HUGEINT) * 60000000
+            \\      ) // 86400000000
+            \\      ELSE -((-(
+            \\        CAST(e.received_at_utc_micros AS HUGEINT) +
+            \\        CAST(i.offset_minutes AS HUGEINT) * 60000000
+            \\      ) + 86399999999) // 86400000000) END
+            \\    AS INTEGER)
+            \\FROM timezone_rebucket_intervals i
+            \\WHERE e.site_id = ?
+            \\  AND e.received_at_utc_micros BETWEEN
+            \\      i.start_utc_micros AND i.end_utc_micros
+        );
+        defer update.deinit();
+        try update.bindText(1, site_id);
+        var update_result = try update.execute();
+        update_result.deinit();
+        var validation = try self.database.prepare(
+            \\SELECT count(*)
+            \\FROM events e
+            \\JOIN timezone_rebucket_intervals i
+            \\  ON e.received_at_utc_micros BETWEEN
+            \\     i.start_utc_micros AND i.end_utc_micros
+            \\WHERE e.site_id = ? AND (
+            \\  e.site_utc_offset_minutes != i.offset_minutes OR
+            \\  e.site_local_date != DATE '1970-01-01' + CAST(
+            \\    CASE WHEN
+            \\      CAST(e.received_at_utc_micros AS HUGEINT) +
+            \\      CAST(i.offset_minutes AS HUGEINT) * 60000000 >= 0
+            \\    THEN (
+            \\      CAST(e.received_at_utc_micros AS HUGEINT) +
+            \\      CAST(i.offset_minutes AS HUGEINT) * 60000000
+            \\    ) // 86400000000
+            \\    ELSE -((-(
+            \\      CAST(e.received_at_utc_micros AS HUGEINT) +
+            \\      CAST(i.offset_minutes AS HUGEINT) * 60000000
+            \\    ) + 86399999999) // 86400000000) END
+            \\  AS INTEGER)
+            \\)
+        );
+        defer validation.deinit();
+        try validation.bindText(1, site_id);
+        var validation_result = try validation.execute();
+        defer validation_result.deinit();
+        if (validation_result.rowCount() != 1 or
+            validation_result.int64(0, 0) != 0)
+        {
+            return error.RebucketValidationFailed;
+        }
+        const after = try self.siteEventBounds(site_id);
+        if (after.count != expected_count) return error.RebucketCountChanged;
+        try self.database.exec("COMMIT");
     }
 
     pub fn deleteBefore(self: *Store, cutoff_date: []const u8) !i64 {

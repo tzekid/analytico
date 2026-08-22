@@ -39,8 +39,10 @@ report_json() {
 }
 
 "$binary" init "$fixture_dir" >/dev/null
-"$binary" site add "$fixture_dir" demo "Demo" https://demo.example >/dev/null
-"$binary" site add "$fixture_dir" empty "Empty" https://empty.example >/dev/null
+"$binary" site add "$fixture_dir" demo "Demo" https://demo.example \
+    --timezone UTC >/dev/null
+"$binary" site add "$fixture_dir" empty "Empty" https://empty.example \
+    --timezone UTC >/dev/null
 site_id=$("$binary" site list "$fixture_dir" |
     awk -F '\t' '$1 == "demo" { print $2 }')
 
@@ -194,7 +196,7 @@ timeout_output=$(
 test "$timeout_output" = "report timeout interrupted and connection reused"
 grep -q 'Interrupted' "$fixture_dir/timeout.stderr"
 test "$("$binary" doctor "$fixture_dir")" = \
-    "ok metadata=v2 events=v3 sites=2 goals=3 funnels=1 stored_events=14 key=ok"
+    "ok metadata=v3 events=v3 sites=2 goals=3 funnels=1 stored_events=14 key=ok"
 
 legacy_dir="$fixture_dir/legacy"
 mkdir "$legacy_dir"

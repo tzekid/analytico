@@ -3,6 +3,7 @@ pub const version = @import("version.zig").value;
 comptime {
     _ = @import("domain.zig");
     _ = @import("version.zig");
+    _ = @import("timezone.zig");
     _ = @import("report.zig");
     _ = @import("ops.zig");
     _ = @import("cli.zig");

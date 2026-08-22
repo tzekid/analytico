@@ -57,7 +57,8 @@ useradd --system --home-dir /var/lib/analytico \
 install -d -o analytico -g analytico -m 0700 /var/lib/analytico
 sudo -u analytico /opt/analytico/bin/analytico init /var/lib/analytico
 sudo -u analytico /opt/analytico/bin/analytico \
-  site add /var/lib/analytico example "Example" https://example.com
+  site add /var/lib/analytico example "Example" https://example.com \
+  --timezone Europe/Berlin
 sudo -u analytico /opt/analytico/bin/analytico \
   doctor /var/lib/analytico
 install -m 0644 deploy/analytico.service /etc/systemd/system/
@@ -83,7 +84,9 @@ analytico serve \
   --visitor-key-file /var/lib/analytico/visitor.key
 ```
 
-Only loopback listeners and absolute paths are accepted. Unknown, duplicate,
+Only loopback listeners and absolute paths are accepted. The optional
+`--zoneinfo-root` is absolute and defaults to `/usr/share/zoneinfo`. Every site
+policy is loaded from that root before binding. Unknown, duplicate,
 or missing flags; missing paths; non-current schemas; and a key with the wrong
 type, length, or mode fail before binding the listener. `serve` never migrates.
 The optional `--report-timeout-ms 1..2000` flag exists for constrained
@@ -93,6 +96,33 @@ interactive deadline.
 DuckDB is configured before its configuration is locked: one query thread,
 128 MiB memory, 256 MiB temp limit, insertion-order preservation off,
 community extensions off, and external access off.
+
+### Existing-site timezone assignment
+
+Metadata migration 3 does not guess a timezone for existing sites. With the
+service stopped, select one explicitly:
+
+```sh
+analytico site timezone-set /var/lib/analytico example Europe/Berlin
+```
+
+When the site already has events, first create the required matched backup,
+then opt into the offline rewrite:
+
+```sh
+analytico backup /var/lib/analytico /var/backups/analytico/before-timezone
+analytico site timezone-set /var/lib/analytico example Europe/Berlin \
+  --offline-rebucket
+analytico doctor /var/lib/analytico
+```
+
+The command opens the sole-writer DuckDB file, records a pending metadata
+state, rewrites only local date and offset from immutable receipt time in one
+DuckDB transaction, validates the row count, checkpoints, and then marks the
+policy ready. An interrupted command is safe to retry with the same zone. A
+different zone for a site with events is rejected unless the same explicit
+offline procedure is used. Full upgrade backup/rollback rehearsal remains a
+1.0 release gate owned by issue #13.
 
 ## 4. systemd boundary
 

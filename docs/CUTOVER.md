@@ -35,7 +35,8 @@ should be retained:
 
 ```sh
 sudo -u analytico /opt/analytico/bin/analytico \
-  site add /var/lib/analytico example "Example" https://example.com
+  site add /var/lib/analytico example "Example" https://example.com \
+  --timezone Europe/Berlin
 sudo -u analytico /opt/analytico/bin/analytico \
   site property-add /var/lib/analytico example plan
 sudo -u analytico /opt/analytico/bin/analytico \
@@ -48,7 +49,8 @@ sudo -u analytico /opt/analytico/bin/analytico \
 ```
 
 `site add`, goal, and funnel commands fail if an identifier is invalid or
-already exists. Run `analytico doctor /var/lib/analytico` after setup.
+already exists. The site timezone is an explicit choice; it is never inferred
+from the service host. Run `analytico doctor /var/lib/analytico` after setup.
 
 ## 3. Install the tracker and merge CSP
 
