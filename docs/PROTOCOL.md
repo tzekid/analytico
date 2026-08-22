@@ -2,9 +2,9 @@
 
 > **Status:** Protocol v1 remains a shipped frozen compatibility contract.
 > Protocol v2 is the additive collector/storage foundation defined by D28.
-> Protocol-v2 tracker anonymous identity, `reset()`, and 30-minute client
-> session rotation are implemented. `identify()`, SPA/engagement, and metric-v2
-> continue through issues #9–#13.
+> Protocol-v2 tracker anonymous identity, `identify()`, `reset()`, and
+> 30-minute client session rotation are implemented. SPA/engagement and
+> metric-v2 continue through issues #10–#13.
 
 Breaking changes require a new protocol version. They do not reinterpret
 accepted v1 events or metric-v1 visitor-day semantics.
@@ -14,7 +14,9 @@ accepted v1 events or metric-v1 visitor-day semantics.
 | Method | Route | Purpose | Success |
 | --- | --- | --- | --- |
 | `GET` | `/tracker.aef65945.js` | Immutable protocol-v1 tracker | `200` JavaScript |
-| `GET` | `/tracker.78135195.js` | Immutable protocol-v2 tracker | `200` JavaScript |
+| `GET` | `/tracker.fb64c486.js` | Immutable protocol-v2 anonymous-identity tracker | `200` JavaScript |
+| `GET` | `/tracker.78135195.js` | Immutable protocol-v2 session tracker | `200` JavaScript |
+| `GET` | `/tracker.d9e94247.js` | Immutable current protocol-v2 identify tracker | `200` JavaScript |
 | `GET` | `/tracker.js` | Short-cache alias of the protocol-v2 tracker | `200` JavaScript |
 | `POST` | `/v1/event` | Page view or custom event | `204` empty |
 | `POST` | `/v2/event` | Bounded version-2 event envelope | `204` empty |
@@ -194,7 +196,10 @@ the same canonical digest returns `204` and writes nothing. Reuse with any
 different normalized field, or an anonymous identity already linked to a
 different user, returns fixed `409`. An identify link and its event are one
 DuckDB transaction. No response echoes a property, trait, identity, or request
-body.
+body. An identity-link conflict additionally carries the stable safe response
+header `X-Analytico-Code: identity_conflict`; event-ID conflicts retain the
+generic fixed response. The future authenticated diagnostics ring consumes the
+same code but is not part of the public identity state model.
 
 ## 5. Pixel page view
 
@@ -240,7 +245,8 @@ Protocol-v1 tracker requirements remain for `/tracker.aef65945.js`. That asset
 still posts `v:1` to `/v1/event`, uses no browser storage, and exposes
 `window.analytico.event(name, properties)`.
 
-Protocol-v2 tracker requirements for `/tracker.js` and `/tracker.78135195.js`:
+Protocol-v2 tracker requirements for `/tracker.js` and the current immutable
+content-hashed path:
 
 - self-hosted by Analytico or copied byte-for-byte to the measured site;
 - loaded with `defer`;
@@ -249,7 +255,8 @@ Protocol-v2 tracker requirements for `/tracker.js` and `/tracker.78135195.js`:
 - one page-view request per ordinary document load;
 - site-scoped first-party `localStorage` keys `anl:<site-uuid>:a` (anonymous
   UUID) and `anl:<site-uuid>:s` (session record
-  `{id,last_activity_ms,sequence}`);
+  `{id,last_activity_ms,sequence}`), plus optional `anl:<site-uuid>:u`
+  identified-user state;
 - the session UUID is reused while inactivity is at most 30 minutes, including
   across UTC midnight, and rotates only after more than 30 minutes;
 - sequence is persisted with the session record and sent on each event;
@@ -261,7 +268,14 @@ Protocol-v2 tracker requirements for `/tracker.js` and `/tracker.78135195.js`:
 - `analytico.reset()` clears identified storage and creates a new anonymous
   and session UUID;
 - custom events through `analytico.track(name, properties)`;
-- SPA, engagement, and `identify()` remain later issues;
+- `analytico.identify(user_id, traits)` sends a bounded identify event only for
+  persistent anonymous identity. The first locally recorded user ID remains
+  until `reset()`; a different call is still sent for authoritative server
+  rejection but does not overwrite that local state;
+- the local identified key is failure-tolerant application state, not proof
+  that the collector committed a link. Traits are not duplicated into browser
+  storage; accepted bounded traits remain on identify events in DuckDB;
+- SPA and engagement remain later issues;
 - minified and compressed bytes recorded by the performance gate.
 
 Usage:
@@ -269,18 +283,20 @@ Usage:
 ```html
 <script
   defer
-  src="https://analytics.example/tracker.78135195.js"
+  src="https://analytics.example/tracker.d9e94247.js"
   data-site="00000000-0000-4000-8000-000000000000"
 ></script>
 ```
 
 ```js
 window.analytico?.track("signup", { plan: "basic" });
+window.analytico?.identify("user_123", { plan: "basic" });
 window.analytico?.reset();
 ```
 
-The site attribute is exactly `data-site`. Existing hashed v1 URLs continue to
-serve the frozen protocol-v1 bytes.
+The site attribute is exactly `data-site`. Every published content-hashed
+tracker URL continues to serve its exact original bytes with immutable caching;
+the short-cache `/tracker.js` alias alone advances to the current tracker.
 
 ## 7. Origin and proxy trust
 
@@ -316,8 +332,8 @@ on it.
 
 - `/tracker.aef65945.js`: frozen protocol-v1 bytes, one-year immutable cache
   with Brotli/gzip variants.
-- `/tracker.78135195.js`: protocol-v2 identity tracker, one-year immutable
-  cache with Brotli/gzip variants.
+- Published content-hashed protocol-v2 trackers: exact original bytes,
+  one-year immutable cache with Brotli/gzip variants.
 - `/tracker.js`: identical protocol-v2 bytes with a five-minute cache.
 - Event and pixel routes, including `/v2/event`: `no-store`.
 - No collector route sets a cookie.

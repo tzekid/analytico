@@ -48,6 +48,40 @@
     } catch (_) {}
   }
 
+  function validText(value, maximum, allowEmpty) {
+    if (typeof value !== "string" || (!allowEmpty && !value) ||
+        value.length > maximum ||
+        /[\u0000-\u001f\u007f-\u009f]/.test(value)) return 0;
+    try {
+      return new TextEncoder().encode(value).length <= maximum;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  function boundedTraits(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const result = Object.create(null);
+    let count = 0;
+    try {
+      for (const key in value) {
+        if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+        if (++count > 16 || !/^[A-Za-z0-9_.:-]{1,64}$/.test(key)) return null;
+        const item = value[key];
+        if (item === null || typeof item === "boolean" ||
+            (typeof item === "number" && Number.isSafeInteger(item)) ||
+            validText(item, 512, 1)) {
+          result[key] = item;
+        } else {
+          return null;
+        }
+      }
+      return result;
+    } catch (_) {
+      return null;
+    }
+  }
+
   let identityQuality = "persistent";
   let anonymousId = "";
   let session = null;
@@ -106,24 +140,26 @@
 
   function send(type, extra) {
     if (!anonymousId || !session) loadIdentity();
-    if (!anonymousId || !session) return;
+    if (!anonymousId || !session) return "";
     const eventId = uuid();
-    if (!eventId) return;
+    if (!eventId) return "";
     try {
       const now = Date.now();
       if (now - session.last_activity_ms > idleLimitMs) {
         session = loadSession(now);
-        if (!session) return;
+        if (!session) return "";
       }
       const sequence = session.sequence;
       session.sequence = sequence + 1;
       session.last_activity_ms = now;
       if (!persistSession()) identityQuality = "ephemeral";
       const utm = {};
-      const params = new URLSearchParams(location.search);
-      for (const field of ["source", "medium", "campaign", "term", "content"]) {
-        const value = params.get("utm_" + field);
-        if (value) utm[field] = value;
+      if (type !== "identify") {
+        const params = new URLSearchParams(location.search);
+        for (const field of ["source", "medium", "campaign", "term", "content"]) {
+          const value = params.get("utm_" + field);
+          if (value) utm[field] = value;
+        }
       }
       const title = (document.title || "").slice(0, 512);
       const body = JSON.stringify(Object.assign({
@@ -141,18 +177,34 @@
           title,
           hostname: location.hostname,
         },
-        referrer: document.referrer || undefined,
+        referrer: type === "identify" ? undefined : document.referrer || undefined,
         utm: Object.keys(utm).length ? utm : undefined,
       }, extra));
-      if (navigator.sendBeacon(endpoint, body)) return;
+      try {
+        if (navigator.sendBeacon(endpoint, body)) return eventId;
+      } catch (_) {}
       fetch(endpoint, {
         method: "POST",
         body,
-        headers: { "Content-Type": "text/plain;charset=UTF-8" },
         keepalive: true,
         credentials: "omit",
       }).catch(() => {});
-    } catch (_) {}
+      return eventId;
+    } catch (_) {
+      return "";
+    }
+  }
+
+  function identify(userId, traits) {
+    if (identityQuality !== "persistent" ||
+        !validText(userId, 160, 0)) return;
+    const safeTraits = traits === undefined ? undefined : boundedTraits(traits);
+    if (traits !== undefined && safeTraits === null) return;
+    if (!send("identify", {
+      user: { id: userId, traits: safeTraits },
+    })) return;
+    const current = read(identifiedKey);
+    if (!current || current === userId) write(identifiedKey, userId);
   }
 
   function reset() {
@@ -168,6 +220,7 @@
     track(name, properties) {
       send("event", { name, properties });
     },
+    identify,
     reset,
   };
   send("pageview");

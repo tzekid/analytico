@@ -112,7 +112,7 @@ expect_code 200 "$base/tracker.js"
 cmp "$fixture_dir/body" public/tracker.js
 grep -qi '^Content-Type: text/javascript; charset=utf-8' \
     "$fixture_dir/headers"
-grep -qi '^Content-Length: 2338' "$fixture_dir/headers"
+grep -qi '^Content-Length: 3025' "$fixture_dir/headers"
 grep -qi '^Cache-Control: public, max-age=300' "$fixture_dir/headers"
 grep -qi '^X-Content-Type-Options: nosniff' "$fixture_dir/headers"
 grep -qi '^Vary: Accept-Encoding' "$fixture_dir/headers"
@@ -139,6 +139,16 @@ grep -qi '^Cache-Control: public, max-age=31536000, immutable' \
 grep -qi '^Content-Encoding: br' "$fixture_dir/headers"
 cmp "$fixture_dir/body" src/http/tracker.v1.min.js.br
 expect_code 200 -H 'Accept-Encoding: br' "$base/tracker.78135195.js"
+grep -qi '^Cache-Control: public, max-age=31536000, immutable' \
+    "$fixture_dir/headers"
+grep -qi '^Content-Encoding: br' "$fixture_dir/headers"
+cmp "$fixture_dir/body" src/http/tracker.78135195.min.js.br
+expect_code 200 -H 'Accept-Encoding: gzip' "$base/tracker.fb64c486.js"
+grep -qi '^Cache-Control: public, max-age=31536000, immutable' \
+    "$fixture_dir/headers"
+grep -qi '^Content-Encoding: gzip' "$fixture_dir/headers"
+cmp "$fixture_dir/body" src/http/tracker.fb64c486.min.js.gz
+expect_code 200 -H 'Accept-Encoding: br' "$base/tracker.d9e94247.js"
 grep -qi '^Cache-Control: public, max-age=31536000, immutable' \
     "$fixture_dir/headers"
 grep -qi '^Content-Encoding: br' "$fixture_dir/headers"
@@ -399,6 +409,7 @@ expect_code 409 -X POST "$base/v2/event" \
     -H 'Content-Type: text/plain' -H 'Origin: https://example.com' \
     -H 'X-Forwarded-For: 198.18.10.1' --data-binary "$v2_identity_conflict"
 expect_fixed_error "conflict"
+grep -qi '^X-Analytico-Code: identity_conflict' "$fixture_dir/headers"
 
 v2_nested=$(
     printf '{"v":2,"site":"%s","event_id":"00000000-0000-4000-8000-000000000221","anonymous_id":"%s","identity_quality":"persistent","session_id":"%s","sequence":4,"occurred_at_ms":%s,"type":"event","name":"bad","properties":{"z":{"nested":true}}}' \
@@ -643,7 +654,11 @@ cmp public/tracker.js src/http/tracker.min.js
 test "$(stat -c '%s' public/tracker.js)" -le 3072
 test "$(stat -c '%s' public/tracker.js.br)" -le 1536
 test "$(sha256sum public/tracker.js | cut -d' ' -f1)" = \
+    "d9e94247f97fa84795f5a9bb493a0d383b2aac11565e80e6ceb670b4e9e05c2c"
+test "$(sha256sum src/http/tracker.78135195.min.js | cut -d' ' -f1)" = \
     "7813519555b9ea0625a90c1d42c1adfb5db78d3d33b5229809e6b654830ffcf7"
+test "$(sha256sum src/http/tracker.fb64c486.min.js | cut -d' ' -f1)" = \
+    "fb64c48638c240656d0627fb3087bdf84cdd6ed3570efa363869b9eea16c97d2"
 test "$(sha256sum src/http/tracker.v1.min.js | cut -d' ' -f1)" = \
     "aef659456671d0dbc0a63e7732b14edc40ad0b08523fd91081f36004c99aa116"
 
@@ -699,10 +714,10 @@ done
 test "$ready" = true
 mv "$fault_dir" "$fault_away"
 fault_payload=$(
-    printf '{"v":1,"site":"%s","type":"pageview","path":"/fault"}' \
-        "$fault_site"
+    printf '{"v":2,"site":"%s","event_id":"00000000-0000-4000-8000-000000000291","anonymous_id":"00000000-0000-4000-8000-000000000292","identity_quality":"persistent","session_id":"00000000-0000-4000-8000-000000000293","sequence":0,"occurred_at_ms":%s,"type":"identify","user":{"id":"fault_user","traits":{"plan":"private-plan"}}}' \
+        "$fault_site" "$(date +%s%3N)"
 )
-expect_code 500 -X POST "$fault_base/v1/event" \
+expect_code 500 -X POST "$fault_base/v2/event" \
     -H 'Content-Type: text/plain' -H 'Origin: https://fault.example' \
     --data-binary "$fault_payload"
 expect_fixed_error "internal error"
@@ -714,5 +729,12 @@ wait "$server_pid"
 server_pid=
 test "$("$binary" doctor "$fault_dir")" = \
     "ok metadata=v2 events=v3 sites=1 goals=0 funnels=0 stored_events=0 key=ok"
+test "$("$binary" m2 identity-links "$fault_dir")" = 0
+if grep -aE 'fault_user|private-plan' \
+    "$fault_dir/server.stdout" "$fault_dir/server.stderr" >/dev/null
+then
+    echo "failed identify leaked user or trait data" >&2
+    exit 1
+fi
 
 echo "M2 bounded real-HTTP collection checks passed"

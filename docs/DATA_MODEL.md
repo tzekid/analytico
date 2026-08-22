@@ -237,6 +237,14 @@ Conventions:
 - An identify event and a new `identity_links` row commit atomically. Repeating
   the same link is idempotent; a different user for the same anonymous identity
   rejects before either write.
+- Canonical person keys are derived rather than stored: `u:<user_id>` for a
+  linked identity, otherwise `a:<uuid>`, `e:<uuid>`, or `l:<uuid>` for
+  persistent anonymous, ephemeral, or migrated legacy identity. Prefixes make
+  the key spaces disjoint; only an explicit equal user ID combines devices.
+- Latest user traits are derived from successful identify events for the same
+  site and linked user. Selection is deterministic by plausible occurrence
+  time, sequence, receipt time, and event ID in descending order. No mutable
+  profile row or identity graph duplicates those events.
 - `site_id` is duplicated deliberately. DuckDB does not enforce a foreign key
   into Turso.
 - `visitor_day_id` and `visitor_day_start` are temporary compatibility columns
@@ -459,8 +467,9 @@ Decisions D26–D28 establish protocol v2, DuckDB event schema 3, and metric
 semantics v2 as a versioned extension rather than a reinterpretation of the
 legacy fields. Issue #6 provides the collector/storage foundation, issue #7
 provides tracker anonymous identity and `reset()`, and issue #8 provides
-30-minute client session rotation. Issues #9–#13 own identify, property,
-timezone, metric, and migration acceptance evidence.
+30-minute client session rotation. Issue #9 provides explicit identify,
+canonical-person resolution, and latest-trait selection. Issues #10–#13 own
+property, timezone, metric, and migration acceptance evidence.
 
 ### Identity and sessions
 
