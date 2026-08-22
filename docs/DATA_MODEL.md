@@ -280,12 +280,16 @@ Migration 3 performs a transactional create/backfill/swap. Existing rows keep
 event IDs, receipt time/date, kind/name/path, sessions, dimensions, UTM, and
 property bytes; occurrence equals receipt; protocol/tracker are 1; identity is
 `legacy_daily` with one deterministic synthetic UUID per existing
-`(site,date,visitor_day_id)`; sequence follows stored session order; other new
-fields are empty/zero. Migration 3 initially writes the shipped UTC date and
-  offset zero. Issue #11 replaces those placeholders under an explicit site
-  zone before the site may serve; issue #13 owns the remaining exact-baseline,
-  mixed-data, backup, and rollback evidence before metric-v2 date queries
-  consume those values.
+`(site,date,visitor_day_id)`, derived from a fixed namespace and the exact tuple;
+sequence follows stored session order; other new fields are empty/zero. Before
+the source table is dropped, the same transaction proves the complete
+preserved-field multiset, the new-field mapping, group/identity isolation,
+and an empty identity-link table. Sequence is produced directly by the bounded
+`row_number` backfill; an out-of-range cast fails the transaction. Migration 3
+initially writes the shipped UTC date and offset zero. Issue #11 replaces those
+placeholders under an explicit site zone before the site may serve; the
+exact-baseline gate proves the rebucket and metric-v1 compatibility before
+metric-v2 date queries consume those values.
 
 ## 4. Normalization
 
@@ -522,8 +526,9 @@ provides tracker anonymous identity and `reset()`, and issue #8 provides
 30-minute client session rotation. Issue #9 provides explicit identify,
 canonical-person resolution, and latest-trait selection. Issue #10 provides
 typed property canonicalization and DuckDB query primitives, and issue #11
-provides explicit TZif-backed site-local dates. Issues #12–#13 own the remaining
-tracker and migration acceptance evidence.
+provides explicit TZif-backed site-local dates. Issue #13 provides the exact
+legacy migration, mixed-data coverage, and rollback evidence; issue #12 owns
+the remaining tracker SPA/engagement behavior.
 
 ### Identity and sessions
 
@@ -576,3 +581,16 @@ for every existing site, and a verified Turso/DuckDB backup pair. It validates
 row counts, preserved bytes and IDs, metric-v1 totals, session IDs, local dates
 around DST, and absence of legacy identity links before swap. Rollback restores
 the pre-migration database pair because an older binary may not read schema 3.
+
+Backup manifest schema 1 remains the pair format for supported historical and
+current stores; it records the actual metadata/event migration versions. A
+real legacy upgrade accepts only a verified backup whose hashes and versions
+match the live legacy files. Ordinary commands require current schemas and
+never trigger the upgrade. The event file's conservative copy/WAL allowance is
+checked against filesystem availability before DuckDB begins the transaction.
+
+For a bounded site-local meaningful-event range, identity coverage reports
+distinct canonical people split into persistent-compatible, ephemeral, and
+`legacy_daily` counts, plus persistent basis points and the site's first
+persistent local date. Metric-v1 result shapes remain frozen; metric-v2 callers
+compose this metadata rather than reinterpreting old visitor-day totals.

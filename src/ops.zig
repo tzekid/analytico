@@ -8,6 +8,25 @@ const timezone = @import("timezone.zig");
 
 const manifest_schema: u8 = 1;
 const export_page_size: i64 = 1_000;
+const migration_space_headroom: u64 = 64 * 1024 * 1024;
+
+const Statvfs = extern struct {
+    block_size: usize,
+    fragment_size: usize,
+    blocks: u64,
+    blocks_free: u64,
+    blocks_available: u64,
+    files: u64,
+    files_free: u64,
+    files_available: u64,
+    filesystem_id: usize,
+    flags: usize,
+    name_max: usize,
+    filesystem_type: u32,
+    spare: [5]i32,
+};
+
+extern fn statvfs(path: [*:0]const u8, result: *Statvfs) i32;
 
 const Paths = struct {
     meta: []const u8,
@@ -47,16 +66,52 @@ const FileEvidence = struct {
 
 pub fn migrate(
     allocator: std.mem.Allocator,
+    io: std.Io,
     output: *std.Io.Writer,
     directory: []const u8,
+    backup_directory: ?[]const u8,
 ) !void {
     const paths = try Paths.init(allocator, directory);
+    try validateKey(io, paths.key);
+    try requireRegularFile(io, paths.meta);
+    try requireRegularFile(io, paths.events);
     var metadata = try meta.Store.open(allocator, paths.meta);
     defer metadata.deinit();
-    try metadata.migrate();
     var event_store = try events.Store.open(allocator, paths.events);
     defer event_store.deinit();
-    try event_store.migrate();
+    const metadata_version = try metadata.migrationVersion();
+    const event_version = try event_store.migrationVersion();
+    try validateStoreVersions(metadata_version, event_version);
+
+    const metadata_upgrade = metadata_version < meta.schema_version;
+    const event_upgrade = event_version < events.schema_version;
+    if (metadata_upgrade or event_upgrade) {
+        const verified_backup = backup_directory orelse
+            return error.VerifiedBackupRequired;
+        try metadata.integrityCheck();
+        try event_store.checkpoint();
+        try metadata.checkpoint();
+        _ = try event_store.eventCount();
+        try verifyMigrationBackup(
+            allocator,
+            io,
+            verified_backup,
+            paths,
+            metadata_version,
+            event_version,
+        );
+        if (event_upgrade) {
+            try requireMigrationSpace(allocator, io, paths.events);
+            try event_store.migrate();
+            try event_store.requireCurrent();
+        }
+        if (metadata_upgrade) {
+            try metadata.migrate();
+            try metadata.requireCurrent();
+        }
+        try event_store.checkpoint();
+        try metadata.checkpoint();
+    }
     try output.print("migrated metadata=v{d} events=v{d}\n", .{
         try metadata.migrationVersion(),
         try event_store.migrationVersion(),
@@ -72,15 +127,20 @@ pub fn backup(
 ) !void {
     const source = try Paths.init(allocator, directory);
     try validateKey(io, source.key);
+    try requireRegularFile(io, source.meta);
+    try requireRegularFile(io, source.events);
+    var metadata_version: i64 = undefined;
+    var event_version: i64 = undefined;
     {
         var metadata = try meta.Store.open(allocator, source.meta);
         defer metadata.deinit();
-        try metadata.requireCurrent();
+        metadata_version = try metadata.migrationVersion();
         try metadata.integrityCheck();
         try metadata.checkpoint();
         var event_store = try events.Store.open(allocator, source.events);
         defer event_store.deinit();
-        try event_store.requireCurrent();
+        event_version = try event_store.migrationVersion();
+        try validateStoreVersions(metadata_version, event_version);
         _ = try event_store.eventCount();
         try event_store.checkpoint();
     }
@@ -116,8 +176,8 @@ pub fn backup(
         .schema = manifest_schema,
         .analytico_version = version.value,
         .created_at_utc_micros = try nowMicros(),
-        .metadata_schema = meta.schema_version,
-        .event_schema = events.schema_version,
+        .metadata_schema = metadata_version,
+        .event_schema = event_version,
         .meta = .{
             .name = "meta.db",
             .bytes = meta_evidence.bytes,
@@ -146,7 +206,7 @@ pub fn backup(
     if (std.fs.path.dirname(destination)) |parent| try syncDirectory(io, parent);
     try output.print(
         "backup complete destination={s} metadata=v{d} events=v{d}\n",
-        .{ destination, meta.schema_version, events.schema_version },
+        .{ destination, metadata_version, event_version },
     );
 }
 
@@ -204,7 +264,12 @@ pub fn restore(
     }
     const restored_paths = try Paths.init(allocator, temporary);
     try validateKey(io, restored_paths.key);
-    try verifyStores(allocator, restored_paths);
+    try verifyStores(
+        allocator,
+        restored_paths,
+        manifest.metadata_schema,
+        manifest.event_schema,
+    );
     try syncDirectory(io, temporary);
     try std.Io.Dir.renamePreserve(
         .cwd(),
@@ -388,21 +453,28 @@ pub fn doctor(
     );
 }
 
-fn verifyStores(allocator: std.mem.Allocator, paths: Paths) !void {
+fn verifyStores(
+    allocator: std.mem.Allocator,
+    paths: Paths,
+    expected_metadata_version: i64,
+    expected_event_version: i64,
+) !void {
     var metadata = try meta.Store.open(allocator, paths.meta);
     defer metadata.deinit();
-    try metadata.requireCurrent();
+    if (try metadata.migrationVersion() != expected_metadata_version) {
+        return error.BackupSchemaMismatch;
+    }
     try metadata.integrityCheck();
     var event_store = try events.Store.open(allocator, paths.events);
     defer event_store.deinit();
-    try event_store.requireCurrent();
+    if (try event_store.migrationVersion() != expected_event_version) {
+        return error.BackupSchemaMismatch;
+    }
     _ = try event_store.eventCount();
 }
 
 fn validateManifest(manifest: Manifest) !void {
     if (manifest.schema != manifest_schema or
-        manifest.metadata_schema != meta.schema_version or
-        manifest.event_schema != events.schema_version or
         !std.mem.eql(u8, manifest.meta.name, "meta.db") or
         !std.mem.eql(u8, manifest.events.name, "events.duckdb") or
         !std.mem.eql(u8, manifest.visitor_key.name, "visitor.key") or
@@ -411,6 +483,99 @@ fn validateManifest(manifest: Manifest) !void {
     {
         return error.IncompatibleBackupManifest;
     }
+    try validateStoreVersions(manifest.metadata_schema, manifest.event_schema);
+}
+
+fn validateStoreVersions(metadata_version: i64, event_version: i64) !void {
+    if (metadata_version > meta.schema_version) return error.NewerMetadataSchema;
+    if (event_version > events.schema_version) return error.NewerEventSchema;
+    if (metadata_version < 1 or event_version < 1) {
+        return error.UnsupportedBackupSchema;
+    }
+}
+
+fn verifyMigrationBackup(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    backup_directory: []const u8,
+    live: Paths,
+    metadata_version: i64,
+    event_version: i64,
+) !void {
+    const manifest_path = try std.fs.path.join(
+        allocator,
+        &.{ backup_directory, "manifest.json" },
+    );
+    const encoded = try std.Io.Dir.cwd().readFileAlloc(
+        io,
+        manifest_path,
+        allocator,
+        .limited(16 * 1024),
+    );
+    const parsed = std.json.parseFromSlice(
+        Manifest,
+        allocator,
+        encoded,
+        .{ .ignore_unknown_fields = false },
+    ) catch return error.InvalidBackupManifest;
+    defer parsed.deinit();
+    const manifest = parsed.value;
+    try validateManifest(manifest);
+    try verifyManifestFile(allocator, io, backup_directory, manifest.meta);
+    try verifyManifestFile(allocator, io, backup_directory, manifest.events);
+    try verifyManifestFile(allocator, io, backup_directory, manifest.visitor_key);
+
+    if (metadata_version < meta.schema_version) {
+        if (manifest.metadata_schema != metadata_version) {
+            return error.BackupSchemaMismatch;
+        }
+        try verifyLiveFile(io, live.meta, manifest.meta);
+    }
+    if (event_version < events.schema_version) {
+        if (manifest.event_schema != event_version) {
+            return error.BackupSchemaMismatch;
+        }
+        try verifyLiveFile(io, live.events, manifest.events);
+    }
+    try verifyLiveFile(io, live.key, manifest.visitor_key);
+}
+
+fn verifyLiveFile(io: std.Io, path: []const u8, expected: ManifestFile) !void {
+    const actual = try hashFile(io, path);
+    if (actual.bytes != expected.bytes or
+        !std.mem.eql(u8, &actual.sha256, expected.sha256))
+    {
+        return error.BackupDoesNotMatchLiveData;
+    }
+}
+
+fn requireMigrationSpace(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    event_path: []const u8,
+) !void {
+    const stat = try std.Io.Dir.cwd().statFile(io, event_path, .{});
+    if (stat.kind != .file) return error.InvalidEventStorePath;
+    const required = try migrationBytesRequired(stat.size);
+    const path_z = try allocator.dupeSentinel(u8, event_path, 0);
+    defer allocator.free(path_z);
+    var filesystem: Statvfs = undefined;
+    if (statvfs(path_z.ptr, &filesystem) != 0) {
+        return error.MigrationSpaceUnavailable;
+    }
+    const available = std.math.mul(
+        u64,
+        filesystem.blocks_available,
+        filesystem.fragment_size,
+    ) catch return error.MigrationSpaceUnavailable;
+    if (available < required) return error.InsufficientMigrationSpace;
+}
+
+fn migrationBytesRequired(event_bytes: u64) !u64 {
+    const copies = std.math.mul(u64, event_bytes, 3) catch
+        return error.MigrationSizeOverflow;
+    return std.math.add(u64, copies, migration_space_headroom) catch
+        return error.MigrationSizeOverflow;
 }
 
 fn verifyManifestFile(
@@ -438,6 +603,11 @@ fn validateKey(io: std.Io, path: []const u8) !void {
     if (stat.permissions.toMode() & 0o777 != 0o600) {
         return error.InsecureKeyPermissions;
     }
+}
+
+fn requireRegularFile(io: std.Io, path: []const u8) !void {
+    const stat = try std.Io.Dir.cwd().statFile(io, path, .{});
+    if (stat.kind != .file) return error.InvalidStoreFile;
 }
 
 fn hashFile(io: std.Io, path: []const u8) !FileEvidence {
@@ -594,4 +764,15 @@ fn needsFormulaPrefix(value: []const u8) bool {
     }
     return index < value.len and
         std.mem.findScalar(u8, "=+-@", value[index]) != null;
+}
+
+test "migration space preflight reserves three event files and headroom" {
+    try std.testing.expectEqual(
+        @as(u64, 94 * 1024 * 1024),
+        try migrationBytesRequired(10 * 1024 * 1024),
+    );
+    try std.testing.expectError(
+        error.MigrationSizeOverflow,
+        migrationBytesRequired(std.math.maxInt(u64)),
+    );
 }

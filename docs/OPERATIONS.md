@@ -121,8 +121,8 @@ state, rewrites only local date and offset from immutable receipt time in one
 DuckDB transaction, validates the row count, checkpoints, and then marks the
 policy ready. An interrupted command is safe to retry with the same zone. A
 different zone for a site with events is rejected unless the same explicit
-offline procedure is used. Full upgrade backup/rollback rehearsal remains a
-1.0 release gate owned by issue #13.
+offline procedure is used. The exact v0.3.0 upgrade and database-pair rollback
+are enforced by the issue #13 release gate.
 
 ## 4. systemd boundary
 
@@ -233,11 +233,13 @@ systemctl start analytico
 curl --fail http://127.0.0.1:4318/readyz
 ```
 
-`backup` requires current, readable stores and a secure key; checkpoints both
+`backup` requires readable supported stores and a secure key; checkpoints both
 engines, copies into a unique sibling temp directory, fsyncs files and the
-directory, writes sizes and SHA-256 hashes to `manifest.json`, then atomically
-renames to a destination which must not exist. Never overwrite the last
-known-good backup.
+directory, writes the actual migration versions, sizes, and SHA-256 hashes to
+`manifest.json`, then atomically renames to a destination which must not exist.
+This deliberately allows the 1.0 candidate to create the required v0.3.0
+schema-2 upgrade backup without first mutating either store. Never overwrite
+the last known-good backup.
 
 Lost-passkey recovery is deliberately local and first performs that same
 verified matched backup:
@@ -257,10 +259,11 @@ never creates a recovery credential or prints a new token implicitly.
 
 ## 9. Restore
 
-`restore ... --verify` rejects an unknown manifest/schema, unexpected file
-name, size/hash mismatch, insecure key, unreadable store, or existing
-destination. It copies into a sibling temp directory, creates a secure DuckDB
-temp directory, validates both isolated stores, fsyncs, and atomically renames.
+`restore ... --verify` rejects an unknown manifest/schema, unsupported recorded
+migration version, unexpected file name, size/hash mismatch, insecure key,
+unreadable store, or existing destination. It copies into a sibling temp
+directory, creates a secure DuckDB temp directory, validates both isolated
+stores at the manifest's recorded versions, fsyncs, and atomically renames.
 
 For production recovery:
 
@@ -274,18 +277,31 @@ For production recovery:
 
 ```sh
 systemctl stop analytico
-analytico backup /var/lib/analytico /var/backups/analytico/pre-<version>
-/opt/analytico-new/bin/analytico migrate /var/lib/analytico
+/opt/analytico-new/bin/analytico backup \
+  /var/lib/analytico /var/backups/analytico/pre-1.0.0
+/opt/analytico-new/bin/analytico migrate \
+  /var/lib/analytico /var/backups/analytico/pre-1.0.0
+# assign every existing site's explicit zone; use --offline-rebucket with events
+/opt/analytico-new/bin/analytico site timezone-set \
+  /var/lib/analytico example Europe/Berlin --offline-rebucket
 /opt/analytico-new/bin/analytico doctor /var/lib/analytico
 # atomically switch /opt/analytico to the new verified release
 systemctl start analytico
 ```
 
+The second migration argument is mandatory only while a supported older store
+actually needs an upgrade. Its manifest, hashes, key, and legacy versions must
+match the live pair before migration starts. The event file also receives a
+conservative free-space preflight. `init`, `report`, `site`, `event`, goal,
+funnel, and authentication commands never substitute for this explicit step.
+
 Migrations are numbered and transactional. Killing the process during the
-million-row v1-to-v3 DuckDB migration chain and retrying is an automated
-release gate. A binary refuses a database with a newer unknown schema. Event
-schema 3 requires database-pair restoration before an event-schema-2 binary is
-started for rollback.
+million-row v1-to-v3 DuckDB migration chain and retrying with the same verified
+backup is an automated release gate. A binary refuses a database with a newer
+unknown schema. Event schema 3 requires database-pair restoration before an
+event-schema-2 binary is started for rollback. Metric-v1 reports continue to
+use their original UTC dates; explicit timezone rebucketing populates the
+separate site-local date/offset before the service can become ready.
 
 Keep the previous release directory and the verified pre-upgrade backup.
 Rollback means stopping the new binary, restoring both stores and the key from
@@ -349,7 +365,8 @@ For the exact pinned environment:
 ```sh
 zig build test -Doptimize=ReleaseSafe \
   -Dturso-native-path=<exact-prefix>
-zig build e2e-m0 e2e-m1 e2e-m2 e2e-properties e2e-m2-browser e2e-m3 e2e-m4 e2e-m6 \
+zig build e2e-m0 e2e-m1 e2e-m2 e2e-properties e2e-legacy-migration \
+  e2e-m2-browser e2e-m3 e2e-m4 e2e-m6 \
   e2e-m7 e2e-passkey-p1 \
   -Doptimize=ReleaseSafe -Dturso-native-path=<exact-prefix>
 zig build bench-properties \

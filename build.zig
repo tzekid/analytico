@@ -144,6 +144,18 @@ pub fn build(b: *std.Build) void {
         "Run typed property ingestion and queries through real HTTP and DuckDB",
     ).dependOn(&properties_e2e.step);
 
+    const legacy_migration_e2e = b.addSystemCommand(&.{
+        "bash",
+        "scripts/run-v0.3-gate.sh",
+    });
+    legacy_migration_e2e.addArtifactArg(app);
+    legacy_migration_e2e.addArg("tests/e2e-legacy-migration.sh");
+    legacy_migration_e2e.step.dependOn(b.getInstallStep());
+    b.step(
+        "e2e-legacy-migration",
+        "Upgrade the exact v0.3.0 pair and prove mixed-data rollback",
+    ).dependOn(&legacy_migration_e2e.step);
+
     const properties_benchmark = b.addSystemCommand(&.{ "bash", "bench/properties.sh" });
     properties_benchmark.addArtifactArg(app);
     properties_benchmark.step.dependOn(b.getInstallStep());

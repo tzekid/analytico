@@ -93,6 +93,12 @@ pub const SiteEventBounds = struct {
     maximum_utc_micros: i64,
 };
 
+pub const LegacyMigrationEvidence = struct {
+    event_migration_version: i64,
+    rows: i64,
+    preserved_fingerprint: []u8,
+};
+
 pub const Store = struct {
     database: duckdb.Database,
 
@@ -236,93 +242,187 @@ pub const Store = struct {
             );
         }
         if (current < 3) {
-            try self.database.exec(
-                \\BEGIN TRANSACTION;
-                \\CREATE TABLE events_v3 (
-                \\  event_schema_version UTINYINT NOT NULL,
-                \\  protocol_version UTINYINT NOT NULL,
-                \\  tracker_version UTINYINT NOT NULL,
-                \\  event_id UUID NOT NULL,
-                \\  site_id VARCHAR NOT NULL,
-                \\  received_at_utc_micros BIGINT NOT NULL,
-                \\  occurred_at_utc_micros BIGINT NOT NULL,
-                \\  received_date_utc DATE NOT NULL,
-                \\  site_local_date DATE NOT NULL,
-                \\  site_utc_offset_minutes SMALLINT NOT NULL,
-                \\  kind UTINYINT NOT NULL,
-                \\  event_name VARCHAR NOT NULL,
-                \\  path VARCHAR NOT NULL,
-                \\  page_title VARCHAR NOT NULL,
-                \\  hostname VARCHAR NOT NULL,
-                \\  anonymous_id UUID NOT NULL,
-                \\  identity_quality UTINYINT NOT NULL,
-                \\  user_id VARCHAR NOT NULL,
-                \\  session_id UUID NOT NULL,
-                \\  sequence UINTEGER NOT NULL,
-                \\  session_start BOOLEAN NOT NULL,
-                \\  referrer_host VARCHAR NOT NULL,
-                \\  country_code VARCHAR NOT NULL,
-                \\  language VARCHAR NOT NULL,
-                \\  browser_family VARCHAR NOT NULL,
-                \\  os_family VARCHAR NOT NULL,
-                \\  device_category VARCHAR NOT NULL,
-                \\  utm_source VARCHAR NOT NULL,
-                \\  utm_medium VARCHAR NOT NULL,
-                \\  utm_campaign VARCHAR NOT NULL,
-                \\  utm_term VARCHAR NOT NULL,
-                \\  utm_content VARCHAR NOT NULL,
-                \\  properties_json VARCHAR NOT NULL,
-                \\  user_traits_json VARCHAR NOT NULL,
-                \\  value_amount DECIMAL(18,6),
-                \\  value_currency VARCHAR NOT NULL,
-                \\  engagement_ms UINTEGER NOT NULL,
-                \\  max_scroll_depth UTINYINT NOT NULL,
-                \\  visitor_day_id BLOB NOT NULL,
-                \\  visitor_day_start BOOLEAN NOT NULL,
-                \\  event_payload_digest VARCHAR NOT NULL
-                \\);
-                \\CREATE TABLE identity_links (
-                \\  site_id VARCHAR NOT NULL,
-                \\  anonymous_id UUID NOT NULL,
-                \\  user_id VARCHAR NOT NULL,
-                \\  linked_at_utc_micros BIGINT NOT NULL,
-                \\  event_id UUID NOT NULL,
-                \\  PRIMARY KEY (site_id, anonymous_id)
-                \\);
-                \\INSERT INTO events_v3
-                \\WITH sequenced AS (
-                \\  SELECT *,
-                \\    first_value(event_id) OVER (
-                \\      PARTITION BY site_id, received_date_utc, visitor_day_id
-                \\      ORDER BY received_at_utc_micros, event_id
-                \\    ) AS legacy_anonymous_id,
-                \\    row_number() OVER (
-                \\      PARTITION BY site_id, session_id
-                \\      ORDER BY received_at_utc_micros, event_id
-                \\    ) - 1 AS legacy_sequence
-                \\  FROM events
-                \\)
-                \\SELECT
-                \\  3, 1, 1, event_id, site_id,
-                \\  received_at_utc_micros, received_at_utc_micros,
-                \\  received_date_utc, received_date_utc, 0,
-                \\  kind, event_name, path, '', '', legacy_anonymous_id,
-                \\  3, '', session_id, CAST(legacy_sequence AS UINTEGER),
-                \\  session_start, referrer_host, country_code, '',
-                \\  browser_family, os_family, device_category,
-                \\  utm_source, utm_medium, utm_campaign, utm_term, utm_content,
-                \\  properties_json, '{}', CAST(NULL AS DECIMAL(18,6)), '',
-                \\  0, 0, visitor_day_id, visitor_day_start, ''
-                \\FROM sequenced;
-                \\DROP TABLE events;
-                \\ALTER TABLE events_v3 RENAME TO events;
-                \\INSERT INTO event_migrations VALUES (
-                \\  3, 'protocol-v2-event-foundation', 0
-                \\);
-                \\COMMIT;
-            );
+            try self.migrateV3();
         }
         try self.database.checkpoint();
+    }
+
+    fn migrateV3(self: *Store) !void {
+        try self.database.exec("BEGIN TRANSACTION");
+        errdefer self.database.exec("ROLLBACK") catch {};
+        try self.database.exec(
+            \\CREATE TABLE events_v3 (
+            \\  event_schema_version UTINYINT NOT NULL,
+            \\  protocol_version UTINYINT NOT NULL,
+            \\  tracker_version UTINYINT NOT NULL,
+            \\  event_id UUID NOT NULL,
+            \\  site_id VARCHAR NOT NULL,
+            \\  received_at_utc_micros BIGINT NOT NULL,
+            \\  occurred_at_utc_micros BIGINT NOT NULL,
+            \\  received_date_utc DATE NOT NULL,
+            \\  site_local_date DATE NOT NULL,
+            \\  site_utc_offset_minutes SMALLINT NOT NULL,
+            \\  kind UTINYINT NOT NULL,
+            \\  event_name VARCHAR NOT NULL,
+            \\  path VARCHAR NOT NULL,
+            \\  page_title VARCHAR NOT NULL,
+            \\  hostname VARCHAR NOT NULL,
+            \\  anonymous_id UUID NOT NULL,
+            \\  identity_quality UTINYINT NOT NULL,
+            \\  user_id VARCHAR NOT NULL,
+            \\  session_id UUID NOT NULL,
+            \\  sequence UINTEGER NOT NULL,
+            \\  session_start BOOLEAN NOT NULL,
+            \\  referrer_host VARCHAR NOT NULL,
+            \\  country_code VARCHAR NOT NULL,
+            \\  language VARCHAR NOT NULL,
+            \\  browser_family VARCHAR NOT NULL,
+            \\  os_family VARCHAR NOT NULL,
+            \\  device_category VARCHAR NOT NULL,
+            \\  utm_source VARCHAR NOT NULL,
+            \\  utm_medium VARCHAR NOT NULL,
+            \\  utm_campaign VARCHAR NOT NULL,
+            \\  utm_term VARCHAR NOT NULL,
+            \\  utm_content VARCHAR NOT NULL,
+            \\  properties_json VARCHAR NOT NULL,
+            \\  user_traits_json VARCHAR NOT NULL,
+            \\  value_amount DECIMAL(18,6),
+            \\  value_currency VARCHAR NOT NULL,
+            \\  engagement_ms UINTEGER NOT NULL,
+            \\  max_scroll_depth UTINYINT NOT NULL,
+            \\  visitor_day_id BLOB NOT NULL,
+            \\  visitor_day_start BOOLEAN NOT NULL,
+            \\  event_payload_digest VARCHAR NOT NULL
+            \\);
+            \\CREATE TABLE identity_links (
+            \\  site_id VARCHAR NOT NULL,
+            \\  anonymous_id UUID NOT NULL,
+            \\  user_id VARCHAR NOT NULL,
+            \\  linked_at_utc_micros BIGINT NOT NULL,
+            \\  event_id UUID NOT NULL,
+            \\  PRIMARY KEY (site_id, anonymous_id)
+            \\);
+            \\INSERT INTO events_v3
+            \\WITH sequenced AS (
+            \\  SELECT *,
+            \\    md5(
+            \\      'analytico/legacy-daily/v1|' || site_id || '|' ||
+            \\      CAST(received_date_utc AS VARCHAR) || '|' ||
+            \\      hex(visitor_day_id)
+            \\    ) AS legacy_identity_hash,
+            \\    row_number() OVER (
+            \\      PARTITION BY site_id, session_id
+            \\      ORDER BY received_at_utc_micros, event_id
+            \\    ) - 1 AS legacy_sequence
+            \\  FROM events
+            \\)
+            \\SELECT
+            \\  3, 1, 1, event_id, site_id,
+            \\  received_at_utc_micros, received_at_utc_micros,
+            \\  received_date_utc, received_date_utc, 0,
+            \\  kind, event_name, path, '', '', CAST(
+            \\    substr(legacy_identity_hash, 1, 8) || '-' ||
+            \\    substr(legacy_identity_hash, 9, 4) || '-5' ||
+            \\    substr(legacy_identity_hash, 14, 3) || '-a' ||
+            \\    substr(legacy_identity_hash, 18, 3) || '-' ||
+            \\    substr(legacy_identity_hash, 21, 12) AS UUID
+            \\  ),
+            \\  3, '', session_id, CAST(legacy_sequence AS UINTEGER),
+            \\  session_start, referrer_host, country_code, '',
+            \\  browser_family, os_family, device_category,
+            \\  utm_source, utm_medium, utm_campaign, utm_term, utm_content,
+            \\  properties_json, '{}', CAST(NULL AS DECIMAL(18,6)), '',
+            \\  0, 0, visitor_day_id, visitor_day_start, ''
+            \\FROM sequenced;
+        );
+
+        const preserved_mismatches = try self.scalar(
+            \\SELECT count(*) FROM (
+            \\  (SELECT CAST(event_id AS VARCHAR), site_id,
+            \\          received_at_utc_micros, CAST(received_date_utc AS VARCHAR),
+            \\          kind, event_name, path, visitor_day_id,
+            \\          CAST(session_id AS VARCHAR), visitor_day_start,
+            \\          session_start, referrer_host, country_code,
+            \\          browser_family, os_family, device_category,
+            \\          utm_source, utm_medium, utm_campaign, utm_term,
+            \\          utm_content, properties_json
+            \\   FROM events
+            \\   EXCEPT ALL
+            \\   SELECT CAST(event_id AS VARCHAR), site_id,
+            \\          received_at_utc_micros, CAST(received_date_utc AS VARCHAR),
+            \\          kind, event_name, path, visitor_day_id,
+            \\          CAST(session_id AS VARCHAR), visitor_day_start,
+            \\          session_start, referrer_host, country_code,
+            \\          browser_family, os_family, device_category,
+            \\          utm_source, utm_medium, utm_campaign, utm_term,
+            \\          utm_content, properties_json
+            \\   FROM events_v3)
+            \\  UNION ALL
+            \\  (SELECT CAST(event_id AS VARCHAR), site_id,
+            \\          received_at_utc_micros, CAST(received_date_utc AS VARCHAR),
+            \\          kind, event_name, path, visitor_day_id,
+            \\          CAST(session_id AS VARCHAR), visitor_day_start,
+            \\          session_start, referrer_host, country_code,
+            \\          browser_family, os_family, device_category,
+            \\          utm_source, utm_medium, utm_campaign, utm_term,
+            \\          utm_content, properties_json
+            \\   FROM events_v3
+            \\   EXCEPT ALL
+            \\   SELECT CAST(event_id AS VARCHAR), site_id,
+            \\          received_at_utc_micros, CAST(received_date_utc AS VARCHAR),
+            \\          kind, event_name, path, visitor_day_id,
+            \\          CAST(session_id AS VARCHAR), visitor_day_start,
+            \\          session_start, referrer_host, country_code,
+            \\          browser_family, os_family, device_category,
+            \\          utm_source, utm_medium, utm_campaign, utm_term,
+            \\          utm_content, properties_json
+            \\   FROM events)
+            \\) differences
+        );
+        const mapping_mismatches = try self.scalar(
+            \\SELECT count(*) FROM events_v3 WHERE
+            \\  event_schema_version != 3 OR protocol_version != 1 OR
+            \\  tracker_version != 1 OR
+            \\  occurred_at_utc_micros != received_at_utc_micros OR
+            \\  site_local_date != received_date_utc OR
+            \\  site_utc_offset_minutes != 0 OR identity_quality != 3 OR
+            \\  user_id != '' OR page_title != '' OR hostname != '' OR
+            \\  language != '' OR user_traits_json != '{}' OR
+            \\  value_amount IS NOT NULL OR value_currency != '' OR
+            \\  engagement_ms != 0 OR max_scroll_depth != 0 OR
+            \\  event_payload_digest != ''
+        );
+        const identity_mismatches = try self.scalar(
+            \\WITH group_reuse AS (
+            \\  SELECT 1 FROM events_v3
+            \\  GROUP BY site_id, received_date_utc, visitor_day_id
+            \\  HAVING count(DISTINCT anonymous_id) != 1
+            \\), identity_reuse AS (
+            \\  SELECT 1 FROM events_v3
+            \\  GROUP BY anonymous_id
+            \\  HAVING count(DISTINCT
+            \\    site_id || '|' || CAST(received_date_utc AS VARCHAR) || '|' ||
+            \\    hex(visitor_day_id)
+            \\  ) != 1
+            \\)
+            \\SELECT (SELECT count(*) FROM group_reuse) +
+            \\       (SELECT count(*) FROM identity_reuse)
+        );
+        const links = try self.scalar("SELECT count(*) FROM identity_links");
+        if (preserved_mismatches != 0 or mapping_mismatches != 0 or
+            identity_mismatches != 0 or links != 0)
+        {
+            return error.LegacyMigrationValidationFailed;
+        }
+
+        try self.database.exec(
+            \\DROP TABLE events;
+            \\ALTER TABLE events_v3 RENAME TO events;
+            \\INSERT INTO event_migrations VALUES (
+            \\  3, 'protocol-v2-event-foundation', 0
+            \\)
+        );
+        try self.database.exec("COMMIT");
     }
 
     pub fn insert(self: *Store, event: domain.Event) !void {
@@ -594,6 +694,47 @@ pub const Store = struct {
         const current = try self.migrationVersion();
         if (current > schema_version) return error.NewerEventSchema;
         if (current < schema_version) return error.EventMigrationRequired;
+    }
+
+    pub fn legacyMigrationEvidence(
+        self: *Store,
+        allocator: std.mem.Allocator,
+    ) !LegacyMigrationEvidence {
+        const current = try self.migrationVersion();
+        const source_sql: [:0]const u8 =
+            \\SELECT count(*), to_hex(COALESCE(bit_xor(hash(
+            \\  event_id, site_id, received_at_utc_micros, received_date_utc,
+            \\  kind, event_name, path, visitor_day_id, session_id,
+            \\  visitor_day_start, session_start, referrer_host, country_code,
+            \\  browser_family, os_family, device_category, utm_source,
+            \\  utm_medium, utm_campaign, utm_term, utm_content, properties_json
+            \\)), 0::UBIGINT))
+            \\FROM events
+        ;
+        const migrated_sql: [:0]const u8 =
+            \\SELECT count(*), to_hex(COALESCE(bit_xor(hash(
+            \\  event_id, site_id, received_at_utc_micros, received_date_utc,
+            \\  kind, event_name, path, visitor_day_id, session_id,
+            \\  visitor_day_start, session_start, referrer_host, country_code,
+            \\  browser_family, os_family, device_category, utm_source,
+            \\  utm_medium, utm_campaign, utm_term, utm_content, properties_json
+            \\)), 0::UBIGINT))
+            \\FROM events WHERE identity_quality = 3
+        ;
+        var result = try self.database.query(switch (current) {
+            2 => source_sql,
+            3 => migrated_sql,
+            else => return error.UnsupportedLegacyEvidenceSchema,
+        });
+        defer result.deinit();
+        if (result.rowCount() != 1 or result.columnCount() != 2) {
+            return error.InvalidLegacyEvidence;
+        }
+        return .{
+            .event_migration_version = current,
+            .rows = result.int64(0, 0),
+            .preserved_fingerprint = try result.text(allocator, 1, 0),
+        };
     }
 
     pub fn siteEventBounds(self: *Store, site_id: []const u8) !SiteEventBounds {
