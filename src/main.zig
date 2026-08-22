@@ -5,6 +5,7 @@ const probe = @import("m0/probe.zig");
 const m2_probe = @import("m2/probe.zig");
 const m3_probe = @import("m3/probe.zig");
 const m4_probe = @import("m4/probe.zig");
+const analysis_probe = @import("analysis_probe.zig");
 
 pub fn main(init: std.process.Init) !void {
     const ignore_file_limit: std.posix.Sigaction = .{
@@ -21,6 +22,13 @@ pub fn main(init: std.process.Init) !void {
     const output = &writer.interface;
     defer output.flush() catch {};
 
+    if (args.len == 4 and
+        std.mem.eql(u8, args[1], "analysis") and
+        std.mem.eql(u8, args[2], "semantic-probe"))
+    {
+        try analysis_probe.run(allocator, init.io, output, args[3]);
+        return;
+    }
     if (args.len == 4 and
         std.mem.eql(u8, args[1], "m0") and
         std.mem.eql(u8, args[2], "probe"))

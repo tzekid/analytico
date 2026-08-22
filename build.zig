@@ -144,6 +144,14 @@ pub fn build(b: *std.Build) void {
         "Run typed property ingestion and queries through real HTTP and DuckDB",
     ).dependOn(&properties_e2e.step);
 
+    const analysis_e2e = b.addSystemCommand(&.{ "bash", "tests/e2e-analysis.sh" });
+    analysis_e2e.addArtifactArg(app);
+    analysis_e2e.step.dependOn(b.getInstallStep());
+    b.step(
+        "e2e-analysis",
+        "Run metric-v2 typed analysis against a real on-disk DuckDB file",
+    ).dependOn(&analysis_e2e.step);
+
     const legacy_migration_e2e = b.addSystemCommand(&.{
         "bash",
         "scripts/run-v0.3-gate.sh",

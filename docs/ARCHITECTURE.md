@@ -102,6 +102,13 @@ through the same DuckDB ownership boundary. It does not move configuration into
 DuckDB or permit Turso to query analytics rows. Temporary visitor-day columns
 keep metric-v1 report SQL honest until versioned metric-v2 queries replace it.
 
+Decision D29 adds a parallel pure `AnalysisQuery` model and finite metric-v2
+store compiler. The domain model validates and canonicalizes state without I/O;
+the store chooses only enum-reviewed fragments and binds every value. Current
+metric-v1 report SQL/output remains intact, and specialized journey/session
+queries retain their own result types. `ANALYSIS_QUERY.md` defines the exact
+grammar, limits, serialization, compilation, and result boundary.
+
 The serving process configures one query thread, a bounded memory limit, a
 bounded temporary directory, no community extensions, and no external file or
 network access. It never executes request-supplied SQL.

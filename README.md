@@ -70,6 +70,7 @@ That target is a plan, not a claim that the capabilities are already shipped.
 - [Decision register](docs/DECISIONS.md)
 - [Milestones and definitions of done](docs/MILESTONES.md)
 - [Data model and metric semantics](docs/DATA_MODEL.md)
+- [Typed analysis query contract](docs/ANALYSIS_QUERY.md)
 - [Collection protocol](docs/PROTOCOL.md)
 - [Performance contract](docs/PERFORMANCE.md)
 - [Operations and deployment](docs/OPERATIONS.md)
@@ -155,6 +156,14 @@ with:
 ```sh
 zig build e2e-properties -Doptimize=ReleaseSafe
 zig build bench-properties -Doptimize=ReleaseSafe
+```
+
+Run the typed metric-v2 compiler, semantic fixture, exact-currency checks, and
+interrupt/reuse proof through the real executable and an on-disk DuckDB file:
+
+```bash
+zig build e2e-analysis
+zig build -Doptimize=ReleaseSafe e2e-analysis
 ```
 
 Run the exact published v0.3.0 schema-2 upgrade, mixed-identity coverage,

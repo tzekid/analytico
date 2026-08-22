@@ -6,13 +6,17 @@ comptime {
     _ = @import("version.zig");
     _ = @import("timezone.zig");
     _ = @import("report.zig");
+    _ = @import("analysis.zig");
+    _ = @import("analysis_probe.zig");
     _ = @import("ops.zig");
     _ = @import("cli.zig");
     _ = @import("store/duckdb.zig");
+    _ = @import("store/deadline.zig");
     _ = @import("store/events.zig");
     _ = @import("store/meta.zig");
     _ = @import("store/properties.zig");
     _ = @import("store/reports.zig");
+    _ = @import("store/analysis.zig");
     _ = @import("auth/passkeys.zig");
     _ = @import("auth/store.zig");
     _ = @import("auth/service.zig");

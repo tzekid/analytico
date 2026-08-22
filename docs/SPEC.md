@@ -20,8 +20,10 @@
   DuckDB property primitives, while issue #11 implements explicit TZif-backed
   local dates. Issue #13 implements the exact legacy migration and mixed-data
   coverage evidence, while issue #12 still owns SPA and engagement behavior.
-  Schema 3 does not retroactively turn visitor-days into people or claim the
-  later metric-v2 product queries are complete.
+  Issue #24 defines the separate closed metric-v2 AnalysisQuery/compiler
+  boundary without changing metric-v1 reports. Schema 3 does not retroactively
+  turn visitor-days into people or claim the later product routes and views are
+  complete.
 - The current server-rendered `/admin` dashboard and optional HTMX enhancement
   shipped after M4. HTML, native navigation, and ordinary forms remain the
   application baseline.
