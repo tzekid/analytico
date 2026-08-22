@@ -181,6 +181,21 @@ rows plus exact truncation/cardinality metadata in 383 ms. Fixture generation
 took 4,269 ms and the checkpointed DuckDB file was 52,703,232 bytes. The
 compact reproducible record is `bench/results/properties-release-safe.json`.
 
+### Analytico 1.0 typed-analysis gate
+
+Issue #24 retains the 400-day range, 100-row interactive result, one-thread
+DuckDB, 128 MiB memory, bounded temp, and two-second interrupt ceilings for the
+closed metric-v2 compiler. Canonical URL state is at most 16 KiB/32 parameters;
+saved canonical JSON is at most 32 KiB; filters are at most 12 clauses with 20
+OR values each; EventSelector property predicates are at most three.
+Resolved active-goal execution context is at most 32 selectors.
+
+The issue gate uses a hand-checkable real schema-3 corpus for semantic breadth
+and records ordinary Trend/Breakdown elapsed time. Million-event p95 budgets
+remain issue #46's representative mixed-data benchmark; a miss there follows
+the optimization order before any cache, projection, rollup, table, service, or
+memory-limit change.
+
 ### M4 production-MVP baseline
 
 The current ReleaseSafe package contains a 26,341,344-byte executable and a

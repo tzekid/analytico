@@ -594,3 +594,9 @@ distinct canonical people split into persistent-compatible, ephemeral, and
 `legacy_daily` counts, plus persistent basis points and the site's first
 persistent local date. Metric-v1 result shapes remain frozen; metric-v2 callers
 compose this metadata rather than reinterpreting old visitor-day totals.
+
+Metric-v2 ordinary Trend/Breakdown queries follow `ANALYSIS_QUERY.md` and D29.
+They read schema-3 facts in place, use site-local dates, canonical identity,
+explicit session/person filter scopes, and exact value/currency groups. They do
+not add a projection, EAV table, rollup, cache table, or migration. Existing
+metric-v1 queries continue to read their UTC visitor-day compatibility columns.

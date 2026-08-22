@@ -2,6 +2,7 @@ const std = @import("std");
 const domain = @import("../domain.zig");
 const report = @import("../report.zig");
 const duckdb = @import("duckdb.zig");
+const deadline = @import("deadline.zig");
 const events = @import("events.zig");
 const meta = @import("meta.zig");
 
@@ -411,7 +412,7 @@ pub fn identityCoverage(
     try statement.bindText(2, start_local_date);
     try statement.bindText(3, end_local_date);
     try statement.bindText(4, site_id);
-    var result = try executeDeadline(&event_store.database, &statement, timeout_ms);
+    var result = try deadline.execute(&event_store.database, &statement, timeout_ms);
     defer result.deinit();
     if (result.rowCount() != 1 or result.columnCount() != 5) {
         return error.InvalidIdentityCoverageResult;
@@ -587,7 +588,7 @@ fn overview(
     var statement = try event_store.database.prepare(overview_sql);
     defer statement.deinit();
     try bindRange(&statement, site_id, request);
-    var result = try executeDeadline(&event_store.database, &statement, timeout_ms);
+    var result = try deadline.execute(&event_store.database, &statement, timeout_ms);
     defer result.deinit();
     if (result.rowCount() != 1 or result.columnCount() != 5) {
         return error.InvalidReportResult;
@@ -617,7 +618,7 @@ fn list(
     try bindRange(&statement, site_id, request);
     try statement.bindInt64(4, @as(i64, request.limit) + 1);
     try statement.bindInt64(5, try request.offset());
-    var result = try executeDeadline(&event_store.database, &statement, timeout_ms);
+    var result = try deadline.execute(&event_store.database, &statement, timeout_ms);
     defer result.deinit();
     if (result.columnCount() != 3) return error.InvalidReportResult;
     const returned = result.rowCount();
@@ -761,7 +762,7 @@ fn goalReport(
     defer statement.deinit();
     try bindRange(&statement, site_id, request);
     try statement.bindText(4, goal.match_value);
-    var result = try executeDeadline(&event_store.database, &statement, timeout_ms);
+    var result = try deadline.execute(&event_store.database, &statement, timeout_ms);
     defer result.deinit();
     if (result.rowCount() != 1 or result.columnCount() != 3) {
         return error.InvalidReportResult;
@@ -803,7 +804,7 @@ fn funnelReport(
     try statement.bindText(18, site_id);
     try statement.bindText(19, request.start_date);
     try statement.bindText(20, request.end_date);
-    var result = try executeDeadline(&event_store.database, &statement, timeout_ms);
+    var result = try deadline.execute(&event_store.database, &statement, timeout_ms);
     defer result.deinit();
     if (result.columnCount() != 3 or result.rowCount() != steps.len) {
         return error.InvalidReportResult;
@@ -835,73 +836,12 @@ fn bindRange(
     try statement.bindText(3, request.end_date);
 }
 
-const DeadlineState = struct {
-    done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    timed_out: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-};
-
-fn executeDeadline(
-    database: *duckdb.Database,
-    statement: *duckdb.Statement,
-    timeout_ms: u32,
-) !duckdb.Result {
-    var state = DeadlineState{};
-    const thread = try std.Thread.spawn(
-        .{ .stack_size = 1024 * 1024 },
-        deadlineWatchdog,
-        .{ database, &state, timeout_ms },
-    );
-    var result = statement.execute() catch |err| {
-        state.done.store(true, .release);
-        thread.join();
-        if (state.timed_out.load(.acquire)) return error.ReportTimeout;
-        return err;
-    };
-    state.done.store(true, .release);
-    thread.join();
-    if (state.timed_out.load(.acquire)) {
-        result.deinit();
-        return error.ReportTimeout;
-    }
-    return result;
-}
-
-fn deadlineWatchdog(
-    database: *duckdb.Database,
-    state: *DeadlineState,
-    timeout_ms: u32,
-) void {
-    const pause: std.os.linux.timespec = .{ .sec = 0, .nsec = 1_000_000 };
-    const started = monotonicNanos() orelse {
-        state.timed_out.store(true, .release);
-        database.interrupt();
-        return;
-    };
-    const timeout_nanos = @as(i128, timeout_ms) * std.time.ns_per_ms;
-    while (true) {
-        if (state.done.load(.acquire)) return;
-        _ = std.os.linux.nanosleep(&pause, null);
-        const now = monotonicNanos() orelse break;
-        if (now - started >= timeout_nanos) break;
-    }
-    if (!state.done.load(.acquire)) {
-        state.timed_out.store(true, .release);
-        database.interrupt();
-    }
-}
-
-fn monotonicNanos() ?i128 {
-    var timestamp: std.os.linux.timespec = undefined;
-    if (std.os.linux.clock_gettime(.MONOTONIC, &timestamp) != 0) return null;
-    return @as(i128, timestamp.sec) * std.time.ns_per_s + timestamp.nsec;
-}
-
 pub fn timeoutProbe(event_store: *events.Store) !void {
     var statement = try event_store.database.prepare(
         "SELECT sum(sqrt(i::DOUBLE)) FROM range(1000000000000) rows(i)",
     );
     defer statement.deinit();
-    _ = executeDeadline(&event_store.database, &statement, 10) catch |err| {
+    _ = deadline.execute(&event_store.database, &statement, 10) catch |err| {
         if (err != error.ReportTimeout) return err;
         _ = try event_store.eventCount();
         return;

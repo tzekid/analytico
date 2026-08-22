@@ -37,6 +37,7 @@ semantic, or application state model is consequential and must be added here.
 | D26 | 1.0 identity and sessions | Persistent first-party anonymous identity, explicit identify/reset, cross-midnight client sessions | Accepted for 1.0; implemented by #6–#9 and #13 |
 | D27 | 1.0 site-local time | Explicit IANA zone with bounded host-TZif reader and stored local dates | Accepted; implemented by #11 with #13 migration evidence |
 | D28 | Protocol-v2 and event-schema-3 foundation | Separate bounded route, explicit identity quality, single-writer idempotency, transactional schema swap | Accepted for 1.0 issue #6 |
+| D29 | Typed metric-v2 analysis boundary | Separate closed domain model and finite bound-SQL compiler; preserve metric-v1 reports | Accepted for 1.0 issue #24 |
 
 ## D01. MVP interface
 
@@ -987,3 +988,72 @@ same/different-payload reuse, identity-link conflict atomicity, v1 compatibility
 fresh and legacy DuckDB migration, the real loopback executable, and Debug and
 ReleaseSafe gates. The public Caddy allowlist and operational route inventory
 must change in the same release.
+
+## D29. Separate closed metric-v2 query model and finite compiler
+
+**Status:** Accepted for Analytico 1.0 issue #24
+
+**Date:** 2026-08-22
+
+**Issue:** #24
+
+### Context
+
+The shipped report engine is intentionally frozen at metric v1: UTC report
+dates, visitor-day identity, report-kind branching, and compatibility columns.
+Analytico 1.0 needs site-local metric v2, persistent-person coverage, scoped
+filters, selectors, Trend/Breakdown results, and canonical saved state without
+allowing user-selected SQL or silently reinterpreting the operational CLI.
+
+### Candidates
+
+| Candidate | Advantages | Costs and risks |
+| --- | --- | --- |
+| Rename/generalize `report.Kind` in place | Small initial diff and immediate reuse | Couples metric v2 to UTC/visitor-day assumptions; risks changing frozen output; still cannot express scope or canonical state cleanly |
+| General SQL AST or expression visitor | Broad future expressiveness | Creates an open query language, validation/optimization framework, larger attack surface, and abstractions with no accepted consumers |
+| Separate closed `AnalysisQuery` domain model plus finite store compiler; map current concepts to presets | Keeps metric versions honest; enum-selected reviewed plans; future screens share one bounded contract | Some local SQL/semantic duplication remains until two real consumers prove safe extraction |
+
+### Recommendation
+
+Select the separate closed model and compiler defined by
+`ANALYSIS_QUERY.md`:
+
+- Pure Zig domain types own validation, canonicalization, canonical JSON, and
+  canonical URL components. They have no database, HTTP, renderer, filesystem,
+  or clock dependency.
+- The store layer chooses from a finite metric/dimension/scope matrix and
+  composes only literal reviewed SQL fragments. Every external value is bound.
+- Metric-v2 execution uses stored site-local dates, schema-3 identity/session/
+  engagement/value facts, explicit goal resolution, exact currencies, bounded
+  result/cardinality metadata, and the existing DuckDB interrupt boundary.
+- The existing metric-v1 report API, SQL, CLI output, and compatibility columns
+  remain unchanged. Ordinary report concepts gain typed presets; specialized
+  funnel/path/retention/session/Live engines remain separate.
+- Route/calendar comparison resolution, saved Turso entities, and product UI
+  remain in their issue-backed consumers. No generic AST, ORM, cache, rollup,
+  projection, service, table, migration, or dependency is introduced.
+
+### Consequences
+
+- Metric versions cannot be selected by request text or silently coerced. A
+  query is either a validated metric-v2 plan or a typed pre-database failure.
+- Filter event/session/person scope becomes explicit and testable instead of an
+  accidental row predicate.
+- Canonical JSON/URL grammar and bounds become versioned compatibility
+  contracts for later routes, segments, and views.
+- Current report parity can be proved without forcing unsafe sharing or a
+  big-bang UI/CLI cutover.
+- Rollback removes the additive code/docs only; no store restoration or schema
+  compatibility step is required.
+
+**Affected contracts:** `SPEC.md`, `ARCHITECTURE.md`, `DATA_MODEL.md`,
+`ANALYSIS_QUERY.md`, `PERFORMANCE.md`, and `RELEASE_CONTRACT_1.0.md`.
+
+### Acceptance evidence
+
+Issue #24 must prove pure parser/canonical bounds, plan inventory and unsupported
+combination rejection, real on-disk metric-v2 semantics, scoped filters, exact
+currency behavior, current report preset/parity, timeout/interrupt reuse, and
+Debug/ReleaseSafe gates. Later issues prove route, browser, rendering, saved
+state, and specialized-analysis consumers rather than broadening this compiler
+silently.

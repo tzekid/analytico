@@ -71,6 +71,10 @@ are not passes.
 - Typed properties, exact value/currency behavior, attribution, goals, funnels,
   paths, retention, and engagement match hand-checkable fixtures. Metric
   definitions and versions appear in applicable exports.
+- Ordinary metric-v2 Trend/Breakdown state follows
+  [`ANALYSIS_QUERY.md`](ANALYSIS_QUERY.md): closed types, canonical bounded
+  serialization, explicit filter scopes, finite reviewed SQL fragments, bound
+  values, typed unsupported-state failures, and preserved metric-v1 output.
 
 ### Architecture and security
 
