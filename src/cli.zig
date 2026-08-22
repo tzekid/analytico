@@ -21,8 +21,16 @@ pub fn run(
         try initialize(allocator, io, output, args[2]);
         return true;
     }
-    if (args.len == 3 and std.mem.eql(u8, args[1], "migrate")) {
-        try ops.migrate(allocator, output, args[2]);
+    if ((args.len == 3 or args.len == 4) and
+        std.mem.eql(u8, args[1], "migrate"))
+    {
+        try ops.migrate(
+            allocator,
+            io,
+            output,
+            args[2],
+            if (args.len == 4) args[3] else null,
+        );
         return true;
     }
     if (args.len == 4 and std.mem.eql(u8, args[1], "backup")) {
@@ -108,7 +116,7 @@ pub fn run(
 pub fn writeUsage(output: *std.Io.Writer) !void {
     try output.writeAll(
         \\  analytico init <directory>
-        \\  analytico migrate <directory>
+        \\  analytico migrate <directory> [verified-pre-upgrade-backup]
         \\  analytico backup <directory> <new-backup-directory>
         \\  analytico restore <backup-directory> <new-data-directory> --verify
         \\  analytico maintain <directory> <delete-before-date>
@@ -148,7 +156,7 @@ fn reportCommand(
     const paths = try Paths.init(allocator, request.directory);
     var metadata = try meta.Store.open(allocator, paths.meta);
     defer metadata.deinit();
-    try metadata.migrate();
+    try metadata.requireCurrent();
     const site_id = try metadata.siteIdBySlug(allocator, request.site_slug);
     const selected_goal: ?meta.Goal = if (request.kind == .goal)
         try metadata.goalByName(allocator, request.site_slug, request.subject)
@@ -161,7 +169,7 @@ fn reportCommand(
 
     var event_store = try events.Store.open(allocator, paths.events);
     defer event_store.deinit();
-    try event_store.migrate();
+    try event_store.requireCurrent();
     const result = try reports.run(
         allocator,
         &event_store,
@@ -180,24 +188,43 @@ fn initialize(
     directory: []const u8,
 ) !void {
     try std.Io.Dir.cwd().createDirPath(io, directory);
+    const paths = try Paths.init(allocator, directory);
+
+    const metadata_exists = try pathExists(io, paths.meta);
+    const events_exist = try pathExists(io, paths.events);
+    if (metadata_exists != events_exist) return error.IncompleteDataDirectory;
+
+    const key_created = if (metadata_exists)
+        false
+    else
+        createKey(io, paths.key) catch |err| switch (err) {
+            error.PathAlreadyExists => false,
+            else => return err,
+        };
+    if (!key_created) {
+        var existing_key = try readKey(allocator, io, paths.key);
+        defer std.crypto.secureZero(u8, &existing_key);
+    }
+
+    var metadata = try meta.Store.open(allocator, paths.meta);
+    defer metadata.deinit();
+    if (metadata_exists) {
+        try metadata.requireCurrent();
+    } else {
+        try metadata.migrate();
+    }
+    var event_store = try events.Store.open(allocator, paths.events);
+    defer event_store.deinit();
+    if (events_exist) {
+        try event_store.requireCurrent();
+    } else {
+        try event_store.migrate();
+    }
     const temp_path = try std.fs.path.join(allocator, &.{ directory, "tmp" });
     std.Io.Dir.cwd().createDir(io, temp_path, @fromBackingInt(@intCast(0o700))) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
-    const paths = try Paths.init(allocator, directory);
-
-    const key_created = createKey(io, paths.key) catch |err| switch (err) {
-        error.PathAlreadyExists => false,
-        else => return err,
-    };
-
-    var metadata = try meta.Store.open(allocator, paths.meta);
-    defer metadata.deinit();
-    try metadata.migrate();
-    var event_store = try events.Store.open(allocator, paths.events);
-    defer event_store.deinit();
-    try event_store.migrate();
 
     try output.print(
         "initialized metadata=v{d} events=v{d} key={s}\n",
@@ -288,7 +315,7 @@ fn siteCommand(
     const paths = try Paths.init(allocator, args[3]);
     var store = try meta.Store.open(allocator, paths.meta);
     defer store.deinit();
-    try store.migrate();
+    try store.requireCurrent();
 
     if (std.mem.eql(u8, args[2], "add") and
         (args.len == 9 or args.len == 11) and
@@ -468,7 +495,7 @@ fn goalCommand(
     const paths = try Paths.init(allocator, args[3]);
     var store = try meta.Store.open(allocator, paths.meta);
     defer store.deinit();
-    try store.migrate();
+    try store.requireCurrent();
 
     if (std.mem.eql(u8, args[2], "add") and args.len == 8) {
         const id = try domain.randomUuid(io);
@@ -518,7 +545,7 @@ fn funnelCommand(
     const paths = try Paths.init(allocator, args[3]);
     var store = try meta.Store.open(allocator, paths.meta);
     defer store.deinit();
-    try store.migrate();
+    try store.requireCurrent();
 
     if (std.mem.eql(u8, args[2], "add") and args.len >= 8 and args.len <= 14) {
         var steps: std.ArrayList(meta.FunnelStepInput) = .empty;
@@ -578,7 +605,7 @@ fn eventCommand(
         const paths = try Paths.init(allocator, args[3]);
         var event_store = try events.Store.open(allocator, paths.events);
         defer event_store.deinit();
-        try event_store.migrate();
+        try event_store.requireCurrent();
         const event = if (args.len == 5)
             try event_store.latestNamed(allocator, args[4])
         else
@@ -612,7 +639,7 @@ fn eventCommand(
     const key = try readKey(allocator, io, paths.key);
     var metadata = try meta.Store.open(allocator, paths.meta);
     defer metadata.deinit();
-    try metadata.migrate();
+    try metadata.requireCurrent();
     const site_id = try metadata.siteIdBySlug(allocator, args[4]);
     const policy = try metadata.sitePolicy(allocator, site_id);
     var site_timezone = try timezone.load(
@@ -648,7 +675,7 @@ fn eventCommand(
 
     var event_store = try events.Store.open(allocator, paths.events);
     defer event_store.deinit();
-    try event_store.migrate();
+    try event_store.requireCurrent();
     try event_store.insert(.{
         .event_id = &id,
         .site_id = site_id,
@@ -681,6 +708,14 @@ const Paths = struct {
         };
     }
 };
+
+fn pathExists(io: std.Io, path: []const u8) !bool {
+    _ = std.Io.Dir.cwd().statFile(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    return true;
+}
 
 fn createKey(io: std.Io, path: []const u8) !bool {
     var key: [32]u8 = undefined;

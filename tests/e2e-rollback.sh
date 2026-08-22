@@ -42,7 +42,7 @@ backup="$fixture/pre-upgrade"
 "$previous" backup "$live" "$backup" >/dev/null
 
 # Represent post-upgrade state which must not survive the operator rollback.
-"$current" migrate "$live" >/dev/null
+"$current" migrate "$live" "$backup" >/dev/null
 "$current" site timezone-set "$live" rollback UTC \
     --offline-rebucket >/dev/null
 "$current" auth configure "$live" http://localhost:4318 >/dev/null
@@ -54,7 +54,7 @@ test "$("$current" doctor "$live")" = \
 rolled_back="$fixture/rolled-back"
 "$previous" restore "$backup" "$rolled_back" --verify >/dev/null
 test "$("$previous" doctor "$rolled_back")" = \
-    "ok metadata=v1 events=v2 sites=1 goals=0 funnels=0 stored_events=1 key=ok"
+    "ok metadata=v2 events=v2 sites=1 goals=0 funnels=0 stored_events=1 key=ok"
 report=$("$previous" report "$rolled_back" rollback 2026-07-31 2026-07-31 \
     overview --format json)
 test "$report" = \

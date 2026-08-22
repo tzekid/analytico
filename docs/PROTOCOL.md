@@ -4,8 +4,9 @@
 > Protocol v2 is the additive collector/storage foundation defined by D28.
 > Protocol-v2 tracker anonymous identity, `identify()`, `reset()`, 30-minute
 > client session rotation, explicit site timezone bucketing, and typed property
-> storage/query primitives are implemented. SPA/engagement and the remaining
-> metric-v2 migration work continue through issues #12–#13.
+> storage/query primitives are implemented. Exact legacy migration and
+> mixed-data coverage are implemented by issue #13; SPA/engagement continues
+> through issue #12 and later product queries remain separately issue-backed.
 
 Breaking changes require a new protocol version. They do not reinterpret
 accepted v1 events or metric-v1 visitor-day semantics.

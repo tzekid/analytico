@@ -52,7 +52,9 @@ DROP TABLE auth_users;
 DROP TABLE auth_config;
 DELETE FROM meta_migrations WHERE version >= 2;
 SQL
-"$binary" migrate "$legacy" >"$fixture/upgrade.txt"
+legacy_backup="$fixture/legacy-backup"
+"$binary" backup "$legacy" "$legacy_backup" >/dev/null
+"$binary" migrate "$legacy" "$legacy_backup" >"$fixture/upgrade.txt"
 grep -Fq 'metadata=v3 events=v3' "$fixture/upgrade.txt"
 "$binary" site timezone-set "$legacy" preserved UTC >/dev/null
 "$binary" site list "$legacy" | grep -Fq $'preserved\t'

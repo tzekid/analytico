@@ -90,9 +90,9 @@ pub const Store = struct {
     }
 
     pub fn migrate(self: *Store) !void {
+        try self.enableForeignKeys();
         var diagnostics = turso.Diagnostics{};
         _ = self.connection.execBatch(
-            \\PRAGMA foreign_keys = ON;
             \\CREATE TABLE IF NOT EXISTS meta_migrations (
             \\  version INTEGER PRIMARY KEY,
             \\  name TEXT NOT NULL,
@@ -262,9 +262,22 @@ pub const Store = struct {
     }
 
     pub fn requireCurrent(self: *Store) !void {
+        try self.enableForeignKeys();
         const current = try self.migrationVersion();
         if (current > schema_version) return error.NewerMetadataSchema;
         if (current < schema_version) return error.MetadataMigrationRequired;
+    }
+
+    fn enableForeignKeys(self: *Store) !void {
+        var diagnostics = turso.Diagnostics{};
+        _ = self.connection.exec(
+            "PRAGMA foreign_keys = ON",
+            &.{},
+            .{ .diagnostics = &diagnostics },
+        ) catch |err| {
+            std.log.err("metadata connection setup failed: {s}", .{diagnostics.text()});
+            return err;
+        };
     }
 
     pub fn checkpoint(self: *Store) !void {

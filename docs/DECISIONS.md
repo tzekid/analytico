@@ -34,8 +34,8 @@ semantic, or application state model is consequential and must be added here.
 | D23 | Private dashboard authentication | Passkey-only owner gate after staged Basic Auth cutover | Accepted and deployed |
 | D24 | Public and dashboard URL topology | One canonical hostname with strict path routing | Accepted and deployed |
 | D25 | Dashboard functional-quality pass | Separate native state transitions with minimal enhancement | Accepted for U1 |
-| D26 | 1.0 identity and sessions | Persistent first-party anonymous identity, explicit identify/reset, cross-midnight client sessions | Accepted for 1.0; #6–#9 implemented, legacy migration pending |
-| D27 | 1.0 site-local time | Explicit IANA zone with bounded host-TZif reader and stored local dates | Accepted; issue #11 implementation, issue #13 release evidence |
+| D26 | 1.0 identity and sessions | Persistent first-party anonymous identity, explicit identify/reset, cross-midnight client sessions | Accepted for 1.0; implemented by #6–#9 and #13 |
+| D27 | 1.0 site-local time | Explicit IANA zone with bounded host-TZif reader and stored local dates | Accepted; implemented by #11 with #13 migration evidence |
 | D28 | Protocol-v2 and event-schema-3 foundation | Separate bounded route, explicit identity quality, single-writer idempotency, transactional schema swap | Accepted for 1.0 issue #6 |
 
 ## D01. MVP interface
@@ -708,7 +708,7 @@ exploration images are non-binding.
 **Status:** Accepted for Analytico 1.0; collector/schema (#6), tracker
 anonymous identity/`reset()` (#7), and 30-minute client session rotation (#8)
 implemented; explicit identify/conflict/person resolution (#9) implemented;
-legacy identity migration remains pending
+exact legacy identity migration and mixed-data coverage implemented by #13
 
 **Date:** 2026-08-21
 
@@ -767,6 +767,17 @@ compatibility; new/returning classification, retention, user profiles, and
 cross-session visitor funnels exclude incompatible rows or expose an explicit
 coverage-limited result.
 
+The upgrade is an explicit offline operation. A candidate may create and
+verify a schema-2 backup using the existing manifest format, but it must not
+rewrite legacy stores through `report`, `site`, `event`, authentication, or
+other ordinary commands. Migration requires the matching verified database
+pair, checks conservative free space, validates the complete preserved-field
+mapping before the table swap, and keeps the backup usable by the v0.3.0
+binary. Mixed-data coverage is the share of distinct canonical people with
+persistent identity among all meaningful-event people in the bounded range;
+legacy and ephemeral counts remain explicit rather than being coerced into
+persistent people.
+
 ### Consequences
 
 - D07, D08, and D21 remain authoritative for metric-v1 and legacy rows and are
@@ -798,12 +809,13 @@ real-browser persistence, storage-unavailable ephemeral marking, reset, and
 site-scoped keys. Issue #8 landed 30-minute inactivity rotation, persisted
 sequence, and cross-midnight reuse. Issue #9 landed two-browser same-user,
 shared-browser conflict/reset, derived person/latest-trait, and transactional
-store-failure evidence. Legacy identity migration remains target behavior until
-issue #13 lands.
+store-failure evidence. Issue #13 lands the exact v0.3.0 upgrade, legacy
+isolation, mixed coverage, interruption/retry, and database-pair rollback.
 
 ## D27. Explicit site-local dates through bounded TZif parsing
 
-**Status:** Accepted for Analytico 1.0; implemented by issue #11, with final migration evidence owned by issue #13
+**Status:** Accepted for Analytico 1.0; implemented by issue #11 with exact
+migration evidence from issue #13
 
 **Date:** 2026-08-21
 
@@ -875,11 +887,11 @@ root, defaulting to `/usr/share/zoneinfo`:
 
 ### Acceptance evidence
 
-Issues #6, #11, and #13 must cover bounded pure-parser fixtures, real zoneinfo,
+Issues #6, #11, and #13 cover bounded pure-parser fixtures, real zoneinfo,
 UTC and Europe/Berlin across DST and leap day, invalid/traversal/missing/corrupt
 zones, local range boundaries, ingestion stability, locked-zone behavior,
-legacy backfill, repeated migration, and database-pair rollback. Until that
-evidence lands, UTC remains the shipped reporting behavior.
+legacy backfill, repeated migration, and database-pair rollback. Issues #11 and
+#13 land that evidence without changing frozen metric-v1 dates.
 
 ## D28. Protocol-v2 route and event-schema-3 foundation
 
@@ -942,12 +954,15 @@ identity end-to-end acceptance.
 Migration 3 uses one transactional create/backfill/swap and retains the two
 metric-v1 visitor-day compatibility facts until their queries are retired.
 Legacy rows receive protocol/tracker version 1, `legacy_daily`, occurrence equal
-to receipt, deterministic day-scoped synthetic anonymous identity, and their
-existing event/session/data bytes. Migration 3 initially records the shipped
-UTC date and offset zero. This is a labeled compatibility value until issue
-#11's explicit-zone rebucket replaces it; issue #13 owns the remaining backup,
-mixed-quality, repeated-migration, and rollback evidence before metric v2 uses
-those columns.
+to receipt, a namespaced tuple-derived synthetic anonymous UUID, and their
+existing event/session/data bytes. Before dropping the source table, the
+transaction proves exact preserved rows and session IDs, one anonymous
+identity per legacy day group, no cross-group identity reuse, and no identity
+links. The same backfill directly derives sequence from stored session order.
+Migration 3 initially records the shipped UTC date and offset zero. This is a
+labeled compatibility value until issue #11's explicit-zone rebucket replaces
+it; issue #13 provides the backup, mixed-quality, repeated-migration, and
+rollback evidence required before metric v2 uses those columns.
 
 ### Wire and storage boundary
 

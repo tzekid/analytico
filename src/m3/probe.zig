@@ -409,6 +409,49 @@ pub fn legacyVerify(
     try output.writeAll("legacy event schema v1 migrated to v3\n");
 }
 
+pub fn legacyEvidence(
+    allocator: std.mem.Allocator,
+    output: *std.Io.Writer,
+    directory: []const u8,
+) !void {
+    const event_path = try std.fs.path.join(allocator, &.{ directory, "events.duckdb" });
+    var store = try events.Store.open(allocator, event_path);
+    defer store.deinit();
+    try std.json.Stringify.value(
+        try store.legacyMigrationEvidence(allocator),
+        .{},
+        output,
+    );
+    try output.writeByte('\n');
+}
+
+pub fn identityCoverage(
+    allocator: std.mem.Allocator,
+    output: *std.Io.Writer,
+    directory: []const u8,
+    site_id: []const u8,
+    start_local_date: []const u8,
+    end_local_date: []const u8,
+) !void {
+    const event_path = try std.fs.path.join(allocator, &.{ directory, "events.duckdb" });
+    var store = try events.Store.open(allocator, event_path);
+    defer store.deinit();
+    try store.requireCurrent();
+    try std.json.Stringify.value(
+        try reports.identityCoverage(
+            allocator,
+            &store,
+            site_id,
+            start_local_date,
+            end_local_date,
+            2_000,
+        ),
+        .{},
+        output,
+    );
+    try output.writeByte('\n');
+}
+
 const FixtureEvent = struct {
     id: []const u8,
     at: i64,

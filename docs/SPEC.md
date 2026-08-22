@@ -18,9 +18,10 @@
   implements explicit identify, conflict handling, and derived person/trait
   resolution. Issue #10 implements typed property canonicalization and bounded
   DuckDB property primitives, while issue #11 implements explicit TZif-backed
-  local dates. Issues #12–#13 still own SPA behavior and the remaining migration
-  evidence; schema 3 does not retroactively turn visitor-days into people or
-  claim site-local metric v2 is complete.
+  local dates. Issue #13 implements the exact legacy migration and mixed-data
+  coverage evidence, while issue #12 still owns SPA and engagement behavior.
+  Schema 3 does not retroactively turn visitor-days into people or claim the
+  later metric-v2 product queries are complete.
 - The current server-rendered `/admin` dashboard and optional HTMX enhancement
   shipped after M4. HTML, native navigation, and ordinary forms remain the
   application baseline.

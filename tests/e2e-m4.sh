@@ -170,7 +170,9 @@ legacy_dir="$fixture_root/interrupted-migration"
 "$binary" init "$legacy_dir" >/dev/null
 mv "$legacy_dir/events.duckdb" "$legacy_dir/events.initial-v2"
 "$binary" m4 legacy-million "$legacy_dir" >/dev/null
-"$binary" migrate "$legacy_dir" \
+legacy_backup="$fixture_root/interrupted-migration-backup"
+"$binary" backup "$legacy_dir" "$legacy_backup" >/dev/null
+"$binary" migrate "$legacy_dir" "$legacy_backup" \
     >"$fixture_root/migrate.stdout" 2>"$fixture_root/migrate.stderr" &
 migration_pid=$!
 for _ in {1..100}; do
@@ -189,7 +191,8 @@ if wait "$migration_pid" 2>/dev/null; then
     echo "interrupted migration unexpectedly exited successfully" >&2
     exit 1
 fi
-test "$("$binary" migrate "$legacy_dir")" = "migrated metadata=v3 events=v3"
+test "$("$binary" migrate "$legacy_dir" "$legacy_backup")" = \
+    "migrated metadata=v3 events=v3"
 test "$("$binary" doctor "$legacy_dir")" = \
     "ok metadata=v3 events=v3 sites=0 goals=0 funnels=0 stored_events=1000000 key=ok"
 

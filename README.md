@@ -157,6 +157,13 @@ zig build e2e-properties -Doptimize=ReleaseSafe
 zig build bench-properties -Doptimize=ReleaseSafe
 ```
 
+Run the exact published v0.3.0 schema-2 upgrade, mixed-identity coverage,
+backup/restore, and old-binary rollback gate with:
+
+```sh
+zig build e2e-legacy-migration -Doptimize=ReleaseSafe
+```
+
 Run the complete report semantics and million-event performance gates with:
 
 ```sh

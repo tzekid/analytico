@@ -141,6 +141,27 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
     if (args.len == 4 and
+        std.mem.eql(u8, args[1], "m3") and
+        std.mem.eql(u8, args[2], "legacy-evidence"))
+    {
+        try m3_probe.legacyEvidence(allocator, output, args[3]);
+        return;
+    }
+    if (args.len == 7 and
+        std.mem.eql(u8, args[1], "m3") and
+        std.mem.eql(u8, args[2], "identity-coverage"))
+    {
+        try m3_probe.identityCoverage(
+            allocator,
+            output,
+            args[3],
+            args[4],
+            args[5],
+            args[6],
+        );
+        return;
+    }
+    if (args.len == 4 and
         std.mem.eql(u8, args[1], "m0") and
         std.mem.eql(u8, args[2], "verify"))
     {
@@ -178,6 +199,8 @@ pub fn main(init: std.process.Init) !void {
         \\  analytico m3 timeout <directory>
         \\  analytico m3 legacy-create <directory>
         \\  analytico m3 legacy-verify <directory>
+        \\  analytico m3 legacy-evidence <directory>
+        \\  analytico m3 identity-coverage <directory> <site-id> <start-local-date> <end-local-date>
         \\  analytico m4 legacy-million <directory>
         \\  analytico m4 poison-newer <directory> <metadata|events>
         \\

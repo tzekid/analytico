@@ -165,7 +165,7 @@ fn openMetadata(
     const path = try std.fs.path.join(allocator, &.{ directory, "meta.db" });
     var metadata = try meta.Store.open(allocator, path);
     errdefer metadata.deinit();
-    try metadata.migrate();
+    try metadata.requireCurrent();
     return metadata;
 }
 

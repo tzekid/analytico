@@ -6,6 +6,52 @@ const events = @import("events.zig");
 const meta = @import("meta.zig");
 
 const deadline_milliseconds: u32 = 2_000;
+
+pub const IdentityCoverage = struct {
+    total_people: i64,
+    persistent_people: i64,
+    ephemeral_people: i64,
+    legacy_people: i64,
+    persistent_basis_points: u16,
+    persistent_since_local_date: ?[]u8,
+};
+
+const identity_coverage_sql: [:0]const u8 =
+    \\WITH meaningful AS (
+    \\  SELECT e.site_local_date, e.anonymous_id, e.identity_quality,
+    \\         COALESCE(l.user_id, '') AS linked_user_id
+    \\  FROM events e
+    \\  LEFT JOIN identity_links l
+    \\    ON l.site_id = e.site_id AND l.anonymous_id = e.anonymous_id
+    \\  WHERE e.site_id = ?
+    \\    AND e.site_local_date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
+    \\    AND e.kind IN (1, 2)
+    \\    AND e.device_category <> 'bot'
+    \\), people AS (
+    \\  SELECT DISTINCT CASE
+    \\    WHEN identity_quality = 1 AND linked_user_id != ''
+    \\      THEN 'u:' || linked_user_id
+    \\    WHEN identity_quality = 1
+    \\      THEN 'a:' || CAST(anonymous_id AS VARCHAR)
+    \\    WHEN identity_quality = 2
+    \\      THEN 'e:' || CAST(anonymous_id AS VARCHAR)
+    \\    WHEN identity_quality = 3
+    \\      THEN 'l:' || CAST(anonymous_id AS VARCHAR)
+    \\    ELSE NULL
+    \\  END AS canonical_key, identity_quality
+    \\  FROM meaningful
+    \\)
+    \\SELECT count(*),
+    \\       count(*) FILTER (WHERE identity_quality = 1),
+    \\       count(*) FILTER (WHERE identity_quality = 2),
+    \\       count(*) FILTER (WHERE identity_quality = 3),
+    \\       (SELECT CAST(min(site_local_date) AS VARCHAR)
+    \\        FROM events
+    \\        WHERE site_id = ? AND kind IN (1, 2)
+    \\          AND device_category <> 'bot' AND identity_quality = 1)
+    \\FROM people
+    \\WHERE canonical_key IS NOT NULL
+;
 const session_cte =
     \\WITH filtered_all AS (
     \\  SELECT * FROM events
@@ -338,6 +384,66 @@ pub fn run(
         funnel_steps,
         deadline_milliseconds,
     );
+}
+
+pub fn identityCoverage(
+    allocator: std.mem.Allocator,
+    event_store: *events.Store,
+    site_id: []const u8,
+    start_local_date: []const u8,
+    end_local_date: []const u8,
+    timeout_ms: u32,
+) !IdentityCoverage {
+    try domain.validateUuid(site_id);
+    try domain.validateDate(start_local_date);
+    try domain.validateDate(end_local_date);
+    const start_day = try report.dateDay(start_local_date);
+    const end_day = try report.dateDay(end_local_date);
+    if (end_day < start_day or
+        end_day - start_day + 1 > report.maximum_range_days or
+        timeout_ms == 0 or timeout_ms > deadline_milliseconds)
+    {
+        return error.InvalidIdentityCoverageRange;
+    }
+    var statement = try event_store.database.prepare(identity_coverage_sql);
+    defer statement.deinit();
+    try statement.bindText(1, site_id);
+    try statement.bindText(2, start_local_date);
+    try statement.bindText(3, end_local_date);
+    try statement.bindText(4, site_id);
+    var result = try executeDeadline(&event_store.database, &statement, timeout_ms);
+    defer result.deinit();
+    if (result.rowCount() != 1 or result.columnCount() != 5) {
+        return error.InvalidIdentityCoverageResult;
+    }
+    const total = result.int64(0, 0);
+    const persistent = result.int64(1, 0);
+    const ephemeral = result.int64(2, 0);
+    const legacy = result.int64(3, 0);
+    if (total < 0 or persistent < 0 or ephemeral < 0 or legacy < 0 or
+        persistent + ephemeral + legacy != total)
+    {
+        return error.InvalidIdentityCoverageResult;
+    }
+    const basis_points: u16 = if (total == 0)
+        0
+    else
+        @intCast(@divTrunc(
+            std.math.mul(i64, persistent, 10_000) catch
+                return error.InvalidIdentityCoverageResult,
+            total,
+        ));
+    return .{
+        .total_people = total,
+        .persistent_people = persistent,
+        .ephemeral_people = ephemeral,
+        .legacy_people = legacy,
+        .persistent_basis_points = basis_points,
+        .persistent_since_local_date = if (result.isNull(4, 0))
+            null
+        else
+            try result.text(allocator, 4, 0),
+    };
 }
 
 pub fn runWithTimeout(
