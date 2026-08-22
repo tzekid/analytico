@@ -72,6 +72,26 @@ pub const EventV2 = struct {
     event_payload_digest: []const u8,
 };
 
+pub fn canonicalPersonKey(
+    allocator: std.mem.Allocator,
+    identity_quality: u8,
+    anonymous_id: []const u8,
+    linked_user_id: []const u8,
+) ![]u8 {
+    try validateUuid(anonymous_id);
+    if (linked_user_id.len != 0) {
+        if (identity_quality != 1) return error.InvalidIdentityLinkQuality;
+        return std.fmt.allocPrint(allocator, "u:{s}", .{linked_user_id});
+    }
+    const prefix = switch (identity_quality) {
+        1 => "a:",
+        2 => "e:",
+        3 => "l:",
+        else => return error.InvalidIdentityQuality,
+    };
+    return std.fmt.allocPrint(allocator, "{s}{s}", .{ prefix, anonymous_id });
+}
+
 pub fn validateSlug(value: []const u8) !void {
     if (value.len == 0 or value.len > 48) return error.InvalidSlug;
     if (!std.ascii.isAlphanumeric(value[0]) or

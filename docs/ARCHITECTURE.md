@@ -149,15 +149,18 @@ anonymous UUID, an optional bounded application user ID, and a random client
 session UUID plus sequence. The server validates and stores those values; it
 never derives a long-lived fingerprint. The protocol-v2 tracker persists
 site-scoped anonymous identity and a session record in first-party
-`localStorage`, exposes `reset()`, and rotates the session after more than 30
-minutes of inactivity without splitting at UTC midnight. Server receipt time
-remains authoritative for acceptance and report bucketing.
+`localStorage`, exposes `identify()` and `reset()`, and rotates the session
+after more than 30 minutes of inactivity without splitting at UTC midnight.
+Identity links remain server-authoritative. Canonical people and latest traits
+are derived from links and accepted identify events rather than a mutable
+profile store. Server receipt time remains authoritative for acceptance and
+report bucketing.
 
 Protocol-v1 rows keep their daily visitor and session meaning under metric v1.
 Migration marks them `legacy_daily`, never links them across dates, and retains
 their existing session IDs. Decisions D26–D28 govern this version boundary;
-issues #9–#13 own identify, SPA, metric, timezone, and the remaining migration
-acceptance.
+issues #10–#13 own properties, SPA, metric, timezone, and the remaining
+migration acceptance.
 
 ## 6. Report flow
 

@@ -72,3 +72,19 @@ pub fn identityLinkCount(
     }
     try output.print("{d}\n", .{result.int64(0, 0)});
 }
+
+pub fn inspectPerson(
+    allocator: std.mem.Allocator,
+    output: *std.Io.Writer,
+    directory: []const u8,
+    site_id: []const u8,
+    anonymous_id: []const u8,
+) !void {
+    const path = try std.fs.path.join(allocator, &.{ directory, "events.duckdb" });
+    var store = try events.Store.open(allocator, path);
+    defer store.deinit();
+    try store.requireCurrent();
+    const person = try store.resolvePerson(allocator, site_id, anonymous_id);
+    try std.json.Stringify.value(person, .{}, output);
+    try output.writeByte('\n');
+}

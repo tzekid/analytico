@@ -79,6 +79,13 @@ pub const InspectedV2Event = struct {
     linked_user_id: []u8,
 };
 
+pub const ResolvedPerson = struct {
+    canonical_key: []u8,
+    user_id: []u8,
+    latest_traits_json: []u8,
+    linked_anonymous_ids: i64,
+};
+
 pub const Store = struct {
     database: duckdb.Database,
 
@@ -848,6 +855,80 @@ pub const Store = struct {
             .engagement_ms = result.int64(34, 0),
             .max_scroll_depth = result.int64(35, 0),
             .linked_user_id = try result.text(allocator, 36, 0),
+        };
+    }
+
+    pub fn resolvePerson(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        site_id: []const u8,
+        anonymous_id: []const u8,
+    ) !ResolvedPerson {
+        try domain.validateUuid(site_id);
+        try domain.validateUuid(anonymous_id);
+        var identity_statement = try self.database.prepare(
+            \\SELECT e.identity_quality, COALESCE(l.user_id, '')
+            \\FROM events e
+            \\LEFT JOIN identity_links l
+            \\  ON l.site_id = e.site_id AND l.anonymous_id = e.anonymous_id
+            \\WHERE e.site_id = ? AND e.anonymous_id = CAST(? AS UUID)
+            \\ORDER BY e.occurred_at_utc_micros DESC, e.sequence DESC,
+            \\         e.received_at_utc_micros DESC, e.event_id DESC
+            \\LIMIT 1
+        );
+        defer identity_statement.deinit();
+        try identity_statement.bindText(1, site_id);
+        try identity_statement.bindText(2, anonymous_id);
+        var identity = try identity_statement.execute();
+        defer identity.deinit();
+        if (identity.rowCount() != 1 or identity.columnCount() != 2) {
+            return error.PersonNotFound;
+        }
+        const identity_quality: u8 = @intCast(identity.int64(0, 0));
+        const user_id = try identity.text(allocator, 1, 0);
+        const canonical_key = try domain.canonicalPersonKey(
+            allocator,
+            identity_quality,
+            anonymous_id,
+            user_id,
+        );
+        if (user_id.len == 0) {
+            return .{
+                .canonical_key = canonical_key,
+                .user_id = user_id,
+                .latest_traits_json = try allocator.dupe(u8, "{}"),
+                .linked_anonymous_ids = 0,
+            };
+        }
+
+        var profile_statement = try self.database.prepare(
+            \\SELECT
+            \\  COALESCE((
+            \\    SELECT e.user_traits_json
+            \\    FROM events e
+            \\    WHERE e.site_id = ? AND e.kind = 4 AND e.user_id = ?
+            \\    ORDER BY e.occurred_at_utc_micros DESC, e.sequence DESC,
+            \\             e.received_at_utc_micros DESC, e.event_id DESC
+            \\    LIMIT 1
+            \\  ), '{}'),
+            \\  (SELECT count(*) FROM identity_links l
+            \\   WHERE l.site_id = ? AND l.user_id = ?)
+        );
+        defer profile_statement.deinit();
+        try profile_statement.bindText(1, site_id);
+        try profile_statement.bindText(2, user_id);
+        try profile_statement.bindText(3, site_id);
+        try profile_statement.bindText(4, user_id);
+        var profile = try profile_statement.execute();
+        defer profile.deinit();
+        if (profile.rowCount() != 1 or profile.columnCount() != 2) {
+            return error.InvalidPersonProfile;
+        }
+        return .{
+            .canonical_key = canonical_key,
+            .user_id = user_id,
+            .latest_traits_json = try profile.text(allocator, 0, 0),
+            .linked_anonymous_ids = profile.int64(1, 0),
         };
     }
 

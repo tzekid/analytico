@@ -7,8 +7,9 @@
 > zero-persistent-storage tracker rule for new compatible events. The 1.0 target
 > keeps zero dependencies and a tracker-v2 budget below 5 KiB Brotli. Issue #7
 > bounds identity storage to two site-scoped `localStorage` keys, and issue #8
-> stores a bounded session JSON record. Issues #9 and #12 still add identify
-> and measured SPA/engagement size.
+> stores a bounded session JSON record. Issue #9 adds the optional identified
+> key and measures `identify()`; issue #12 still owns measured SPA/engagement
+> size.
 
 The numbers in this file are budgets, not claims. M0 records the first measured
 baseline on the target VPS. A release passes both the absolute budget and the
@@ -133,13 +134,14 @@ The embedding page loads it with `defer`; analytics failure cannot delay or
 break the host page's useful HTML.
 
 Protocol-v1 retains the zero-storage contract at `/tracker.aef65945.js`.
-Protocol-v2 identity storage is two site-scoped `localStorage` keys:
+Protocol-v2 identity storage is two required site-scoped `localStorage` keys:
 `anl:<site-uuid>:a` (anonymous UUID) and `anl:<site-uuid>:s` (JSON session
-record `{id,last_activity_ms,sequence}`), plus an optional later identified-user
-key cleared by `reset()`. Sessions rotate after more than 30 minutes of
-inactivity. Issues #9 and #12 add identify and SPA/engagement without new
+record `{id,last_activity_ms,sequence}`), plus optional identified-user key
+`anl:<site-uuid>:u`, cleared by `reset()`. The identified key stores the first
+user ID only; traits are not duplicated in the browser. Sessions rotate after
+more than 30 minutes of inactivity. Issue #12 adds SPA/engagement without new
 dependencies. The v2 minified/Brotli budgets remain ≤ 3 KiB / ≤ 1.5 KiB until
-those issues prove a new measured ceiling below 5 KiB Brotli.
+that issue proves a new measured ceiling below 5 KiB Brotli.
 
 ### M2 measured baseline
 

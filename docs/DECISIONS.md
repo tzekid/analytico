@@ -34,7 +34,7 @@ semantic, or application state model is consequential and must be added here.
 | D23 | Private dashboard authentication | Passkey-only owner gate after staged Basic Auth cutover | Accepted and deployed |
 | D24 | Public and dashboard URL topology | One canonical hostname with strict path routing | Accepted and deployed |
 | D25 | Dashboard functional-quality pass | Separate native state transitions with minimal enhancement | Accepted for U1 |
-| D26 | 1.0 identity and sessions | Persistent first-party anonymous identity, explicit identify/reset, cross-midnight client sessions | Accepted for 1.0; implementation pending |
+| D26 | 1.0 identity and sessions | Persistent first-party anonymous identity, explicit identify/reset, cross-midnight client sessions | Accepted for 1.0; #6–#9 implemented, legacy migration pending |
 | D27 | 1.0 site-local time | Explicit IANA zone with bounded host-TZif reader and stored local dates | Accepted for 1.0; implementation pending |
 | D28 | Protocol-v2 and event-schema-3 foundation | Separate bounded route, explicit identity quality, single-writer idempotency, transactional schema swap | Accepted for 1.0 issue #6 |
 
@@ -707,7 +707,8 @@ exploration images are non-binding.
 
 **Status:** Accepted for Analytico 1.0; collector/schema (#6), tracker
 anonymous identity/`reset()` (#7), and 30-minute client session rotation (#8)
-implemented; identify and legacy identity migration remain pending
+implemented; explicit identify/conflict/person resolution (#9) implemented;
+legacy identity migration remains pending
 
 **Date:** 2026-08-21
 
@@ -746,10 +747,15 @@ Select the random first-party design for protocol-v2 compatible events:
 - `identify(user_id, traits)` accepts bounded untrusted application data. One
   anonymous ID may link to at most one user until `reset()` creates a new
   anonymous and session ID. Repeating the same link is idempotent; a different
-  user without reset is rejected as `identity_conflict` and never merged.
+  user without reset is rejected as `identity_conflict` and never merged. The
+  tracker does not overwrite its first local identified-user state with the
+  conflicting ID; DuckDB links, not browser state, remain authoritative.
 - One user ID may link multiple anonymous IDs only through explicit equal IDs.
   Anonymous devices are never joined by inference. User IDs and traits are not
   authentication or authorization inputs.
+- Canonical person keys and latest bounded traits are derived from accepted
+  links and identify events. No mutable profile table or inferred identity
+  graph is introduced.
 - No tracker cookie, raw IP, full user agent, fingerprint API, cross-site
   identifier, or claim that an anonymous ID equals a real person is introduced.
 
@@ -768,6 +774,9 @@ coverage-limited result.
 - DuckDB event schema 3 and `identity_links` remain inside the single owning
   process. Turso does not query them. The browser tracker gains no dependency
   or background communication primitive.
+- A new tracker revision receives a new content-hashed path. Every previously
+  published immutable tracker path continues to serve its exact original bytes;
+  only the short-cache alias advances.
 - Identity, traits, storage, payload, sequence, and conflict work is bounded
   and output-escaped. The existing origin, CSRF, passkey, SQL, and raw-request
   privacy boundaries remain in force.
@@ -787,8 +796,10 @@ and database-pair rollback through the real tracker, collector, executable,
 and on-disk stores. Issue #6 landed collector/schema evidence. Issue #7 landed
 real-browser persistence, storage-unavailable ephemeral marking, reset, and
 site-scoped keys. Issue #8 landed 30-minute inactivity rotation, persisted
-sequence, and cross-midnight reuse. Identify and legacy identity migration
-remain target behavior until their issues land.
+sequence, and cross-midnight reuse. Issue #9 landed two-browser same-user,
+shared-browser conflict/reset, derived person/latest-trait, and transactional
+store-failure evidence. Legacy identity migration remains target behavior until
+issue #13 lands.
 
 ## D27. Explicit site-local dates through bounded TZif parsing
 
@@ -917,8 +928,9 @@ the transactional insert. The same `(site_id,event_id)` and digest returns
 `204` without another row; any other reuse returns fixed `409`. The digest is an
 internal schema column, not user data. A v2 identify link and event commit in
 one transaction. The first accepted `(site_id,session_id)` event is marked as
-the session start. Issue #9 still owns identify, profile resolution, and its
-remaining end-to-end acceptance.
+the session start. Issue #9 supplies the tracker identify API, stable identity
+conflict classification, derived person/latest-trait resolution, and remaining
+identity end-to-end acceptance.
 
 Migration 3 uses one transactional create/backfill/swap and retains the two
 metric-v1 visitor-day compatibility facts until their queries are retired.

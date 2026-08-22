@@ -24,7 +24,7 @@ function html(site) {
 <meta charset="utf-8">
 <title>Analytico identity fixture</title>
 <main><h1>Useful server-rendered state</h1><p>${site}</p></main>
-<script defer src="${collector}/tracker.78135195.js" data-site="${site}"></script>
+<script defer src="${collector}/tracker.d9e94247.js" data-site="${site}"></script>
 </html>`;
 }
 
@@ -72,6 +72,22 @@ function nextV2(page) {
   ]).then(([request]) => eventBody(request));
 }
 
+function nextV2Result(page, status) {
+  return Promise.all([
+    page.waitForRequest(
+      (request) =>
+        request.url() === `${collector}/v2/event` && request.method() === "POST",
+    ),
+    page.waitForResponse(
+      (response) =>
+        response.url() === `${collector}/v2/event` &&
+        response.status() === status,
+    ),
+  ]).then(([request]) => ({
+    event: eventBody(request),
+  }));
+}
+
 function assertUuid(value, label) {
   assert.match(value, UUID, `${label} is a UUID v4`);
 }
@@ -103,6 +119,7 @@ async function storageKeys(page, site) {
 async function verifyPersistenceAndReset() {
   const browser = await launch();
   try {
+    let unlinked;
     const context = await browser.newContext();
     const page = await context.newPage();
     let accepted = nextV2(page);
@@ -183,6 +200,7 @@ async function verifyPersistenceAndReset() {
       assert.equal(otherSite.site, siteB);
       assert.equal(otherSite.identity_quality, "persistent");
       assert.notEqual(otherSite.anonymous_id, afterReset.anonymous);
+      unlinked = { site: siteB, anonymous: otherSite.anonymous_id };
       const both = await restoredPage.evaluate(
         ([a, b]) => ({
           a: [`anl:${a}:a`, `anl:${a}:s`],
@@ -196,6 +214,7 @@ async function verifyPersistenceAndReset() {
     } finally {
       await restoredBrowser.close();
     }
+    return unlinked;
   } catch (error) {
     await browser.close().catch(() => {});
     throw error;
@@ -279,6 +298,128 @@ async function verifySessionRotation() {
   }
 }
 
+async function verifyIdentifyAndConflict() {
+  const browserA = await launch();
+  const browserB = await launch();
+  try {
+    const contextA = await browserA.newContext();
+    const pageA = await contextA.newPage();
+    let accepted = nextV2(pageA);
+    await pageA.goto(`${fixtureOrigin}/a-identify?utm_source=campaign`, {
+      waitUntil: "load",
+      referer: `${fixtureOrigin}/source`,
+    });
+    const firstA = await accepted;
+
+    let result = nextV2Result(pageA, 204);
+    await pageA.evaluate(() => {
+      window.analytico.identify("user_A", { plan: "basic" });
+    });
+    const identifyA = await result;
+    assert.equal(identifyA.event.type, "identify");
+    assert.equal(identifyA.event.user.id, "user_A");
+    assert.deepEqual(identifyA.event.user.traits, { plan: "basic" });
+    assert.equal("referrer" in identifyA.event, false);
+    assert.equal("utm" in identifyA.event, false);
+    assert.equal((await storageKeys(pageA, siteA)).identified, "user_A");
+
+    result = nextV2Result(pageA, 204);
+    await pageA.evaluate(() => {
+      window.analytico.identify("user_A", { plan: "pro", seats: 2 });
+    });
+    const repeatedA = await result;
+    assert.equal(repeatedA.event.anonymous_id, firstA.anonymous_id);
+    assert.equal((await storageKeys(pageA, siteA)).identified, "user_A");
+
+    const contextB = await browserB.newContext();
+    const pageB = await contextB.newPage();
+    accepted = nextV2(pageB);
+    await pageB.goto(`${fixtureOrigin}/a-device-two`, { waitUntil: "load" });
+    const firstB = await accepted;
+    assert.notEqual(firstB.anonymous_id, firstA.anonymous_id);
+    await pageB.waitForTimeout(5);
+    result = nextV2Result(pageB, 204);
+    await pageB.evaluate(() => {
+      window.analytico.identify("user_A", {
+        device: "second",
+        plan: "business",
+      });
+    });
+    const identifyB = await result;
+    assert.equal((await storageKeys(pageB, siteA)).identified, "user_A");
+
+    result = nextV2Result(pageA, 409);
+    await pageA.evaluate(() => {
+      window.analytico.identify("user_B", { plan: "wrong" });
+    });
+    const conflict = await result;
+    assert.equal(conflict.event.anonymous_id, firstA.anonymous_id);
+    assert.equal(conflict.event.user.id, "user_B");
+    assert.equal((await storageKeys(pageA, siteA)).identified, "user_A");
+
+    await pageA.evaluate(() => window.analytico.reset());
+    const resetState = await storageKeys(pageA, siteA);
+    assert.notEqual(resetState.anonymous, firstA.anonymous_id);
+    assert.notEqual(resetState.session, firstA.session_id);
+    assert.equal(resetState.identified, null);
+    result = nextV2Result(pageA, 204);
+    await pageA.evaluate(() => {
+      window.analytico.identify("user_B", { plan: "personal" });
+    });
+    const identifyAfterReset = await result;
+    assert.equal(identifyAfterReset.event.anonymous_id, resetState.anonymous);
+    assert.equal((await storageKeys(pageA, siteA)).identified, "user_B");
+
+    const beforePendingReset = await storageKeys(pageA, siteA);
+    result = nextV2Result(pageA, 204);
+    await pageA.evaluate(() => {
+      window.analytico.identify("user_B", { plan: "personal" });
+      window.analytico.reset();
+    });
+    await result;
+    const afterPendingReset = await storageKeys(pageA, siteA);
+    assert.notEqual(afterPendingReset.anonymous, beforePendingReset.anonymous);
+    assert.notEqual(afterPendingReset.session, beforePendingReset.session);
+    assert.equal(afterPendingReset.identified, null);
+
+    let invalidRequests = 0;
+    const countInvalid = (request) => {
+      if (request.url() === `${collector}/v2/event`) invalidRequests++;
+    };
+    pageA.on("request", countInvalid);
+    await pageA.evaluate(() => {
+      window.analytico.identify("bad\u0001user", {});
+      window.analytico.identify("x".repeat(161), {});
+      window.analytico.identify("user_B", { nested: {} });
+      window.analytico.identify("user_B", { long: "x".repeat(513) });
+      const cyclic = {};
+      cyclic.self = cyclic;
+      window.analytico.identify("user_B", cyclic);
+    });
+    await pageA.waitForTimeout(20);
+    pageA.off("request", countInvalid);
+    assert.equal(invalidRequests, 0);
+    assert.equal((await storageKeys(pageA, siteA)).identified, null);
+
+    await contextB.close();
+    await contextA.close();
+    return {
+      site: siteA,
+      anonymous_a: firstA.anonymous_id,
+      anonymous_b: firstB.anonymous_id,
+      anonymous_after_reset: resetState.anonymous,
+      identify_a_event: identifyA.event.event_id,
+      repeat_a_event: repeatedA.event.event_id,
+      identify_b_event: identifyB.event.event_id,
+      conflict_event: conflict.event.event_id,
+      reset_user_event: identifyAfterReset.event.event_id,
+    };
+  } finally {
+    await browserB.close();
+    await browserA.close();
+  }
+}
+
 async function verifyStorageException() {
   const browser = await launch();
   try {
@@ -306,6 +447,7 @@ async function verifyStorageException() {
       "function",
     );
     await context.close();
+    return { site: siteA, anonymous: event.anonymous_id };
   } finally {
     await browser.close();
   }
@@ -317,6 +459,11 @@ async function verifyRandomValuesFallback() {
     const context = await browser.newContext();
     await context.addInitScript(() => {
       Object.defineProperty(crypto, "randomUUID", { value: undefined });
+      Object.defineProperty(navigator, "sendBeacon", {
+        value() {
+          throw new Error("blocked");
+        },
+      });
     });
     const page = await context.newPage();
     const accepted = nextV2(page);
@@ -337,9 +484,10 @@ async function main() {
     server.listen(fixturePort, "127.0.0.1", resolve);
   });
   try {
-    await verifyPersistenceAndReset();
+    const unlinked = await verifyPersistenceAndReset();
     await verifySessionRotation();
-    await verifyStorageException();
+    const identify = await verifyIdentifyAndConflict();
+    const ephemeral = await verifyStorageException();
     await verifyRandomValuesFallback();
     process.stdout.write(
       JSON.stringify({
@@ -352,9 +500,19 @@ async function main() {
         reset_cleared_identified_key: true,
         distinct_site_keys: true,
         uuid_getRandomValues_fallback: true,
+        beacon_exception_fetch_fallback: true,
         session_reused_at_30_minutes: true,
         session_rotates_after_30_minutes: true,
         session_survives_utc_midnight: true,
+        two_browser_same_user: true,
+        repeated_same_user_link: true,
+        shared_browser_conflict_rejected: true,
+        reset_allows_new_user: true,
+        invalid_identify_host_survived: true,
+        reset_safe_with_pending_identify: true,
+        unlinked,
+        ephemeral,
+        identify,
       }) + "\n",
     );
   } finally {

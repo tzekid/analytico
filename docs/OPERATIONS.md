@@ -116,8 +116,8 @@ Replace `analytics.example` in `deploy/Caddyfile`, then validate and install it:
 caddy validate --config deploy/Caddyfile
 ```
 
-The vhost exposes `/tracker.aef65945.js`, `/tracker.78135195.js`, `/tracker.js`,
-`/v1/event`,
+The vhost exposes `/tracker.aef65945.js`, `/tracker.fb64c486.js`,
+`/tracker.78135195.js`, `/tracker.d9e94247.js`, `/tracker.js`, `/v1/event`,
 `/v2/event`, `/v1/p.gif`, `/admin`, and `/admin/*`. `/` redirects to `/admin`;
 all other paths, including health endpoints, receive `404`.
 Caddy overwrites `X-Forwarded-For` and `X-Analytico-Country` before proxying.

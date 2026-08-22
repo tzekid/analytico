@@ -18,8 +18,16 @@ const tracker_v1_gzip = @embedFile("tracker.v1.min.js.gz");
 const tracker = @embedFile("tracker.min.js");
 const tracker_br = @embedFile("tracker.min.js.br");
 const tracker_gzip = @embedFile("tracker.min.js.gz");
+const tracker_v2_anonymous = @embedFile("tracker.fb64c486.min.js");
+const tracker_v2_anonymous_br = @embedFile("tracker.fb64c486.min.js.br");
+const tracker_v2_anonymous_gzip = @embedFile("tracker.fb64c486.min.js.gz");
+const tracker_v2_sessions = @embedFile("tracker.78135195.min.js");
+const tracker_v2_sessions_br = @embedFile("tracker.78135195.min.js.br");
+const tracker_v2_sessions_gzip = @embedFile("tracker.78135195.min.js.gz");
 const tracker_v1_path = "/tracker.aef65945.js";
-const tracker_v2_path = "/tracker.78135195.js";
+const tracker_v2_anonymous_path = "/tracker.fb64c486.js";
+const tracker_v2_sessions_path = "/tracker.78135195.js";
+const tracker_v2_path = "/tracker.d9e94247.js";
 const transparent_gif =
     "GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff" ++
     "!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00" ++
@@ -350,14 +358,20 @@ fn handle(context: *Context, stream: std.Io.net.Stream) !void {
     }
     if (std.mem.eql(u8, path, "/tracker.js") or
         std.mem.eql(u8, path, tracker_v1_path) or
+        std.mem.eql(u8, path, tracker_v2_anonymous_path) or
+        std.mem.eql(u8, path, tracker_v2_sessions_path) or
         std.mem.eql(u8, path, tracker_v2_path))
     {
         if (!std.mem.eql(u8, request.method, "GET")) {
             try methodNotAllowed(output, "GET");
         } else {
             const immutable = std.mem.eql(u8, path, tracker_v1_path) or
+                std.mem.eql(u8, path, tracker_v2_anonymous_path) or
+                std.mem.eql(u8, path, tracker_v2_sessions_path) or
                 std.mem.eql(u8, path, tracker_v2_path);
             const use_v1 = std.mem.eql(u8, path, tracker_v1_path);
+            const use_v2_anonymous = std.mem.eql(u8, path, tracker_v2_anonymous_path);
+            const use_v2_sessions = std.mem.eql(u8, path, tracker_v2_sessions_path);
             const encoding = request.header("accept-encoding") catch null;
             const use_brotli = if (encoding) |value|
                 acceptsEncoding(value, "br")
@@ -402,6 +416,10 @@ fn handle(context: *Context, stream: std.Io.net.Stream) !void {
                 tracker_headers,
                 if (use_v1)
                     if (use_brotli) tracker_v1_br else if (use_gzip) tracker_v1_gzip else tracker_v1
+                else if (use_v2_anonymous)
+                    if (use_brotli) tracker_v2_anonymous_br else if (use_gzip) tracker_v2_anonymous_gzip else tracker_v2_anonymous
+                else if (use_v2_sessions)
+                    if (use_brotli) tracker_v2_sessions_br else if (use_gzip) tracker_v2_sessions_gzip else tracker_v2_sessions
                 else if (use_brotli)
                     tracker_br
                 else if (use_gzip)
@@ -608,7 +626,11 @@ fn postEventV2(
             error.EventWriteFailed => 500,
             else => 400,
         };
-        try reject(context, output, status);
+        if (err == error.IdentityConflict) {
+            try rejectIdentityConflict(context, output);
+        } else {
+            try reject(context, output, status);
+        }
         return;
     };
     var headers = std.Io.Writer.Allocating.init(allocator);
@@ -986,4 +1008,18 @@ fn writeError(output: *std.Io.Writer, status: u16) !void {
 fn reject(context: *Context, output: *std.Io.Writer, status: u16) !void {
     context.counters.rejected += 1;
     try writeError(output, status);
+}
+
+fn rejectIdentityConflict(
+    context: *Context,
+    output: *std.Io.Writer,
+) !void {
+    context.counters.rejected += 1;
+    try response.write(
+        output,
+        409,
+        "text/plain; charset=utf-8",
+        no_store_headers ++ "X-Analytico-Code: identity_conflict\r\n",
+        "conflict\n",
+    );
 }

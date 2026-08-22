@@ -103,16 +103,86 @@ grep -q '"distinct_site_keys":true' \
     "$fixture_dir/browser-result.json"
 grep -q '"uuid_getRandomValues_fallback":true' \
     "$fixture_dir/browser-result.json"
+grep -q '"beacon_exception_fetch_fallback":true' \
+    "$fixture_dir/browser-result.json"
 grep -q '"session_reused_at_30_minutes":true' \
     "$fixture_dir/browser-result.json"
 grep -q '"session_rotates_after_30_minutes":true' \
     "$fixture_dir/browser-result.json"
 grep -q '"session_survives_utc_midnight":true' \
     "$fixture_dir/browser-result.json"
+grep -q '"two_browser_same_user":true' "$fixture_dir/browser-result.json"
+grep -q '"repeated_same_user_link":true' "$fixture_dir/browser-result.json"
+grep -q '"shared_browser_conflict_rejected":true' \
+    "$fixture_dir/browser-result.json"
+grep -q '"reset_allows_new_user":true' "$fixture_dir/browser-result.json"
+grep -q '"invalid_identify_host_survived":true' \
+    "$fixture_dir/browser-result.json"
+grep -q '"reset_safe_with_pending_identify":true' \
+    "$fixture_dir/browser-result.json"
 
 kill -TERM "$collector_pid"
 wait "$collector_pid" 2>/dev/null || true
 collector_pid=
+
+identify_site=$(jq -r '.identify.site' "$fixture_dir/browser-result.json")
+anonymous_a=$(jq -r '.identify.anonymous_a' "$fixture_dir/browser-result.json")
+anonymous_b=$(jq -r '.identify.anonymous_b' "$fixture_dir/browser-result.json")
+anonymous_after_reset=$(jq -r \
+    '.identify.anonymous_after_reset' "$fixture_dir/browser-result.json")
+conflict_event=$(jq -r '.identify.conflict_event' \
+    "$fixture_dir/browser-result.json")
+unlinked_site=$(jq -r '.unlinked.site' "$fixture_dir/browser-result.json")
+unlinked_anonymous=$(jq -r '.unlinked.anonymous' \
+    "$fixture_dir/browser-result.json")
+ephemeral_site=$(jq -r '.ephemeral.site' "$fixture_dir/browser-result.json")
+ephemeral_anonymous=$(jq -r '.ephemeral.anonymous' \
+    "$fixture_dir/browser-result.json")
+
+test "$("$binary" m2 identity-links "$fixture_dir")" = 3
+person_a=$("$binary" m2 person-inspect \
+    "$fixture_dir" "$identify_site" "$anonymous_a")
+person_b=$("$binary" m2 person-inspect \
+    "$fixture_dir" "$identify_site" "$anonymous_b")
+person_after_reset=$("$binary" m2 person-inspect \
+    "$fixture_dir" "$identify_site" "$anonymous_after_reset")
+person_unlinked=$("$binary" m2 person-inspect \
+    "$fixture_dir" "$unlinked_site" "$unlinked_anonymous")
+person_ephemeral=$("$binary" m2 person-inspect \
+    "$fixture_dir" "$ephemeral_site" "$ephemeral_anonymous")
+jq -e '
+    .canonical_key == "u:user_A" and
+    .user_id == "user_A" and
+    .latest_traits_json == "{\"device\":\"second\",\"plan\":\"business\"}" and
+    .linked_anonymous_ids == 2
+' <<<"$person_a" >/dev/null
+jq -e '
+    .canonical_key == "u:user_A" and .linked_anonymous_ids == 2
+' <<<"$person_b" >/dev/null
+jq -e '
+    .canonical_key == "u:user_B" and
+    .user_id == "user_B" and
+    .latest_traits_json == "{\"plan\":\"personal\"}" and
+    .linked_anonymous_ids == 1
+' <<<"$person_after_reset" >/dev/null
+jq -e --arg key "a:$unlinked_anonymous" '
+    .canonical_key == $key and
+    .user_id == "" and
+    .latest_traits_json == "{}" and
+    .linked_anonymous_ids == 0
+' <<<"$person_unlinked" >/dev/null
+jq -e --arg key "e:$ephemeral_anonymous" '
+    .canonical_key == $key and
+    .user_id == "" and
+    .latest_traits_json == "{}" and
+    .linked_anonymous_ids == 0
+' <<<"$person_ephemeral" >/dev/null
+if "$binary" m2 v2-inspect \
+    "$fixture_dir" "$identify_site" "$conflict_event" >/dev/null 2>&1
+then
+    echo "conflicting identify event was stored" >&2
+    exit 1
+fi
 
 doctor=$("$binary" doctor "$fixture_dir")
 [[ "$doctor" == ok\ metadata=v2\ events=v3\ sites=2\ * ]]
