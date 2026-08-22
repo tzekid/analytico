@@ -45,8 +45,10 @@ dashboard="http://localhost:$proxy_port"
 data="$fixture/data"
 
 "$binary" init "$data" >/dev/null
-"$binary" site add "$data" example Example https://example.com >/dev/null
-"$binary" site add "$data" second "Second Site" https://second.example >/dev/null
+"$binary" site add "$data" example Example https://example.com \
+    --timezone UTC >/dev/null
+"$binary" site add "$data" second "Second Site" https://second.example \
+    --timezone UTC >/dev/null
 site_id=$("$binary" site list "$data" |
     awk -F '\t' '$1 == "example" { print $2 }')
 "$binary" goal add "$data" example Signup event signup >/dev/null

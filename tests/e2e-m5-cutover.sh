@@ -53,7 +53,8 @@ collector="http://127.0.0.1:$collector_port"
 fixture_origin="http://127.0.0.1:$fixture_port"
 data="$fixture/data"
 "$binary" init "$data" >/dev/null
-"$binary" site add "$data" cutover Cutover "$fixture_origin" >/dev/null
+"$binary" site add "$data" cutover Cutover "$fixture_origin" \
+    --timezone UTC >/dev/null
 "$binary" site property-add "$data" cutover plan >/dev/null
 "$binary" goal add "$data" cutover signup event signup >/dev/null
 "$binary" funnel add "$data" cutover journey \
@@ -99,7 +100,7 @@ kill -TERM "$collector_pid"
 wait "$collector_pid"
 collector_pid=
 test "$("$binary" doctor "$data")" = \
-    "ok metadata=v2 events=v3 sites=1 goals=1 funnels=1 stored_events=3 key=ok"
+    "ok metadata=v3 events=v3 sites=1 goals=1 funnels=1 stored_events=3 key=ok"
 
 today=$(date -u +%F)
 report_json() {
@@ -146,7 +147,7 @@ restored="$fixture/restored"
 "$binary" backup "$data" "$backup" >/dev/null
 "$binary" restore "$backup" "$restored" --verify >/dev/null
 test "$("$binary" doctor "$restored")" = \
-    "ok metadata=v2 events=v3 sites=1 goals=1 funnels=1 stored_events=3 key=ok"
+    "ok metadata=v3 events=v3 sites=1 goals=1 funnels=1 stored_events=3 key=ok"
 test "$("$binary" report "$restored" cutover "$today" "$today" \
     overview --format json)" = "$(report_json overview)"
 

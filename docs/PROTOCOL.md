@@ -159,7 +159,10 @@ The common required envelope is:
 UUIDs are canonical lowercase text. Sequence is an unsigned 32-bit integer.
 Occurrence time must be no more than seven days behind or 24 hours ahead of
 server receipt time; receipt time remains authoritative for acceptance and
-date bucketing. `identity_quality` is exactly `persistent` or `ephemeral`.
+bucketing. `received_date_utc` retains the UTC compatibility date, while the
+server also derives stable `site_local_date` and `site_utc_offset_minutes`
+from the loaded site TZif policy. `identity_quality` is exactly `persistent`
+or `ephemeral`.
 
 Event-specific fields are closed:
 

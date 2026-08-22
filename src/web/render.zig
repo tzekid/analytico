@@ -45,7 +45,8 @@ pub fn page(output: *std.Io.Writer, value: model.Page) !void {
     if (value.selected_site == null) {
         try output.writeAll(
             "<section class=\"panel\"><h2>No sites configured</h2>" ++
-                "<p>Add the first site with <code>analytico site add</code>, " ++
+                "<p>Add the first site with <code>analytico site add " ++
+                "... --timezone &lt;IANA-zone&gt;</code>, " ++
                 "then restart the service.</p></section></main>",
         );
         try foot(output);

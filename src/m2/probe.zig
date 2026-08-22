@@ -88,3 +88,36 @@ pub fn inspectPerson(
     try std.json.Stringify.value(person, .{}, output);
     try output.writeByte('\n');
 }
+
+pub fn timeBuckets(
+    allocator: std.mem.Allocator,
+    output: *std.Io.Writer,
+    directory: []const u8,
+    site_id: []const u8,
+) !void {
+    const path = try std.fs.path.join(allocator, &.{ directory, "events.duckdb" });
+    var store = try events.Store.open(allocator, path);
+    defer store.deinit();
+    try store.requireCurrent();
+    var statement = try store.database.prepare(
+        \\SELECT received_at_utc_micros, CAST(received_date_utc AS VARCHAR),
+        \\       CAST(site_local_date AS VARCHAR), site_utc_offset_minutes
+        \\FROM events WHERE site_id = ?
+        \\ORDER BY received_at_utc_micros, event_id
+    );
+    defer statement.deinit();
+    try statement.bindText(1, site_id);
+    var result = try statement.execute();
+    defer result.deinit();
+    if (result.columnCount() != 4) return error.InvalidTimeBuckets;
+    for (0..result.rowCount()) |row| {
+        const utc_date = try result.text(allocator, 1, row);
+        const local_date = try result.text(allocator, 2, row);
+        try output.print("{d}\t{s}\t{s}\t{d}\n", .{
+            result.int64(0, row),
+            utc_date,
+            local_date,
+            result.int64(3, row),
+        });
+    }
+}

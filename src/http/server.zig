@@ -11,6 +11,7 @@ const dashboard = @import("../web/dashboard.zig");
 const dashboard_render = @import("../web/render.zig");
 const auth_http = @import("../auth/http.zig");
 const auth_store = @import("../auth/store.zig");
+const timezone = @import("../timezone.zig");
 
 const tracker_v1 = @embedFile("tracker.v1.min.js");
 const tracker_v1_br = @embedFile("tracker.v1.min.js.br");
@@ -49,6 +50,7 @@ pub const Options = struct {
     event_path: []const u8,
     temp_directory: []const u8,
     key_path: []const u8,
+    zoneinfo_root: []const u8 = timezone.default_zoneinfo_root,
     report_timeout_ms: u32 = 2_000,
 };
 
@@ -67,6 +69,7 @@ pub fn run(
         options.event_path,
         options.temp_directory,
         options.key_path,
+        options.zoneinfo_root,
     }) |path| {
         if (!std.fs.path.isAbsolute(path)) return error.ProductionPathMustBeAbsolute;
     }
@@ -84,8 +87,9 @@ pub fn run(
     const meta_stat = try std.Io.Dir.cwd().statFile(io, options.meta_path, .{});
     const event_stat = try std.Io.Dir.cwd().statFile(io, options.event_path, .{});
     const temp_stat = try std.Io.Dir.cwd().statFile(io, options.temp_directory, .{});
+    const zoneinfo_stat = try std.Io.Dir.cwd().statFile(io, options.zoneinfo_root, .{});
     if (meta_stat.kind != .file or event_stat.kind != .file or
-        temp_stat.kind != .directory)
+        temp_stat.kind != .directory or zoneinfo_stat.kind != .directory)
     {
         return error.InvalidProductionPath;
     }
@@ -113,7 +117,12 @@ pub fn run(
     try event_store.requireCurrent();
     var policy_arena = std.heap.ArenaAllocator.init(allocator);
     defer policy_arena.deinit();
-    const policies = try loadPolicies(policy_arena.allocator(), &metadata);
+    const policies = try loadPolicies(
+        policy_arena.allocator(),
+        io,
+        &metadata,
+        options.zoneinfo_root,
+    );
     const auth_policy = try (auth_store.Store{ .metadata = &metadata }).policy(
         policy_arena.allocator(),
     );
@@ -216,7 +225,7 @@ const Context = struct {
     io: std.Io,
     metadata: *meta.Store,
     events: *events.Store,
-    policies: []const meta.SitePolicy,
+    policies: []const RuntimePolicy,
     master_key: [32]u8,
     meta_path: []const u8,
     event_path: []const u8,
@@ -490,7 +499,7 @@ fn postEvent(
         try reject(context, output, 404);
         return;
     };
-    if (policy.disabled) {
+    if (policy.metadata.disabled) {
         try reject(context, output, 404);
         return;
     }
@@ -502,19 +511,26 @@ fn postEvent(
         try reject(context, output, 403);
         return;
     };
-    if (!policy.allowsOrigin(origin)) {
+    if (!policy.metadata.allowsOrigin(origin)) {
         try reject(context, output, 403);
         return;
     }
-    const prepared = collect.preparePost(allocator, payload, policy) catch {
+    const prepared = collect.preparePost(allocator, payload, policy.metadata) catch {
         try reject(context, output, 400);
         return;
     };
-    const accepted = acceptEvent(context, allocator, request, prepared) catch |err| {
+    const accepted = acceptEvent(
+        context,
+        allocator,
+        request,
+        prepared,
+        policy.timezone,
+    ) catch |err| {
         try reject(
             context,
             output,
-            if (err == error.EventWriteFailed) 500 else 400,
+            if (err == error.EventWriteFailed or
+                err == error.TimezoneUnavailable) 500 else 400,
         );
         return;
     };
@@ -562,7 +578,7 @@ fn postEventV2(
         try reject(context, output, 404);
         return;
     };
-    if (policy.disabled) {
+    if (policy.metadata.disabled) {
         try reject(context, output, 404);
         return;
     }
@@ -574,7 +590,7 @@ fn postEventV2(
         try reject(context, output, 403);
         return;
     };
-    if (!policy.allowsOrigin(origin)) {
+    if (!policy.metadata.allowsOrigin(origin)) {
         try reject(context, output, 403);
         return;
     }
@@ -585,7 +601,7 @@ fn postEventV2(
     if (!(eventRateAllowed(
         context,
         request,
-        policy.id,
+        policy.metadata.id,
         now.seconds,
     ) catch {
         try reject(context, output, 400);
@@ -605,7 +621,7 @@ fn postEventV2(
     const prepared = collect.preparePostV2(
         allocator,
         payload,
-        policy,
+        policy.metadata,
         now.micros,
     ) catch {
         try reject(context, output, 400);
@@ -617,13 +633,14 @@ fn postEventV2(
         request,
         prepared,
         now,
+        policy.timezone,
     ) catch |err| {
         const status: u16 = switch (err) {
             error.EventIdConflict,
             error.IdentityConflict,
             error.IdentityQualityConflict,
             => 409,
-            error.EventWriteFailed => 500,
+            error.EventWriteFailed, error.TimezoneUnavailable => 500,
             else => 400,
         };
         if (err == error.IdentityConflict) {
@@ -659,7 +676,7 @@ fn pixelEvent(
         try reject(context, output, 404);
         return;
     };
-    if (policy.disabled) {
+    if (policy.metadata.disabled) {
         try reject(context, output, 404);
         return;
     }
@@ -667,15 +684,27 @@ fn pixelEvent(
         try reject(context, output, 403);
         return;
     };
-    const prepared = collect.preparePixel(allocator, pixel, policy, referer) catch {
+    const prepared = collect.preparePixel(
+        allocator,
+        pixel,
+        policy.metadata,
+        referer,
+    ) catch {
         try reject(context, output, 403);
         return;
     };
-    const accepted = acceptEvent(context, allocator, request, prepared) catch |err| {
+    const accepted = acceptEvent(
+        context,
+        allocator,
+        request,
+        prepared,
+        policy.timezone,
+    ) catch |err| {
         try reject(
             context,
             output,
-            if (err == error.EventWriteFailed) 500 else 400,
+            if (err == error.EventWriteFailed or
+                err == error.TimezoneUnavailable) 500 else 400,
         );
         return;
     };
@@ -698,6 +727,7 @@ fn acceptEvent(
     allocator: std.mem.Allocator,
     request: request_mod.Request,
     prepared: collect.Prepared,
+    site_timezone: timezone.Zone,
 ) !bool {
     const client_ip = (try request.header("x-forwarded-for")) orelse "127.0.0.1";
     if (client_ip.len == 0 or client_ip.len > 64 or
@@ -736,11 +766,15 @@ fn acceptEvent(
         coarse,
     );
     const event_id = try domain.randomUuid(context.io);
+    const local = site_timezone.localAt(now.seconds) catch
+        return error.TimezoneUnavailable;
     context.events.insert(.{
         .event_id = &event_id,
         .site_id = prepared.site_id,
         .received_at_utc_micros = now.micros,
         .received_date_utc = &now.date,
+        .site_local_date = &local.date,
+        .site_utc_offset_minutes = local.offset_minutes,
         .kind = prepared.kind,
         .event_name = prepared.event_name,
         .path = prepared.path,
@@ -771,6 +805,7 @@ fn acceptEventV2(
     request: request_mod.Request,
     prepared: collect.PreparedV2,
     now: CurrentTime,
+    site_timezone: timezone.Zone,
 ) !void {
     const user_agent = (try request.header("user-agent")) orelse "";
     if (user_agent.len > 1024) return error.InvalidUserAgent;
@@ -790,12 +825,16 @@ fn acceptEventV2(
         &now.date,
         prepared.anonymous_id,
     );
+    const local = site_timezone.localAt(now.seconds) catch
+        return error.TimezoneUnavailable;
     const outcome = context.events.insertV2(allocator, .{
         .event_id = prepared.event_id,
         .site_id = prepared.site_id,
         .received_at_utc_micros = now.micros,
         .occurred_at_utc_micros = prepared.occurred_at_utc_micros,
         .received_date_utc = &now.date,
+        .site_local_date = &local.date,
+        .site_utc_offset_minutes = local.offset_minutes,
         .kind = prepared.kind,
         .event_name = prepared.event_name,
         .path = prepared.path,
@@ -945,27 +984,46 @@ fn acceptsEncoding(value: []const u8, expected: []const u8) bool {
     return false;
 }
 
+const RuntimePolicy = struct {
+    metadata: meta.SitePolicy,
+    timezone: timezone.Zone,
+};
+
 fn loadPolicies(
     allocator: std.mem.Allocator,
+    io: std.Io,
     metadata: *meta.Store,
-) ![]const meta.SitePolicy {
+    zoneinfo_root: []const u8,
+) ![]const RuntimePolicy {
     const ids = try metadata.siteIds(allocator);
-    var policies: std.ArrayList(meta.SitePolicy) = .empty;
+    var policies: std.ArrayList(RuntimePolicy) = .empty;
+    const now = try currentTime();
     for (ids) |id| {
+        const policy = try metadata.sitePolicy(allocator, id);
+        const site_timezone = try timezone.load(
+            allocator,
+            io,
+            zoneinfo_root,
+            policy.timezone_name,
+        );
+        _ = try site_timezone.localAt(now.seconds);
         try policies.append(
             allocator,
-            try metadata.sitePolicy(allocator, id),
+            .{
+                .metadata = policy,
+                .timezone = site_timezone,
+            },
         );
     }
     return policies.toOwnedSlice(allocator);
 }
 
 fn findPolicy(
-    policies: []const meta.SitePolicy,
+    policies: []const RuntimePolicy,
     id: []const u8,
-) ?meta.SitePolicy {
+) ?RuntimePolicy {
     for (policies) |policy| {
-        if (std.mem.eql(u8, policy.id, id)) return policy;
+        if (std.mem.eql(u8, policy.metadata.id, id)) return policy;
     }
     return null;
 }

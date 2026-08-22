@@ -34,23 +34,27 @@ port=$((49000 + ($$ % 500)))
 origin="http://localhost:$port"
 data="$fixture/data"
 "$binary" init "$data" >"$fixture/init.txt"
-grep -Fq 'metadata=v2' "$fixture/init.txt"
-"$binary" site add "$data" example Example https://example.com >/dev/null
+grep -Fq 'metadata=v3' "$fixture/init.txt"
+"$binary" site add "$data" example Example https://example.com \
+    --timezone UTC >/dev/null
 
 legacy="$fixture/legacy-v1"
 "$binary" init "$legacy" >/dev/null
-"$binary" site add "$legacy" preserved Preserved https://preserved.example >/dev/null
+"$binary" site add "$legacy" preserved Preserved https://preserved.example \
+    --timezone UTC >/dev/null
 sqlite3 "$legacy/meta.db" <<'SQL'
+DROP TABLE site_timezones;
 DROP TABLE auth_bootstrap;
 DROP TABLE auth_sessions;
 DROP TABLE auth_challenges;
 DROP TABLE auth_credentials;
 DROP TABLE auth_users;
 DROP TABLE auth_config;
-DELETE FROM meta_migrations WHERE version = 2;
+DELETE FROM meta_migrations WHERE version >= 2;
 SQL
 "$binary" migrate "$legacy" >"$fixture/upgrade.txt"
-grep -Fq 'metadata=v2 events=v3' "$fixture/upgrade.txt"
+grep -Fq 'metadata=v3 events=v3' "$fixture/upgrade.txt"
+"$binary" site timezone-set "$legacy" preserved UTC >/dev/null
 "$binary" site list "$legacy" | grep -Fq $'preserved\t'
 
 site_id=$("$binary" site list "$data" | awk -F '\t' '$1 == "example" { print $2 }')

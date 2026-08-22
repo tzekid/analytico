@@ -24,19 +24,19 @@ expect_failure() {
 }
 
 init_output=$("$binary" init "$fixture_dir")
-test "$init_output" = "initialized metadata=v2 events=v3 key=created"
+test "$init_output" = "initialized metadata=v3 events=v3 key=created"
 test -s "$fixture_dir/meta.db"
 test -s "$fixture_dir/events.duckdb"
 test "$(stat -c '%a' "$fixture_dir/visitor.key")" = "600"
 test "$(stat -c '%s' "$fixture_dir/visitor.key")" = "32"
 key_hash=$(sha256sum "$fixture_dir/visitor.key" | cut -d' ' -f1)
 test "$("$binary" init "$fixture_dir")" = \
-    "initialized metadata=v2 events=v3 key=existing"
+    "initialized metadata=v3 events=v3 key=existing"
 test "$(sha256sum "$fixture_dir/visitor.key" | cut -d' ' -f1)" = "$key_hash"
 
 site_output=$(
     "$binary" site add "$fixture_dir" example "Example Site" \
-        "https://Example.COM:443"
+        "https://Example.COM:443" --timezone UTC
 )
 [[ "$site_output" == "site added example "* ]]
 site_list=$("$binary" site list "$fixture_dir")
@@ -44,10 +44,16 @@ site_list=$("$binary" site list "$fixture_dir")
 site_id=$(printf '%s\n' "$site_list" | cut -f2)
 [[ "$site_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]]
 
-expect_failure "$binary" site add "$fixture_dir" example Duplicate https://other.example
-expect_failure "$binary" site add "$fixture_dir" Bad-Slug Invalid https://bad.example
-expect_failure "$binary" site add "$fixture_dir" other Invalid https://bad.example/path
-expect_failure "$binary" site add "$fixture_dir" other $'bad\xff' https://bad.example
+expect_failure "$binary" site add "$fixture_dir" example Duplicate \
+    https://other.example --timezone UTC
+expect_failure "$binary" site add "$fixture_dir" Bad-Slug Invalid \
+    https://bad.example --timezone UTC
+expect_failure "$binary" site add "$fixture_dir" other Invalid \
+    https://bad.example/path --timezone UTC
+expect_failure "$binary" site add "$fixture_dir" other $'bad\xff' \
+    https://bad.example --timezone UTC
+expect_failure "$binary" site add "$fixture_dir" other Valid \
+    https://other.example --timezone ../UTC
 
 test "$("$binary" site origin-add "$fixture_dir" example http://localhost:8080)" = \
     "origin added example http://localhost:8080"
@@ -121,7 +127,7 @@ event_output=$("$binary" event add "$fixture_dir" example pageview \
 [[ "$event_output" == "event committed "* ]]
 doctor=$("$binary" doctor "$fixture_dir")
 test "$doctor" = \
-    "ok metadata=v2 events=v3 sites=1 goals=3 funnels=1 stored_events=1 key=ok"
+    "ok metadata=v3 events=v3 sites=1 goals=3 funnels=1 stored_events=1 key=ok"
 expect_failure "$binary" event add "$fixture_dir" example pageview \
     'not-a-path' 1700000000000001 2023-11-14 203.0.113.42 Firefox Linux desktop
 test "$("$binary" doctor "$fixture_dir")" = "$doctor"
@@ -138,6 +144,6 @@ expect_failure "$binary" site delete "$fixture_dir" example --confirm Wrong
 test "$("$binary" site delete "$fixture_dir" example --confirm example)" = \
     "site deleted example"
 test "$("$binary" doctor "$fixture_dir")" = \
-    "ok metadata=v2 events=v3 sites=0 goals=0 funnels=0 stored_events=0 key=ok"
+    "ok metadata=v3 events=v3 sites=0 goals=0 funnels=0 stored_events=0 key=ok"
 
 echo "M1 durable-domain real-process end-to-end checks passed"

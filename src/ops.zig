@@ -4,6 +4,7 @@ const report = @import("report.zig");
 const version = @import("version.zig");
 const events = @import("store/events.zig");
 const meta = @import("store/meta.zig");
+const timezone = @import("timezone.zig");
 
 const manifest_schema: u8 = 1;
 const export_page_size: i64 = 1_000;
@@ -345,13 +346,30 @@ pub fn doctor(
     io: std.Io,
     output: *std.Io.Writer,
     directory: []const u8,
+    zoneinfo_root: []const u8,
 ) !void {
     const paths = try Paths.init(allocator, directory);
     try validateKey(io, paths.key);
+    const zoneinfo_stat = try std.Io.Dir.cwd().statFile(io, zoneinfo_root, .{});
+    if (zoneinfo_stat.kind != .directory) return error.InvalidZoneinfoRoot;
     var metadata = try meta.Store.open(allocator, paths.meta);
     defer metadata.deinit();
     try metadata.requireCurrent();
     try metadata.integrityCheck();
+    const site_ids = try metadata.siteIds(allocator);
+    const now_seconds = @divFloor(try nowMicros(), 1_000_000);
+    for (site_ids) |site_id| {
+        const policy = try metadata.sitePolicy(allocator, site_id);
+        var zone = try timezone.load(
+            allocator,
+            io,
+            zoneinfo_root,
+            policy.timezone_name,
+        );
+        errdefer zone.deinit(allocator);
+        _ = try zone.localAt(now_seconds);
+        zone.deinit(allocator);
+    }
     var event_store = try events.Store.open(allocator, paths.events);
     defer event_store.deinit();
     try event_store.requireCurrent();

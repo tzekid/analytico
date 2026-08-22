@@ -2,7 +2,7 @@ const std = @import("std");
 const turso = @import("turso");
 const domain = @import("../domain.zig");
 
-pub const schema_version: i64 = 2;
+pub const schema_version: i64 = 3;
 
 pub const Site = struct {
     id: []u8,
@@ -46,6 +46,7 @@ pub const Counts = struct {
 pub const SitePolicy = struct {
     id: []u8,
     disabled: bool,
+    timezone_name: []u8,
     origins: []const []u8,
     properties: []const []u8,
 
@@ -62,6 +63,11 @@ pub const SitePolicy = struct {
         }
         return false;
     }
+};
+
+pub const SiteTimezone = struct {
+    zone_name: []u8,
+    rebucket_pending: bool,
 };
 
 pub const Store = struct {
@@ -233,6 +239,22 @@ pub const Store = struct {
             std.log.err("metadata migration v2 failed: {s}", .{diagnostics.text()});
             return err;
         };
+        if (current < 3) _ = self.connection.execBatch(
+            \\CREATE TABLE IF NOT EXISTS site_timezones (
+            \\  site_id TEXT PRIMARY KEY,
+            \\  zone_name TEXT NOT NULL,
+            \\  revision INTEGER NOT NULL,
+            \\  rebucket_pending INTEGER NOT NULL,
+            \\  FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE CASCADE,
+            \\  CHECK (length(zone_name) BETWEEN 1 AND 255),
+            \\  CHECK (revision >= 1),
+            \\  CHECK (rebucket_pending IN (0, 1))
+            \\);
+            \\INSERT INTO meta_migrations VALUES (3, 'explicit-site-timezones', 0);
+        , .{ .diagnostics = &diagnostics }) catch |err| {
+            std.log.err("metadata migration v3 failed: {s}", .{diagnostics.text()});
+            return err;
+        };
     }
 
     pub fn migrateProbe(self: *Store) !void {
@@ -288,6 +310,15 @@ pub const Store = struct {
             },
             .{},
         );
+        _ = try self.connection.execParams(
+            \\INSERT INTO site_timezones
+            \\  (site_id, zone_name, revision, rebucket_pending)
+            \\VALUES (?1, 'UTC', 1, 0)
+            \\ON CONFLICT(site_id) DO NOTHING
+        ,
+            .{"00000000-0000-4000-8000-000000000001"},
+            .{},
+        );
     }
 
     pub fn addSite(
@@ -296,6 +327,7 @@ pub const Store = struct {
         slug: []const u8,
         name: []const u8,
         origin: []const u8,
+        timezone_name: []const u8,
         created_at: i64,
     ) !void {
         try domain.validateUuid(id);
@@ -320,6 +352,148 @@ pub const Store = struct {
             .{ id, origin },
             .{},
         );
+        _ = try self.connection.execParams(
+            \\INSERT INTO site_timezones
+            \\  (site_id, zone_name, revision, rebucket_pending)
+            \\VALUES (?1, ?2, 1, 0)
+        ,
+            .{ id, timezone_name },
+            .{},
+        );
+    }
+
+    pub fn siteTimezone(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        site_id: []const u8,
+    ) !SiteTimezone {
+        try domain.validateUuid(site_id);
+        var rows = try self.connection.queryParams(
+            \\SELECT zone_name, rebucket_pending
+            \\FROM site_timezones WHERE site_id = ?1
+        ,
+            .{site_id},
+            .{},
+        );
+        defer rows.deinit();
+        const row = (try rows.next()) orelse return error.SiteTimezoneRequired;
+        const result = SiteTimezone{
+            .zone_name = try allocator.dupe(u8, try row.get([]const u8, 0)),
+            .rebucket_pending = (try row.get(i64, 1)) != 0,
+        };
+        if ((try rows.next()) != null) return error.UnexpectedSiteTimezoneRow;
+        try rows.finish(null);
+        return result;
+    }
+
+    pub fn configureTimezoneReady(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        site_id: []const u8,
+        zone_name: []const u8,
+    ) !void {
+        const existing = self.siteTimezone(allocator, site_id) catch |err| switch (err) {
+            error.SiteTimezoneRequired => null,
+            else => return err,
+        };
+        if (existing) |timezone| {
+            if (timezone.rebucket_pending and
+                !std.mem.eql(u8, timezone.zone_name, zone_name))
+            {
+                return error.TimezoneRebucketPending;
+            }
+            if (timezone.rebucket_pending and
+                std.mem.eql(u8, timezone.zone_name, zone_name))
+            {
+                const changed = try self.connection.execParams(
+                    \\UPDATE site_timezones SET rebucket_pending = 0
+                    \\WHERE site_id = ?1 AND zone_name = ?2
+                ,
+                    .{ site_id, zone_name },
+                    .{},
+                );
+                if (changed != 1) return error.SiteTimezoneNotFound;
+                return;
+            }
+            if (!timezone.rebucket_pending and
+                std.mem.eql(u8, timezone.zone_name, zone_name))
+            {
+                return;
+            }
+            const changed = try self.connection.execParams(
+                \\UPDATE site_timezones
+                \\SET zone_name = ?2, revision = revision + 1,
+                \\    rebucket_pending = 0
+                \\WHERE site_id = ?1
+            ,
+                .{ site_id, zone_name },
+                .{},
+            );
+            if (changed != 1) return error.SiteTimezoneNotFound;
+            return;
+        }
+        _ = try self.connection.execParams(
+            \\INSERT INTO site_timezones
+            \\  (site_id, zone_name, revision, rebucket_pending)
+            \\VALUES (?1, ?2, 1, 0)
+        ,
+            .{ site_id, zone_name },
+            .{},
+        );
+    }
+
+    pub fn markTimezoneRebucketPending(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        site_id: []const u8,
+        zone_name: []const u8,
+    ) !void {
+        const existing = self.siteTimezone(allocator, site_id) catch |err| switch (err) {
+            error.SiteTimezoneRequired => null,
+            else => return err,
+        };
+        if (existing) |timezone| {
+            if (timezone.rebucket_pending) {
+                if (!std.mem.eql(u8, timezone.zone_name, zone_name)) {
+                    return error.TimezoneRebucketPending;
+                }
+                return;
+            }
+            const changed = try self.connection.execParams(
+                \\UPDATE site_timezones
+                \\SET zone_name = ?2, revision = revision + 1,
+                \\    rebucket_pending = 1
+                \\WHERE site_id = ?1
+            ,
+                .{ site_id, zone_name },
+                .{},
+            );
+            if (changed != 1) return error.SiteTimezoneNotFound;
+            return;
+        }
+        _ = try self.connection.execParams(
+            \\INSERT INTO site_timezones
+            \\  (site_id, zone_name, revision, rebucket_pending)
+            \\VALUES (?1, ?2, 1, 1)
+        ,
+            .{ site_id, zone_name },
+            .{},
+        );
+    }
+
+    pub fn finishTimezoneRebucket(
+        self: *Store,
+        site_id: []const u8,
+        zone_name: []const u8,
+    ) !void {
+        const changed = try self.connection.execParams(
+            \\UPDATE site_timezones SET rebucket_pending = 0
+            \\WHERE site_id = ?1 AND zone_name = ?2 AND rebucket_pending = 1
+        ,
+            .{ site_id, zone_name },
+            .{},
+        );
+        if (changed != 1) return error.TimezoneRebucketStateChanged;
     }
 
     pub fn addOrigin(
@@ -659,6 +833,9 @@ pub const Store = struct {
         const disabled = (try site_row.get(i64, 1)) != 0;
         try site_rows.finish(null);
 
+        const timezone = try self.siteTimezone(allocator, id);
+        if (timezone.rebucket_pending) return error.TimezoneRebucketPending;
+
         const origins = try self.stringColumn(
             allocator,
             "SELECT origin FROM site_origins WHERE site_id = ?1 ORDER BY origin",
@@ -674,6 +851,7 @@ pub const Store = struct {
         return .{
             .id = owned_id,
             .disabled = disabled,
+            .timezone_name = timezone.zone_name,
             .origins = origins,
             .properties = properties,
         };

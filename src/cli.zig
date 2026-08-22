@@ -7,6 +7,7 @@ const meta = @import("store/meta.zig");
 const events = @import("store/events.zig");
 const reports = @import("store/reports.zig");
 const auth_cli = @import("auth/cli.zig");
+const timezone = @import("timezone.zig");
 
 pub fn run(
     allocator: std.mem.Allocator,
@@ -75,8 +76,18 @@ pub fn run(
         try eventCommand(allocator, output, io, args);
         return true;
     }
-    if (args.len == 3 and std.mem.eql(u8, args[1], "doctor")) {
-        try ops.doctor(allocator, io, output, args[2]);
+    if ((args.len == 3 or args.len == 5) and
+        std.mem.eql(u8, args[1], "doctor"))
+    {
+        const zoneinfo_root = if (args.len == 5 and
+            std.mem.eql(u8, args[3], "--zoneinfo-root"))
+            args[4]
+        else if (args.len == 3)
+            timezone.default_zoneinfo_root
+        else
+            return error.InvalidArguments;
+        if (!std.fs.path.isAbsolute(zoneinfo_root)) return error.InvalidZoneinfoRoot;
+        try ops.doctor(allocator, io, output, args[2], zoneinfo_root);
         return true;
     }
     if (args.len == 7 and std.mem.eql(u8, args[1], "pseudonym")) {
@@ -102,9 +113,10 @@ pub fn writeUsage(output: *std.Io.Writer) !void {
         \\  analytico restore <backup-directory> <new-data-directory> --verify
         \\  analytico maintain <directory> <delete-before-date>
         \\  analytico export <directory> <site> <start-date> <end-date> <new.csv>
-        \\  analytico serve --listen <loopback:port> --meta <absolute-path> --events <absolute-path> --temp <absolute-directory> --visitor-key-file <absolute-path> [--report-timeout-ms 1..2000]
-        \\  analytico site add <directory> <slug> <name> <origin>
+        \\  analytico serve --listen <loopback:port> --meta <absolute-path> --events <absolute-path> --temp <absolute-directory> --visitor-key-file <absolute-path> [--zoneinfo-root <absolute-directory>] [--report-timeout-ms 1..2000]
+        \\  analytico site add <directory> <slug> <name> <origin> --timezone <iana-zone> [--zoneinfo-root <absolute-directory>]
         \\  analytico site list <directory>
+        \\  analytico site timezone-set <directory> <slug> <iana-zone> [--zoneinfo-root <absolute-directory>] [--offline-rebucket]
         \\  analytico site disable <directory> <slug>
         \\  analytico site origin-add <directory> <slug> <origin>
         \\  analytico site property-add <directory> <slug> <property>
@@ -116,10 +128,10 @@ pub fn writeUsage(output: *std.Io.Writer) !void {
         \\  analytico funnel add <directory> <site> <name> <kind=value> <kind=value> [...]
         \\  analytico funnel show <directory> <site> <name>
         \\  analytico funnel delete <directory> <site> <name> --confirm <name>
-        \\  analytico event add <directory> <site> <event> <path> <micros> <date> <ip> <browser> <os> <device>
+        \\  analytico event add <directory> <site> <event> <path> <micros> <date> <ip> <browser> <os> <device> [--zoneinfo-root <absolute-directory>]
         \\  analytico event inspect <directory> [event-name]
         \\  analytico report <directory> <site> <start-date> <end-date> <kind> [subject] [--format table|json|csv] [--sort count|label] [--limit 1..100] [--page N]
-        \\  analytico doctor <directory>
+        \\  analytico doctor <directory> [--zoneinfo-root <absolute-directory>]
         \\  analytico pseudonym <64-hex-key> <site-id> <date> <ip> <coarse-client>
         \\
     );
@@ -205,6 +217,8 @@ fn parseServe(args: []const []const u8) !http_server.Options {
     var key_path: ?[]const u8 = null;
     var report_timeout_ms: u32 = 2_000;
     var report_timeout_set = false;
+    var zoneinfo_root: []const u8 = timezone.default_zoneinfo_root;
+    var zoneinfo_root_set = false;
     var index: usize = 2;
     while (index < args.len) : (index += 2) {
         if (index + 1 >= args.len) return error.InvalidServeOption;
@@ -233,6 +247,12 @@ fn parseServe(args: []const []const u8) !http_server.Options {
                 return error.InvalidReportTimeout;
             }
             report_timeout_set = true;
+        } else if (std.mem.eql(u8, flag, "--zoneinfo-root")) {
+            if (zoneinfo_root_set or !std.fs.path.isAbsolute(value)) {
+                return error.InvalidZoneinfoRoot;
+            }
+            zoneinfo_root = value;
+            zoneinfo_root_set = true;
         } else {
             return error.InvalidServeOption;
         }
@@ -253,6 +273,7 @@ fn parseServe(args: []const []const u8) !http_server.Options {
         .event_path = event_path orelse return error.MissingServeOption,
         .temp_directory = temp_directory orelse return error.MissingServeOption,
         .key_path = key_path orelse return error.MissingServeOption,
+        .zoneinfo_root = zoneinfo_root,
         .report_timeout_ms = report_timeout_ms,
     };
 }
@@ -269,13 +290,98 @@ fn siteCommand(
     defer store.deinit();
     try store.migrate();
 
-    if (std.mem.eql(u8, args[2], "add") and args.len == 7) {
+    if (std.mem.eql(u8, args[2], "add") and
+        (args.len == 9 or args.len == 11) and
+        std.mem.eql(u8, args[7], "--timezone"))
+    {
         try domain.validateSlug(args[4]);
         try domain.validateName(args[5], 120);
         const origin = try domain.normalizeOrigin(allocator, args[6]);
+        const zoneinfo_root = if (args.len == 11 and
+            std.mem.eql(u8, args[9], "--zoneinfo-root"))
+            args[10]
+        else if (args.len == 9)
+            timezone.default_zoneinfo_root
+        else
+            return error.InvalidArguments;
+        var site_timezone = try timezone.load(allocator, io, zoneinfo_root, args[8]);
+        defer site_timezone.deinit(allocator);
+        _ = try site_timezone.localAt(@divFloor(try nowMicros(), 1_000_000));
         const id = try domain.randomUuid(io);
-        try store.addSite(&id, args[4], args[5], origin, try nowMicros());
+        try store.addSite(
+            &id,
+            args[4],
+            args[5],
+            origin,
+            args[8],
+            try nowMicros(),
+        );
         try output.print("site added {s} {s}\n", .{ args[4], id });
+        return;
+    }
+    if (std.mem.eql(u8, args[2], "timezone-set") and args.len >= 6) {
+        var zoneinfo_root: []const u8 = timezone.default_zoneinfo_root;
+        var zoneinfo_root_set = false;
+        var offline_rebucket = false;
+        var index: usize = 6;
+        while (index < args.len) {
+            if (std.mem.eql(u8, args[index], "--offline-rebucket")) {
+                if (offline_rebucket) return error.InvalidArguments;
+                offline_rebucket = true;
+                index += 1;
+            } else if (std.mem.eql(u8, args[index], "--zoneinfo-root")) {
+                if (zoneinfo_root_set or index + 1 >= args.len) {
+                    return error.InvalidArguments;
+                }
+                zoneinfo_root = args[index + 1];
+                zoneinfo_root_set = true;
+                index += 2;
+            } else {
+                return error.InvalidArguments;
+            }
+        }
+        var site_timezone = try timezone.load(allocator, io, zoneinfo_root, args[5]);
+        defer site_timezone.deinit(allocator);
+        _ = try site_timezone.localAt(@divFloor(try nowMicros(), 1_000_000));
+        const site_id = try store.siteIdBySlug(allocator, args[4]);
+        var event_store = try events.Store.open(allocator, paths.events);
+        defer event_store.deinit();
+        try event_store.requireCurrent();
+        const bounds = try event_store.siteEventBounds(site_id);
+        if (bounds.count == 0) {
+            try store.configureTimezoneReady(allocator, site_id, args[5]);
+            try store.checkpoint();
+            try output.print("site timezone ready {s} {s}\n", .{ args[4], args[5] });
+            return;
+        }
+        const existing = store.siteTimezone(allocator, site_id) catch |err| switch (err) {
+            error.SiteTimezoneRequired => null,
+            else => return err,
+        };
+        if (existing) |current| {
+            if (!current.rebucket_pending and
+                std.mem.eql(u8, current.zone_name, args[5]))
+            {
+                try output.print("site timezone unchanged {s} {s}\n", .{ args[4], args[5] });
+                return;
+            }
+        }
+        if (!offline_rebucket) return error.TimezoneLocked;
+        const intervals = try site_timezone.rebucketIntervals(
+            allocator,
+            bounds.minimum_utc_micros,
+            bounds.maximum_utc_micros,
+        );
+        try store.markTimezoneRebucketPending(allocator, site_id, args[5]);
+        try store.checkpoint();
+        try event_store.rebucketSite(site_id, intervals, bounds.count);
+        try event_store.checkpoint();
+        try store.finishTimezoneRebucket(site_id, args[5]);
+        try store.checkpoint();
+        try output.print(
+            "site timezone rebucketed {s} {s} events={d}\n",
+            .{ args[4], args[5], bounds.count },
+        );
         return;
     }
     if (std.mem.eql(u8, args[2], "list") and args.len == 4) {
@@ -490,15 +596,32 @@ fn eventCommand(
         });
         return;
     }
-    if (!std.mem.eql(u8, args[2], "add") or args.len != 13) {
+    if (!std.mem.eql(u8, args[2], "add") or
+        (args.len != 13 and args.len != 15))
+    {
         return error.InvalidArguments;
     }
+    const zoneinfo_root = if (args.len == 15 and
+        std.mem.eql(u8, args[13], "--zoneinfo-root"))
+        args[14]
+    else if (args.len == 13)
+        timezone.default_zoneinfo_root
+    else
+        return error.InvalidArguments;
     const paths = try Paths.init(allocator, args[3]);
     const key = try readKey(allocator, io, paths.key);
     var metadata = try meta.Store.open(allocator, paths.meta);
     defer metadata.deinit();
     try metadata.migrate();
     const site_id = try metadata.siteIdBySlug(allocator, args[4]);
+    const policy = try metadata.sitePolicy(allocator, site_id);
+    var site_timezone = try timezone.load(
+        allocator,
+        io,
+        zoneinfo_root,
+        policy.timezone_name,
+    );
+    defer site_timezone.deinit(allocator);
 
     try domain.validateIdentifier(args[5]);
     const path = try domain.normalizePath(args[6]);
@@ -521,6 +644,7 @@ fn eventCommand(
         coarse,
     );
     const id = try domain.randomUuid(io);
+    const local = try site_timezone.localAt(@divFloor(timestamp, 1_000_000));
 
     var event_store = try events.Store.open(allocator, paths.events);
     defer event_store.deinit();
@@ -530,6 +654,8 @@ fn eventCommand(
         .site_id = site_id,
         .received_at_utc_micros = timestamp,
         .received_date_utc = args[8],
+        .site_local_date = &local.date,
+        .site_utc_offset_minutes = local.offset_minutes,
         .kind = if (std.mem.eql(u8, args[5], "pageview")) 1 else 2,
         .event_name = args[5],
         .path = path,

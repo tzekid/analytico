@@ -187,7 +187,9 @@ The complete setup and login acceptance evidence is recorded in
 [`docs/PASSKEY_P1_RESULTS.md`](docs/PASSKEY_P1_RESULTS.md) and
 [`docs/PASSKEY_P2_RESULTS.md`](docs/PASSKEY_P2_RESULTS.md).
 
-After `init` and `site add`, start the loopback collector with:
+After `init` and an explicit-timezone site creation such as
+`analytico site add DATA example "Example" https://example.com --timezone UTC`,
+start the loopback collector with:
 
 ```sh
 analytico serve \
