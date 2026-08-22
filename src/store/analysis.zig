@@ -841,9 +841,10 @@ fn writeBucket(
         .hour => {
             try builder.write("strftime(to_timestamp(");
             try builder.write(event_alias);
+            try builder.write(".received_at_utc_micros / 1000000.0) + ");
+            try builder.write(event_alias);
             try builder.write(
-                ".occurred_at_utc_micros / 1000000.0) + " ++
-                    "e.site_utc_offset_minutes * INTERVAL '1 minute'," ++
+                ".site_utc_offset_minutes * INTERVAL '1 minute'," ++
                     " '%Y-%m-%dT%H:00')",
             );
         },
@@ -1717,7 +1718,8 @@ pub fn seedSemanticFixture(database: *duckdb.Database) !void {
         \\);
         \\INSERT INTO events
         \\SELECT 3, 2, 2, CAST(event_id AS UUID),
-        \\  '00000000-0000-4000-8000-000000000024', occurred, occurred,
+        \\  '00000000-0000-4000-8000-000000000024',
+        \\  occurred + receipt_delay_micros, occurred,
         \\  CAST(local_date AS DATE), CAST(local_date AS DATE), offset_minutes,
         \\  kind, event_name, path, title, hostname, CAST(anonymous_id AS UUID),
         \\  identity_quality, user_id, CAST(session_id AS UUID), sequence,
@@ -1728,20 +1730,22 @@ pub fn seedSemanticFixture(database: *duckdb.Database) !void {
         \\  currency, engagement_ms, 0, CAST(event_id AS BLOB), sequence = 0,
         \\  repeat('a', 64)
         \\FROM (VALUES
-        \\ ('00000000-0000-4000-8000-000000000101',1767139200000000,'2025-12-31',0,1,'pageview','/old','Old','example.test','00000000-0000-4000-8000-0000000000a1',1,'user-a','00000000-0000-4000-8000-0000000000b0',0,'','DE','en','Chrome','Linux','desktop','','','','{}','{}','','',0),
-        \\ ('00000000-0000-4000-8000-000000000102',1767312000000000,'2026-01-02',60,1,'pageview','/landing','Landing','example.test','00000000-0000-4000-8000-0000000000a1',1,'user-a','00000000-0000-4000-8000-0000000000b1',0,'search.example','DE','en','Chrome','Linux','desktop','google','cpc','winter','{"plan":"pro"}','{}','','',0),
-        \\ ('00000000-0000-4000-8000-000000000103',1767398400000000,'2026-01-03',60,1,'pageview','/pricing','Pricing','example.test','00000000-0000-4000-8000-0000000000a1',1,'user-a','00000000-0000-4000-8000-0000000000b1',1,'','DE','en','Chrome','Linux','desktop','','','','{"plan":"pro"}','{}','','',0),
-        \\ ('00000000-0000-4000-8000-000000000104',1767398401000000,'2026-01-03',60,2,'purchase','/pricing','Pricing','example.test','00000000-0000-4000-8000-0000000000a1',1,'user-a','00000000-0000-4000-8000-0000000000b1',2,'','DE','en','Chrome','Linux','desktop','','','','{"plan":"pro","amount":14.25}','{}','12.500000','EUR',0),
-        \\ ('00000000-0000-4000-8000-000000000105',1767398402000000,'2026-01-03',60,2,'purchase','/pricing','Pricing','example.test','00000000-0000-4000-8000-0000000000a1',1,'user-a','00000000-0000-4000-8000-0000000000b1',3,'','DE','en','Chrome','Linux','desktop','','','','{"plan":"pro","amount":7.5}','{}','7.500000','USD',0),
-        \\ ('00000000-0000-4000-8000-000000000106',1767398403000000,'2026-01-03',60,4,'identify','/pricing','Pricing','example.test','00000000-0000-4000-8000-0000000000a1',1,'user-a','00000000-0000-4000-8000-0000000000b1',4,'','DE','en','Chrome','Linux','desktop','','','','{}','{"plan":"enterprise"}','','',0),
-        \\ ('00000000-0000-4000-8000-000000000107',1767398404000000,'2026-01-03',60,1,'pageview','/','Home','example.test','00000000-0000-4000-8000-0000000000a2',1,'','00000000-0000-4000-8000-0000000000b2',0,'','US','en','Firefox','Windows','mobile','','','','{"plan":"free"}','{}','','',0),
-        \\ ('00000000-0000-4000-8000-000000000108',1767398405000000,'2026-01-03',60,3,'engagement','/','Home','example.test','00000000-0000-4000-8000-0000000000a2',1,'','00000000-0000-4000-8000-0000000000b2',1,'','US','en','Firefox','Windows','mobile','','','','{}','{}','','',10000),
-        \\ ('00000000-0000-4000-8000-000000000109',1767398406000000,'2026-01-03',60,1,'pageview','/ephemeral','Ephemeral','example.test','00000000-0000-4000-8000-0000000000a3',2,'','00000000-0000-4000-8000-0000000000b3',0,'','FR','fr','Safari','macOS','tablet','','','','{}','{}','','',0),
-        \\ ('00000000-0000-4000-8000-000000000110',1767398407000000,'2026-01-03',60,1,'pageview','/legacy','Legacy','example.test','00000000-0000-4000-8000-0000000000a4',3,'','00000000-0000-4000-8000-0000000000b4',0,'','ZZ','','Unknown','Unknown','unknown','','','','{}','{}','','',0),
-        \\ ('00000000-0000-4000-8000-000000000111',1767398408000000,'2026-01-03',60,1,'pageview','/bot','Bot','example.test','00000000-0000-4000-8000-0000000000a5',1,'','00000000-0000-4000-8000-0000000000b5',0,'','ZZ','','Bot','Bot','bot','','','','{}','{}','','',0)
+        \\ ('00000000-0000-4000-8000-000000000101',1767139200000000,'2025-12-31',0,1,'pageview','/old','Old','example.test','00000000-0000-4000-8000-0000000000a1',1,'user-a','00000000-0000-4000-8000-0000000000b0',0,'','DE','en','Chrome','Linux','desktop','','','','{}','{}','','',0,0),
+        \\ ('00000000-0000-4000-8000-000000000102',1767312000000000,'2026-01-02',60,1,'pageview','/landing','Landing','example.test','00000000-0000-4000-8000-0000000000a1',1,'user-a','00000000-0000-4000-8000-0000000000b1',0,'search.example','DE','en','Chrome','Linux','desktop','google','cpc','winter','{"plan":"pro"}','{}','','',0,0),
+        \\ ('00000000-0000-4000-8000-000000000103',1767398400000000,'2026-01-03',60,1,'pageview','/pricing','Pricing','example.test','00000000-0000-4000-8000-0000000000a1',1,'user-a','00000000-0000-4000-8000-0000000000b1',1,'','DE','en','Chrome','Linux','desktop','','','','{"plan":"pro"}','{}','','',0,0),
+        \\ ('00000000-0000-4000-8000-000000000104',1767398401000000,'2026-01-03',60,2,'purchase','/pricing','Pricing','example.test','00000000-0000-4000-8000-0000000000a1',1,'user-a','00000000-0000-4000-8000-0000000000b1',2,'','DE','en','Chrome','Linux','desktop','','','','{"plan":"pro","amount":14.25}','{}','12.500000','EUR',0,0),
+        \\ ('00000000-0000-4000-8000-000000000105',1767398402000000,'2026-01-03',60,2,'purchase','/pricing','Pricing','example.test','00000000-0000-4000-8000-0000000000a1',1,'user-a','00000000-0000-4000-8000-0000000000b1',3,'','DE','en','Chrome','Linux','desktop','','','','{"plan":"pro","amount":7.5}','{}','7.500000','USD',0,0),
+        \\ ('00000000-0000-4000-8000-000000000106',1767398403000000,'2026-01-03',60,4,'identify','/pricing','Pricing','example.test','00000000-0000-4000-8000-0000000000a1',1,'user-a','00000000-0000-4000-8000-0000000000b1',4,'','DE','en','Chrome','Linux','desktop','','','','{}','{"plan":"enterprise"}','','',0,0),
+        \\ ('00000000-0000-4000-8000-000000000112',1767394809000000,'2026-01-03',60,2,'delayed_event','/pricing','Pricing','example.test','00000000-0000-4000-8000-0000000000a1',1,'user-a','00000000-0000-4000-8000-0000000000b1',5,'','DE','en','Chrome','Linux','desktop','','','','{}','{}','','',0,3600000000),
+        \\ ('00000000-0000-4000-8000-000000000107',1767398404000000,'2026-01-03',60,1,'pageview','/','Home','example.test','00000000-0000-4000-8000-0000000000a2',1,'','00000000-0000-4000-8000-0000000000b2',0,'','US','en','Firefox','Windows','mobile','','','','{"plan":"free"}','{}','','',0,0),
+        \\ ('00000000-0000-4000-8000-000000000108',1767398405000000,'2026-01-03',60,3,'engagement','/','Home','example.test','00000000-0000-4000-8000-0000000000a2',1,'','00000000-0000-4000-8000-0000000000b2',1,'','US','en','Firefox','Windows','mobile','','','','{}','{}','','',10000,0),
+        \\ ('00000000-0000-4000-8000-000000000109',1767398406000000,'2026-01-03',60,1,'pageview','/ephemeral','Ephemeral','example.test','00000000-0000-4000-8000-0000000000a3',2,'','00000000-0000-4000-8000-0000000000b3',0,'','FR','fr','Safari','macOS','tablet','','','','{}','{}','','',0,0),
+        \\ ('00000000-0000-4000-8000-000000000110',1767398407000000,'2026-01-03',60,1,'pageview','/legacy','Legacy','example.test','00000000-0000-4000-8000-0000000000a4',3,'','00000000-0000-4000-8000-0000000000b4',0,'','ZZ','','Unknown','Unknown','unknown','','','','{}','{}','','',0,0),
+        \\ ('00000000-0000-4000-8000-000000000111',1767398408000000,'2026-01-03',60,1,'pageview','/bot','Bot','example.test','00000000-0000-4000-8000-0000000000a5',1,'','00000000-0000-4000-8000-0000000000b5',0,'','ZZ','','Bot','Bot','bot','','','','{}','{}','','',0,0)
         \\) fixture(event_id,occurred,local_date,offset_minutes,kind,event_name,
         \\ path,title,hostname,anonymous_id,identity_quality,user_id,session_id,
         \\ sequence,referrer,country,language,browser,os,device,utm_source,
-        \\ utm_medium,utm_campaign,properties,traits,amount,currency,engagement_ms);
+        \\ utm_medium,utm_campaign,properties,traits,amount,currency,engagement_ms,
+        \\ receipt_delay_micros);
     );
 }

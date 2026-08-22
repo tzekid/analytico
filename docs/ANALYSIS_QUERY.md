@@ -123,6 +123,12 @@ Metric v2 uses `site_local_date`, excludes `device_category='bot'` from product
 metrics, and treats only page-view/custom-event rows as independently
 meaningful. Canonical person identity follows D26 and D28:
 
+Trend buckets follow the receipt-time authority in `PROTOCOL.md` and D27.
+Day, week, and month intervals derive from the persisted `site_local_date`.
+Hour intervals derive from `received_at_utc_micros` plus the persisted,
+receipt-derived `site_utc_offset_minutes`. `occurred_at_utc_micros` remains an
+ordering input and never selects an analytics bucket.
+
 - linked persistent anonymous IDs use the site-scoped user key;
 - otherwise persistent, ephemeral, and legacy identities use distinct
   namespaces;
