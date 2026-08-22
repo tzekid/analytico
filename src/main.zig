@@ -49,6 +49,27 @@ pub fn main(init: std.process.Init) !void {
         try m2_probe.timeBuckets(allocator, output, args[3], args[4]);
         return;
     }
+    if (args.len == 7 and
+        std.mem.eql(u8, args[1], "m2") and
+        std.mem.eql(u8, args[2], "property-semantics"))
+    {
+        try m2_probe.propertySemantics(
+            allocator,
+            output,
+            args[3],
+            args[4],
+            try std.fmt.parseInt(i64, args[5], 10),
+            try std.fmt.parseInt(i64, args[6], 10),
+        );
+        return;
+    }
+    if (args.len == 4 and
+        std.mem.eql(u8, args[1], "m2") and
+        std.mem.eql(u8, args[2], "property-million"))
+    {
+        try m2_probe.propertyMillion(allocator, init.io, output, args[3]);
+        return;
+    }
     if (args.len == 6 and
         std.mem.eql(u8, args[1], "m2") and
         std.mem.eql(u8, args[2], "session-timeline"))
@@ -150,6 +171,8 @@ pub fn main(init: std.process.Init) !void {
         \\  analytico m2 session-timeline <directory> <site-id> <session-id>
         \\  analytico m2 identity-links <directory>
         \\  analytico m2 person-inspect <directory> <site-id> <anonymous-id>
+        \\  analytico m2 property-semantics <directory> <site-id> <start-micros> <end-micros>
+        \\  analytico m2 property-million <directory>
         \\  analytico m3 seed <directory> <site-id>
         \\  analytico m3 million <directory> <site-id>
         \\  analytico m3 timeout <directory>

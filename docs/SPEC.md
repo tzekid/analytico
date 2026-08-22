@@ -16,9 +16,11 @@
   storage foundation. Issue #7 implements protocol-v2 tracker anonymous identity
   and `reset()`. Issue #8 implements 30-minute client session rotation. Issue #9
   implements explicit identify, conflict handling, and derived person/trait
-  resolution. D27 and issues #10–#13 still require property, metric, timezone,
-  and migration evidence; schema 3 does not retroactively turn visitor-days
-  into people or claim site-local metric v2 is complete.
+  resolution. Issue #10 implements typed property canonicalization and bounded
+  DuckDB property primitives, while issue #11 implements explicit TZif-backed
+  local dates. Issues #12–#13 still own SPA behavior and the remaining migration
+  evidence; schema 3 does not retroactively turn visitor-days into people or
+  claim site-local metric v2 is complete.
 - The current server-rendered `/admin` dashboard and optional HTMX enhancement
   shipped after M4. HTML, native navigation, and ordinary forms remain the
   application baseline.
@@ -77,10 +79,17 @@ verified backups, upgrades the binary, and can restore the two embedded files.
 
 ### F3. Custom events
 
-- Accept a declared event name and a bounded flat property map.
+- Protocol v1 accepts a declared event name and a bounded allowlisted flat
+  property map. Protocol v2 accepts bounded non-allowlisted flat properties and
+  identify traits for later authenticated analysis.
 - Support events such as `signup`, `download`, and `purchase`.
 - Reject nested values, oversized names or values, and disallowed property
-  keys before database work begins.
+  keys where the selected protocol requires an allowlist before database work
+  begins.
+- Protocol-v2 string, signed-integer, exact scale-six decimal, boolean, and null
+  values retain type; missing remains distinct from null. Bounded discovery,
+  exact typed filtering, and breakdown query canonical JSON in DuckDB without
+  property pre-registration.
 - Do not add revenue accounting to the MVP; a purchase is initially a named
   conversion event with optional allowlisted descriptive properties.
 

@@ -1,6 +1,12 @@
 const std = @import("std");
+const property = @import("../property.zig");
 const rate_limit = @import("../http/rate_limit.zig");
+const duckdb = @import("../store/duckdb.zig");
 const events = @import("../store/events.zig");
+const properties = @import("../store/properties.zig");
+
+const benchmark_site_id = "00000000-0000-4000-8000-000000000f10";
+const benchmark_start_micros: i64 = 1_767_225_600_000_000;
 
 pub fn rateTable(output: *std.Io.Writer) !void {
     var limiter = rate_limit.Limiter{};
@@ -120,4 +126,320 @@ pub fn timeBuckets(
             result.int64(3, row),
         });
     }
+}
+
+pub fn propertySemantics(
+    allocator: std.mem.Allocator,
+    output: *std.Io.Writer,
+    directory: []const u8,
+    site_id: []const u8,
+    start_utc_micros: i64,
+    end_utc_micros: i64,
+) !void {
+    const path = try std.fs.path.join(allocator, &.{ directory, "events.duckdb" });
+    var store = try events.Store.open(allocator, path);
+    defer store.deinit();
+    try store.requireCurrent();
+    const event_window = properties.Window{
+        .source = .event,
+        .site_id = site_id,
+        .start_utc_micros = start_utc_micros,
+        .end_utc_micros = end_utc_micros,
+    };
+    const typed_query = properties.Query{
+        .window = event_window,
+        .property_name = "typed",
+    };
+    const high_query = properties.Query{
+        .window = event_window,
+        .property_name = "high",
+    };
+    const trait_query = properties.Query{
+        .window = .{
+            .source = .user_trait,
+            .site_id = site_id,
+            .start_utc_micros = start_utc_micros,
+            .end_utc_micros = end_utc_micros,
+        },
+        .property_name = "typed",
+    };
+    const result = .{
+        .catalog = try properties.discover(
+            allocator,
+            &store.database,
+            event_window,
+            property.max_result_rows,
+        ),
+        .filters = .{
+            .string = try properties.countMatching(
+                allocator,
+                &store.database,
+                typed_query,
+                .{ .string = "14" },
+            ),
+            .integer = try properties.countMatching(
+                allocator,
+                &store.database,
+                typed_query,
+                .{ .integer = 14 },
+            ),
+            .decimal = try properties.countMatching(
+                allocator,
+                &store.database,
+                typed_query,
+                .{ .decimal = "14.25" },
+            ),
+            .boolean = try properties.countMatching(
+                allocator,
+                &store.database,
+                typed_query,
+                .{ .boolean = true },
+            ),
+            .null_value = try properties.countMatching(
+                allocator,
+                &store.database,
+                typed_query,
+                .{ .null = {} },
+            ),
+            .missing = try properties.countMatching(
+                allocator,
+                &store.database,
+                typed_query,
+                .{ .missing = {} },
+            ),
+        },
+        .breakdown = try properties.breakdown(
+            allocator,
+            &store.database,
+            typed_query,
+            property.max_result_rows,
+        ),
+        .high_cardinality = try properties.breakdown(
+            allocator,
+            &store.database,
+            high_query,
+            3,
+        ),
+        .trait_breakdown = try properties.breakdown(
+            allocator,
+            &store.database,
+            trait_query,
+            property.max_result_rows,
+        ),
+    };
+    try std.json.Stringify.value(result, .{}, output);
+    try output.writeByte('\n');
+}
+
+pub fn propertyMillion(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    output: *std.Io.Writer,
+    directory: []const u8,
+) !void {
+    const path = try std.fs.path.join(allocator, &.{ directory, "events.duckdb" });
+    if (std.Io.Dir.cwd().statFile(io, path, .{})) |_| {
+        return error.PropertyBenchmarkRequiresNewStore;
+    } else |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    }
+    var store = try events.Store.open(allocator, path);
+    defer store.deinit();
+    try store.migrate();
+    var existing = try store.database.query(
+        \\SELECT
+        \\  (SELECT count(*) FROM events) +
+        \\  (SELECT count(*) FROM identity_links)
+    );
+    defer existing.deinit();
+    if (existing.rowCount() != 1 or existing.columnCount() != 1 or
+        existing.int64(0, 0) != 0)
+    {
+        return error.PropertyBenchmarkRequiresEmptyStore;
+    }
+
+    const seed_started = std.Io.Clock.awake.now(io).nanoseconds;
+    try store.database.exec(
+        \\INSERT INTO events (
+        \\  event_schema_version, protocol_version, tracker_version,
+        \\  event_id, site_id, received_at_utc_micros,
+        \\  occurred_at_utc_micros, received_date_utc, site_local_date,
+        \\  site_utc_offset_minutes, kind, event_name, path, page_title,
+        \\  hostname, anonymous_id, identity_quality, user_id, session_id,
+        \\  sequence, session_start, referrer_host, country_code, language,
+        \\  browser_family, os_family, device_category, utm_source, utm_medium,
+        \\  utm_campaign, utm_term, utm_content, properties_json,
+        \\  user_traits_json, value_amount, value_currency, engagement_ms,
+        \\  max_scroll_depth, visitor_day_id, visitor_day_start,
+        \\  event_payload_digest
+        \\)
+        \\SELECT
+        \\  3, 2, 2,
+        \\  CAST('00000000-0000-4000-8000-000000000f11' AS UUID),
+        \\  '00000000-0000-4000-8000-000000000f10',
+        \\  1767225600000000 + i * 1000,
+        \\  1767225600000000 + i * 1000,
+        \\  CAST('2026-01-01' AS DATE), CAST('2026-01-01' AS DATE), 0,
+        \\  2, 'benchmark', '/', '', '',
+        \\  CAST('00000000-0000-4000-8000-000000000f12' AS UUID),
+        \\  1, '', CAST('00000000-0000-4000-8000-000000000f13' AS UUID),
+        \\  CAST(i AS UINTEGER), i = 0, '', 'DE', '', 'Chrome', 'Linux',
+        \\  'desktop', '', '', '', '', '',
+        \\  '{"active":' || CASE WHEN i % 2 = 0 THEN 'true' ELSE 'false' END ||
+        \\  ',"attempt":' || CAST(i % 100 AS VARCHAR) ||
+        \\  ',"cohort":"c' || CAST(i % 12 AS VARCHAR) || '"' ||
+        \\  ',"decimal":' || CAST(i % 10 AS VARCHAR) || '.250000' ||
+        \\  ',"enabled":true' ||
+        \\  ',"high":"h' || lpad(CAST(i % 100000 AS VARCHAR), 6, '0') || '"' ||
+        \\  ',"integer":' || CAST(i % 1000 AS VARCHAR) ||
+        \\  ',"mixed":' || CASE i % 4
+        \\    WHEN 0 THEN '"alpha"'
+        \\    WHEN 1 THEN '42'
+        \\    WHEN 2 THEN '42.500000'
+        \\    ELSE 'null'
+        \\  END ||
+        \\  ',"nullable":null' ||
+        \\  CASE WHEN i % 2 = 0 THEN ',"optional":"present"' ELSE '' END ||
+        \\  ',"plan":"' || CASE i % 4
+        \\    WHEN 0 THEN 'free'
+        \\    WHEN 1 THEN 'basic'
+        \\    WHEN 2 THEN 'pro'
+        \\    ELSE 'business'
+        \\  END || '"' ||
+        \\  ',"region":"r' || CAST(i % 8 AS VARCHAR) || '"}',
+        \\  '{}', CAST(NULL AS DECIMAL(18,6)), '', 0, 0,
+        \\  CAST('benchmark' AS BLOB), i = 0, ''
+        \\FROM range(1000000) rows(i);
+    );
+    try store.checkpoint();
+    const seed_ms: i64 = @intCast(@divTrunc(
+        std.Io.Clock.awake.now(io).nanoseconds - seed_started,
+        std.time.ns_per_ms,
+    ));
+
+    const window = properties.Window{
+        .source = .event,
+        .site_id = benchmark_site_id,
+        .start_utc_micros = benchmark_start_micros,
+        .end_utc_micros = benchmark_start_micros + 2_000_000_000,
+        .event_name = "benchmark",
+    };
+    const low_query = properties.Query{
+        .window = window,
+        .property_name = "plan",
+    };
+    _ = try properties.breakdown(
+        allocator,
+        &store.database,
+        low_query,
+        property.max_result_rows,
+    );
+    var samples: [10]i64 = undefined;
+    var low_breakdown: properties.Breakdown = undefined;
+    for (&samples) |*sample| {
+        const started = std.Io.Clock.awake.now(io).nanoseconds;
+        low_breakdown = try properties.breakdown(
+            allocator,
+            &store.database,
+            low_query,
+            property.max_result_rows,
+        );
+        sample.* = @intCast(@divTrunc(
+            std.Io.Clock.awake.now(io).nanoseconds - started,
+            std.time.ns_per_ms,
+        ));
+    }
+    std.mem.sort(i64, &samples, {}, std.sort.asc(i64));
+
+    const high_started = std.Io.Clock.awake.now(io).nanoseconds;
+    const high_breakdown = try properties.breakdown(
+        allocator,
+        &store.database,
+        .{ .window = window, .property_name = "high" },
+        property.max_result_rows,
+    );
+    const high_ms: i64 = @intCast(@divTrunc(
+        std.Io.Clock.awake.now(io).nanoseconds - high_started,
+        std.time.ns_per_ms,
+    ));
+    const mixed = try properties.breakdown(
+        allocator,
+        &store.database,
+        .{ .window = window, .property_name = "mixed" },
+        property.max_result_rows,
+    );
+    const catalog = try properties.discover(
+        allocator,
+        &store.database,
+        window,
+        property.max_result_rows,
+    );
+    const filters = .{
+        .string = try properties.countMatching(
+            allocator,
+            &store.database,
+            .{ .window = window, .property_name = "plan" },
+            .{ .string = "pro" },
+        ),
+        .integer = try properties.countMatching(
+            allocator,
+            &store.database,
+            .{ .window = window, .property_name = "integer" },
+            .{ .integer = 42 },
+        ),
+        .decimal = try properties.countMatching(
+            allocator,
+            &store.database,
+            .{ .window = window, .property_name = "decimal" },
+            .{ .decimal = "2.25" },
+        ),
+        .boolean = try properties.countMatching(
+            allocator,
+            &store.database,
+            .{ .window = window, .property_name = "active" },
+            .{ .boolean = true },
+        ),
+        .null_value = try properties.countMatching(
+            allocator,
+            &store.database,
+            .{ .window = window, .property_name = "nullable" },
+            .{ .null = {} },
+        ),
+        .missing = try properties.countMatching(
+            allocator,
+            &store.database,
+            .{ .window = window, .property_name = "optional" },
+            .{ .missing = {} },
+        ),
+    };
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+    const stat = try file.stat(io);
+    const result = .{
+        .duckdb_version = duckdb.Database.version(),
+        .events = 1_000_000,
+        .properties = 12,
+        .seed_ms = seed_ms,
+        .database_bytes = stat.size,
+        .catalog = catalog,
+        .filters = filters,
+        .mixed = mixed,
+        .low_breakdown = .{
+            .rows = low_breakdown.rows.len,
+            .bucket_count = low_breakdown.bucket_count,
+            .samples = samples.len,
+            .p50_ms = samples[4],
+            .p95_ms = samples[9],
+            .p99_ms = samples[9],
+        },
+        .high_breakdown = .{
+            .rows = high_breakdown.rows.len,
+            .bucket_count = high_breakdown.bucket_count,
+            .truncated = high_breakdown.truncated,
+            .elapsed_ms = high_ms,
+        },
+    };
+    try std.json.Stringify.value(result, .{}, output);
+    try output.writeByte('\n');
 }

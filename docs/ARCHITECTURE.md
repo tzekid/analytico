@@ -161,9 +161,11 @@ startup rather than falling back to process-local time.
 
 Protocol-v1 rows keep their daily visitor and session meaning under metric v1.
 Migration marks them `legacy_daily`, never links them across dates, and retains
-their existing session IDs. Decisions D26–D28 govern this version boundary;
-issues #10–#13 own properties, SPA, metric, timezone, and the remaining
-migration acceptance.
+their existing session IDs. Canonical protocol-v2 properties and traits are
+queried in place with pinned DuckDB built-in JSON functions through static,
+bound templates; no extension download, EAV table, or request-selected SQL is
+introduced. Decisions D26–D28 govern this version boundary; issues #12–#13 own
+SPA behavior and the remaining migration acceptance.
 
 ## 6. Report flow
 

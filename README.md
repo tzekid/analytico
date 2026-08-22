@@ -149,6 +149,14 @@ tests/setup-browser-e2e.sh
 zig build e2e-m2-browser -Doptimize=ReleaseSafe
 ```
 
+Run typed property semantics and the separate million-event property benchmark
+with:
+
+```sh
+zig build e2e-properties -Doptimize=ReleaseSafe
+zig build bench-properties -Doptimize=ReleaseSafe
+```
+
 Run the complete report semantics and million-event performance gates with:
 
 ```sh
