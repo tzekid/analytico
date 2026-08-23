@@ -8,6 +8,15 @@
   const sessionKey = prefix + ":s";
   const identifiedKey = prefix + ":u";
   const idleLimitMs = 30 * 60 * 1000;
+  const activeLimitMs = 60 * 1000;
+  const engagementIntervalMs = 15 * 1000;
+  const spaEnabled = script.dataset.spa === "auto";
+  const engagementEnabled = script.dataset.engagement === "true";
+  const outboundEnabled = script.dataset.outbound === "true";
+  const downloadsEnabled = script.dataset.downloads === "true";
+  const formsEnabled = script.dataset.forms === "true";
+  const notFoundEnabled = script.dataset.notFound === "true";
+  const downloadPattern = /\.(pdf|csv|docx?|xlsx?|zip|rar|7z|gz|mp3|mp4|mov|dmg|pkg|exe)$/i;
 
   function uuid() {
     try {
@@ -82,6 +91,38 @@
     }
   }
 
+  function currentPage() {
+    return {
+      path: location.pathname,
+      title: (document.title || "").slice(0, 512),
+      hostname: location.hostname,
+    };
+  }
+
+  function eventExtra(properties) {
+    if (!properties || typeof properties !== "object" || Array.isArray(properties)) {
+      return { properties };
+    }
+    const hasValue = Object.prototype.hasOwnProperty.call(properties, "value");
+    const hasCurrency = Object.prototype.hasOwnProperty.call(properties, "currency");
+    if (!hasValue && !hasCurrency) return { properties };
+    if (!hasValue || !hasCurrency ||
+        typeof properties.value !== "string" ||
+        !/^-?(0|[1-9][0-9]{0,11})(\.[0-9]{1,6})?$/.test(properties.value) ||
+        typeof properties.currency !== "string" ||
+        !/^[A-Z]{3}$/.test(properties.currency)) return null;
+    const ordinary = Object.create(null);
+    for (const key in properties) {
+      if (!Object.prototype.hasOwnProperty.call(properties, key) ||
+          key === "value" || key === "currency") continue;
+      ordinary[key] = properties[key];
+    }
+    return {
+      properties: Object.keys(ordinary).length ? ordinary : undefined,
+      value: { amount: properties.value, currency: properties.currency },
+    };
+  }
+
   let identityQuality = "persistent";
   let anonymousId = "";
   let session = null;
@@ -138,7 +179,7 @@
 
   loadIdentity();
 
-  function send(type, extra) {
+  function send(type, extra, page) {
     if (!anonymousId || !session) loadIdentity();
     if (!anonymousId || !session) return "";
     const eventId = uuid();
@@ -153,15 +194,15 @@
       session.sequence = sequence + 1;
       session.last_activity_ms = now;
       if (!persistSession()) identityQuality = "ephemeral";
+      const attributed = type === "pageview" || type === "event";
       const utm = {};
-      if (type !== "identify") {
+      if (attributed) {
         const params = new URLSearchParams(location.search);
         for (const field of ["source", "medium", "campaign", "term", "content"]) {
           const value = params.get("utm_" + field);
           if (value) utm[field] = value;
         }
       }
-      const title = (document.title || "").slice(0, 512);
       const body = JSON.stringify(Object.assign({
         v: 2,
         site,
@@ -172,13 +213,9 @@
         sequence,
         occurred_at_ms: now,
         type,
-        page: {
-          path: location.pathname,
-          title,
-          hostname: location.hostname,
-        },
-        referrer: type === "identify" ? undefined : document.referrer || undefined,
-        utm: Object.keys(utm).length ? utm : undefined,
+        page: page || currentPage(),
+        referrer: attributed ? document.referrer || undefined : undefined,
+        utm: attributed && Object.keys(utm).length ? utm : undefined,
       }, extra));
       try {
         if (navigator.sendBeacon(endpoint, body)) return eventId;
@@ -208,6 +245,7 @@
   }
 
   function reset() {
+    if (engagementEnabled) resetPageEngagement();
     remove(anonymousKey);
     remove(sessionKey);
     remove(identifiedKey);
@@ -216,12 +254,174 @@
     loadIdentity();
   }
 
+  let trackedPage = currentPage();
+  let visible = document.visibilityState !== "hidden";
+  let activityAt = Date.now();
+  let sampledAt = activityAt;
+  let pendingActiveMs = 0;
+  let maxScrollDepth = 0;
+
+  function scrollDepth() {
+    const root = document.documentElement;
+    const body = document.body;
+    const height = Math.max(
+      root ? root.scrollHeight : 0,
+      root ? root.offsetHeight : 0,
+      body ? body.scrollHeight : 0,
+      body ? body.offsetHeight : 0,
+    );
+    if (!height) return 0;
+    return Math.max(0, Math.min(100,
+      Math.floor(((window.scrollY + window.innerHeight) * 100) / height)));
+  }
+
+  function captureActive(now) {
+    if (now < sampledAt) {
+      sampledAt = now;
+      return;
+    }
+    if (visible) {
+      const activeEnd = Math.min(now, activityAt + activeLimitMs);
+      if (activeEnd > sampledAt) pendingActiveMs += activeEnd - sampledAt;
+    }
+    sampledAt = now;
+  }
+
+  function emitEngagement(page) {
+    const now = Date.now();
+    captureActive(now);
+    const activeMs = Math.min(60_000, Math.floor(pendingActiveMs));
+    if (activeMs <= 0) return;
+    if (send("engagement", {
+      engagement: { active_ms: activeMs, max_scroll_depth: maxScrollDepth },
+    }, page)) pendingActiveMs -= activeMs;
+  }
+
+  function resetPageEngagement() {
+    const now = Date.now();
+    activityAt = now;
+    sampledAt = now;
+    pendingActiveMs = 0;
+    maxScrollDepth = scrollDepth();
+  }
+
+  function navigation() {
+    const next = currentPage();
+    if (next.path === trackedPage.path) return;
+    if (engagementEnabled) emitEngagement(trackedPage);
+    trackedPage = next;
+    if (engagementEnabled) resetPageEngagement();
+    send("pageview", undefined, trackedPage);
+  }
+
+  if (spaEnabled) {
+    for (const name of ["pushState", "replaceState"]) {
+      const original = history[name];
+      history[name] = function () {
+        const result = original.apply(this, arguments);
+        try {
+          navigation();
+        } catch (_) {}
+        return result;
+      };
+    }
+    addEventListener("popstate", () => {
+      try {
+        navigation();
+      } catch (_) {}
+    });
+  }
+
+  if (engagementEnabled) {
+    maxScrollDepth = scrollDepth();
+    const activity = (event) => {
+      try {
+        const now = Date.now();
+        captureActive(now);
+        activityAt = now;
+        if (event.type === "scroll") {
+          maxScrollDepth = Math.max(maxScrollDepth, scrollDepth());
+        }
+      } catch (_) {}
+    };
+    for (const name of ["scroll", "pointerdown", "touchstart", "keydown"]) {
+      addEventListener(name, activity, { passive: true });
+    }
+    document.addEventListener("visibilitychange", () => {
+      try {
+        const now = Date.now();
+        captureActive(now);
+        visible = document.visibilityState !== "hidden";
+        sampledAt = now;
+        if (!visible) emitEngagement(trackedPage);
+      } catch (_) {}
+    });
+    addEventListener("pagehide", () => {
+      try {
+        emitEngagement(trackedPage);
+        visible = false;
+        sampledAt = Date.now();
+      } catch (_) {}
+    });
+    setInterval(() => {
+      try {
+        emitEngagement(trackedPage);
+      } catch (_) {}
+    }, engagementIntervalMs);
+  }
+
+  if (outboundEnabled || downloadsEnabled) {
+    document.addEventListener("click", (event) => {
+      try {
+        const target = event.target;
+        const link = target && typeof target.closest === "function" ?
+          target.closest("a[href]") : null;
+        if (!link) return;
+        const url = new URL(link.href, location.href);
+        if (url.protocol !== "http:" && url.protocol !== "https:") return;
+        const extensionMatch = url.pathname.match(downloadPattern);
+        if (downloadsEnabled &&
+            (link.hasAttribute("download") || extensionMatch)) {
+          const properties = { url_path: url.pathname.slice(0, 512) };
+          if (extensionMatch) properties.extension = extensionMatch[1].toLowerCase();
+          send("event", { name: "file_download", properties });
+        } else if (outboundEnabled && url.origin !== location.origin) {
+          send("event", {
+            name: "outbound_click",
+            properties: { url_host: url.hostname.slice(0, 253) },
+          });
+        }
+      } catch (_) {}
+    }, { passive: true });
+  }
+
+  if (formsEnabled) {
+    document.addEventListener("submit", (event) => {
+      try {
+        const form = event.target;
+        if (!form || form.tagName !== "FORM") return;
+        const action = new URL(form.getAttribute("action") || location.href, location.href);
+        const properties = {
+          action_path: action.pathname.slice(0, 512),
+          action_host: action.hostname.slice(0, 253),
+        };
+        const formId = form.id || form.getAttribute("name") || "";
+        if (validText(formId, 128, 0)) properties.form_id = formId;
+        send("event", { name: "form_submit", properties });
+      } catch (_) {}
+    }, { passive: true });
+  }
+
   window.analytico = {
     track(name, properties) {
-      send("event", { name, properties });
+      try {
+        const extra = eventExtra(properties);
+        if (extra) send("event", Object.assign({ name }, extra));
+      } catch (_) {}
     },
     identify,
     reset,
   };
-  send("pageview");
+  send("pageview", undefined, trackedPage);
+  if (notFoundEnabled) send("event", { name: "not_found" }, trackedPage);
 })();

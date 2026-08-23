@@ -24,7 +24,7 @@ function html(site) {
 <meta charset="utf-8">
 <title>Analytico identity fixture</title>
 <main><h1>Useful server-rendered state</h1><p>${site}</p></main>
-<script defer src="${collector}/tracker.d9e94247.js" data-site="${site}"></script>
+<script defer src="${collector}/tracker.81c3b777.js" data-site="${site}"></script>
 </html>`;
 }
 

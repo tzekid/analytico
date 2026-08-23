@@ -51,20 +51,22 @@
   },
   "tracker_v2": {
     "protocol": 2,
-    "minified_bytes": 3025,
-    "brotli_bytes": 1316,
-    "gzip_bytes": 1461,
-    "minified_sha256": "d9e94247f97fa84795f5a9bb493a0d383b2aac11565e80e6ceb670b4e9e05c2c",
-    "brotli_sha256": "660d9ab4feb542f998d4e6ef9df11a4a6b9544c366f44690a4fa6ee448b47b8e",
-    "gzip_sha256": "53316f56ecfa8d34a84af7b9159253d7410b31e548d4d6a515fb2032192f2bf0",
-    "content_hash_path": "/tracker.d9e94247.js",
+    "source_bytes": 13203,
+    "minified_bytes": 6266,
+    "brotli_bytes": 2386,
+    "gzip_bytes": 2649,
+    "minified_sha256": "81c3b7770d010bcb43d854b31fe0da85151f28017a2b469b4d34797e86d2b8df",
+    "brotli_sha256": "0b96413f8ffad259a45a780b1f5c8950f6416b22b0724800fb1b84e69e32f288",
+    "gzip_sha256": "f9de02eb5d8b588b9dfc48692065d4d9bd7d9236c2765a6bc5080282f0aba825",
+    "content_hash_path": "/tracker.81c3b777.js",
     "immutable_compatibility_paths": [
       "/tracker.fb64c486.js",
-      "/tracker.78135195.js"
+      "/tracker.78135195.js",
+      "/tracker.d9e94247.js"
     ],
     "local_storage_keys_per_site": 3,
     "third_party_dependencies": 0,
-    "status": "accepted 1.0 identify and session tracker"
+    "status": "accepted 1.0 SPA, engagement, automatic-event, identity, and session tracker"
   },
   "browser_e2e": {
     "playwright": "1.62.0",

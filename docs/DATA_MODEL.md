@@ -527,8 +527,9 @@ provides tracker anonymous identity and `reset()`, and issue #8 provides
 canonical-person resolution, and latest-trait selection. Issue #10 provides
 typed property canonicalization and DuckDB query primitives, and issue #11
 provides explicit TZif-backed site-local dates. Issue #13 provides the exact
-legacy migration, mixed-data coverage, and rollback evidence; issue #12 owns
-the remaining tracker SPA/engagement behavior.
+legacy migration, mixed-data coverage, and rollback evidence. Issue #12
+provides the tracker SPA, engagement/scroll, exact value, and opt-in automatic
+event producers for those schema-3 fields.
 
 ### Identity and sessions
 

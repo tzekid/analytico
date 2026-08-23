@@ -4,9 +4,10 @@
 > Protocol v2 is the additive collector/storage foundation defined by D28.
 > Protocol-v2 tracker anonymous identity, `identify()`, `reset()`, 30-minute
 > client session rotation, explicit site timezone bucketing, and typed property
-> storage/query primitives are implemented. Exact legacy migration and
-> mixed-data coverage are implemented by issue #13; SPA/engagement continues
-> through issue #12 and later product queries remain separately issue-backed.
+> storage/query primitives, SPA navigation, engagement/scroll, exact tracker
+> value handling, and opt-in automatic events are implemented. Exact legacy
+> migration and mixed-data coverage are implemented by issue #13; later
+> product queries remain separately issue-backed.
 
 Breaking changes require a new protocol version. They do not reinterpret
 accepted v1 events or metric-v1 visitor-day semantics.
@@ -18,7 +19,8 @@ accepted v1 events or metric-v1 visitor-day semantics.
 | `GET` | `/tracker.aef65945.js` | Immutable protocol-v1 tracker | `200` JavaScript |
 | `GET` | `/tracker.fb64c486.js` | Immutable protocol-v2 anonymous-identity tracker | `200` JavaScript |
 | `GET` | `/tracker.78135195.js` | Immutable protocol-v2 session tracker | `200` JavaScript |
-| `GET` | `/tracker.d9e94247.js` | Immutable current protocol-v2 identify tracker | `200` JavaScript |
+| `GET` | `/tracker.d9e94247.js` | Immutable protocol-v2 identify tracker | `200` JavaScript |
+| `GET` | `/tracker.81c3b777.js` | Immutable current SPA/engagement tracker | `200` JavaScript |
 | `GET` | `/tracker.js` | Short-cache alias of the protocol-v2 tracker | `200` JavaScript |
 | `POST` | `/v1/event` | Page view or custom event | `204` empty |
 | `POST` | `/v2/event` | Bounded version-2 event envelope | `204` empty |
@@ -273,9 +275,15 @@ content-hashed path:
 - when UUID generation fails, the tracker does not send;
 - storage, serialization, beacon, and fetch failures never throw into the host
   page;
-- `analytico.reset()` clears identified storage and creates a new anonymous
-  and session UUID;
-- custom events through `analytico.track(name, properties)`;
+- `analytico.reset()` clears identified storage, discards unsent engagement,
+  and creates a new anonymous and session UUID without requiring a network
+  request;
+- custom events through `analytico.track(name, properties)`. When the second
+  argument contains both `value` and `currency`, the tracker sends them through
+  protocol v2's exact value object and leaves the remaining keys as ordinary
+  properties. The amount must use the protocol decimal-string grammar and the
+  currency must be three uppercase ASCII letters; an invalid or incomplete pair
+  sends nothing rather than recording misleading revenue;
 - `analytico.identify(user_id, traits)` sends a bounded identify event only for
   persistent anonymous identity. The first locally recorded user ID remains
   until `reset()`; a different call is still sent for authoritative server
@@ -283,7 +291,31 @@ content-hashed path:
 - the local identified key is failure-tolerant application state, not proof
   that the collector committed a link. Traits are not duplicated into browser
   storage; accepted bounded traits remain on identify events in DuckDB;
-- SPA and engagement remain later issues;
+- `data-spa="auto"` wraps `pushState` and `replaceState` and listens to
+  `popstate`. It emits once when `location.pathname` changes, suppresses an
+  immediate same-path duplicate, and never sends the query string. No
+  framework hook or public `page()` API is added;
+- `data-engagement="true"` counts time only while the document is visible and
+  user activity occurred within the previous 60 seconds. Passive scroll,
+  `pointerdown`, `touchstart`, and `keydown` activity update that window. A
+  delta and the maximum integer scroll depth are attempted at most every 15
+  seconds and when a page becomes hidden, is left, or changes SPA path. Hidden
+  and idle time are not carried into the next delta;
+- automatic events are off unless their exact attribute is `true`:
+  `data-outbound` sends `outbound_click` with only `url_host`,
+  `data-downloads` sends `file_download` with bounded query-free `url_path` and
+  `extension`, `data-forms` sends `form_submit` with bounded `form_id`,
+  query-free `action_path`, and `action_host`, and `data-not-found` sends one
+  `not_found` event.
+  A matching download takes precedence over outbound classification. No field
+  value, generic click, full URL, or query string is inspected or sent;
+- the tracker installs no configuration request, dependency, DOM mutation,
+  framework integration, high-frequency pointer listener, or every-click
+  capture. Multi-tab session races remain an accepted documented limitation;
+- the tested compatibility target is the acceptance-tooling versions pinned in
+  `versions.json`: Chromium 151, Firefox 153, and WebKit 26.5. The UUID helper
+  falls back from `crypto.randomUUID()` to `crypto.getRandomValues()`; no
+  legacy-browser compatibility layer is shipped;
 - minified and compressed bytes recorded by the performance gate.
 
 Usage:
@@ -291,8 +323,10 @@ Usage:
 ```html
 <script
   defer
-  src="https://analytics.example/tracker.d9e94247.js"
+  src="https://analytics.example/tracker.81c3b777.js"
   data-site="00000000-0000-4000-8000-000000000000"
+  data-spa="auto"
+  data-engagement="true"
 ></script>
 ```
 

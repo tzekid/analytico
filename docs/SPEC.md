@@ -19,7 +19,8 @@
   resolution. Issue #10 implements typed property canonicalization and bounded
   DuckDB property primitives, while issue #11 implements explicit TZif-backed
   local dates. Issue #13 implements the exact legacy migration and mixed-data
-  coverage evidence, while issue #12 still owns SPA and engagement behavior.
+  coverage evidence. Issue #12 implements bounded SPA, engagement/scroll,
+  exact value/currency, and opt-in automatic tracker behavior.
   Issue #24 defines the separate closed metric-v2 AnalysisQuery/compiler
   boundary without changing metric-v1 reports. Schema 3 does not retroactively
   turn visitor-days into people or claim the later product routes and views are
