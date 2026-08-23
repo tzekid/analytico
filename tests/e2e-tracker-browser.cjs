@@ -14,7 +14,7 @@ if (!collector || !site || !Number.isInteger(fixturePort)) {
 }
 
 const fixtureOrigin = `http://127.0.0.2:${fixturePort}`;
-const tracker = `${collector}/tracker.6de111c9.js`;
+const tracker = `${collector}/tracker.bc506cfe.js`;
 
 function html(mode) {
   let attributes = "";
@@ -56,15 +56,20 @@ const server = http.createServer((request, response) => {
   response.end(html(mode));
 });
 
-function launch() {
+function launch(human = false) {
   const options = {
     headless: true,
     args: [
       "--no-sandbox",
+      "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 " +
+        "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
       "--ozone-platform=headless",
       "--use-angle=swiftshader-webgl",
     ],
   };
+  if (human) {
+    options.args.push("--disable-blink-features=AutomationControlled");
+  }
   if (process.env.ANALYTICO_CHROMIUM_PATH) {
     options.executablePath = process.env.ANALYTICO_CHROMIUM_PATH;
   }
@@ -371,26 +376,94 @@ async function verifyAutomaticAndValue(browser) {
   };
 }
 
+async function verifySignals(automationBrowser, humanBrowser) {
+  const automationContext = await automationBrowser.newContext();
+  const automationPage = await automationContext.newPage();
+  let accepted = nextEvent(
+    automationPage,
+    (event) => event.type === "pageview" && event.page.path === "/signals-automation",
+  );
+  await automationPage.goto(`${fixtureOrigin}/signals-automation`, {
+    waitUntil: "load",
+  });
+  const automation = await accepted;
+  assert.equal(await automationPage.evaluate(() => navigator.webdriver), true);
+  assert.equal(automation.signals.v, 1);
+  assert.equal(automation.signals.webdriver, true);
+  assert.equal(automation.signals.trusted_interactions, 0);
+  assert.equal(automation.signals.was_visible, true);
+  assert.equal(automation.signals.was_prerendered, false);
+  assert.equal(automation.signals.viewport_bucket, 4);
+  assert.ok(automation.signals.beacon_timing_bucket >= 1);
+  assert.ok(automation.signals.beacon_timing_bucket <= 4);
+  await automationContext.close();
+
+  const humanContext = await humanBrowser.newContext({
+    extraHTTPHeaders: {
+      "Sec-CH-UA": '"Chromium";v="151", "Google Chrome";v="151"',
+    },
+  });
+  const humanPage = await humanContext.newPage();
+  accepted = nextEvent(
+    humanPage,
+    (event) => event.type === "pageview" && event.page.path === "/signals-human",
+  );
+  await humanPage.goto(`${fixtureOrigin}/signals-human`, { waitUntil: "load" });
+  const initialHuman = await accepted;
+  assert.equal(await humanPage.evaluate(() => navigator.webdriver), false);
+  assert.equal(initialHuman.signals.webdriver, false);
+
+  await humanPage.mouse.move(40, 40);
+  await humanPage.keyboard.press("A");
+  await humanPage.mouse.wheel(0, 300);
+  await humanPage.waitForFunction(() => window.scrollY > 0);
+  await humanPage.waitForTimeout(20);
+  accepted = nextEvent(
+    humanPage,
+    (event) => event.type === "event" && event.name === "trusted_signal",
+  );
+  await humanPage.evaluate(() => window.analytico.track("trusted_signal"));
+  const human = await accepted;
+  assert.equal(human.signals.v, 1);
+  assert.equal(human.signals.webdriver, false);
+  assert.equal(human.signals.trusted_interactions & 7, 7);
+  assert.equal(human.signals.was_visible, true);
+  assert.equal(human.signals.was_prerendered, false);
+  assert.equal(human.signals.viewport_bucket, 4);
+  await humanContext.close();
+
+  return {
+    automation: automation.event_id,
+    human: human.event_id,
+    trusted_interactions: human.signals.trusted_interactions,
+    stored_events: 3,
+  };
+}
+
 async function main() {
   await new Promise((resolve, reject) => {
     server.once("error", reject);
     server.listen(fixturePort, "0.0.0.0", resolve);
   });
   const browser = await launch();
+  const humanBrowser = await launch(true);
   try {
     const spa = await verifySpa(browser);
     const engagement = await verifyEngagement(browser);
     const automatic = await verifyAutomaticAndValue(browser);
+    const signals = await verifySignals(browser, humanBrowser);
     process.stdout.write(JSON.stringify({
       engine: "chromium",
       spa,
       engagement,
       automatic,
+      signals,
       stored_events_expected: spa.pageviews + engagement.requests +
-        automatic.requests + automatic.disabled_requests,
+        automatic.requests + automatic.disabled_requests + signals.stored_events,
     }) + "\n");
   } finally {
     await browser.close();
+    await humanBrowser.close();
     await new Promise((resolve) => server.close(resolve));
   }
 }

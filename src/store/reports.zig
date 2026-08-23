@@ -27,7 +27,7 @@ const identity_coverage_sql: [:0]const u8 =
     \\  WHERE e.site_id = ?
     \\    AND e.site_local_date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
     \\    AND e.kind IN (1, 2)
-    \\    AND e.traffic_class != 4 AND NOT e.legacy_bot_verdict
+    \\    AND e.traffic_class IN (1, 5)
     \\), people AS (
     \\  SELECT DISTINCT CASE
     \\    WHEN identity_quality = 1 AND linked_user_id != ''
@@ -49,7 +49,7 @@ const identity_coverage_sql: [:0]const u8 =
     \\       (SELECT CAST(min(site_local_date) AS VARCHAR)
     \\        FROM events
     \\        WHERE site_id = ? AND kind IN (1, 2)
-    \\          AND traffic_class != 4 AND NOT legacy_bot_verdict
+    \\          AND traffic_class IN (1, 5)
     \\          AND identity_quality = 1)
     \\FROM people
     \\WHERE canonical_key IS NOT NULL
@@ -62,7 +62,7 @@ const session_cte =
     \\),
     \\filtered AS (
     \\  SELECT * FROM filtered_all
-    \\  WHERE traffic_class != 4 AND NOT legacy_bot_verdict
+    \\  WHERE traffic_class IN (1, 5)
     \\),
     \\sessioned AS (
     \\  SELECT * FROM filtered
@@ -101,21 +101,19 @@ const first_event_cte = session_cte ++
 const overview_sql: [:0]const u8 =
     \\SELECT
     \\  count(*) FILTER (
-    \\    WHERE kind = 1 AND traffic_class != 4 AND NOT legacy_bot_verdict
+    \\    WHERE kind = 1 AND traffic_class IN (1, 5)
     \\  ),
     \\  count(*) FILTER (
-    \\    WHERE visitor_day_start AND traffic_class != 4
-    \\      AND NOT legacy_bot_verdict
+    \\    WHERE visitor_day_start AND traffic_class IN (1, 5)
     \\  ),
     \\  count(*) FILTER (
-    \\    WHERE session_start AND traffic_class != 4
-    \\      AND NOT legacy_bot_verdict
+    \\    WHERE session_start AND traffic_class IN (1, 5)
     \\  ),
     \\  count(*) FILTER (
-    \\    WHERE kind = 2 AND traffic_class != 4 AND NOT legacy_bot_verdict
+    \\    WHERE kind = 2 AND traffic_class IN (1, 5)
     \\  ),
     \\  count(*) FILTER (
-    \\    WHERE legacy_bot_verdict AND traffic_class != 4
+    \\    WHERE traffic_class IN (2, 3)
     \\  )
     \\FROM events
     \\WHERE site_id = ?
@@ -130,13 +128,15 @@ const traffic_quality_sql: [:0]const u8 =
     \\  SELECT e.site_id, e.received_date_utc, e.kind, e.anonymous_id,
     \\    e.identity_quality, e.session_id, e.visitor_day_start,
     \\    e.traffic_class, e.classifier_version, e.bot_rule,
-    \\    e.legacy_bot_verdict
+    \\    e.signal_version, e.navigator_webdriver,
+    \\    e.trusted_interactions, e.was_visible, e.was_prerendered,
+    \\    e.client_hint_consistency, e.accept_language_present
     \\  FROM events e, params p
     \\  WHERE e.site_id = p.site_id
     \\    AND e.received_date_utc BETWEEN p.start_date AND p.end_date
     \\), eligible_range AS (
     \\  SELECT * FROM range_events
-    \\  WHERE traffic_class != 4 AND NOT legacy_bot_verdict
+    \\  WHERE traffic_class IN (1, 5)
     \\), meaningful AS (
     \\  SELECT e.anonymous_id, e.identity_quality,
     \\         COALESCE(l.user_id, '') AS linked_user_id
@@ -194,25 +194,19 @@ const traffic_quality_sql: [:0]const u8 =
     \\    count(*) FILTER (WHERE traffic_class = 3) AS automation,
     \\    count(*) FILTER (WHERE traffic_class = 4) AS excluded,
     \\    count(*) FILTER (WHERE traffic_class = 5) AS suspected,
-    \\    count(*) FILTER (
-    \\      WHERE traffic_class != 4 AND classifier_version = 1
-    \\    ) AS classifier_v1_events,
-    \\    count(*) FILTER (
-    \\      WHERE traffic_class != 4 AND classifier_version = 1
-    \\        AND NOT legacy_bot_verdict AND traffic_class NOT IN (2, 3)
-    \\    ) AS both_human,
-    \\    count(*) FILTER (
-    \\      WHERE traffic_class != 4 AND classifier_version = 1
-    \\        AND legacy_bot_verdict AND traffic_class NOT IN (2, 3)
-    \\    ) AS legacy_only,
-    \\    count(*) FILTER (
-    \\      WHERE traffic_class != 4 AND classifier_version = 1
-    \\        AND NOT legacy_bot_verdict AND traffic_class IN (2, 3)
-    \\    ) AS classifier_only,
-    \\    count(*) FILTER (
-    \\      WHERE traffic_class != 4 AND classifier_version = 1
-    \\        AND legacy_bot_verdict AND traffic_class IN (2, 3)
-    \\    ) AS both_bot
+    \\    count(*) FILTER (WHERE signal_version = 1)
+    \\      AS client_signal_v1_events,
+    \\    count(*) FILTER (WHERE navigator_webdriver) AS webdriver_events,
+    \\    count(*) FILTER (WHERE trusted_interactions != 0)
+    \\      AS trusted_interaction_events,
+    \\    count(*) FILTER (WHERE was_visible) AS visible_events,
+    \\    count(*) FILTER (WHERE was_prerendered) AS prerendered_events,
+    \\    count(*) FILTER (WHERE client_hint_consistency = 2)
+    \\      AS client_hint_mismatch_events,
+    \\    count(*) FILTER (WHERE client_hint_consistency = 3)
+    \\      AS client_hint_absent_expected_events,
+    \\    count(*) FILTER (WHERE accept_language_present)
+    \\      AS accept_language_present_events
     \\  FROM range_events
     \\), range_sessions AS (
     \\  SELECT DISTINCT session_id FROM eligible_range
@@ -229,14 +223,14 @@ const traffic_quality_sql: [:0]const u8 =
     \\    FROM events e
     \\    JOIN range_sessions r ON r.session_id = e.session_id
     \\    JOIN params p ON p.site_id = e.site_id
-    \\    WHERE e.traffic_class != 4 AND NOT e.legacy_bot_verdict
+    \\    WHERE e.traffic_class IN (1, 5)
     \\    GROUP BY e.session_id
     \\  ) sessions
     \\), anonymous_first AS (
     \\  SELECT e.anonymous_id, min(e.received_date_utc) AS first_date
     \\  FROM events e, params p
     \\  WHERE e.site_id = p.site_id AND e.kind IN (1, 2)
-    \\    AND e.traffic_class != 4 AND NOT e.legacy_bot_verdict
+    \\    AND e.traffic_class IN (1, 5)
     \\    AND e.identity_quality IN (1, 2)
     \\  GROUP BY e.anonymous_id
     \\), dates AS (
@@ -248,8 +242,8 @@ const traffic_quality_sql: [:0]const u8 =
     \\    (SELECT count(*) FROM anonymous_first a WHERE a.first_date = d.date)
     \\      AS new_anonymous_identities,
     \\    (SELECT count(*) FROM range_events e
-    \\      WHERE e.received_date_utc = d.date AND e.legacy_bot_verdict
-    \\        AND e.traffic_class != 4)
+    \\      WHERE e.received_date_utc = d.date
+    \\        AND e.traffic_class IN (2, 3))
     \\      AS bot_events
     \\  FROM dates d
     \\), daily_page AS (
@@ -273,8 +267,10 @@ const traffic_quality_sql: [:0]const u8 =
     \\  i.legacy_events, i.legacy_visitor_days,
     \\  t.tracker_events, t.network_events, t.both_events,
     \\  t.human_presumed, t.declared_bot, t.automation, t.excluded,
-    \\  t.suspected, t.classifier_v1_events,
-    \\  t.both_human, t.legacy_only, t.classifier_only, t.both_bot,
+    \\  t.suspected, t.client_signal_v1_events, t.webdriver_events,
+    \\  t.trusted_interaction_events, t.visible_events, t.prerendered_events,
+    \\  t.client_hint_mismatch_events, t.client_hint_absent_expected_events,
+    \\  t.accept_language_present_events,
     \\  0 AS rule_class, 0 AS rule_version, '' AS rule_id, 0 AS rule_events
     \\FROM daily_page d
     \\CROSS JOIN person_summary p
@@ -283,7 +279,7 @@ const traffic_quality_sql: [:0]const u8 =
     \\CROSS JOIN traffic_summary t
     \\UNION ALL
     \\SELECT 1, '', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    \\  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    \\  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     \\  r.traffic_class, r.classifier_version, r.bot_rule, r.events
     \\FROM rule_counts r
     \\ORDER BY row_kind, date, rule_class, rule_version, rule_id
@@ -443,7 +439,7 @@ const funnel_sql: [:0]const u8 =
     \\  FROM events
     \\  WHERE site_id = ?
     \\    AND received_date_utc BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
-    \\    AND traffic_class != 4 AND NOT legacy_bot_verdict
+    \\    AND traffic_class IN (1, 5)
     \\),
     \\sessioned AS (
     \\  SELECT * FROM filtered
@@ -805,7 +801,7 @@ pub fn trafficQuality(
     try statement.bindInt64(5, offset);
     var result = try deadline.execute(&event_store.database, &statement, timeout_ms);
     defer result.deinit();
-    if (result.columnCount() != 33) {
+    if (result.columnCount() != 36) {
         return error.InvalidReportResult;
     }
     var daily_returned: usize = 0;
@@ -858,12 +854,15 @@ pub fn trafficQuality(
         .{ .class = .excluded, .events = result.int64(22, 0) },
         .{ .class = .suspected, .events = result.int64(23, 0) },
     };
-    const classifier_v1_events = result.int64(24, 0);
-    const shadow: report.TrafficShadow = .{
-        .both_human = result.int64(25, 0),
-        .legacy_only = result.int64(26, 0),
-        .classifier_only = result.int64(27, 0),
-        .both_bot = result.int64(28, 0),
+    const signals: report.TrafficSignals = .{
+        .client_signal_v1_events = result.int64(24, 0),
+        .webdriver_events = result.int64(25, 0),
+        .trusted_interaction_events = result.int64(26, 0),
+        .visible_events = result.int64(27, 0),
+        .prerendered_events = result.int64(28, 0),
+        .client_hint_mismatch_events = result.int64(29, 0),
+        .client_hint_absent_expected_events = result.int64(30, 0),
+        .accept_language_present_events = result.int64(31, 0),
     };
     if (total < 0 or persistent < 0 or ephemeral < 0 or legacy < 0 or
         visitor_days < 0 or zero_sessions < 0 or
@@ -871,9 +870,7 @@ pub fn trafficQuality(
         identity_quality[0].visitor_days + identity_quality[1].visitor_days +
             identity_quality[2].visitor_days != visitor_days or
         exclusion_sources[0].events < 0 or exclusion_sources[1].events < 0 or
-        exclusion_sources[2].events < 0 or classifier_v1_events < 0 or
-        shadow.both_human < 0 or shadow.legacy_only < 0 or
-        shadow.classifier_only < 0 or shadow.both_bot < 0)
+        exclusion_sources[2].events < 0)
     {
         return error.InvalidReportResult;
     }
@@ -885,11 +882,23 @@ pub fn trafficQuality(
     }
     const excluded_total = exclusion_sources[0].events +
         exclusion_sources[1].events + exclusion_sources[2].events;
-    const shadow_total = shadow.both_human + shadow.legacy_only +
-        shadow.classifier_only + shadow.both_bot;
+    inline for (.{
+        signals.client_signal_v1_events,
+        signals.webdriver_events,
+        signals.trusted_interaction_events,
+        signals.visible_events,
+        signals.prerendered_events,
+        signals.client_hint_mismatch_events,
+        signals.client_hint_absent_expected_events,
+        signals.accept_language_present_events,
+    }) |value| if (value < 0 or value > class_total) {
+        return error.InvalidReportResult;
+    };
     if (excluded_total != traffic_classes[3].events or
-        shadow_total != classifier_v1_events or
-        classifier_v1_events > class_total - traffic_classes[3].events)
+        signals.webdriver_events > signals.client_signal_v1_events or
+        signals.trusted_interaction_events > signals.client_signal_v1_events or
+        signals.visible_events > signals.client_signal_v1_events or
+        signals.prerendered_events > signals.client_signal_v1_events)
     {
         return error.InvalidReportResult;
     }
@@ -901,7 +910,7 @@ pub fn trafficQuality(
         if (new_identities < 0 or bot_events < 0 or
             result.int64(4, index) != total or
             result.int64(8, index) != visitor_days or
-            result.int64(24, index) != classifier_v1_events)
+            result.int64(24, index) != signals.client_signal_v1_events)
         {
             return error.InvalidReportResult;
         }
@@ -916,15 +925,15 @@ pub fn trafficQuality(
     var rule_total: i64 = 0;
     for (daily_returned..result.rowCount()) |index| {
         if (result.int64(0, index) != 1) return error.InvalidReportResult;
-        const class_value = result.int64(29, index);
-        const version_value = result.int64(30, index);
-        const rule_events = result.int64(32, index);
+        const class_value = result.int64(32, index);
+        const version_value = result.int64(33, index);
+        const rule_events = result.int64(35, index);
         if (class_value < 1 or class_value > 5 or version_value < 0 or
             version_value > std.math.maxInt(u16) or rule_events < 0)
         {
             return error.InvalidReportResult;
         }
-        const rule = try result.text(allocator, 31, index);
+        const rule = try result.text(allocator, 34, index);
         if (rule.len > 64) return error.InvalidReportResult;
         rules[rule_index] = .{
             .class = @fromBackingInt(@intCast(@as(u8, @intCast(class_value)))),
@@ -958,8 +967,7 @@ pub fn trafficQuality(
         .identity_quality = identity_quality,
         .exclusion_sources = exclusion_sources,
         .traffic_classes = traffic_classes,
-        .classifier_v1_events = classifier_v1_events,
-        .shadow = shadow,
+        .signals = signals,
         .rules = rules,
         .days = days,
         .next_page = if (daily_returned > decoded) request.page + 1 else null,

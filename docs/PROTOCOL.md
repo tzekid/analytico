@@ -5,8 +5,8 @@
 > Protocol-v2 tracker anonymous identity, `identify()`, `reset()`, 30-minute
 > client session rotation, explicit site timezone bucketing, and typed property
 > storage/query primitives, SPA navigation, engagement/scroll, exact tracker
-> value handling, opt-in automatic events, and D32's schema-5 traffic classifier
-> are implemented. Exact legacy
+> value handling, opt-in automatic events, D32's UA classifier, and D33's
+> schema-6 bounded signal contract are implemented. Exact legacy
 > migration and mixed-data coverage are implemented by issue #13; later
 > product queries remain separately issue-backed.
 
@@ -22,7 +22,8 @@ accepted v1 events or metric-v1 visitor-day semantics.
 | `GET` | `/tracker.78135195.js` | Immutable protocol-v2 session tracker | `200` JavaScript |
 | `GET` | `/tracker.d9e94247.js` | Immutable protocol-v2 identify tracker | `200` JavaScript |
 | `GET` | `/tracker.81c3b777.js` | Immutable compatibility SPA/engagement tracker | `200` JavaScript |
-| `GET` | `/tracker.6de111c9.js` | Immutable current tracker with stored self-exclusion | `200` JavaScript |
+| `GET` | `/tracker.6de111c9.js` | Immutable compatibility self-exclusion tracker | `200` JavaScript |
+| `GET` | `/tracker.bc506cfe.js` | Immutable current tracker with bounded signals | `200` JavaScript |
 | `GET` | `/tracker.js` | Short-cache alias of the protocol-v2 tracker | `200` JavaScript |
 | `POST` | `/v1/event` | Page view or custom event | `204` empty |
 | `POST` | `/v2/event` | Bounded version-2 event envelope | `204` empty |
@@ -145,6 +146,15 @@ The common required envelope is:
   "sequence": 4,
   "occurred_at_ms": 1787227532123,
   "self_excluded": true,
+  "signals": {
+    "v": 1,
+    "webdriver": false,
+    "trusted_interactions": 3,
+    "was_visible": true,
+    "was_prerendered": false,
+    "viewport_bucket": 4,
+    "beacon_timing_bucket": 2
+  },
   "type": "event",
   "name": "sign_up",
   "page": {
@@ -174,12 +184,27 @@ or `ephemeral`. `self_excluded` is an optional boolean common to all four event
 types; absent and false mean no tracker self-flag, while true sets the tracker
 input to the first-receipt permanent exclusion rule.
 
+`signals` is optional and common to all four event types. Version 1 is closed:
+`webdriver` is boolean; `trusted_interactions` is a mask from 0–15 with bits
+pointer move/key down/scroll/touch start; visibility and prerender fields are
+booleans; viewport and beacon-timing buckets are integers from 0–4. Viewport
+codes are unknown, under 480, 480–767, 768–1199, and at least 1200 CSS pixels.
+Timing codes are unknown, under 100 ms, under one second, under five seconds,
+and at least five seconds after navigation start. Unknown keys, versions, or
+out-of-range values reject the envelope.
+These client-carried facts are not authenticated. A custom sender can omit or
+forge them, so they never prove a human or any identity/authorization fact.
+Later positive-evidence use is deliberately a false-positive veto, not an
+anti-evasion guarantee.
+
 The canonical protocol-v2 payload digest adds a component when
 `self_excluded=true`. Absent and false preserve the pre-D31 digest so unchanged
 events remain idempotent across migration; changing an existing event to true
-conflicts. UA and network classification come from the first receipt context:
+conflicts. An absent signal bundle similarly preserves the pre-D33 digest; a
+present bundle hashes every closed field. UA, client-hint, language-presence,
+and network classification come from the first receipt context:
 a later idempotent replay does not rewrite the stored traffic class, version,
-rule, or legacy verdict. The request context is not added to the payload digest.
+rule, or evidence. The request context is not added to the payload digest.
 
 Event-specific fields are closed:
 
@@ -294,6 +319,12 @@ content-hashed path:
 - when the self-exclusion flag is present, every otherwise valid envelope adds
   `self_excluded:true`; the collector stores and classifies those events rather
   than suppressing the request;
+- every envelope from the current tracker adds the closed signal-v1 bundle. It
+  latches whether the page was ever visible or began prerendered, buckets only
+  viewport width and time since navigation start, and accumulates at most four
+  `isTrusted` interaction bits. Each pointer/key/scroll/touch listener removes
+  itself after its first trusted observation; raw dimensions, timestamps, event
+  objects, and input values are never sent;
 - when UUID generation fails, the tracker does not send;
 - storage, serialization, beacon, and fetch failures never throw into the host
   page;
@@ -332,7 +363,7 @@ content-hashed path:
   A matching download takes precedence over outbound classification. No field
   value, generic click, full URL, or query string is inspected or sent;
 - the tracker installs no configuration request, dependency, DOM mutation,
-  framework integration, high-frequency pointer listener, or every-click
+  framework integration, continuing high-frequency pointer listener, or every-click
   capture. Multi-tab session races remain an accepted documented limitation;
 - the tested compatibility target is the acceptance-tooling versions pinned in
   `versions.json`: Chromium 151, Firefox 153, and WebKit 26.5. The UUID helper
@@ -354,7 +385,7 @@ Usage:
 ```html
 <script
   defer
-  src="https://analytics.example/tracker.6de111c9.js"
+  src="https://analytics.example/tracker.bc506cfe.js"
   data-site="00000000-0000-4000-8000-000000000000"
   data-spa="auto"
   data-engagement="true"
@@ -391,12 +422,17 @@ network exclusion takes precedence and stores permanent
 `exclude.network`, or `exclude.both`.
 
 The collector evaluates the optional, at-most-1,024-byte User-Agent through
-`UA_CLASSIFIER_V1.md` before insertion. It stores only traffic class,
-classifier version, rule identifier, and—during the one-release D32
-comparison—the exact old six-substring boolean. An exclusion overrides the new
-UA class/rule, stores the legacy boolean as false, and removes that row from
-disagreement cells. The header, a normalized copy, and a hash are neither
-persisted nor logged. Classification performs no
+`UA_CLASSIFIER_V1.md` before insertion. D33 classifier v2 retains a specific UA
+hard rule first, otherwise `webdriver=true` or a contradictory bounded
+`Sec-CH-UA` value classifies as automation. An exclusion overrides classifier
+evidence and keeps its exclusion rule. Missing hints/language and coarse
+viewport/timing/visibility/interaction facts do not classify in #69.
+
+The collector scans at most 512 bytes of `Sec-CH-UA` and stores only consistency
+(`unknown historical`, `consistent/not applicable`, `mismatch`, or `absent
+when expected`). It stores only whether nonempty `Accept-Language` was present.
+Those headers, normalized copies, hashes, raw browser values, and precise
+dimensions/timing are neither persisted nor logged. Classification performs no
 allocation, file read, network request, regex, or fingerprinting. Browser, OS,
 and device dimensions are derived independently and never carry a bot category.
 
@@ -405,11 +441,10 @@ collection suppression or bot drop-at-ingest setting. Dashboard exclusion
 mutations refresh the bounded in-memory site-policy snapshot before returning
 success.
 
-For newly inserted nonexcluded rows, the serving process increments fixed
-old-positive/new-positive and four-cell shadow counters. Duplicates, conflicts,
-rejections, write failures, and exclusions do not enter them. They are emitted
-at `serve_stopped` without UA or rule strings; durable traffic-quality v3
-retains the same verdict comparison by report date.
+`serve_stopped.bots` counts permanent declared-bot/automation request attempts.
+The D32 shadow counters ended with schema 6. Durable traffic-quality v4 reports
+permanent class/rule totals and fixed bounded signal-evidence counts without
+UA, hint, language, or input-derived keys.
 
 The site identifier is public and appears in browser markup. It is not an
 authorization credential.

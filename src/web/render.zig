@@ -377,20 +377,27 @@ fn renderTrafficQuality(
         try output.print("</td><td>{d}</td></tr>", .{row.events});
     }
     try output.print(
-        "</tbody></table></div><p class=\"muted\">Classifier-v1 comparison coverage: {d} non-excluded events.</p>" ++
-            "<h4>Legacy / classifier shadow</h4>" ++
+        "</tbody></table></div><h4>Bounded signal evidence</h4>" ++
             "<div class=\"table-scroll\"><table><thead><tr>" ++
-            "<th>Verdict</th><th>Events</th></tr></thead><tbody>" ++
-            "<tr><td>Both human</td><td>{d}</td></tr>" ++
-            "<tr><td>Legacy only</td><td>{d}</td></tr>" ++
-            "<tr><td>Classifier only</td><td>{d}</td></tr>" ++
-            "<tr><td>Both bot</td><td>{d}</td></tr></tbody></table></div>",
+            "<th>Evidence</th><th>Events</th></tr></thead><tbody>" ++
+            "<tr><td>Client signal v1</td><td>{d}</td></tr>" ++
+            "<tr><td>WebDriver</td><td>{d}</td></tr>" ++
+            "<tr><td>Trusted interaction</td><td>{d}</td></tr>" ++
+            "<tr><td>Was visible</td><td>{d}</td></tr>" ++
+            "<tr><td>Was prerendered</td><td>{d}</td></tr>" ++
+            "<tr><td>Client-hint mismatch</td><td>{d}</td></tr>" ++
+            "<tr><td>Expected client hints absent</td><td>{d}</td></tr>" ++
+            "<tr><td>Accept-Language present</td><td>{d}</td></tr>" ++
+            "</tbody></table></div>",
         .{
-            quality.classifier_v1_events,
-            quality.shadow.both_human,
-            quality.shadow.legacy_only,
-            quality.shadow.classifier_only,
-            quality.shadow.both_bot,
+            quality.signals.client_signal_v1_events,
+            quality.signals.webdriver_events,
+            quality.signals.trusted_interaction_events,
+            quality.signals.visible_events,
+            quality.signals.prerendered_events,
+            quality.signals.client_hint_mismatch_events,
+            quality.signals.client_hint_absent_expected_events,
+            quality.signals.accept_language_present_events,
         },
     );
     if (show_headlines) {

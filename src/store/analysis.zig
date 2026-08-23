@@ -457,8 +457,7 @@ fn compileCoverage(
     );
     try builder.bindText(execution.query.site_id);
     try builder.write(
-        " AND kind IN (1, 2) AND traffic_class != 4" ++
-            " AND NOT legacy_bot_verdict" ++
+        " AND kind IN (1, 2) AND traffic_class IN (1, 5)" ++
             " AND identity_quality = 1) FROM qualified",
     );
     return builder.finish();
@@ -487,14 +486,14 @@ fn writeCommon(
     try builder.write(" AS DATE) AND CAST(");
     try builder.bindText(range.end);
     try builder.write(
-        " AS DATE) AND e.traffic_class != 4 AND NOT e.legacy_bot_verdict)," ++
+        " AS DATE) AND e.traffic_class IN (1, 5))," ++
             " base AS (SELECT * FROM range_events WHERE kind IN (1, 2))," ++
             " session_events AS (SELECT e.* FROM events e" ++
             " WHERE e.site_id = ",
     );
     try builder.bindText(execution.query.site_id);
     try builder.write(
-        " AND e.traffic_class != 4 AND NOT e.legacy_bot_verdict" ++
+        " AND e.traffic_class IN (1, 5)" ++
             " AND e.session_id IN" ++
             " (SELECT DISTINCT session_id FROM range_events))," ++
             " session_meaningful AS (SELECT * FROM session_events WHERE kind IN (1, 2))," ++
@@ -605,7 +604,7 @@ fn writePersonTraits(builder: *Builder, site_id: []const u8) !void {
     try builder.bindText(site_id);
     try builder.write(
         " AND e.kind = 4 AND e.identity_quality = 1" ++
-            " AND e.traffic_class != 4 AND NOT e.legacy_bot_verdict)," ++
+            " AND e.traffic_class IN (1, 5))," ++
             " person_traits AS (SELECT * EXCLUDE (position) FROM (SELECT *," ++
             " row_number() OVER (PARTITION BY person_key" ++
             " ORDER BY occurred_at_utc_micros DESC, sequence DESC," ++
@@ -776,8 +775,7 @@ fn writeFirstPersonDate(builder: *Builder, event_alias: []const u8) !void {
     );
     try builder.write(event_alias);
     try builder.write(
-        ".site_id AND h.kind IN (1, 2) AND h.traffic_class != 4" ++
-            " AND NOT h.legacy_bot_verdict" ++
+        ".site_id AND h.kind IN (1, 2) AND h.traffic_class IN (1, 5)" ++
             " AND h.identity_quality = 1 AND (CASE" ++
             " WHEN COALESCE(hl.user_id, h.user_id, '') <> ''" ++
             " THEN 'u:' || COALESCE(hl.user_id, h.user_id)" ++
@@ -1720,7 +1718,7 @@ pub fn seedSemanticFixture(database: *duckdb.Database) !void {
         \\  CAST('00000000-0000-4000-8000-0000000000f1' AS UUID)
         \\);
         \\INSERT INTO events
-        \\SELECT 5, 2, 2, CAST(event_id AS UUID),
+        \\SELECT 6, 2, 2, CAST(event_id AS UUID),
         \\  '00000000-0000-4000-8000-000000000024',
         \\  occurred + receipt_delay_micros, occurred,
         \\  CAST(local_date AS DATE), CAST(local_date AS DATE), offset_minutes,
@@ -1734,7 +1732,7 @@ pub fn seedSemanticFixture(database: *duckdb.Database) !void {
         \\  currency, engagement_ms, 0, CAST(event_id AS BLOB), sequence = 0,
         \\  repeat('a', 64), CASE WHEN device = 'bot' THEN 2 ELSE 1 END,
         \\  0, CASE WHEN device = 'bot' THEN 'legacy-device-bot' ELSE '' END,
-        \\  device = 'bot'
+        \\  0, FALSE, 0, FALSE, FALSE, 0, 0, 0, FALSE
         \\FROM (VALUES
         \\ ('00000000-0000-4000-8000-000000000101',1767139200000000,'2025-12-31',0,1,'pageview','/old','Old','example.test','00000000-0000-4000-8000-0000000000a1',1,'user-a','00000000-0000-4000-8000-0000000000b0',0,'','DE','en','Chrome','Linux','desktop','','','','{}','{}','','',0,0),
         \\ ('00000000-0000-4000-8000-000000000102',1767312000000000,'2026-01-02',60,1,'pageview','/landing','Landing','example.test','00000000-0000-4000-8000-0000000000a1',1,'user-a','00000000-0000-4000-8000-0000000000b1',0,'search.example','DE','en','Chrome','Linux','desktop','google','cpc','winter','{"plan":"pro"}','{}','','',0,0),

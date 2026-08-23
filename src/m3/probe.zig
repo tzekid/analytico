@@ -249,7 +249,10 @@ pub fn million(
         \\  properties_json, user_traits_json, value_amount, value_currency,
         \\  engagement_ms, max_scroll_depth, visitor_day_id,
         \\  visitor_day_start, event_payload_digest, traffic_class,
-        \\  classifier_version, bot_rule, legacy_bot_verdict
+        \\  classifier_version, bot_rule, signal_version,
+        \\  navigator_webdriver, trusted_interactions, was_visible,
+        \\  was_prerendered, viewport_bucket, beacon_timing_bucket,
+        \\  client_hint_consistency, accept_language_present
         \\)
         \\WITH generated AS (
         \\  SELECT
@@ -296,7 +299,7 @@ pub fn million(
         \\  FROM generated
         \\)
         \\SELECT
-        \\  5, 1, 1, event_id, site_id,
+        \\  6, 1, 1, event_id, site_id,
         \\  received_at, received_at, received_date, received_date, 0,
         \\  kind, event_name, path, '', '', CAST(
         \\    substr(identity_hash, 1, 8) || '-' ||
@@ -308,7 +311,8 @@ pub fn million(
         \\  3, '', session_id, CAST(i % 10 AS UINTEGER), i % 10 = 0,
         \\  '', 'US', '', 'Chrome', 'Linux', 'desktop',
         \\  '', '', '', '', '', '{}', '{}', CAST(NULL AS DECIMAL(18,6)), '',
-        \\  0, 0, visitor_day_id, visitor_day_start, '', 1, 0, '', FALSE
+        \\  0, 0, visitor_day_id, visitor_day_start, '', 1, 0, '',
+        \\  0, FALSE, 0, FALSE, FALSE, 0, 0, 0, FALSE
         \\FROM sequenced
     );
     defer statement.deinit();
@@ -399,13 +403,13 @@ pub fn legacyVerify(
     var store = try events.Store.open(allocator, event_path);
     defer store.deinit();
     try store.migrate();
-    if (try store.migrationVersion() != 5) return error.LegacyMigrationVersion;
+    if (try store.migrationVersion() != 6) return error.LegacyMigrationVersion;
     var result = try store.database.query(
         \\SELECT count(*), count(DISTINCT session_id),
         \\       count(*) FILTER (WHERE visitor_day_start),
         \\       count(*) FILTER (WHERE session_start),
         \\       count(*) FILTER (
-        \\         WHERE event_schema_version = 5
+        \\         WHERE event_schema_version = 6
         \\           AND protocol_version = 1 AND tracker_version = 1
         \\           AND identity_quality = 3
         \\           AND occurred_at_utc_micros = received_at_utc_micros
@@ -416,7 +420,12 @@ pub fn legacyVerify(
         \\           AND value_amount IS NULL AND value_currency = ''
         \\           AND engagement_ms = 0 AND max_scroll_depth = 0
         \\           AND traffic_class = 1 AND classifier_version = 0
-        \\           AND bot_rule = '' AND NOT legacy_bot_verdict
+        \\           AND bot_rule = '' AND signal_version = 0
+        \\           AND NOT navigator_webdriver AND trusted_interactions = 0
+        \\           AND NOT was_visible AND NOT was_prerendered
+        \\           AND viewport_bucket = 0 AND beacon_timing_bucket = 0
+        \\           AND client_hint_consistency = 0
+        \\           AND NOT accept_language_present
         \\       ),
         \\       count(DISTINCT anonymous_id), sum(sequence)
         \\FROM events
@@ -528,6 +537,5 @@ fn insertFixture(
         .utm_campaign = row.utm_campaign,
         .traffic_class = if (is_bot) .declared_bot else .human_presumed,
         .bot_rule = if (is_bot) "generic.bot" else "",
-        .legacy_bot_verdict = is_bot,
     });
 }

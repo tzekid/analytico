@@ -1,10 +1,10 @@
 # Data model and metric semantics
 
 > **Status:** Sections 1–9 define the shipped analytics-metadata subset in
-> Turso, DuckDB event schema 5, and metric semantics v1. Authentication storage
+> Turso, DuckDB event schema 6, and metric semantics v1. Authentication storage
 > remains governed by its own specification. The daily-pseudonym and UTC-day
 > rules remain the compatibility contract for existing rows and current
-> reports. Section 10 records the remaining 1.0 transition; event schema 5 does
+> reports. Section 10 records the remaining 1.0 transition; event schema 6 does
 > not by itself claim that metric v2 or site-local reporting is shipped.
 
 This document is the contract for durable fields and reported numbers. SQL
@@ -196,7 +196,7 @@ CREATE TABLE event_migrations (
 );
 ```
 
-### `events` — event schema migration 5
+### `events` — event schema migration 6
 
 ```sql
 CREATE TABLE events (
@@ -245,8 +245,21 @@ CREATE TABLE events (
     traffic_class UTINYINT NOT NULL,
     classifier_version USMALLINT NOT NULL,
     bot_rule VARCHAR NOT NULL,
-    legacy_bot_verdict BOOLEAN NOT NULL,
+    signal_version UTINYINT NOT NULL,
+    navigator_webdriver BOOLEAN NOT NULL,
+    trusted_interactions UTINYINT NOT NULL,
+    was_visible BOOLEAN NOT NULL,
+    was_prerendered BOOLEAN NOT NULL,
+    viewport_bucket UTINYINT NOT NULL,
+    beacon_timing_bucket UTINYINT NOT NULL,
+    client_hint_consistency UTINYINT NOT NULL,
+    accept_language_present BOOLEAN NOT NULL,
     CHECK (traffic_class BETWEEN 1 AND 5),
+    CHECK (signal_version BETWEEN 0 AND 1),
+    CHECK (trusted_interactions BETWEEN 0 AND 15),
+    CHECK (viewport_bucket BETWEEN 0 AND 4),
+    CHECK (beacon_timing_bucket BETWEEN 0 AND 4),
+    CHECK (client_hint_consistency BETWEEN 0 AND 3),
     CHECK (length(bot_rule) <= 64)
 );
 
@@ -265,21 +278,25 @@ Conventions:
 - `kind` values 1–4 are page view, custom event, engagement, and identify.
 - `identity_quality` values 1–3 are persistent, ephemeral, and migrated
   legacy daily identity.
-- `event_schema_version=5`; protocol/tracker versions are 1 for compatibility
+- `event_schema_version=6`; protocol/tracker versions are 1 for compatibility
   events and 2 for v2 envelopes.
 - `traffic_class` values 1–5 are human-presumed, declared-bot, automation,
-  excluded, and suspected. `classifier_version=1` identifies D32 UA/exclusion
-  classification; zero marks honest historical rows whose discarded UA cannot
-  be reclassified. `bot_rule` is an empty or bounded classifier/exclusion rule
-  ID. `docs/UA_CLASSIFIER_V1.md` governs the permanent classifier.
-- `legacy_bot_verdict` is the exact old six-substring boolean retained for the
-  single #68 comparison release. During that release product queries require
-  `traffic_class <> 4 AND legacy_bot_verdict=false`; diagnostics include every
-  class and compare nonexcluded classifier-v1 rows. #69 owns review of deployed
-  disagreement data, predicate promotion, and removal of this temporary byte.
-- A newly excluded row always stores `legacy_bot_verdict=false`; exclusion
-  precedence removes it from UA shadow evidence even when the discarded header
-  would have matched the old predicate.
+  excluded, and suspected. Classifier version zero marks honest historical
+  rows, version 1 identifies D32 UA/exclusion classification, and version 2
+  identifies D33 UA plus hard-signal evaluation. `bot_rule` is an empty or
+  bounded classifier/exclusion rule ID. D32, D33, and
+  `docs/UA_CLASSIFIER_V1.md` govern the permanent classifier.
+- `signal_version=0` means the browser bundle was absent or historical and its
+  client fields are unknown zeros/false values. Version 1 contains the closed
+  D33 bundle. Trusted-interaction bits are 1 pointer move, 2 key down, 4 scroll,
+  and 8 touch start. Viewport/timing codes use D33's four coarse positive
+  buckets plus zero unknown.
+- `client_hint_consistency` is 0 historical unknown, 1 consistent or not
+  applicable, 2 mismatch, or 3 absent when expected. Only presence of a
+  nonempty `Accept-Language` is stored. Raw hints, language, viewport, precise
+  timing, and their hashes are never stored.
+- Product queries require `traffic_class IN (1, 5)`. Exclusion remains
+  diagnostic-only, and declared bots/automation are outside product metrics.
 - `device_category` is again only a device dimension. Traffic classification
   never overloads it with `bot`.
 - Absent optional strings are empty rather than `NULL` to simplify bounded
@@ -359,6 +376,23 @@ It also proves identity links unchanged, every row at schema 5, all closed
 class/version/rule/legacy mappings, and absence of the temporary source column.
 The million-row, interrupted, and repeated-upgrade gates stay inside the fixed
 DuckDB limits. Rollback restores the verified pre-schema-5 database pair.
+
+Migration 6 performs the same transactional create/backfill/swap from the
+exact deployed schema-5 predecessor. It preserves every field except the
+completed `legacy_bot_verdict` shadow byte, advances each row to schema 6, and
+adds `signal_version=0`, false booleans, and zero buckets/consistency. These
+values mean unavailable historical evidence and never claim that a discarded
+header or browser fact was negative. Traffic class, classifier version, rule,
+identity links, and every unrelated event fact remain byte-for-byte or
+value-for-value preserved.
+
+Before swap, the streaming verifier checks count plus XOR, sum, minimum, and
+maximum fingerprints over all preserved fields, the complete zero-state
+mapping, unchanged identity-link count/hash, and absence of
+`legacy_bot_verdict` on the target table. The million-row interruption/retry,
+repeat, matched backup, isolated restore, and old-binary rollback gates use the
+exact schema-5 release. Product-query changes after migration are the explicit
+D33 permanent-class promotion, not evidence loss or migration drift.
 
 ## 4. Normalization
 
@@ -497,8 +531,8 @@ Count accepted `kind = 1` rows in the requested range.
 
 ### Daily unique visitors
 
-Count product-eligible `visitor_day_start` rows. During D32's one-release shadow
-this means `traffic_class <> 4 AND legacy_bot_verdict=false`. This is
+Count product-eligible `visitor_day_start` rows. Under D33 this means
+`traffic_class IN (1, 5)`. This is
 equivalent to counting distinct daily pseudonyms because the one writer sets
 exactly one eligible start for each site/date/pseudonym. For a multi-day
 headline, sum those daily counts. The value is a visitor-day total, not a
@@ -606,6 +640,8 @@ to schema 4 with a temporary stored self-exclusion source while preserving the
 schema-3 facts. D32 and issue #68 consume every temporary source into schema 5,
 separate the permanent traffic class from device, and retain one deployed
 release of observable old/new classifier shadow evidence.
+D33 and issue #69 advance to schema 6 with bounded browser/receipt evidence,
+end the completed shadow, and promote permanent-class product eligibility.
 
 ### Identity and sessions
 
@@ -682,5 +718,6 @@ metric-v1 queries continue to read their UTC visitor-day compatibility columns.
 bridge. D31 version 2 adds explicit stored exclusions. D32 version 3 reports
 schema-5 classes, classifier coverage, bounded rule totals, and the one-release
 legacy/new disagreement cells while retaining the same received-UTC Overview
-range. It never reinterprets legacy daily identities as persistent people and
-no accepted event is dropped.
+range. D33 version 4 replaces that completed shadow with permanent class/rule
+totals plus fixed bounded signal-evidence counts. It never reinterprets legacy
+daily identities as persistent people and no accepted event is dropped.

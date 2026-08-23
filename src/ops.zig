@@ -378,7 +378,10 @@ pub fn exportCsv(
             "referrer_host,country_code,browser_family,os_family," ++
             "device_category,utm_source,utm_medium,utm_campaign,utm_term," ++
             "utm_content,properties_json,traffic_class,classifier_version," ++
-            "bot_rule,legacy_bot_verdict\n",
+            "bot_rule,signal_version,navigator_webdriver," ++
+            "trusted_interactions,was_visible,was_prerendered," ++
+            "viewport_bucket,beacon_timing_bucket,client_hint_consistency," ++
+            "accept_language_present\n",
     );
     var offset: i64 = 0;
     var written: i64 = 0;
@@ -750,8 +753,16 @@ fn writeExportEvent(output: *std.Io.Writer, event: events.ExportEvent) !void {
         event.classifier_version,
     });
     try csvText(output, event.bot_rule);
-    try output.print(",{s}\n", .{
-        if (event.legacy_bot_verdict) "true" else "false",
+    try output.print(",{d},{s},{d},{s},{s},{d},{d},{d},{s}\n", .{
+        event.signals.version,
+        if (event.signals.navigator_webdriver) "true" else "false",
+        event.signals.trusted_interactions,
+        if (event.signals.was_visible) "true" else "false",
+        if (event.signals.was_prerendered) "true" else "false",
+        event.signals.viewport_bucket,
+        event.signals.beacon_timing_bucket,
+        event.client_hint_consistency,
+        if (event.accept_language_present) "true" else "false",
     });
 }
 

@@ -349,10 +349,13 @@ pub fn propertyMillion(
         \\  user_traits_json, value_amount, value_currency, engagement_ms,
         \\  max_scroll_depth, visitor_day_id, visitor_day_start,
         \\  event_payload_digest, traffic_class, classifier_version, bot_rule,
-        \\  legacy_bot_verdict
+        \\  signal_version, navigator_webdriver, trusted_interactions,
+        \\  was_visible, was_prerendered, viewport_bucket,
+        \\  beacon_timing_bucket, client_hint_consistency,
+        \\  accept_language_present
         \\)
         \\SELECT
-        \\  5, 2, 2,
+        \\  6, 2, 2,
         \\  CAST('00000000-0000-4000-8000-000000000f11' AS UUID),
         \\  '00000000-0000-4000-8000-000000000f10',
         \\  1767225600000000 + i * 1000,
@@ -386,7 +389,8 @@ pub fn propertyMillion(
         \\  END || '"' ||
         \\  ',"region":"r' || CAST(i % 8 AS VARCHAR) || '"}',
         \\  '{}', CAST(NULL AS DECIMAL(18,6)), '', 0, 0,
-        \\  CAST('benchmark' AS BLOB), i = 0, '', 1, 1, '', FALSE
+        \\  CAST('benchmark' AS BLOB), i = 0, '', 1, 2, '',
+        \\  0, FALSE, 0, FALSE, FALSE, 0, 0, 0, FALSE
         \\FROM range(1000000) rows(i);
     );
     try store.checkpoint();

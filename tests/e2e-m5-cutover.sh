@@ -64,7 +64,7 @@ site_id=$("$binary" site list "$data" |
 
 snippet=$("$binary" site install "$data" cutover "$collector")
 [[ "$snippet" == *\
-'src="'"$collector"'/tracker.6de111c9.js" data-site="'"$site_id"'" data-spa="auto" data-engagement="true"'* ]]
+'src="'"$collector"'/tracker.bc506cfe.js" data-site="'"$site_id"'" data-spa="auto" data-engagement="true"'* ]]
 [[ "$snippet" == *$'CSP merge:\n  script-src '"$collector"$'\n  connect-src '"$collector"$'\n  img-src '"$collector" ]]
 
 "$binary" serve --listen "127.0.0.1:$collector_port" \
@@ -100,7 +100,7 @@ kill -TERM "$collector_pid"
 wait "$collector_pid"
 collector_pid=
 test "$("$binary" doctor "$data")" = \
-    "ok metadata=v4 events=v5 sites=1 goals=1 funnels=1 stored_events=3 key=ok"
+    "ok metadata=v4 events=v6 sites=1 goals=1 funnels=1 stored_events=3 key=ok"
 
 today=$(date -u +%F)
 report_json() {
@@ -147,7 +147,7 @@ restored="$fixture/restored"
 "$binary" backup "$data" "$backup" >/dev/null
 "$binary" restore "$backup" "$restored" --verify >/dev/null
 test "$("$binary" doctor "$restored")" = \
-    "ok metadata=v4 events=v5 sites=1 goals=1 funnels=1 stored_events=3 key=ok"
+    "ok metadata=v4 events=v6 sites=1 goals=1 funnels=1 stored_events=3 key=ok"
 test "$("$binary" report "$restored" cutover "$today" "$today" \
     overview --format json)" = "$(report_json overview)"
 
@@ -159,7 +159,7 @@ grep -Fq '/var/lib/analytico/visitor.key' \
     "$release_root/docs/OPERATIONS.md"
 grep -Fq '/tracker.aef65945.js' "$release_root/deploy/Caddyfile"
 grep -Fq '/tracker.d9e94247.js' "$release_root/deploy/Caddyfile"
-grep -Fq '/tracker.6de111c9.js' "$release_root/deploy/Caddyfile"
+grep -Fq '/tracker.bc506cfe.js' "$release_root/deploy/Caddyfile"
 grep -Fq '/v1/p.gif' "$release_root/deploy/Caddyfile"
 
 cat "$fixture/browser.json"

@@ -106,7 +106,7 @@ if (analyticoWasPrerendering) {
 <html lang="en"><meta charset="utf-8"><title>Exclusion ${path}</title>
 <main><h1>Useful measured-site state</h1></main>
 ${prerenderProbe}
-<script defer src="${trackerOrigin}/tracker.6de111c9.js" data-site="${site}"></script>
+<script defer src="${trackerOrigin}/tracker.bc506cfe.js" data-site="${site}"></script>
 </html>`);
 });
 
@@ -119,6 +119,9 @@ function launch() {
       `--host-resolver-rules=MAP prerender.test 127.0.0.1`,
       "--ignore-certificate-errors",
       "--enable-features=Prerender2",
+      "--disable-blink-features=AutomationControlled",
+      "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 " +
+        "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
       "--ozone-platform=headless",
       "--use-angle=swiftshader-webgl",
     ],
@@ -142,6 +145,8 @@ function startUnattachedChromium(url) {
     "--no-default-browser-check",
     "--ignore-certificate-errors",
     "--enable-features=Prerender2",
+    "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 " +
+      "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
     "--ozone-platform=headless",
     "--use-angle=swiftshader-webgl",
     "--host-resolver-rules=MAP prerender.test 127.0.0.1",

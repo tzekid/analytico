@@ -119,10 +119,10 @@ string/number conversion is permitted.
 
 ## 4. Metric and dimension semantics
 
-Metric v2 uses `site_local_date`, applies D32's versioned product-eligibility
+Metric v2 uses `site_local_date`, applies D33's versioned product-eligibility
 predicate, and treats only page-view/custom-event rows as independently
-meaningful. During the one-release #68 shadow that predicate is
-`traffic_class <> excluded AND legacy_bot_verdict=false`; traffic class never
+meaningful. The predicate is `traffic_class IN (human-presumed, suspected)`;
+traffic class never
 overloads the device dimension. Canonical person identity follows D26 and D28:
 
 Trend buckets follow the receipt-time authority in `PROTOCOL.md` and D27.

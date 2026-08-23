@@ -24,7 +24,7 @@ const html = (javaScriptPath, trackerPath) => `<!doctype html>
 const server = http.createServer((request, response) => {
   const requestPath = request.url || "/";
   const trackerPath = requestPath.startsWith("/v2-browser-")
-    ? "/tracker.6de111c9.js"
+    ? "/tracker.bc506cfe.js"
     : "/tracker.aef65945.js";
   response.writeHead(200, {
     "Content-Type": "text/html; charset=utf-8",

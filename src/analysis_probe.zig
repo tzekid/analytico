@@ -50,7 +50,7 @@ pub fn seedTrafficQuality(
         \\  FALSE AS visitor_day_start, FALSE AS session_start,
         \\  repeat('1', 64) AS event_payload_digest,
         \\  4 AS traffic_class, 1 AS classifier_version,
-        \\  'exclude.tracker' AS bot_rule, FALSE AS legacy_bot_verdict
+        \\  'exclude.tracker' AS bot_rule
         \\) FROM events
         \\WHERE event_id = CAST('00000000-0000-4000-8000-000000000107' AS UUID);
         \\INSERT INTO events SELECT * REPLACE (
@@ -63,7 +63,7 @@ pub fn seedTrafficQuality(
         \\  FALSE AS visitor_day_start, FALSE AS session_start,
         \\  repeat('2', 64) AS event_payload_digest,
         \\  4 AS traffic_class, 1 AS classifier_version,
-        \\  'exclude.network' AS bot_rule, FALSE AS legacy_bot_verdict
+        \\  'exclude.network' AS bot_rule
         \\) FROM events
         \\WHERE event_id = CAST('00000000-0000-4000-8000-000000000107' AS UUID);
         \\INSERT INTO events SELECT * REPLACE (
@@ -76,7 +76,7 @@ pub fn seedTrafficQuality(
         \\  FALSE AS visitor_day_start, FALSE AS session_start,
         \\  repeat('3', 64) AS event_payload_digest,
         \\  4 AS traffic_class, 1 AS classifier_version,
-        \\  'exclude.both' AS bot_rule, FALSE AS legacy_bot_verdict
+        \\  'exclude.both' AS bot_rule
         \\) FROM events
         \\WHERE event_id = CAST('00000000-0000-4000-8000-000000000107' AS UUID);
     );

@@ -35,6 +35,7 @@ post() {
         -H 'Content-Type: text/plain;charset=UTF-8' \
         -H 'Origin: https://properties.example' \
         -H 'X-Forwarded-For: 203.0.113.10' \
+        -H 'User-Agent: Mozilla/5.0 Firefox/140.0' \
         --data-binary "$payload")
     if [[ "$code" != "$expected" ]]; then
         echo "expected HTTP $expected, got $code" >&2

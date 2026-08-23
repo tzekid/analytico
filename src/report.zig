@@ -3,7 +3,7 @@ const domain = @import("domain.zig");
 
 pub const metric_version: u8 = 1;
 pub const traffic_quality_metric_version: u8 = 2;
-pub const traffic_quality_version: u8 = 3;
+pub const traffic_quality_version: u8 = 4;
 pub const default_limit: u16 = 25;
 pub const maximum_limit: u16 = 100;
 pub const maximum_range_days: u16 = 400;
@@ -256,11 +256,15 @@ pub const TrafficClassRow = struct {
     events: i64,
 };
 
-pub const TrafficShadow = struct {
-    both_human: i64,
-    legacy_only: i64,
-    classifier_only: i64,
-    both_bot: i64,
+pub const TrafficSignals = struct {
+    client_signal_v1_events: i64,
+    webdriver_events: i64,
+    trusted_interaction_events: i64,
+    visible_events: i64,
+    prerendered_events: i64,
+    client_hint_mismatch_events: i64,
+    client_hint_absent_expected_events: i64,
+    accept_language_present_events: i64,
 };
 
 pub const TrafficRuleRow = struct {
@@ -287,8 +291,7 @@ pub const TrafficQuality = struct {
     identity_quality: [3]IdentityQualityRow,
     exclusion_sources: [3]ExclusionSourceRow,
     traffic_classes: [5]TrafficClassRow,
-    classifier_v1_events: i64,
-    shadow: TrafficShadow,
+    signals: TrafficSignals,
     rules: []TrafficRuleRow,
     days: []TrafficQualityDay,
     next_page: ?u32,
@@ -415,19 +418,19 @@ fn renderTable(
             for (quality.traffic_classes) |row| {
                 try output.print("{s}\t{d}\n", .{ row.class.name(), row.events });
             }
-            try output.print(
-                "classifier_v1_events\t{d}\n" ++
-                    "shadow_verdict\tevents\n" ++
-                    "both_human\t{d}\nlegacy_only\t{d}\n" ++
-                    "classifier_only\t{d}\nboth_bot\t{d}\n",
-                .{
-                    quality.classifier_v1_events,
-                    quality.shadow.both_human,
-                    quality.shadow.legacy_only,
-                    quality.shadow.classifier_only,
-                    quality.shadow.both_bot,
-                },
-            );
+            try output.writeAll("signal_evidence\tevents\n");
+            inline for (.{
+                .{ "client_signal_v1", quality.signals.client_signal_v1_events },
+                .{ "webdriver", quality.signals.webdriver_events },
+                .{ "trusted_interaction", quality.signals.trusted_interaction_events },
+                .{ "visible", quality.signals.visible_events },
+                .{ "prerendered", quality.signals.prerendered_events },
+                .{ "client_hint_mismatch", quality.signals.client_hint_mismatch_events },
+                .{ "client_hint_absent_expected", quality.signals.client_hint_absent_expected_events },
+                .{ "accept_language_present", quality.signals.accept_language_present_events },
+            }) |row| {
+                try output.print("{s}\t{d}\n", .{ row[0], row[1] });
+            }
             try output.writeAll(
                 "classifier_rule\ttraffic_class\tclassifier_version\tevents\n",
             );
@@ -584,16 +587,24 @@ fn renderJson(
                 try output.print(",\"events\":{d}}}", .{row.events});
             }
             try output.print(
-                "],\"classifier_v1_events\":{d},\"shadow\":{{" ++
-                    "\"both_human\":{d},\"legacy_only\":{d}," ++
-                    "\"classifier_only\":{d},\"both_bot\":{d}}}," ++
+                "],\"signal_evidence\":{{" ++
+                    "\"client_signal_v1_events\":{d}," ++
+                    "\"webdriver_events\":{d}," ++
+                    "\"trusted_interaction_events\":{d}," ++
+                    "\"visible_events\":{d},\"prerendered_events\":{d}," ++
+                    "\"client_hint_mismatch_events\":{d}," ++
+                    "\"client_hint_absent_expected_events\":{d}," ++
+                    "\"accept_language_present_events\":{d}}}," ++
                     "\"classifier_rules\":[",
                 .{
-                    quality.classifier_v1_events,
-                    quality.shadow.both_human,
-                    quality.shadow.legacy_only,
-                    quality.shadow.classifier_only,
-                    quality.shadow.both_bot,
+                    quality.signals.client_signal_v1_events,
+                    quality.signals.webdriver_events,
+                    quality.signals.trusted_interaction_events,
+                    quality.signals.visible_events,
+                    quality.signals.prerendered_events,
+                    quality.signals.client_hint_mismatch_events,
+                    quality.signals.client_hint_absent_expected_events,
+                    quality.signals.accept_language_present_events,
                 },
             );
             for (quality.rules, 0..) |row, index| {
@@ -744,18 +755,17 @@ fn renderCsv(
                     row.class.name(),
                 });
             }
-            try output.print("{d},{d},classifier_coverage,v1,{d},,,,,,,,,,,1,\n", .{
-                traffic_quality_metric_version,
-                traffic_quality_version,
-                quality.classifier_v1_events,
-            });
             inline for (.{
-                .{ "both_human", quality.shadow.both_human },
-                .{ "legacy_only", quality.shadow.legacy_only },
-                .{ "classifier_only", quality.shadow.classifier_only },
-                .{ "both_bot", quality.shadow.both_bot },
+                .{ "client_signal_v1", quality.signals.client_signal_v1_events },
+                .{ "webdriver", quality.signals.webdriver_events },
+                .{ "trusted_interaction", quality.signals.trusted_interaction_events },
+                .{ "visible", quality.signals.visible_events },
+                .{ "prerendered", quality.signals.prerendered_events },
+                .{ "client_hint_mismatch", quality.signals.client_hint_mismatch_events },
+                .{ "client_hint_absent_expected", quality.signals.client_hint_absent_expected_events },
+                .{ "accept_language_present", quality.signals.accept_language_present_events },
             }) |row| {
-                try output.print("{d},{d},shadow,{s},{d},,,,,,,,,,,,\n", .{
+                try output.print("{d},{d},signal_evidence,{s},{d},,,,,,,,,,,,\n", .{
                     traffic_quality_metric_version,
                     traffic_quality_version,
                     row[0],

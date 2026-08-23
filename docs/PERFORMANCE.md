@@ -71,6 +71,7 @@ documented rather than silently changed.
 | Dynamic request-body bytes | 8 KiB maximum |
 | Headers | 32 / 16 KiB maximum |
 | User-Agent classification input | 1,024 bytes maximum |
+| Sec-CH-UA consistency input | 512 bytes classified; longer is mismatch |
 | Per-request temporary allocation retained after response | 0 bytes |
 | Database statements for a valid event | 1 insert transaction |
 | Collector response body | 0 bytes for POST; fixed GIF for pixel |
@@ -84,11 +85,14 @@ varying request input.
 UA classifier v1 contains at most 64 compile-time rule entries. Matching is one
 bounded pass over the at-most-1,024-byte header per rule, with no allocation,
 regex, runtime file, or network request. Only the closed class, numeric version,
-at-most-64-byte rule ID, and one comparison boolean reach the event row. A
+at-most-64-byte rule ID reach the event row. A
 future measured collection-latency regression must first reduce or reorganize
 the concrete table; it does not justify a service or downloaded corpus.
-The D32 process shadow adds exactly six `u64` counters. No per-rule map,
-input-derived counter name, or retained UA is permitted.
+D33 adds constant-time validation of one closed client bundle and one bounded
+client-hint scan. It removes the six D32 shadow counters and adds no per-rule
+map, input-derived counter name, retained raw input, dependency, or background
+work. The current tracker remains within 8 KiB raw and 5 KiB Brotli after its
+four trusted-interaction listeners remove themselves on first trusted evidence.
 
 ## 4. Report work bounds
 
@@ -101,7 +105,7 @@ input-derived counter name, or retained UA is permitted.
 - Query deadline: 2 seconds.
 - Result rows decoded before pagination: query-specific and covered by `LIMIT`;
   never a full unbounded collection in Zig memory.
-- Traffic-quality version 3 returns at most 100 daily rows and 64 class/rule
+- Traffic-quality version 4 returns at most 100 daily rows and 64 class/rule
   rows from one static bound statement under the same deadline.
 - JSON/CSV export uses streaming output and a separate offline command.
 
@@ -198,6 +202,21 @@ traffic summary pass measured p50/p95/p99 at 1,146/1,262/1,262 ms, below the
 canonical two-second interactive deadline. The same run measured Overview p95
 94 ms and the eight-step funnel p95 900 ms. The gate fails if any sampled
 traffic-quality run exceeds the deadline.
+
+### Bounded signals and traffic-quality v4 confirmation
+
+Issue #69's ReleaseSafe collection run measured 100 real loopback inserts at
+11.245/17.227/22.960 ms p50/p95/p99. Startup was 41 ms, clean shutdown was
+29 ms, and idle RSS after 30 seconds was 54,604 KiB. All remain inside the
+absolute budgets above. The current tracker measured 8,071 bytes raw, 2,988
+bytes Brotli, and 3,334 bytes gzip.
+
+The schema-6 million-event fixture measured traffic-quality v4 at
+1,146/1,226/1,226 ms p50/p95/p99 across ten full CLI processes, below the
+two-second deadline. The same exact run measured Overview p95 at 81 ms and the
+eight-step funnel p95 at 923 ms; the checkpointed DuckDB file was 23,605,248
+bytes. These results include the fixed signal-evidence totals and permanent
+traffic predicate rather than reusing the schema-5 measurements.
 
 ### Analytico 1.0 property-query gate
 

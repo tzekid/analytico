@@ -30,6 +30,10 @@
   to schema 5, consume every temporary marker into permanent traffic class,
   separate device from traffic classification, and retain one release of
   visible old/new classifier shadow evidence without storing raw UAs.
+  D33 and issue #69 advance to schema 6, store only bounded browser/receipt
+  evidence, add webdriver and client-hint-mismatch hard rules, end the completed
+  shadow, and promote the permanent class predicate. Soft heuristics remain
+  reversible query-time work owned by #70.
 - The current server-rendered `/admin` dashboard and optional HTMX enhancement
   shipped after M4. HTML, native navigation, and ordinary forms remain the
   application baseline.

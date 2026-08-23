@@ -123,13 +123,11 @@ comptime {
 }
 
 fn classifyTraffic(value: []const u8) domain.TrafficClassification {
-    const legacy = legacyBot(value);
     if (value.len == 0) {
         return .{
             .class = .declared_bot,
             .classifier_version = 1,
             .rule = "ua.empty",
-            .legacy_bot_verdict = legacy,
         };
     }
     for (rules) |rule| {
@@ -138,7 +136,6 @@ fn classifyTraffic(value: []const u8) domain.TrafficClassification {
                 .class = rule.class,
                 .classifier_version = 1,
                 .rule = rule.id,
-                .legacy_bot_verdict = legacy,
             };
         }
     }
@@ -146,14 +143,44 @@ fn classifyTraffic(value: []const u8) domain.TrafficClassification {
         .class = .human_presumed,
         .classifier_version = 1,
         .rule = "",
-        .legacy_bot_verdict = legacy,
     };
 }
 
-pub fn legacyBot(value: []const u8) bool {
-    return containsAny(value, &.{
-        "bot", "Bot", "spider", "Spider", "crawler", "Crawler",
+pub fn clientHintConsistency(
+    user_agent: []const u8,
+    value: ?[]const u8,
+) domain.ClientHintConsistency {
+    const ua_chromium = containsAnyIgnoreCase(user_agent, &.{
+        "Chrome/", "Chromium/", "Edg/", "HeadlessChrome/",
     });
+    const hint = value orelse return if (ua_chromium)
+        .absent_when_expected
+    else
+        .consistent;
+    if (hint.len > 512) return .mismatch;
+    if (containsIgnoreCase(hint, "\"HeadlessChrome\"")) return .mismatch;
+    const hint_chromium = containsAnyIgnoreCase(hint, &.{
+        "\"Chromium\"", "\"Google Chrome\"", "\"Microsoft Edge\"",
+    });
+    return if (ua_chromium == hint_chromium) .consistent else .mismatch;
+}
+
+pub fn applySignals(
+    base: domain.TrafficClassification,
+    signals: domain.ClientSignals,
+    hint: domain.ClientHintConsistency,
+) domain.TrafficClassification {
+    var result = base;
+    result.classifier_version = 2;
+    if (result.class.isClassifierBot()) return result;
+    if (signals.navigator_webdriver) {
+        result.class = .automation;
+        result.rule = "signal.webdriver";
+    } else if (hint == .mismatch) {
+        result.class = .automation;
+        result.rule = "signal.client-hint-mismatch";
+    }
+    return result;
 }
 
 fn matches(value: []const u8, rule: Rule) bool {
@@ -171,6 +198,13 @@ fn containsIgnoreCase(value: []const u8, needle: []const u8) bool {
         if (std.ascii.eqlIgnoreCase(value[index..][0..needle.len], needle)) {
             return true;
         }
+    }
+    return false;
+}
+
+fn containsAnyIgnoreCase(value: []const u8, needles: []const []const u8) bool {
+    for (needles) |needle| {
+        if (containsIgnoreCase(value, needle)) return true;
     }
     return false;
 }
@@ -212,28 +246,26 @@ test "UA classifier v1 covers rules modes case and false-positive traps" {
         value: []const u8,
         class: domain.TrafficClass,
         rule: []const u8,
-        legacy: bool,
     };
     const cases = [_]Case{
-        .{ .value = "", .class = .declared_bot, .rule = "ua.empty", .legacy = false },
-        .{ .value = "Mozilla/5.0 compatible; Googlebot/2.1", .class = .declared_bot, .rule = "crawler.google", .legacy = true },
-        .{ .value = "MOZILLA/5.0 BINGBOT/2.0", .class = .declared_bot, .rule = "crawler.bing", .legacy = false },
-        .{ .value = "slurp", .class = .declared_bot, .rule = "crawler.yahoo", .legacy = false },
-        .{ .value = "Mozilla/5.0 HeadlessChrome/151.0", .class = .automation, .rule = "headless.chrome", .legacy = false },
-        .{ .value = "CURL/8.12.1", .class = .automation, .rule = "client.curl", .legacy = false },
-        .{ .value = "prefix python-REQUESTS/2.32", .class = .automation, .rule = "client.python_requests", .legacy = false },
-        .{ .value = "Mozilla bot test", .class = .declared_bot, .rule = "generic.bot", .legacy = true },
-        .{ .value = "Mozilla/5.0 (Linux; Android 14; Cubot X70) AppleWebKit Chrome/120 Mobile", .class = .human_presumed, .rule = "", .legacy = true },
-        .{ .value = "Abbott robotics SpiderMonkey", .class = .human_presumed, .rule = "", .legacy = true },
-        .{ .value = "NotGooglebotLike", .class = .human_presumed, .rule = "", .legacy = true },
-        .{ .value = "MyUptimeRobotTool", .class = .human_presumed, .rule = "", .legacy = true },
-        .{ .value = "Mozilla/5.0 Safari/605.1.15", .class = .human_presumed, .rule = "", .legacy = false },
+        .{ .value = "", .class = .declared_bot, .rule = "ua.empty" },
+        .{ .value = "Mozilla/5.0 compatible; Googlebot/2.1", .class = .declared_bot, .rule = "crawler.google" },
+        .{ .value = "MOZILLA/5.0 BINGBOT/2.0", .class = .declared_bot, .rule = "crawler.bing" },
+        .{ .value = "slurp", .class = .declared_bot, .rule = "crawler.yahoo" },
+        .{ .value = "Mozilla/5.0 HeadlessChrome/151.0", .class = .automation, .rule = "headless.chrome" },
+        .{ .value = "CURL/8.12.1", .class = .automation, .rule = "client.curl" },
+        .{ .value = "prefix python-REQUESTS/2.32", .class = .automation, .rule = "client.python_requests" },
+        .{ .value = "Mozilla bot test", .class = .declared_bot, .rule = "generic.bot" },
+        .{ .value = "Mozilla/5.0 (Linux; Android 14; Cubot X70) AppleWebKit Chrome/120 Mobile", .class = .human_presumed, .rule = "" },
+        .{ .value = "Abbott robotics SpiderMonkey", .class = .human_presumed, .rule = "" },
+        .{ .value = "NotGooglebotLike", .class = .human_presumed, .rule = "" },
+        .{ .value = "MyUptimeRobotTool", .class = .human_presumed, .rule = "" },
+        .{ .value = "Mozilla/5.0 Safari/605.1.15", .class = .human_presumed, .rule = "" },
     };
     for (cases) |expected| {
         const actual = userAgent(expected.value);
         try std.testing.expectEqual(expected.class, actual.traffic.class);
         try std.testing.expectEqualStrings(expected.rule, actual.traffic.rule);
-        try std.testing.expectEqual(expected.legacy, actual.traffic.legacy_bot_verdict);
     }
 
     const cubot = userAgent(cases[8].value);
@@ -242,13 +274,65 @@ test "UA classifier v1 covers rules modes case and false-positive traps" {
     try std.testing.expectEqualStrings("Android", cubot.os);
 }
 
-test "operator exclusion overrides UA and clears shadow verdict" {
+test "operator exclusion overrides UA evidence" {
     const google = userAgent("Googlebot/2.1");
-    try std.testing.expect(google.traffic.legacy_bot_verdict);
     const excluded = google.traffic.withExclusion(.tracker);
     try std.testing.expectEqual(domain.TrafficClass.excluded, excluded.class);
     try std.testing.expectEqualStrings("exclude.tracker", excluded.rule);
-    try std.testing.expect(!excluded.legacy_bot_verdict);
+}
+
+test "classifier v2 applies bounded client hints and hard signal precedence" {
+    const chrome = "Mozilla/5.0 Chrome/140.0 Safari/537.36";
+    try std.testing.expectEqual(
+        domain.ClientHintConsistency.consistent,
+        clientHintConsistency(chrome, "\"Chromium\";v=\"140\""),
+    );
+    try std.testing.expectEqual(
+        domain.ClientHintConsistency.absent_when_expected,
+        clientHintConsistency(chrome, null),
+    );
+    try std.testing.expectEqual(
+        domain.ClientHintConsistency.mismatch,
+        clientHintConsistency(chrome, "\"Firefox\";v=\"140\""),
+    );
+    try std.testing.expectEqual(
+        domain.ClientHintConsistency.mismatch,
+        clientHintConsistency(chrome, "\"HeadlessChrome\";v=\"140\""),
+    );
+    try std.testing.expectEqual(
+        domain.ClientHintConsistency.consistent,
+        clientHintConsistency("Mozilla/5.0 Firefox/140.0", null),
+    );
+    var hint_at_limit: [512]u8 = undefined;
+    var hint_over_limit: [513]u8 = undefined;
+    @memset(&hint_at_limit, 'x');
+    @memset(&hint_over_limit, 'x');
+    try std.testing.expectEqual(
+        domain.ClientHintConsistency.consistent,
+        clientHintConsistency("Mozilla/5.0 Firefox/140.0", &hint_at_limit),
+    );
+    try std.testing.expectEqual(
+        domain.ClientHintConsistency.mismatch,
+        clientHintConsistency("Mozilla/5.0 Firefox/140.0", &hint_over_limit),
+    );
+
+    const base = userAgent(chrome).traffic;
+    const webdriver = applySignals(base, .{ .version = 1, .navigator_webdriver = true }, .mismatch);
+    try std.testing.expectEqual(domain.TrafficClass.automation, webdriver.class);
+    try std.testing.expectEqual(@as(u16, 2), webdriver.classifier_version);
+    try std.testing.expectEqualStrings("signal.webdriver", webdriver.rule);
+
+    const mismatch = applySignals(base, .{}, .mismatch);
+    try std.testing.expectEqual(domain.TrafficClass.automation, mismatch.class);
+    try std.testing.expectEqualStrings("signal.client-hint-mismatch", mismatch.rule);
+
+    const google = applySignals(
+        userAgent("Googlebot/2.1").traffic,
+        .{ .version = 1, .navigator_webdriver = true },
+        .mismatch,
+    );
+    try std.testing.expectEqual(domain.TrafficClass.declared_bot, google.class);
+    try std.testing.expectEqualStrings("crawler.google", google.rule);
 }
 
 test "UA classifier v1 table families are all reachable" {

@@ -2,7 +2,8 @@
 
 This document is the normative, auditable contract for D32's collection-time
 User-Agent classifier. It produces a traffic class and bounded rule identifier;
-it never persists or emits the input User-Agent.
+it never persists or emits the input User-Agent. D33 classifier v2 composes
+this unchanged UA table with bounded hard browser/receipt evidence.
 
 ## Source and provenance
 
@@ -98,23 +99,25 @@ or `spider` inside an alphanumeric product/model name as a declaration. Cubot,
 Abbott, `robotics`, and `SpiderMonkey` are required no-match traps unless an
 independent explicit rule is present.
 
-## Legacy shadow
+## Historical legacy shadow
 
-During the single #68 comparison release, the collector also evaluates the
+During the completed #68 comparison release, the collector also evaluated the
 old byte-exact predicate: a case-sensitive substring match for any of `bot`,
 `Bot`, `spider`, `Spider`, `crawler`, or `Crawler`. It stores only that boolean
-as `legacy_bot_verdict`; it does not retain the header or a second rule.
+as `legacy_bot_verdict`; it did not retain the header or a second rule.
 
-Traffic-quality diagnostics version 3 compares this boolean with whether UA
+Traffic-quality diagnostics version 3 compared this boolean with whether UA
 classifier v1 returned `declared-bot` or `automation`. Excluded rows take
 precedence, store the boolean as false, and are omitted from disagreement cells. Historical rows receive
 classifier version zero because their discarded UAs cannot be reconstructed.
 
-For newly inserted nonexcluded rows, `serve_stopped` exposes the same comparison
+For newly inserted nonexcluded rows, `serve_stopped` exposed the same comparison
 through six fixed counters: the old-positive and new-positive totals plus
 `both_human`, `legacy_only`, `classifier_only`, and `both_bot`. Rejected,
 failed, conflicting, duplicate, and excluded observations do not enter these
-counters. No counter key or value contains a UA or matched rule.
+counters. No counter key or value contained a UA or matched rule. D33 schema 6
+removes the comparison byte/counters and promotes permanent class eligibility;
+the UA-v1 rule table and its historical classifier-version values remain.
 
 ## Privacy, work, and fixtures
 
@@ -128,7 +131,8 @@ counters. No counter key or value contains a UA or matched rule.
   boundary, empty and missing headers, first-match ordering, all three modes,
   ordinary current desktop/mobile browsers, embedded named-marker traps, and
   the Cubot/Abbott false-positive traps.
-- The real loopback/on-disk journey must inspect stored class/version/rule and
-  legacy verdict, product eligibility, diagnostic disagreement, and raw-UA
-  absence and must assert the matching bounded `serve_stopped` counters before
-  classifier v1 is release-ready.
+- The #68 real loopback/on-disk journey inspected stored class/version/rule and
+  legacy verdict, product eligibility, diagnostic disagreement, raw-UA absence,
+  and the matching bounded `serve_stopped` counters before classifier v1 was
+  released. D33 fixtures preserve every UA classification while composing hard
+  signals and removing only the completed shadow.

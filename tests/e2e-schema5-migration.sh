@@ -56,9 +56,9 @@ test "$("$previous" report "$verified" migration 2026-08-20 2026-08-20 \
     overview --format json)" = "$before"
 
 test "$("$current" migrate "$live" "$backup")" = \
-    "migrated metadata=v4 events=v5"
+    "migrated metadata=v4 events=v6"
 test "$("$current" doctor "$live")" = \
-    "ok metadata=v4 events=v5 sites=1 goals=0 funnels=0 stored_events=6 key=ok"
+    "ok metadata=v4 events=v6 sites=1 goals=0 funnels=0 stored_events=6 key=ok"
 test "$("$current" report "$live" migration 2026-08-20 2026-08-20 \
     overview --format json)" = "$before"
 test "$("$current" m2 identity-links "$live")" = 1
@@ -70,18 +70,19 @@ inspect() {
 jq -e '
     .device_category == "desktop" and .traffic_class == 1 and
     .classifier_version == 0 and .bot_rule == "" and
-    .legacy_bot_verdict == false
+    .signals.version == 0 and .client_hint_consistency == 0 and
+    (has("legacy_bot_verdict") | not)
 ' <<<"$(inspect 401)" >/dev/null
 jq -e '
     .device_category == "unknown" and .traffic_class == 2 and
     .classifier_version == 0 and .bot_rule == "legacy-device-bot" and
-    .legacy_bot_verdict == true and .session_start == true
+    .signals.version == 0 and .session_start == true
 ' <<<"$(inspect 402)" >/dev/null
 while read -r suffix rule; do
     jq -e --arg rule "$rule" '
         .device_category == "desktop" and .traffic_class == 4 and
         .classifier_version == 1 and .bot_rule == $rule and
-        .legacy_bot_verdict == false and .session_start == false
+        .signals.version == 0 and .session_start == false
     ' <<<"$(inspect "$suffix")" >/dev/null
 done <<'EOF'
 403 exclude.tracker
@@ -91,7 +92,7 @@ EOF
 jq -e '
     .device_category == "unknown" and .traffic_class == 4 and
     .classifier_version == 1 and .bot_rule == "exclude.tracker" and
-    .legacy_bot_verdict == false and .session_start == false
+    .signals.version == 0 and .session_start == false
 ' <<<"$(inspect 406)" >/dev/null
 
 quality=$("$current" report "$live" migration 2026-08-20 2026-08-20 \
@@ -103,13 +104,8 @@ jq -e '
       {"class":"automation","events":0},
       {"class":"excluded","events":4},
       {"class":"suspected","events":0}
-    ] and .classifier_v1_events == 0 and
-    .shadow == {
-      "both_human":0,
-      "legacy_only":0,
-      "classifier_only":0,
-      "both_bot":0
-    } and
+    ] and ([.signal_evidence[]] | all(. == 0)) and
+    (has("shadow") | not) and
     .exclusion_sources == [
       {"source":"tracker","events":2},
       {"source":"network","events":1},
@@ -120,7 +116,7 @@ jq -e '
 # Current migration is idempotent; rollback is a matched pair restore opened by
 # the exact schema-4 predecessor.
 test "$("$current" migrate "$live" "$backup")" = \
-    "migrated metadata=v4 events=v5"
+    "migrated metadata=v4 events=v6"
 rolled_back="$fixture/rolled-back"
 "$previous" restore "$backup" "$rolled_back" --verify >/dev/null
 test "$("$previous" doctor "$rolled_back")" = \
@@ -182,13 +178,13 @@ if wait "$migration_pid" 2>/dev/null; then
 fi
 migration_pid=
 test "$("$current" migrate "$million" "$million_backup")" = \
-    "migrated metadata=v4 events=v5"
+    "migrated metadata=v4 events=v6"
 test "$("$current" doctor "$million")" = \
-    "ok metadata=v4 events=v5 sites=1 goals=0 funnels=0 stored_events=1000000 key=ok"
+    "ok metadata=v4 events=v6 sites=1 goals=0 funnels=0 stored_events=1000000 key=ok"
 test "$("$current" report "$million" million \
     2025-01-01 2025-01-31 overview --format json)" = "$million_before"
 test "$("$current" migrate "$million" "$million_backup")" = \
-    "migrated metadata=v4 events=v5"
+    "migrated metadata=v4 events=v6"
 
 printf '%s\n' "$quality"
 echo "exact schema-4 mapping, million-row interruption/retry, repeat, backup, restore, and rollback passed"

@@ -96,11 +96,14 @@ interactive deadline.
 Metadata migration 4 adds the bounded per-site network-exclusion policy. Event
 migration 4 added its temporary stored source, and event migration 5 consumes
 every source into D32's permanent class/version/rule plus the one-release
-legacy verdict. Both event migrations are forward-only schema changes: stop
+legacy verdict. Event migration 6 adds D33's bounded evidence, removes that
+completed shadow byte, and promotes permanent-class product eligibility. All
+three event migrations are forward-only schema changes: stop
 the sole writer, create and verify a matched backup, run `migrate`, then start
 the candidate. An older binary must use a restored pre-migration database pair;
-switching only the executable is not rollback. Schema 5 adds no metadata,
-tracker, Caddy, service-unit, or environment change.
+switching only the executable is not rollback. Schema 6 adds no metadata,
+service-unit, environment, dependency, process, or runtime data file. It adds
+one immutable tracker path to Caddy without removing an old path.
 
 DuckDB is configured before its configuration is locked: one query thread,
 128 MiB memory, 256 MiB temp limit, insertion-order preservation off,
@@ -157,7 +160,7 @@ caddy validate --config deploy/Caddyfile
 
 The vhost exposes `/tracker.aef65945.js`, `/tracker.fb64c486.js`,
 `/tracker.78135195.js`, `/tracker.d9e94247.js`, `/tracker.81c3b777.js`,
-`/tracker.6de111c9.js`,
+`/tracker.6de111c9.js`, `/tracker.bc506cfe.js`,
 `/tracker.js`, `/v1/event`, `/v2/event`, `/v1/p.gif`, `/admin`, and
 `/admin/*`. `/` redirects to `/admin`;
 all other paths, including health endpoints, receive `404`.
@@ -221,16 +224,11 @@ The service emits newline-delimited structured JSON to stderr for:
 
 - `serve_started`, containing only host and port;
 - `request_failed`, containing only an error category;
-- `serve_stopped`, containing accepted, rejected, rate-limited, bot, unknown
-  classification, write-failure, and request-failure counters. During D32's
-  shadow release it additionally contains six fixed-cardinality counters for
-  newly inserted nonexcluded events: `legacy_bot_positive`,
-  `classifier_bot_positive`, `shadow_both_human`, `shadow_legacy_only`,
-  `shadow_classifier_only`, and `shadow_both_bot`. The existing `bots` counter
-  retains its legacy request-attempt meaning. Durable traffic-quality
-  diagnostics remain the date-range evidence; the process counters are the
-  restart-scoped cross-check. Duplicate, conflicting, rejected, failed, and
-  excluded rows do not enter the six shadow counters.
+- `serve_stopped`, containing accepted, rejected, rate-limited, permanent
+  declared-bot/automation request-attempt, unknown classification,
+  write-failure, and request-failure counters. D33 removes the completed D32
+  shadow counters; durable traffic-quality version 4 is the bounded date-range
+  evidence for classes, rules, and signals.
 
 Logs never include IPs, user agents, paths, referrers, campaigns, properties,
 request bodies, visitor IDs, matched rule IDs, keys, or database paths.
@@ -321,10 +319,16 @@ preserved-field fingerprints, and remove `exclusion_source` only in the swap
 transaction. Killing the process during the
 million-row DuckDB migration chain and retrying with the same verified backup
 is an automated release gate. A binary refuses a database with a newer unknown
-schema. Event schemas 3, 4, and 5 require database-pair restoration before an
+schema. Event schemas 3, 4, 5, and 6 require database-pair restoration before an
 older binary is started for rollback. Metric-v1 reports continue to use their
 original UTC dates; explicit timezone rebucketing populates the separate
 site-local date/offset before the service can become ready.
+
+Event migration 6 must preserve every schema-5 row/link/class/version/rule and
+every unrelated-field fingerprint, add only the documented unknown evidence,
+and prove the legacy shadow column absent before swap. Its exact-predecessor
+million-row interruption/retry and repeated-upgrade path is part of the same
+release gate.
 
 Keep the previous release directory and the verified pre-upgrade backup.
 Rollback means stopping the new binary, restoring both stores and the key from
@@ -341,6 +345,17 @@ accepted. Verification then proves the service owner, `/proc/<pid>/exe`, the
 private DuckDB library, ready/health endpoints, exact deployed commit, and the
 authenticated public report path. The release record includes the backup and
 artifact hashes. No runtime classifier file or network access is deployed.
+
+For the schema-6 deployment, repeat the stopped-writer procedure with a
+manifest recording metadata schema 4 and event schema 5. The exact schema-5
+binary must open the independently restored sibling and reproduce the chosen
+pre-migration reports. After migration, verify schema 6, permanent class
+eligibility, traffic-quality version 4, and real browser/receipt signal rows.
+Install the new tracker hash beside every old hash, back up the live Caddy
+configuration, add only the new allowlisted path, validate, and use the Caddy
+admin reload. Verify old and new immutable tracker paths after the reload.
+Rollback restores the matched schema-5 pair, prior release symlink, and backed
+up Caddy configuration; switching only one component is forbidden.
 
 ## 11. Retention and site deletion
 
@@ -401,7 +416,8 @@ zig build test -Doptimize=ReleaseSafe \
   -Dturso-native-path=<exact-prefix>
 zig build e2e-m0 e2e-m1 e2e-m2 e2e-timezone e2e-properties \
   e2e-analysis e2e-traffic-quality e2e-classifier e2e-schema5-migration \
-  e2e-exclusion e2e-legacy-migration e2e-m2-browser e2e-m3 e2e-m4 \
+  e2e-schema6-migration e2e-exclusion e2e-legacy-migration \
+  e2e-m2-browser e2e-identity-browser e2e-tracker-browser e2e-m3 e2e-m4 \
   e2e-m6 e2e-m7 e2e-passkey-p1 \
   -Doptimize=ReleaseSafe -Dturso-native-path=<exact-prefix>
 zig build bench-properties \
@@ -415,5 +431,5 @@ zig build e2e-release-full \
 `e2e-release-full` checks the outer and inner checksums, private DuckDB linkage,
 Caddy syntax, systemd security, and a fresh real-data report from the extracted
 archive, then runs the complete packaged real-process set including classifier,
-traffic-quality, and exact schema-4 migration evidence. Large event/browser
-fixtures are acceptance tooling only and are not shipped.
+traffic-quality, and exact schema-4 plus schema-5 migration evidence. Large
+event/browser fixtures are acceptance tooling only and are not shipped.
