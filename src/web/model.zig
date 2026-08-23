@@ -1,6 +1,44 @@
 const meta = @import("../store/meta.zig");
 const report = @import("../report.zig");
 
+pub const Destination = enum {
+    overview,
+    analyze,
+    journeys,
+    sessions,
+    live,
+    settings,
+
+    pub fn label(self: Destination) []const u8 {
+        return switch (self) {
+            .overview => "Overview",
+            .analyze => "Analyze",
+            .journeys => "Journeys",
+            .sessions => "Sessions",
+            .live => "Live",
+            .settings => "Settings",
+        };
+    }
+
+    pub fn shortLabel(self: Destination) []const u8 {
+        return switch (self) {
+            .overview => "Ov",
+            .analyze => "An",
+            .journeys => "Jo",
+            .sessions => "Se",
+            .live => "Li",
+            .settings => "St",
+        };
+    }
+
+    pub fn runsReport(self: Destination) bool {
+        return switch (self) {
+            .overview, .analyze, .journeys, .live => true,
+            .sessions, .settings => false,
+        };
+    }
+};
+
 pub const Query = struct {
     site: []const u8 = "",
     start_date: []const u8,
@@ -25,6 +63,7 @@ pub const FunnelDraft = struct {
 };
 
 pub const Page = struct {
+    destination: Destination,
     sites: []const meta.Site,
     selected_site: ?meta.Site,
     query: Query,

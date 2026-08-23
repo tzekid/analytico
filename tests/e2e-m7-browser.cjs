@@ -12,7 +12,11 @@ if (!origin || !sessionToken) {
   );
 }
 
-const range = "site=example&start=2025-01-01&end=2025-01-02";
+const dates = "start=2025-01-01&end=2025-01-02";
+
+function route(site, destination, query = "") {
+  return `${origin}/admin/sites/${site}/${destination}?${dates}${query}`;
+}
 
 async function launch() {
   const options = {
@@ -53,7 +57,7 @@ async function normal() {
     });
 
     let response = await page.goto(
-      `${origin}/admin?${range}&report=overview`,
+      route("example", "overview"),
       { waitUntil: "load" },
     );
     assert.equal(response.status(), 200);
@@ -69,42 +73,40 @@ async function normal() {
       0,
     );
 
-    let siteResponse = page.waitForResponse(
-      (candidate) =>
-        candidate.url().includes("site=second") &&
-        candidate.request().headers()["hx-request"] === "true",
-    );
+    let enhancedBefore = enhanced.length;
     await page
-      .locator("form.site-switcher select[name=site]")
+      .locator(".desktop-context form.site-switcher select[name=site]")
       .selectOption("second");
-    response = await siteResponse;
-    assert.equal(response.status(), 200);
+    await page.waitForURL(/\/admin\/sites\/second\/overview/);
     await page.waitForFunction(() =>
-      document.querySelector('form.site-switcher select[name="site"]')?.value ===
+      document.querySelector('.desktop-context form.site-switcher select[name="site"]')?.value ===
       "second",
     );
-    assert.match(page.url(), /site=second/);
+    assert.ok(enhanced.length > enhancedBefore);
+    assert.equal(enhanced.at(-1).method, "GET");
+    assert.match(page.url(), /\/admin\/sites\/second\/overview/);
     assert.equal(
       await page.locator(".metrics li", { hasText: "Page views" }).locator("strong").textContent(),
       "2",
     );
 
-    siteResponse = page.waitForResponse(
-      (candidate) =>
-        candidate.url().includes("site=example") &&
-        candidate.request().headers()["hx-request"] === "true",
-    );
+    enhancedBefore = enhanced.length;
     await page
-      .locator("form.site-switcher select[name=site]")
+      .locator(".desktop-context form.site-switcher select[name=site]")
       .selectOption("example");
-    response = await siteResponse;
-    assert.equal(response.status(), 200);
+    await page.waitForURL(/\/admin\/sites\/example\/overview/);
     await page.waitForFunction(() =>
-      document.querySelector('form.site-switcher select[name="site"]')?.value ===
+      document.querySelector('.desktop-context form.site-switcher select[name="site"]')?.value ===
       "example",
     );
+    assert.ok(enhanced.length > enhancedBefore);
+    assert.equal(enhanced.at(-1).method, "GET");
 
-    await page.route("**/admin?*report=pages*", async (route) => {
+    await page.locator('.primary-navigation a:has-text("Analyze")').click();
+    await page.waitForFunction(() =>
+      document.querySelector('.report-tabs a[aria-current="page"]')?.textContent === "Pages",
+    );
+    await page.route("**/admin/sites/*/analyze?*report=pages*", async (route) => {
       if (route.request().headers()["hx-request"] === "true") {
         await new Promise((resolve) => setTimeout(resolve, 250));
       }
@@ -130,7 +132,7 @@ async function normal() {
     assert.equal(response.status(), 200);
     assert.ok(loadingCount >= 1);
     await page.waitForFunction(() =>
-      document.querySelector('a[aria-current="page"]')?.textContent === "Pages",
+      document.querySelector('.report-tabs a[aria-current="page"]')?.textContent === "Pages",
     );
     assert.match(page.url(), /report=pages/);
     assert.equal(
@@ -144,7 +146,7 @@ async function normal() {
     await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
     await eventsLink.evaluate((element) => element.click());
     await page.waitForFunction(() =>
-      document.querySelector('a[aria-current="page"]')?.textContent === "Events",
+      document.querySelector('.report-tabs a[aria-current="page"]')?.textContent === "Events",
     );
     assert.match(page.url(), /report=events/);
     assert.equal(await page.evaluate(() => localStorage.length), 0);
@@ -153,16 +155,16 @@ async function normal() {
 
     await page.goBack();
     await page.waitForFunction(() =>
-      document.querySelector('a[aria-current="page"]')?.textContent === "Pages",
+      document.querySelector('.report-tabs a[aria-current="page"]')?.textContent === "Pages",
     );
     assert.match(page.url(), /report=pages/);
     await page.goForward();
     await page.waitForFunction(() =>
-      document.querySelector('a[aria-current="page"]')?.textContent === "Events",
+      document.querySelector('.report-tabs a[aria-current="page"]')?.textContent === "Events",
     );
     assert.match(page.url(), /report=events/);
 
-    await page.goto(`${origin}/admin?${range}&report=overview`, {
+    await page.goto(route("example", "journeys/goals"), {
       waitUntil: "load",
     });
     await page.waitForFunction(() => window.htmx !== undefined);
@@ -221,6 +223,10 @@ async function normal() {
     ).length;
     assert.equal(doubleAfter - doubleBefore, 1);
 
+    await page.locator('.primary-navigation a:has-text("Analyze")').click();
+    await page.waitForFunction(() =>
+      document.querySelector('.report-tabs a[aria-current="page"]')?.textContent === "Pages",
+    );
     await context.setOffline(true);
     const titleBeforeOffline = await page.locator("#report h2").textContent();
     await page.getByRole("link", { name: "Sources", exact: true }).click({
@@ -231,7 +237,7 @@ async function normal() {
     await context.setOffline(false);
     await page.getByRole("link", { name: "Sources", exact: true }).click();
     await page.waitForFunction(() =>
-      document.querySelector('a[aria-current="page"]')?.textContent === "Sources",
+      document.querySelector('.report-tabs a[aria-current="page"]')?.textContent === "Sources",
     );
     assert.match(page.url(), /report=sources/);
     assert.ok(expectedConsoleErrors.length >= 1);
@@ -278,7 +284,7 @@ async function fallbackContext(browser, behavior) {
   page.on("request", (request) => {
     if (request.resourceType() === "document") documents.push(request.url());
   });
-  await page.goto(`${origin}/admin?${range}&report=overview`, {
+  await page.goto(route("example", "analyze", "&report=events"), {
     waitUntil: "load",
   });
   await page.getByRole("link", { name: "Pages", exact: true }).click();
@@ -295,7 +301,7 @@ async function timeout() {
     await addSession(context);
     const page = await context.newPage();
     let response = await page.goto(
-      `${origin}/admin?${range}&report=overview`,
+      route("example", "overview"),
       { waitUntil: "load" },
     );
     assert.equal(response.status(), 503);

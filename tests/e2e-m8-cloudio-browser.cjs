@@ -115,7 +115,7 @@ async function connected(browser) {
       link.click(),
     ]).then(([navigation]) => navigation);
     assert.equal(response.status(), 200);
-    assert.equal(await page.locator("h1").textContent(), "Analytico");
+    assert.equal(await page.locator("h1").textContent(), "Overview");
     assert.equal(
       await page.locator(".metrics li", { hasText: "Page views" }).locator("strong").textContent(),
       "8",
@@ -194,7 +194,7 @@ async function rollback(browser) {
       { waitUntil: "load" },
     );
     assert.equal(response.status(), 200);
-    assert.equal(await page.locator("h1").textContent(), "Analytico");
+    assert.equal(await page.locator("h1").textContent(), "Overview");
     process.stdout.write(
       JSON.stringify({
         mode: "rollback",

@@ -38,7 +38,12 @@ async function main() {
     await page.goto(setupUrl);
     await page.locator("#setup-button").click();
     try {
-      await page.waitForURL(`${origin}/admin`, { timeout: 15000 });
+      await page.waitForURL(
+        (url) =>
+          url.origin === origin &&
+          /^\/admin\/sites\/[^/]+\/overview$/.test(url.pathname),
+        { timeout: 15000 },
+      );
     } catch (_) {
       throw new Error("passkey setup failed: " + await page.locator("#setup-error").textContent());
     }

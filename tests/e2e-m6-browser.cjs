@@ -11,8 +11,11 @@ if (!origin || !sessionToken) {
   );
 }
 
-const range =
-  "site=example&start=2025-01-01&end=2025-01-02";
+const dates = "start=2025-01-01&end=2025-01-02";
+
+function route(site, destination, query = "") {
+  return `${origin}/admin/sites/${site}/${destination}?${dates}${query}`;
+}
 
 async function main() {
   const options = {
@@ -61,11 +64,15 @@ async function main() {
     });
 
     let response = await page.goto(
-      `${origin}/admin?${range}&report=overview`,
+      route("example", "overview"),
       { waitUntil: "load" },
     );
     assert.equal(response.status(), 200);
-    assert.equal(await page.locator("h1").textContent(), "Analytico");
+    assert.equal(await page.locator("h1").textContent(), "Overview");
+    assert.equal(
+      await page.locator('.primary-navigation a[aria-current="page"] .nav-label').textContent(),
+      "Overview",
+    );
     await assertMetric(page, "Page views", "8");
     await assertMetric(page, "Visitor-days", "4");
     await assertMetric(page, "Distinct people", "4");
@@ -76,7 +83,7 @@ async function main() {
       1,
     );
     assert.equal((await page.locator("body").innerText()).includes(
-      "self-excluded events stay stored but do not enter product metrics",
+      "Stored classes plus reversible query-classifier v1 diagnostics",
     ), true);
     await assertVisualTheme(page, "light", "44px");
     if (process.env.ANALYTICO_MOBILE_SCREENSHOT_PATH) {
@@ -97,6 +104,12 @@ async function main() {
     assert.equal(await page.evaluate(() => localStorage.length), 0);
     assert.equal(await page.evaluate(() => sessionStorage.length), 0);
     assert.deepEqual(failures, []);
+    await assertMobileNavigation(page);
+    const mobileContext = page.locator(".mobile-context");
+    await mobileContext.locator("summary").click();
+    assert.equal(await mobileContext.locator("form.site-switcher").isVisible(), true);
+    assert.equal(await mobileContext.getByText("All visitors", { exact: true }).isVisible(), true);
+    await mobileContext.locator("summary").click();
     await cdp.send("Network.emulateNetworkConditions", {
       offline: false,
       latency: 0,
@@ -104,70 +117,81 @@ async function main() {
       uploadThroughput: -1,
       connectionType: "none",
     });
+    await page.setViewportSize({ width: 1440, height: 900 });
     if (process.env.ANALYTICO_SCREENSHOT_PATH) {
-      await page.setViewportSize({ width: 1440, height: 900 });
       await page.screenshot({
         path: process.env.ANALYTICO_SCREENSHOT_PATH,
         fullPage: true,
       });
     }
+    response = await page.goto(route("example", "overview"), {
+      waitUntil: "load",
+    });
+    assert.equal(response.status(), 200);
+    await page.keyboard.press("Tab");
+    assert.equal(await page.evaluate(() => document.activeElement?.className), "skip-link");
+    await page.keyboard.press("Enter");
+    assert.equal(await page.evaluate(() => document.activeElement?.id), "main");
 
-    const siteForm = page.locator("form.site-switcher");
+    await assertDestinations(page);
+
+    const siteForm = page.locator(".desktop-context form.site-switcher");
     await siteForm.locator('select[name="site"]').selectOption("second");
     response = await Promise.all([
       page.waitForNavigation({ waitUntil: "load" }),
       siteForm.getByRole("button", { name: "View site" }).click(),
     ]).then(([navigation]) => navigation);
     assert.equal(response.status(), 200);
-    assert.match(page.url(), /site=second/);
+    assert.match(page.url(), /\/admin\/sites\/second\/overview/);
+    assert.doesNotMatch(page.url(), /[?&]site=/);
     assert.equal(
-      await page.locator('select[name="site"]').inputValue(),
+      await page.locator('.desktop-context select[name="site"]').inputValue(),
       "second",
     );
     await assertMetric(page, "Page views", "2");
-    await page.getByRole("link", { name: "Pages", exact: true }).click();
-    assert.match(page.url(), /site=second/);
+    await page.locator('.primary-navigation a:has-text("Analyze")').click();
+    assert.match(page.url(), /\/admin\/sites\/second\/analyze/);
     assert.match(page.url(), /report=pages/);
-    const rangeForm = page.locator("form.range-filter");
+    const rangeForm = page.locator(".desktop-context form.range-filter");
     await rangeForm.locator('input[name="start"]').fill("2025-01-02");
     response = await Promise.all([
       page.waitForNavigation({ waitUntil: "load" }),
       rangeForm.getByRole("button", { name: "Update dates" }).click(),
     ]).then(([navigation]) => navigation);
     assert.equal(response.status(), 200);
-    assert.match(page.url(), /site=second/);
+    assert.match(page.url(), /\/admin\/sites\/second\/analyze/);
     assert.match(page.url(), /start=2025-01-02/);
     assert.match(page.url(), /report=pages/);
 
     await page.goto(
-      `${origin}/admin?${range}&report=goal&subject=Signup`,
+      route("example", "journeys/goals", "&subject=Signup"),
       { waitUntil: "load" },
     );
     await page
-      .locator("form.site-switcher select[name=site]")
+      .locator(".desktop-context form.site-switcher select[name=site]")
       .selectOption("second");
     response = await Promise.all([
       page.waitForNavigation({ waitUntil: "load" }),
       page
-        .locator("form.site-switcher")
+        .locator(".desktop-context form.site-switcher")
         .getByRole("button", { name: "View site" })
         .click(),
     ]).then(([navigation]) => navigation);
     assert.equal(response.status(), 200);
-    assert.match(page.url(), /site=second/);
+    assert.match(page.url(), /\/admin\/sites\/second\/overview/);
     assert.doesNotMatch(page.url(), /subject=/);
     assert.equal(
-      await page.locator('a[aria-current="page"]').textContent(),
+      await page.locator('.primary-navigation a[aria-current="page"] .nav-label').textContent(),
       "Overview",
     );
 
     await page
-      .locator("form.site-switcher select[name=site]")
+      .locator(".desktop-context form.site-switcher select[name=site]")
       .selectOption("example");
     await Promise.all([
       page.waitForNavigation({ waitUntil: "load" }),
       page
-        .locator("form.site-switcher")
+        .locator(".desktop-context form.site-switcher")
         .getByRole("button", { name: "View site" })
         .click(),
     ]);
@@ -189,16 +213,20 @@ async function main() {
       "funnel&subject=Journey",
     ];
     for (const report of reports) {
-      response = await page.goto(
-        `${origin}/admin?${range}&report=${report}`,
-        { waitUntil: "load" },
-      );
+      const reportUrl = report === "traffic-quality"
+        ? route("example", "live")
+        : report.startsWith("goal")
+          ? route("example", "journeys/goals", "&subject=Signup")
+          : report.startsWith("funnel")
+            ? route("example", "journeys/funnels", "&subject=Journey")
+            : route("example", "analyze", `&report=${report}`);
+      response = await page.goto(reportUrl, { waitUntil: "load" });
       assert.equal(response.status(), 200, report);
       assert.equal(await page.locator("#report").count(), 1, report);
     }
 
     response = await page.goto(
-      `${origin}/admin?${range}&report=pages&sort=count&limit=1&page=1`,
+      route("example", "analyze", "&report=pages&sort=count&limit=1&page=1"),
       { waitUntil: "load" },
     );
     assert.equal(response.status(), 200);
@@ -212,7 +240,7 @@ async function main() {
     assert.equal(response.status(), 200);
     assert.match(page.url(), /page=2/);
 
-    await page.goto(`${origin}/admin?${range}&report=overview`, {
+    await page.goto(route("example", "journeys/goals"), {
       waitUntil: "load",
     });
     const unsafeText = "<script>alert(1)</script> \"&";
@@ -322,7 +350,7 @@ async function main() {
     const darkPage = await darkContext.newPage();
     await darkPage.setViewportSize({ width: 1440, height: 900 });
     response = await darkPage.goto(
-      `${origin}/admin?${range}&report=overview`,
+      route("example", "overview"),
       { waitUntil: "load" },
     );
     assert.equal(response.status(), 200);
@@ -346,6 +374,9 @@ async function main() {
       native_form_mutations: 5,
       startup_api_requests: 0,
       persistent_storage_entries: 0,
+      canonical_destinations: 6,
+      keyboard_skip_link: "main",
+      mobile_primary_navigation: "unclipped",
       first_view: "useful-over-64KiBps-link",
       visual_themes: ["light", "dark"],
       contrast: "wcag-aa",
@@ -363,6 +394,47 @@ async function addSession(context) {
   }]);
 }
 
+async function assertMobileNavigation(page) {
+  const links = page.locator(".mobile-navigation a");
+  assert.equal(await links.count(), 6);
+  const bounds = await links.evaluateAll((elements) => elements.map((element) => {
+    const rect = element.getBoundingClientRect();
+    return {
+      left: rect.left,
+      right: rect.right,
+      viewport: document.documentElement.clientWidth,
+      clipped: element.scrollWidth > element.clientWidth,
+    };
+  }));
+  for (const bound of bounds) {
+    assert.ok(bound.left >= 0);
+    assert.ok(bound.right <= bound.viewport + 0.5);
+    assert.equal(bound.clipped, false);
+  }
+}
+
+async function assertDestinations(page) {
+  const destinations = [
+    ["overview", "Overview"],
+    ["analyze", "Analyze"],
+    ["journeys/goals", "Journeys"],
+    ["sessions", "Sessions"],
+    ["live", "Live"],
+    ["settings/general", "Settings"],
+  ];
+  for (const [path, label] of destinations) {
+    const response = await page.goto(route("example", path), { waitUntil: "load" });
+    assert.equal(response.status(), 200, path);
+    assert.equal(await page.locator("h1").textContent(), label, path);
+    assert.equal(
+      await page.locator('.primary-navigation a[aria-current="page"] .nav-label').textContent(),
+      label,
+      path,
+    );
+    assert.equal(await page.locator("#main").count(), 1, path);
+  }
+}
+
 async function assertMetric(page, label, expected) {
   const item = page.locator(".metrics li").filter({
     has: page.getByText(label, { exact: true }),
@@ -376,7 +448,7 @@ async function assertVisualTheme(page, theme, expectedControlHeight) {
     const styles = (selector) => getComputedStyle(document.querySelector(selector));
     const link = styles(".account-nav > a");
     const action = styles(".range-filter button");
-    const active = styles('.report-tabs a[aria-current="page"]');
+    const active = styles('.primary-navigation a[aria-current="page"]');
     const metric = styles(".metrics strong");
     const metricLabel = styles(".metrics span");
     const brand = styles(".brand");
@@ -404,6 +476,8 @@ async function assertVisualTheme(page, theme, expectedControlHeight) {
     linkColor: "rgb(169, 50, 38)",
     actionColor: "rgb(251, 250, 248)",
     actionBackground: "rgb(169, 50, 38)",
+    activeColor: "rgb(169, 50, 38)",
+    activeBackground: "rgb(250, 232, 229)",
     metricLabelColor: "rgb(117, 110, 104)",
     metricSurface: "rgb(255, 255, 255)",
     controlBorder: "rgb(117, 110, 104)",
@@ -414,6 +488,8 @@ async function assertVisualTheme(page, theme, expectedControlHeight) {
     linkColor: "rgb(255, 111, 97)",
     actionColor: "rgb(21, 21, 21)",
     actionBackground: "rgb(255, 111, 97)",
+    activeColor: "rgb(255, 170, 162)",
+    activeBackground: "rgb(59, 35, 33)",
     metricLabelColor: "rgb(167, 160, 155)",
     metricSurface: "rgb(29, 29, 29)",
     controlBorder: "rgb(167, 160, 155)",
@@ -424,8 +500,8 @@ async function assertVisualTheme(page, theme, expectedControlHeight) {
   assert.equal(actual.linkColor, expected.linkColor);
   assert.equal(actual.actionColor, expected.actionColor);
   assert.equal(actual.actionBackground, expected.actionBackground);
-  assert.equal(actual.activeColor, expected.actionColor);
-  assert.equal(actual.activeBackground, expected.actionBackground);
+  assert.equal(actual.activeColor, expected.activeColor);
+  assert.equal(actual.activeBackground, expected.activeBackground);
   assert.equal(actual.metricLabelColor, expected.metricLabelColor);
   assert.equal(actual.metricSurface, expected.metricSurface);
   assert.equal(actual.controlBorder, expected.controlBorder);

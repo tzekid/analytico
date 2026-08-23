@@ -229,7 +229,9 @@ async function selfExclusion(browser) {
     url: dashboard,
   }]);
   const admin = await context.newPage();
-  await admin.goto(`${dashboard}/admin?site=self`, { waitUntil: "load" });
+  await admin.goto(`${dashboard}/admin/sites/self/settings/general`, {
+    waitUntil: "load",
+  });
   const management = admin.locator("details.management", {
     hasText: "Self-visit exclusion",
   });

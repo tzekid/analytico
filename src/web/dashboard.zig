@@ -4,6 +4,7 @@ const request_mod = @import("../http/request.zig");
 const response = @import("../http/response.zig");
 const events = @import("../store/events.zig");
 const meta = @import("../store/meta.zig");
+const report = @import("../report.zig");
 const controller = @import("controller.zig");
 const model = @import("model.zig");
 const render = @import("render.zig");
@@ -102,7 +103,15 @@ pub fn handle(
             try methodNotAllowed(output, "GET");
             return true;
         }
-        try getPage(dependencies, request, output);
+        try getLegacyPage(dependencies, request, output);
+        return true;
+    }
+    if (routeFor(path)) |route| {
+        if (!std.mem.eql(u8, request.method, "GET")) {
+            try methodNotAllowed(output, "GET");
+            return true;
+        }
+        try getPage(dependencies, request, output, route);
         return true;
     }
     const action = actionFor(path) orelse return false;
@@ -124,6 +133,56 @@ const Action = enum {
     update_traffic_policy,
 };
 
+const Route = struct {
+    site: []const u8,
+    destination: model.Destination,
+    default_kind: report.Kind,
+};
+
+fn routeFor(path: []const u8) ?Route {
+    const prefix = "/admin/sites/";
+    if (!std.mem.startsWith(u8, path, prefix)) return null;
+    const site, const suffix = std.mem.cutScalar(u8, path[prefix.len..], '/') orelse
+        return null;
+    domain.validateSlug(site) catch return null;
+    if (std.mem.eql(u8, suffix, "overview")) return .{
+        .site = site,
+        .destination = .overview,
+        .default_kind = .overview,
+    };
+    if (std.mem.eql(u8, suffix, "analyze")) return .{
+        .site = site,
+        .destination = .analyze,
+        .default_kind = .pages,
+    };
+    if (std.mem.eql(u8, suffix, "journeys/goals")) return .{
+        .site = site,
+        .destination = .journeys,
+        .default_kind = .goal,
+    };
+    if (std.mem.eql(u8, suffix, "journeys/funnels")) return .{
+        .site = site,
+        .destination = .journeys,
+        .default_kind = .funnel,
+    };
+    if (std.mem.eql(u8, suffix, "sessions")) return .{
+        .site = site,
+        .destination = .sessions,
+        .default_kind = .overview,
+    };
+    if (std.mem.eql(u8, suffix, "live")) return .{
+        .site = site,
+        .destination = .live,
+        .default_kind = .traffic_quality,
+    };
+    if (std.mem.eql(u8, suffix, "settings/general")) return .{
+        .site = site,
+        .destination = .settings,
+        .default_kind = .overview,
+    };
+    return null;
+}
+
 fn actionFor(path: []const u8) ?Action {
     if (std.mem.eql(u8, path, "/admin/goals")) return .add_goal;
     if (std.mem.eql(u8, path, "/admin/goals/delete")) return .delete_goal;
@@ -141,7 +200,7 @@ fn actionFor(path: []const u8) ?Action {
     return null;
 }
 
-fn getPage(
+fn getLegacyPage(
     dependencies: Dependencies,
     request: request_mod.Request,
     output: *std.Io.Writer,
@@ -159,7 +218,95 @@ fn getPage(
         request.target,
         &range.start,
         &range.end,
+        .overview,
     ) catch {
+        try writeError(output, .{
+            .status = 400,
+            .title = "Invalid report request",
+            .message = "Check the site, UTC date range, report, sort, and page values.",
+        });
+        return;
+    };
+    const sites = try dependencies.metadata.listSites(dependencies.allocator);
+    if (sites.len == 0) {
+        const loaded = try controller.loadPage(
+            dependencies.allocator,
+            dependencies.metadata,
+            dependencies.events,
+            .overview,
+            query,
+            dependencies.csrf_token,
+            noticeMessage(request.target),
+            dependencies.report_timeout_ms,
+        );
+        try writePage(output, 200, loaded);
+        return;
+    }
+    var canonical_query = query;
+    const selected = controller.resolveSite(sites, query.site) catch {
+        try writeError(output, .{
+            .status = 404,
+            .title = "Report not found",
+            .message = "The selected site, goal, or funnel no longer exists.",
+        });
+        return;
+    };
+    canonical_query.site = selected.slug;
+    controller.validateQuery(canonical_query) catch {
+        try writeError(output, .{
+            .status = 400,
+            .title = "Invalid report request",
+            .message = "Check the site, UTC date range, report, sort, and page values.",
+        });
+        return;
+    };
+    try redirectToCanonical(
+        dependencies.allocator,
+        output,
+        legacyDestination(canonical_query.kind),
+        canonical_query,
+        noticeCode(request.target),
+    );
+}
+
+fn getPage(
+    dependencies: Dependencies,
+    request: request_mod.Request,
+    output: *std.Io.Writer,
+    route: Route,
+) !void {
+    const range = currentRange() catch {
+        try writeError(output, .{
+            .status = 503,
+            .title = "Clock unavailable",
+            .message = "The server could not determine a safe UTC report range.",
+        });
+        return;
+    };
+    var query = controller.parseQuery(
+        dependencies.allocator,
+        request.target,
+        &range.start,
+        &range.end,
+        route.default_kind,
+    ) catch {
+        try writeError(output, .{
+            .status = 400,
+            .title = "Invalid report request",
+            .message = "Check the site, UTC date range, report, sort, and page values.",
+        });
+        return;
+    };
+    if (query.site.len != 0 or !kindAllowed(route, query.kind)) {
+        try writeError(output, .{
+            .status = 400,
+            .title = "Invalid report request",
+            .message = "The site path and destination do not accept that report state.",
+        });
+        return;
+    }
+    query.site = route.site;
+    controller.validateQuery(query) catch {
         try writeError(output, .{
             .status = 400,
             .title = "Invalid report request",
@@ -171,6 +318,7 @@ fn getPage(
         dependencies.allocator,
         dependencies.metadata,
         dependencies.events,
+        route.destination,
         query,
         dependencies.csrf_token,
         noticeMessage(request.target),
@@ -203,6 +351,35 @@ fn getPage(
         return;
     };
     try writePage(output, 200, loaded);
+}
+
+fn kindAllowed(route: Route, kind: report.Kind) bool {
+    return switch (route.destination) {
+        .overview => kind == .overview,
+        .analyze => kind.isList(),
+        .journeys => kind == route.default_kind,
+        .sessions, .settings => kind == .overview,
+        .live => kind == .traffic_quality,
+    };
+}
+
+fn legacyDestination(kind: report.Kind) model.Destination {
+    return switch (kind) {
+        .overview => .overview,
+        .pages,
+        .entries,
+        .exits,
+        .sources,
+        .campaigns,
+        .countries,
+        .browsers,
+        .operating_systems,
+        .devices,
+        .events,
+        => .analyze,
+        .goal, .funnel => .journeys,
+        .traffic_quality => .live,
+    };
 }
 
 fn postAction(
@@ -326,15 +503,21 @@ fn postAction(
         }
     }
     const site = try form.required("site");
-    var location = std.Io.Writer.Allocating.init(dependencies.allocator);
-    try location.writer.writeAll("/admin?site=");
-    try urlComponent(&location.writer, site);
-    try location.writer.writeAll("&start=");
-    try urlComponent(&location.writer, date_range.start);
-    try location.writer.writeAll("&end=");
-    try urlComponent(&location.writer, date_range.end);
-    try location.writer.writeAll("&report=overview&notice=");
-    try location.writer.writeAll(switch (action) {
+    const destination: model.Destination = switch (action) {
+        .add_goal, .delete_goal, .add_funnel, .delete_funnel => .journeys,
+        .add_excluded_network, .delete_excluded_network, .update_traffic_policy => .settings,
+    };
+    const kind: report.Kind = switch (action) {
+        .add_funnel, .delete_funnel => .funnel,
+        .add_goal, .delete_goal => .goal,
+        .add_excluded_network, .delete_excluded_network, .update_traffic_policy => .overview,
+    };
+    try redirectToCanonical(dependencies.allocator, output, destination, .{
+        .site = site,
+        .start_date = date_range.start,
+        .end_date = date_range.end,
+        .kind = kind,
+    }, switch (action) {
         .add_goal => "goal-added",
         .delete_goal => "goal-deleted",
         .add_funnel => "funnel-added",
@@ -343,18 +526,6 @@ fn postAction(
         .delete_excluded_network => "network-exclusion-deleted",
         .update_traffic_policy => "traffic-policy-updated",
     });
-    var headers = std.Io.Writer.Allocating.init(dependencies.allocator);
-    try headers.writer.print(
-        "Cache-Control: no-store\r\nLocation: {s}\r\n",
-        .{location.written()},
-    );
-    try response.write(
-        output,
-        303,
-        "text/plain; charset=utf-8",
-        headers.written(),
-        "see other\n",
-    );
 }
 
 fn formErrorPage(
@@ -376,11 +547,20 @@ fn formErrorPage(
         .site = site,
         .start_date = range.start,
         .end_date = range.end,
+        .kind = switch (action) {
+            .add_goal, .delete_goal => .goal,
+            .add_funnel, .delete_funnel => .funnel,
+            .add_excluded_network, .delete_excluded_network, .update_traffic_policy => .overview,
+        },
     };
     var page = controller.loadPage(
         dependencies.allocator,
         dependencies.metadata,
         dependencies.events,
+        switch (action) {
+            .add_goal, .delete_goal, .add_funnel, .delete_funnel => .journeys,
+            .add_excluded_network, .delete_excluded_network, .update_traffic_policy => .settings,
+        },
         query,
         dependencies.csrf_token,
         "",
@@ -536,6 +716,100 @@ fn noticeMessage(target: []const u8) []const u8 {
         return "Traffic policy updated and collection policy refreshed.";
     }
     return "";
+}
+
+fn noticeCode(target: []const u8) []const u8 {
+    inline for (.{
+        "goal-added",
+        "goal-deleted",
+        "funnel-added",
+        "funnel-deleted",
+        "network-exclusion-added",
+        "network-exclusion-deleted",
+        "traffic-policy-updated",
+    }) |code| {
+        var needle_buffer: [64]u8 = undefined;
+        const needle = std.fmt.bufPrint(&needle_buffer, "notice={s}", .{code}) catch
+            unreachable;
+        if (std.mem.indexOf(u8, target, needle) != null) return code;
+    }
+    return "";
+}
+
+fn redirectToCanonical(
+    allocator: std.mem.Allocator,
+    output: *std.Io.Writer,
+    destination: model.Destination,
+    query: model.Query,
+    notice: []const u8,
+) !void {
+    var location = std.Io.Writer.Allocating.init(allocator);
+    try canonicalUrl(&location.writer, destination, query);
+    if (notice.len != 0) {
+        try location.writer.writeAll("&notice=");
+        try urlComponent(&location.writer, notice);
+    }
+    var headers = std.Io.Writer.Allocating.init(allocator);
+    try headers.writer.print(
+        "Cache-Control: no-store\r\nLocation: {s}\r\n",
+        .{location.written()},
+    );
+    try response.write(
+        output,
+        303,
+        "text/plain; charset=utf-8",
+        headers.written(),
+        "see other\n",
+    );
+}
+
+fn canonicalUrl(
+    output: *std.Io.Writer,
+    destination: model.Destination,
+    query: model.Query,
+) !void {
+    try output.writeAll("/admin/sites/");
+    try output.writeAll(query.site);
+    try output.writeAll(switch (destination) {
+        .overview => "/overview",
+        .analyze => "/analyze",
+        .journeys => if (query.kind == .funnel)
+            "/journeys/funnels"
+        else
+            "/journeys/goals",
+        .sessions => "/sessions",
+        .live => "/live",
+        .settings => "/settings/general",
+    });
+    try output.writeAll("?start=");
+    try urlComponent(output, query.start_date);
+    try output.writeAll("&end=");
+    try urlComponent(output, query.end_date);
+    switch (destination) {
+        .analyze => {
+            try output.writeAll("&report=");
+            try urlComponent(output, query.kind.name());
+            if (query.kind == .campaigns) {
+                try output.writeAll("&campaign=");
+                try urlComponent(output, @tagName(query.campaign_dimension));
+            }
+            if (query.kind.isList()) {
+                try output.writeAll("&sort=");
+                try urlComponent(output, @tagName(query.sort));
+            }
+            if (query.kind.isPaginated()) {
+                try output.print("&limit={d}&page={d}", .{ query.limit, query.page });
+            }
+        },
+        .journeys => if (query.subject.len != 0) {
+            try output.writeAll("&subject=");
+            try urlComponent(output, query.subject);
+        },
+        .live => if (query.limit != report.default_limit or query.page != 1) {
+            try output.print("&limit={d}&page={d}", .{ query.limit, query.page });
+        },
+        .overview, .sessions, .settings => {},
+    }
 }
 
 fn isInvalidInput(err: anyerror) bool {

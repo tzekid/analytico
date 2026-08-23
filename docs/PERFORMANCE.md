@@ -334,6 +334,17 @@ no local/session storage entries. Enhanced navigation and forms use the same
 full HTML controller as M6. Full browser failure/fallback evidence is in
 `M7_RESULTS.md`.
 
+### Analytico 1.0 application-shell confirmation
+
+Issue #16's ReleaseSafe real-Caddy, on-disk-store, and no-JavaScript browser
+run measured 2,177 compressed bytes for the complete canonical Overview HTML
+and 3,850 compressed bytes for the versioned shell CSS. The page exposed all
+six direct site-scoped destinations, made zero startup API/JSON requests, kept
+the mobile primary navigation within a 360 px viewport, and grew RSS by 4,884
+KiB after 100 authenticated views. The existing application-authored browser
+island remains 1,802 bytes raw and 696 bytes gzip; the shell adds no script,
+dependency, API request, or client state.
+
 ## 8. Regression policy
 
 For a stable benchmark environment:

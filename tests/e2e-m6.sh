@@ -120,14 +120,51 @@ session_cookie=$(<"$cookie_file")
 cookie="analytico_session=$session_cookie"
 
 range='site=example&start=2025-01-01&end=2025-01-02&report=overview'
+overview="$dashboard/admin/sites/example/overview?start=2025-01-01&end=2025-01-02"
+test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+    --cookie "$cookie" "$dashboard/admin?$range")" = 303
+test "$(curl --silent --output /dev/null --write-out '%{redirect_url}' \
+    --cookie "$cookie" "$dashboard/admin?$range")" = "$overview"
 curl --silent --fail --cookie "$cookie" \
-    "$dashboard/admin?$range" >"$fixture/page-one.html"
+    "$overview" >"$fixture/page-one.html"
 curl --silent --fail --cookie "$cookie" \
-    "$dashboard/admin?$range" >"$fixture/page-two.html"
+    "$overview" >"$fixture/page-two.html"
 cmp "$fixture/page-one.html" "$fixture/page-two.html"
+while IFS='|' read -r path label; do
+    route_page="$fixture/route-${label,,}.html"
+    curl --silent --fail --cookie "$cookie" \
+        "$dashboard/admin/sites/example/$path?start=2025-01-01&end=2025-01-02" \
+        >"$route_page"
+    grep -Fq "<h1>$label</h1>" "$route_page"
+    grep -Fq 'class="primary-navigation" aria-label="Primary"' "$route_page"
+    grep -Fq "<span class=\"nav-label\">$label</span>" "$route_page"
+done <<'ROUTES'
+overview|Overview
+analyze|Analyze
+journeys/goals|Journeys
+sessions|Sessions
+live|Live
+settings/general|Settings
+ROUTES
+test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+    --cookie "$cookie" "$dashboard/admin/sites/example/not-a-destination")" = 404
+test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+    --cookie "$cookie" "$overview&site=second")" = 400
+test "$(curl --silent --output /dev/null --write-out '%{redirect_url}' \
+    --cookie "$cookie" \
+    "$dashboard/admin?site=example&start=2025-01-01&end=2025-01-02&report=pages")" = \
+    "$dashboard/admin/sites/example/analyze?start=2025-01-01&end=2025-01-02&report=pages&sort=count&limit=25&page=1"
+test "$(curl --silent --output /dev/null --write-out '%{redirect_url}' \
+    --cookie "$cookie" \
+    "$dashboard/admin?site=example&start=2025-01-01&end=2025-01-02&report=goal&subject=Signup")" = \
+    "$dashboard/admin/sites/example/journeys/goals?start=2025-01-01&end=2025-01-02&subject=Signup"
+test "$(curl --silent --output /dev/null --write-out '%{redirect_url}' \
+    --cookie "$cookie" \
+    "$dashboard/admin?site=example&start=2025-01-01&end=2025-01-02&report=traffic-quality")" = \
+    "$dashboard/admin/sites/example/live?start=2025-01-01&end=2025-01-02"
 curl --silent --fail --cookie "$cookie" \
     --dump-header "$fixture/page.headers" --output /dev/null \
-    "$dashboard/admin?$range"
+    "$overview"
 grep -Fiq 'Content-Security-Policy:' "$fixture/page.headers"
 html_gzip_bytes=$(gzip --stdout "$fixture/page-one.html" | wc -c)
 css_path=$(grep -o 'href="/admin/[^"]*\.css"' \
@@ -140,7 +177,7 @@ test "$css_gzip_bytes" -le 12288
 rss_before=$(awk '$1 == "VmRSS:" { print $2 }' "/proc/$server_pid/status")
 for _ in {1..100}; do
     curl --silent --fail --cookie "$cookie" \
-        "$dashboard/admin?$range" >/dev/null
+        "$overview" >/dev/null
 done
 rss_after=$(awk '$1 == "VmRSS:" { print $2 }' "/proc/$server_pid/status")
 rss_growth_kib=$((rss_after - rss_before))
@@ -169,7 +206,7 @@ test "$status" = 403
 grep -Fq 'modifying form did not come from this dashboard origin' \
     "$fixture/cross-origin.html"
 curl --silent --fail --cookie "$cookie" \
-    "$dashboard/admin?$range" >"$fixture/after-cross-origin.html"
+    "$overview" >"$fixture/after-cross-origin.html"
 if grep -Fq 'Cross origin' "$fixture/after-cross-origin.html"; then
     echo "cross-origin mutation was persisted" >&2
     exit 1
@@ -182,7 +219,7 @@ server_pid=
 start_server --report-timeout-ms 1
 status=$(curl --silent --output "$fixture/timeout.html" \
     --write-out '%{http_code}' --cookie "$cookie" \
-    "$dashboard/admin?site=example&start=2025-01-01&end=2025-01-02&report=overview")
+    "$overview")
 test "$status" = 503
 grep -Fq 'Report timed out' "$fixture/timeout.html"
 grep -Fq 'Narrow the UTC date range and retry' "$fixture/timeout.html"

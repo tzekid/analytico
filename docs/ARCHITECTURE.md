@@ -49,6 +49,14 @@ renderer <- typed view models <- controller <- application
 - There is no service locator, dependency-injection container, ORM, generic
   repository framework, or generic middleware chain.
 
+The web adapter recognizes a closed set of canonical
+`/admin/sites/{site}/...` destinations and passes a destination plus validated
+query state to one controller/view-model/renderer path. Every destination
+returns a complete semantic document. The bounded legacy `/admin?...` parser
+only translates known shipped report state and redirects; it is not a second
+application state model. Shell-only destinations do not run an analytics query
+merely to render navigation and context.
+
 An interface is introduced only when a second real implementation or a
 deterministic test seam needs the same semantics. Until then, functions accept
 the concrete store or a narrow function pointer owned by the caller.

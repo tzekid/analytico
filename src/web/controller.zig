@@ -76,10 +76,12 @@ pub fn parseQuery(
     target: []const u8,
     default_start: []const u8,
     default_end: []const u8,
+    default_kind: report.Kind,
 ) !model.Query {
     var query = model.Query{
         .start_date = default_start,
         .end_date = default_end,
+        .kind = default_kind,
     };
     const marker = std.mem.findScalar(u8, target, '?') orelse return query;
     const encoded = target[marker + 1 ..];
@@ -134,6 +136,7 @@ pub fn loadPage(
     allocator: std.mem.Allocator,
     metadata: *meta.Store,
     event_store: *events.Store,
+    destination: model.Destination,
     query_input: model.Query,
     csrf_token: []const u8,
     notice: []const u8,
@@ -143,6 +146,7 @@ pub fn loadPage(
     const sites = try metadata.listSites(allocator);
     if (sites.len == 0) {
         return .{
+            .destination = destination,
             .sites = sites,
             .selected_site = null,
             .query = query,
@@ -155,10 +159,7 @@ pub fn loadPage(
             .notice = notice,
         };
     }
-    const selected = if (query.site.len == 0)
-        firstActive(sites) orelse sites[0]
-    else
-        findSite(sites, query.site) orelse return error.SiteNotFound;
+    const selected = try resolveSite(sites, query.site);
     query.site = selected.slug;
     try validateQuery(query);
 
@@ -201,7 +202,7 @@ pub fn loadPage(
         .limit = query.limit,
         .page = query.page,
     };
-    const result: ?report.Result = if (has_subject)
+    const result: ?report.Result = if (destination.runsReport() and has_subject)
         try reports.runWithTimeout(
             allocator,
             event_store,
@@ -223,7 +224,7 @@ pub fn loadPage(
     quality_request.kind = .traffic_quality;
     quality_request.limit = report.maximum_limit;
     quality_request.page = 1;
-    const overview_quality: ?report.TrafficQuality = if (query.kind == .overview)
+    const overview_quality: ?report.TrafficQuality = if (destination == .overview)
         try reports.trafficQuality(
             allocator,
             event_store,
@@ -240,6 +241,7 @@ pub fn loadPage(
     else
         null;
     return .{
+        .destination = destination,
         .sites = sites,
         .selected_site = selected,
         .query = query,
@@ -395,7 +397,7 @@ pub fn verifyCsrf(form: Form, expected: []const u8) !void {
     if (difference != 0) return error.InvalidCsrfToken;
 }
 
-fn validateQuery(query: model.Query) !void {
+pub fn validateQuery(query: model.Query) !void {
     try domain.validateSlug(query.site);
     try domain.validateDate(query.start_date);
     try domain.validateDate(query.end_date);
@@ -430,6 +432,12 @@ fn findSite(sites: []const meta.Site, slug: []const u8) ?meta.Site {
         if (std.mem.eql(u8, site.slug, slug)) return site;
     }
     return null;
+}
+
+pub fn resolveSite(sites: []const meta.Site, slug: []const u8) !meta.Site {
+    if (sites.len == 0) return error.SiteNotFound;
+    if (slug.len == 0) return firstActive(sites) orelse sites[0];
+    return findSite(sites, slug) orelse error.SiteNotFound;
 }
 
 fn decodeComponent(

@@ -133,7 +133,7 @@ start_cloudio() {
 run_browser() {
     local mode=$1
     local extra=${2:-}
-    TMPDIR="$fixture" \
+    TMPDIR=/tmp \
         NODE_PATH="$module_root" \
         PLAYWRIGHT_BROWSERS_PATH="$browser_root" \
         ANALYTICO_CHROMIUM_PATH="$chromium_path" \
@@ -166,7 +166,7 @@ for _ in {1..100}; do
 done
 test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
     "$dashboard_origin/admin")" = 303
-TMPDIR="$fixture" NODE_PATH="$module_root" \
+TMPDIR=/tmp NODE_PATH="$module_root" \
     PLAYWRIGHT_BROWSERS_PATH="$browser_root" \
     ANALYTICO_CHROMIUM_PATH="$chromium_path" \
     node tests/e2e-passkey-session.cjs \
