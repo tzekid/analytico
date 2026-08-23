@@ -44,6 +44,24 @@ fn prepareClassified(
     site_id: []const u8,
     context: TrafficContext,
 ) !PreparedReport {
+    return prepareClassifiedWithPrefix(
+        allocator,
+        event_store,
+        tail,
+        site_id,
+        context,
+        "",
+    );
+}
+
+fn prepareClassifiedWithPrefix(
+    allocator: std.mem.Allocator,
+    event_store: *events.Store,
+    tail: []const u8,
+    site_id: []const u8,
+    context: TrafficContext,
+    prefix: []const u8,
+) !PreparedReport {
     try context.validate();
     var goals: [meta.maximum_active_goals]traffic.Goal = undefined;
     const goal_count = if (context.heuristic_available) context.active_goals.len else 0;
@@ -57,6 +75,7 @@ fn prepareClassified(
         context.heuristic_available,
     );
     var sql = std.Io.Writer.Allocating.init(allocator);
+    try sql.writer.writeAll(prefix);
     try sql.writer.writeAll("WITH ");
     try sql.writer.writeAll(fragment.sql);
     try sql.writer.writeAll(", ");
@@ -75,6 +94,29 @@ fn prepareClassified(
     return .{ .statement = statement, .next_binding = binding };
 }
 
+fn bindTrafficQuality(
+    statement: *duckdb.Statement,
+    binding: usize,
+    request: report.Request,
+    site_id: []const u8,
+    traffic_context: TrafficContext,
+) !void {
+    try statement.bindText(binding, site_id);
+    try statement.bindText(binding + 1, request.start_date);
+    try statement.bindText(binding + 2, request.end_date);
+    try statement.bindInt64(binding + 3, @intFromBool(traffic_context.strict_mode));
+    try statement.bindInt64(binding + 4, traffic_context.daily_event_ceiling);
+    try statement.bindInt64(
+        binding + 5,
+        @intFromBool(traffic_context.heuristic_available),
+    );
+    try statement.bindInt64(binding + 6, @as(i64, request.limit) + 1);
+    const offset = try request.offset();
+    const range_days = @as(i64, request.end_day - request.start_day + 1);
+    if (offset >= range_days) return error.InvalidReportPage;
+    try statement.bindInt64(binding + 7, offset);
+}
+
 fn prepareProduct(
     allocator: std.mem.Allocator,
     event_store: *events.Store,
@@ -89,7 +131,7 @@ fn prepareProduct(
         }
         var tail = std.Io.Writer.Allocating.init(allocator);
         try tail.writer.writeAll(
-            "events AS (SELECT * EXCLUDE (d34_person_key)" ++
+            "events AS (SELECT *" ++
                 " FROM site_product_events WHERE session_id NOT IN" ++
                 " (SELECT session_id FROM d34_current_suspected_sessions)), ",
         );
@@ -155,16 +197,16 @@ const identity_coverage_sql: [:0]const u8 =
     \\WHERE canonical_key IS NOT NULL
 ;
 const session_cte =
-    \\WITH filtered_all AS (
+    \\WITH filtered_all AS NOT MATERIALIZED (
     \\  SELECT * FROM events
     \\  WHERE site_id = ?
     \\    AND received_date_utc BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
     \\),
-    \\filtered AS (
+    \\filtered AS NOT MATERIALIZED (
     \\  SELECT * FROM filtered_all
     \\  WHERE traffic_class IN (1, 5)
     \\),
-    \\sessioned AS (
+    \\sessioned AS NOT MATERIALIZED (
     \\  SELECT * FROM filtered
     \\)
 ;
@@ -246,7 +288,7 @@ const traffic_quality_sql_tail =
     \\  SELECT ?::VARCHAR AS site_id, CAST(? AS DATE) AS start_date,
     \\         CAST(? AS DATE) AS end_date, ?::BOOLEAN AS strict_mode,
     \\         ?::BIGINT AS daily_event_ceiling, ?::BOOLEAN AS heuristic_available
-    \\), range_events AS (
+    \\), range_events AS NOT MATERIALIZED (
     \\  SELECT e.site_id, e.received_date_utc, e.site_local_date, e.kind,
     \\    e.anonymous_id,
     \\    e.identity_quality, e.session_id, e.visitor_day_start,
@@ -257,7 +299,7 @@ const traffic_quality_sql_tail =
     \\  FROM events e, params p
     \\  WHERE e.site_id = p.site_id
     \\    AND e.received_date_utc BETWEEN p.start_date AND p.end_date
-    \\), eligible_range AS (
+    \\), eligible_range AS NOT MATERIALIZED (
     \\  SELECT * FROM range_events
     \\  WHERE traffic_class IN (1, 5)
     \\), meaningful AS (
@@ -581,7 +623,7 @@ const campaign_all_expression =
 const goal_event_sql: [:0]const u8 = session_cte ++
     \\,
     \\matching AS (
-    \\  SELECT * FROM sessioned WHERE event_name = ?
+    \\  SELECT session_id FROM sessioned WHERE event_name = ?
     \\)
     \\SELECT
     \\  (SELECT count(*) FROM matching),
@@ -591,7 +633,7 @@ const goal_event_sql: [:0]const u8 = session_cte ++
 const goal_path_sql: [:0]const u8 = session_cte ++
     \\,
     \\matching AS (
-    \\  SELECT * FROM sessioned WHERE path = ?
+    \\  SELECT session_id FROM sessioned WHERE path = ?
     \\)
     \\SELECT
     \\  (SELECT count(*) FROM matching),
@@ -601,7 +643,7 @@ const goal_path_sql: [:0]const u8 = session_cte ++
 const goal_prefix_sql: [:0]const u8 = session_cte ++
     \\,
     \\matching AS (
-    \\  SELECT * FROM sessioned WHERE starts_with(path, ?)
+    \\  SELECT session_id FROM sessioned WHERE starts_with(path, ?)
     \\)
     \\SELECT
     \\  (SELECT count(*) FROM matching),
@@ -1037,20 +1079,7 @@ pub fn trafficQuality(
     var statement = prepared.statement;
     defer statement.deinit();
     const binding = prepared.next_binding;
-    try statement.bindText(binding, site_id);
-    try statement.bindText(binding + 1, request.start_date);
-    try statement.bindText(binding + 2, request.end_date);
-    try statement.bindInt64(binding + 3, @intFromBool(traffic_context.strict_mode));
-    try statement.bindInt64(binding + 4, traffic_context.daily_event_ceiling);
-    try statement.bindInt64(
-        binding + 5,
-        @intFromBool(traffic_context.heuristic_available),
-    );
-    try statement.bindInt64(binding + 6, @as(i64, request.limit) + 1);
-    const offset = try request.offset();
-    const range_days = @as(i64, request.end_day - request.start_day + 1);
-    if (offset >= range_days) return error.InvalidReportPage;
-    try statement.bindInt64(binding + 7, offset);
+    try bindTrafficQuality(&statement, binding, request, site_id, traffic_context);
     var result = try deadline.execute(&event_store.database, &statement, timeout_ms);
     defer result.deinit();
     if (result.columnCount() != 52) {
@@ -1273,6 +1302,44 @@ pub fn trafficQuality(
         .days = days,
         .next_page = if (daily_returned > decoded) request.page + 1 else null,
     };
+}
+
+pub fn trafficQualityProfile(
+    allocator: std.mem.Allocator,
+    event_store: *events.Store,
+    request: report.Request,
+    site_id: []const u8,
+    traffic_context: TrafficContext,
+) ![]u8 {
+    const prepared = try prepareClassifiedWithPrefix(
+        allocator,
+        event_store,
+        traffic_quality_sql_tail,
+        site_id,
+        traffic_context,
+        "EXPLAIN ANALYZE ",
+    );
+    var statement = prepared.statement;
+    defer statement.deinit();
+    try bindTrafficQuality(
+        &statement,
+        prepared.next_binding,
+        request,
+        site_id,
+        traffic_context,
+    );
+    var result = try statement.execute();
+    defer result.deinit();
+    if (result.columnCount() != 2 or result.rowCount() == 0) {
+        return error.InvalidReportProfile;
+    }
+    var output = std.Io.Writer.Allocating.init(allocator);
+    for (0..result.rowCount()) |row| {
+        const value = try result.text(allocator, 1, row);
+        try output.writer.writeAll(value);
+        try output.writer.writeByte('\n');
+    }
+    return output.toOwnedSlice();
 }
 
 fn list(

@@ -1,0 +1,71 @@
+{
+  "schema": 1,
+  "issue": 70,
+  "measured_at_utc": "2026-08-23",
+  "base_commit": "ad63f19a2e3b8bccbd0bdfa1c25bab882e9f7d7f",
+  "dirty": true,
+  "optimize": "ReleaseSafe",
+  "platform": {
+    "kernel": "Linux 7.1.4-arch1-1",
+    "architecture": "x86_64",
+    "cpu": "AMD EPYC 9354P",
+    "visible_cores": 8,
+    "memory_gib": 31.3,
+    "filesystem": "btrfs"
+  },
+  "versions": {
+    "zig": "0.17.0-dev.1509+bb296ab9b",
+    "turso_zig_commit": "f1b82da9f9207bee085808ad6a8686a9780ed76d",
+    "turso_database_commit": "6e527a75595576790566f3d36560fbe95c5d87a2",
+    "duckdb": "1.4.5"
+  },
+  "command": "zig build bench-m3 -Doptimize=ReleaseSafe",
+  "fixture": {
+    "generator": "m3-report-schema7-classifier-v1",
+    "seed": "fixed-sql-sequence",
+    "events": 1000000,
+    "distinct_session_ids": 100100,
+    "overview_sessions_default_off": 100000,
+    "query_classifier_v1_candidates": 100,
+    "current_suspected_sessions": 100,
+    "page_views": 800000,
+    "custom_events_default_off": 200000,
+    "custom_events_strict_on": 199900,
+    "funnel_steps": 8,
+    "warmups_per_report": 1,
+    "samples_per_percentile_report": 10
+  },
+  "duckdb": {
+    "threads": 1,
+    "memory_limit_mib": 128,
+    "temp_limit_mib": 256,
+    "preserve_insertion_order": false
+  },
+  "observations": {
+    "seed_ms_one_sample": 6545,
+    "overview_default_off_p50_ms": 74,
+    "overview_default_off_p95_ms": 96,
+    "overview_default_off_p99_ms": 96,
+    "pages_ms_one_sample": 96,
+    "goal_ms_one_sample": 90,
+    "funnel_default_off_p50_ms": 824,
+    "funnel_default_off_p95_ms": 883,
+    "funnel_default_off_p99_ms": 883,
+    "traffic_quality_default_off_p50_ms": 791,
+    "traffic_quality_default_off_p95_ms": 824,
+    "traffic_quality_default_off_p99_ms": 824,
+    "overview_strict_on_p50_ms": 265,
+    "overview_strict_on_p95_ms": 336,
+    "overview_strict_on_p99_ms": 336,
+    "funnel_strict_on_p50_ms": 1090,
+    "funnel_strict_on_p95_ms": 1145,
+    "funnel_strict_on_p99_ms": 1145,
+    "traffic_quality_strict_on_p50_ms": 785,
+    "traffic_quality_strict_on_p95_ms": 848,
+    "traffic_quality_strict_on_p99_ms": 848,
+    "traffic_quality_explain_analyze_seconds": 0.948,
+    "traffic_quality_explain_analyze_bytes": 231909,
+    "duckdb_file_bytes": 24129536
+  },
+  "raw_observations": "{\"events\":1000000,\"seed_ms\":6545,\"overview_samples\":10,\"overview_p50_ms\":74,\"overview_p95_ms\":96,\"overview_p99_ms\":96,\"pages_ms\":96,\"goal_ms\":90,\"funnel_samples\":10,\"funnel_p50_ms\":824,\"funnel_p95_ms\":883,\"funnel_p99_ms\":883,\"traffic_quality_samples\":10,\"traffic_quality_p50_ms\":791,\"traffic_quality_p95_ms\":824,\"traffic_quality_p99_ms\":824,\"strict_overview_samples\":10,\"strict_overview_p50_ms\":265,\"strict_overview_p95_ms\":336,\"strict_overview_p99_ms\":336,\"strict_funnel_samples\":10,\"strict_funnel_p50_ms\":1090,\"strict_funnel_p95_ms\":1145,\"strict_funnel_p99_ms\":1145,\"strict_traffic_quality_samples\":10,\"strict_traffic_quality_p50_ms\":785,\"strict_traffic_quality_p95_ms\":848,\"strict_traffic_quality_p99_ms\":848,\"traffic_quality_profile_seconds\":0.948,\"traffic_quality_profile_bytes\":231909,\"database_bytes\":24129536}"
+}

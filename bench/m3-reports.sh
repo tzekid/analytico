@@ -72,6 +72,8 @@ measure_series() {
     2025-01-01 2025-01-12 funnel signup-flow --format json >/dev/null
 "$binary" report "$fixture_dir" scale \
     2025-01-01 2025-01-12 traffic-quality --format json >/dev/null
+"$binary" m3 traffic-quality-profile "$fixture_dir" scale \
+    2025-01-01 2025-01-12 >"$fixture_dir/traffic-quality.profile"
 
 printf '{'
 printf '"events":1000000,'
@@ -86,17 +88,67 @@ measure_series funnel 10 "$binary" report "$fixture_dir" scale \
     2025-01-01 2025-01-12 funnel signup-flow --format json
 measure_series traffic_quality 10 "$binary" report "$fixture_dir" scale \
     2025-01-01 2025-01-12 traffic-quality --format json
+"$binary" site traffic-policy "$fixture_dir" scale strict 100000 >/dev/null
+"$binary" report "$fixture_dir" scale \
+    2025-01-01 2025-01-12 overview --format json >/dev/null
+"$binary" report "$fixture_dir" scale \
+    2025-01-01 2025-01-12 funnel signup-flow --format json >/dev/null
+"$binary" report "$fixture_dir" scale \
+    2025-01-01 2025-01-12 traffic-quality --format json >/dev/null
+measure_series strict_overview 10 "$binary" report "$fixture_dir" scale \
+    2025-01-01 2025-01-12 overview --format json
+measure_series strict_funnel 10 "$binary" report "$fixture_dir" scale \
+    2025-01-01 2025-01-12 funnel signup-flow --format json
+measure_series strict_traffic_quality 10 "$binary" report "$fixture_dir" scale \
+    2025-01-01 2025-01-12 traffic-quality --format json
+profile_seconds=$(sed -n \
+    's/.*Total Time: \([0-9.]*\)s.*/\1/p' \
+    "$fixture_dir/traffic-quality.profile" | head -n 1)
+[[ "$profile_seconds" =~ ^[0-9]+([.][0-9]+)?$ ]]
+awk -v value="$profile_seconds" 'BEGIN { exit !(value + 0 <= 2.0) }'
+printf '"traffic_quality_profile_seconds":%s,' "$profile_seconds"
+printf '"traffic_quality_profile_bytes":%d,' \
+    "$(stat -c '%s' "$fixture_dir/traffic-quality.profile")"
 printf '"database_bytes":%d}\n' "$(stat -c '%s' "$fixture_dir/events.duckdb")"
 
-grep -q '"page_views":800000' "$fixture_dir/overview.json"
-grep -q '"custom_events":200000' "$fixture_dir/overview.json"
-grep -q '"path":"/","page_views":100000' "$fixture_dir/pages.json"
-grep -q '"total_matches":100000' "$fixture_dir/goal.json"
-grep -q '"name":"/checkout","sessions":100000' "$fixture_dir/funnel.json"
+jq -e '.page_views == 800000 and .custom_events == 200000 and
+    .sessions == 100000' "$fixture_dir/overview.json" >/dev/null
+jq -e '.rows[] | select(.path == "/" and .page_views == 100000)' \
+    "$fixture_dir/pages.json" >/dev/null
+jq -e '.total_matches == 100000 and .eligible_sessions == 100100' \
+    "$fixture_dir/goal.json" >/dev/null
+jq -e '.eligible_sessions == 100100 and
+    any(.steps[]; .name == "/checkout" and .sessions == 100000)' \
+    "$fixture_dir/funnel.json" >/dev/null
+jq -e '.traffic_quality_version == 5 and .strict_mode == false and
+    .accepted_events == 1000000 and .raw_candidates == 100 and
+    .current_suspected_sessions == 100 and
+    .signal_evidence.client_signal_v1_events == 100' \
+    "$fixture_dir/traffic_quality.json" >/dev/null
+jq -e '.traffic_quality_version == 5 and .strict_mode == true and
+    .accepted_events == 1000000 and .raw_candidates == 100 and
+    .current_suspected_sessions == 100 and
+    .signal_evidence.client_signal_v1_events == 100' \
+    "$fixture_dir/strict_traffic_quality.json" >/dev/null
+jq -e '.page_views == 800000 and .custom_events == 199900 and
+    .sessions == 100000' "$fixture_dir/strict_overview.json" >/dev/null
+jq -e '.eligible_sessions == 100000 and
+    any(.steps[]; .name == "/checkout" and .sessions == 100000)' \
+    "$fixture_dir/strict_funnel.json" >/dev/null
+grep -q 'site_product_events AS NOT MATERIALIZED' \
+    "$fixture_dir/traffic-quality.profile"
+grep -q 'd34_signal_sessions' "$fixture_dir/traffic-quality.profile"
 
 overview_p95=$(sort -n "$fixture_dir/overview.durations" | tail -n 1)
 funnel_p95=$(sort -n "$fixture_dir/funnel.durations" | tail -n 1)
 traffic_quality_p95=$(sort -n "$fixture_dir/traffic_quality.durations" | tail -n 1)
+strict_overview_p95=$(sort -n "$fixture_dir/strict_overview.durations" | tail -n 1)
+strict_funnel_p95=$(sort -n "$fixture_dir/strict_funnel.durations" | tail -n 1)
+strict_traffic_quality_p95=$(sort -n \
+    "$fixture_dir/strict_traffic_quality.durations" | tail -n 1)
 test "$overview_p95" -le 500
 test "$funnel_p95" -le 2000
 test "$traffic_quality_p95" -le 2000
+test "$strict_overview_p95" -le 500
+test "$strict_funnel_p95" -le 2000
+test "$strict_traffic_quality_p95" -le 2000

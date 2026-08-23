@@ -226,12 +226,28 @@ traffic predicate rather than reusing the schema-5 measurements.
 ### Query-time classifier and traffic-quality v5 gate
 
 Issue #70 records new same-host ReleaseSafe measurements rather than inferring
-them from schema 6. The gate measures 100 real loopback collection requests,
-the schema-7 million-event Overview/funnel/traffic-quality paths, strict-off
-parity, and strict-on query work. Existing absolute insert and two-second
-interactive deadlines remain blocking; a miss follows the documented
-regression policy before any cache, projection, rollup, dependency, or service
-is proposed.
+them from schema 6. The schema-7 fixture contains exactly 1,000,000 events and
+100 isolated query-classifier-v1 candidate sessions. The benchmark asserts the
+candidate totals and default-off/strict-on product semantics, captures the
+exact bound traffic-quality `EXPLAIN ANALYZE` plan, and runs ten process samples
+for Overview, the eight-step funnel, and traffic-quality in each policy mode.
+
+The corrected ReleaseSafe run based on `ad63f19` measured default-off p95 at
+96 ms for Overview, 883 ms for the funnel, and 824 ms for traffic-quality.
+Strict-on p95 was 336 ms, 1,145 ms, and 848 ms respectively. The profiled
+traffic-quality plan completed in 0.948 seconds. Before the measured fix the
+wide traffic-quality relation intermittently crossed the two-second deadline;
+the accepted query keeps the site/product, classifier-first-event, and
+date-range relations non-materialized or explicitly narrow so DuckDB can prune
+unneeded columns. The separate migration gate remains focused on preservation
+and uses Overview for report parity. Full environment, plan size, fixture, and
+raw observations are in
+`bench/results/traffic-quality-v5-release-safe.json`.
+
+The gate also retains 100 real loopback collection requests. Existing absolute
+insert and two-second interactive deadlines remain blocking; a miss follows
+the documented regression policy before any cache, projection, rollup,
+dependency, or service is proposed.
 
 ### Analytico 1.0 property-query gate
 
