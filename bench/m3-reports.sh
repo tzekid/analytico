@@ -17,7 +17,8 @@ fixture_dir=$(mktemp -d "$PWD/.zig-cache/m3-bench.XXXXXX")
 trap 'rm -rf -- "$fixture_dir"' EXIT
 
 "$binary" init "$fixture_dir" >/dev/null
-"$binary" site add "$fixture_dir" scale "Scale" https://scale.example >/dev/null
+"$binary" site add "$fixture_dir" scale "Scale" https://scale.example \
+    --timezone UTC >/dev/null
 site_id=$("$binary" site list "$fixture_dir" |
     awk -F '\t' '$1 == "scale" { print $2 }')
 "$binary" goal add "$fixture_dir" scale signups event signup >/dev/null
