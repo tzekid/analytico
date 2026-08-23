@@ -37,6 +37,18 @@ jq -e '
     .overview_converting_visitors == 1 and
     .overview_revenue_currencies == 3 and
     .overview_history_only_currency == "GBP" and
+    .overview_detail_trend_visitors == 4 and
+    .overview_detail_comparison_visitors == 1 and
+    .overview_detail_content_rows > 0 and .overview_detail_content_rows <= 5 and
+    .overview_detail_acquisition_rows > 0 and .overview_detail_acquisition_rows <= 5 and
+    .overview_detail_conversion_rows == 2 and
+    .overview_detail_audience_rows > 0 and .overview_detail_audience_rows <= 5 and
+    .overview_detail_revenue_eur == "12.500000" and
+    .overview_detail_health_protocol_total > 0 and
+    .overview_detail_ceiling_reached_days == 1 and
+    .overview_detail_empty_dense_zero == true and
+    .overview_detail_cache_invalidated == true and
+    .overview_detail_ceiling_cache_key_exact == true and
     .overview_no_comparison == true and
     .overview_empty_revenue_omitted == true and
     .overview_legacy_local_boundary_exact == true and

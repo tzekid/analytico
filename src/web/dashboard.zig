@@ -275,6 +275,7 @@ fn getLegacyPage(
                 .range = range.view(),
             },
             null,
+            null,
             dependencies.csrf_token,
             noticeMessage(parsed.notice),
             dependencies.report_timeout_ms,
@@ -351,6 +352,7 @@ fn getPage(
             dependencies.events,
             route.destination,
             .{ .site = route.site, .range = range.view(), .kind = route.default_kind },
+            null,
             null,
             dependencies.csrf_token,
             "",
@@ -443,6 +445,7 @@ fn getPage(
         route.destination,
         query,
         resolved_calendar,
+        selected_calendar.zone,
         dependencies.csrf_token,
         noticeMessage(parsed.notice),
         dependencies.report_timeout_ms,
@@ -473,7 +476,7 @@ fn getPage(
         }
         return;
     };
-    if (route.destination == .live) {
+    if (route.destination == .overview or route.destination == .live) {
         const diagnostics = dependencies.diagnostics orelse
             return error.MissingDiagnosticsLookup;
         loaded.collection_diagnostics = try diagnostics.get(
@@ -702,6 +705,7 @@ fn formErrorPage(
         },
         query,
         resolved_calendar,
+        null,
         dependencies.csrf_token,
         "",
         dependencies.report_timeout_ms,
@@ -996,6 +1000,19 @@ fn canonicalUrl(
             if (query.kind.isPaginated()) {
                 try output.print("&limit={d}&page={d}", .{ query.limit, query.page });
             }
+            if (query.overview_metric != .visitors) {
+                try output.writeAll("&focus=");
+                if (query.overview_metric == .revenue) {
+                    try output.writeAll("revenue-");
+                    try urlComponent(output, query.overview_currency);
+                } else {
+                    try urlComponent(output, query.overview_metric.name());
+                }
+            }
+            if (query.highlighted_interval.len != 0) {
+                try output.writeAll("&highlight=");
+                try urlComponent(output, query.highlighted_interval);
+            }
         },
         .journeys => if (query.subject.len != 0) {
             try output.writeAll("&subject=");
@@ -1004,7 +1021,16 @@ fn canonicalUrl(
         .live => if (query.limit != report.default_limit or query.page != 1) {
             try output.print("&limit={d}&page={d}", .{ query.limit, query.page });
         },
-        .overview, .sessions, .settings => {},
+        .overview => if (query.overview_metric != .visitors) {
+            try output.writeAll("&metric=");
+            if (query.overview_metric == .revenue) {
+                try output.writeAll("revenue-");
+                try urlComponent(output, query.overview_currency);
+            } else {
+                try urlComponent(output, query.overview_metric.name());
+            }
+        },
+        .sessions, .settings => {},
     }
 }
 
@@ -1018,6 +1044,10 @@ fn isInvalidInput(err: anyerror) bool {
         error.InvalidReportLimit,
         error.ReportOptionsNotApplicable,
         error.ReportSubjectNotApplicable,
+        error.InvalidOverviewMetric,
+        error.InvalidOverviewHighlight,
+        error.OverviewMetricNotApplicable,
+        error.OverviewHighlightNotApplicable,
         => true,
         else => false,
     };
@@ -1090,6 +1120,34 @@ test "canonical dashboard URL orders explicit calendar state" {
     });
     try std.testing.expectEqualStrings(
         "/admin/sites/example/analyze?from=2024-02-01&to=2024-02-29&compare=previous-year&report=campaigns&campaign=source&sort=count&limit=25&page=1",
+        output.written(),
+    );
+}
+
+test "canonical dashboard URL preserves Overview trend handoff state" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    const base = model.Query{
+        .site = "example",
+        .range = .{ .start = "2025-01-01", .end = "2025-01-02" },
+        .comparison = .previous,
+        .kind = .pages,
+        .overview_metric = .revenue,
+        .overview_currency = "EUR",
+        .highlighted_interval = "2025-01-01T12:00",
+    };
+    try canonicalUrl(&output.writer, .analyze, base);
+    try std.testing.expectEqualStrings(
+        "/admin/sites/example/analyze?from=2025-01-01&to=2025-01-02&compare=previous&report=pages&sort=count&limit=25&page=1&focus=revenue-EUR&highlight=2025-01-01T12%3A00",
+        output.written(),
+    );
+    output.clearRetainingCapacity();
+    var overview = base;
+    overview.kind = .overview;
+    overview.highlighted_interval = "";
+    try canonicalUrl(&output.writer, .overview, overview);
+    try std.testing.expectEqualStrings(
+        "/admin/sites/example/overview?from=2025-01-01&to=2025-01-02&compare=previous&metric=revenue-EUR",
         output.written(),
     );
 }

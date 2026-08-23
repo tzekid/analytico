@@ -49,14 +49,21 @@ data="$fixture/data"
     --timezone UTC >/dev/null
 "$binary" site add "$data" second "Second Site" https://second.example \
     --timezone Europe/Berlin >/dev/null
+"$binary" site add "$data" empty "Empty Site" https://empty.example \
+    --timezone UTC >/dev/null
+"$binary" site add "$data" broken "Broken Tracking" https://broken.example \
+    --timezone UTC >/dev/null
 site_id=$("$binary" site list "$data" |
     awk -F '\t' '$1 == "example" { print $2 }')
+broken_site_id=$("$binary" site list "$data" |
+    awk -F '\t' '$1 == "broken" { print $2 }')
 "$binary" goal add "$data" example Signup event signup >/dev/null
 "$binary" goal add "$data" example \
     '<script>alert(1)</script> "&' event escaped >/dev/null
 "$binary" funnel add "$data" example Journey \
     path=/ path=/pricing event=signup >/dev/null
 "$binary" m3 seed "$data" "$site_id" >/dev/null
+"$binary" site traffic-policy "$data" example off 1 >/dev/null
 "$binary" event add "$data" second pageview /second \
     1735776000000000 2025-01-02 203.0.113.20 Safari macOS desktop >/dev/null
 "$binary" event add "$data" second pageview /another \
@@ -82,6 +89,14 @@ start_server() {
 }
 
 start_server
+broken_body=$(printf \
+    '{"v":1,"site":"%s","type":"pageview","path":"/rejected"}' \
+    "$broken_site_id")
+test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+    -X POST "$upstream/v1/event" \
+    -H 'Content-Type: text/plain' \
+    -H 'Origin: https://attacker.example' \
+    --data-binary "$broken_body")" = 403
 {
     printf '{\n\tadmin off\n}\n'
     sed \
@@ -167,6 +182,16 @@ status=$(curl --silent --output "$fixture/invalid-calendar.html" \
 test "$status" = 400
 grep -Fq 'Invalid calendar or report state' "$fixture/invalid-calendar.html"
 grep -Fq 'Reset to the site' "$fixture/invalid-calendar.html"
+status=$(curl --silent --output "$fixture/invalid-highlight.html" \
+    --write-out '%{http_code}' --cookie "$cookie" \
+    "$dashboard/admin/sites/example/analyze?$dates&report=pages&sort=count&limit=25&page=1&focus=sessions&highlight=2025-01-03T00%3A00")
+test "$status" = 400
+grep -Fq 'Invalid report request' "$fixture/invalid-highlight.html"
+status=$(curl --silent --output "$fixture/malformed-highlight.html" \
+    --write-out '%{http_code}' --cookie "$cookie" \
+    "$dashboard/admin/sites/example/analyze?$dates&report=pages&sort=count&limit=25&page=1&focus=sessions&highlight=2025-01-01T00%3A30")
+test "$status" = 400
+grep -Fq 'Invalid calendar or report state' "$fixture/malformed-highlight.html"
 test "$(curl --silent --output /dev/null --write-out '%{redirect_url}' \
     --cookie "$cookie" \
     "$dashboard/admin?site=example&start=2025-01-01&end=2025-01-02&report=pages")" = \

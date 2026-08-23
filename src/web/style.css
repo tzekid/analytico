@@ -293,6 +293,27 @@ nav[aria-label="Pagination"] { display: flex; gap: .75rem; margin-top: 1rem; }
 .chart-data { margin-top: var(--space-3); }
 .chart-formatted-value { color: var(--color-inkMuted); }
 .chart-data > summary { min-height: var(--space-10); display: inline-flex; align-items: center; border-radius: var(--radius-md); color: var(--color-link); cursor: pointer; font-weight: 700; }
+.overview-trend, .data-health { margin-top: var(--space-8); }
+.overview-section-heading, .answer-heading { display: flex; align-items: start; justify-content: space-between; gap: var(--space-4); }
+.overview-section-heading h2, .answer-heading h2 { margin-bottom: var(--space-1); }
+.overview-metric-form { min-width: min(100%, 20rem); display: flex; align-items: end; gap: var(--space-2); }
+.overview-metric-form label { flex: 1; }
+.overview-metric-form button { white-space: nowrap; }
+.overview-trend .chart-figure { margin-bottom: 0; }
+.trend-chart a:hover circle, .trend-chart a:focus circle,
+.trend-chart a:hover rect, .trend-chart a:focus rect { stroke: var(--color-focus); stroke-width: 4; }
+.chart-point-incomplete { stroke-dasharray: 2 1; }
+.trend-incomplete-marker { display: inline-block; border: 1px solid currentColor; border-radius: var(--radius-sm); margin-left: var(--space-1); padding: 0 .3rem; color: var(--color-inkMuted); font-size: var(--font-xs); font-weight: 700; letter-spacing: .03em; text-transform: uppercase; }
+.answer-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4); margin-top: var(--space-8); }
+.answer-panel { min-width: 0; border: 1px solid var(--color-border); border-radius: var(--radius-md); padding: var(--space-4); background: var(--color-surface); box-shadow: var(--shadow-panel); }
+.answer-panel .table-scroll { margin-top: var(--space-3); }
+.answer-empty { margin: var(--space-4) 0 0; color: var(--color-inkMuted); }
+.data-health { border-top: 1px solid var(--color-border); padding-top: var(--space-6); }
+.health-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-3); margin: var(--space-4) 0 0; }
+.health-grid div { min-width: 0; border: 1px solid var(--color-border); border-radius: var(--radius-md); padding: var(--space-3); background: var(--color-surface); }
+.health-grid dt { color: var(--color-inkMuted); font-size: var(--font-xs); font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.health-grid dd { margin: var(--space-1) 0 0; overflow-wrap: anywhere; font-weight: 700; font-variant-numeric: tabular-nums lining-nums; }
+.analysis-focus { border-left: var(--space-1) solid var(--color-focus); border-radius: var(--radius-md); margin-bottom: var(--space-4); padding: var(--space-3) var(--space-4); background: var(--color-surfaceSubtle); }
 .path-transitions .chart-data { margin-top: 0; }
 .retention-scroll { overflow: auto; border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-surface); }
 .retention-table th:first-child { position: sticky; left: 0; z-index: 1; background: var(--color-surfaceSubtle); }
@@ -379,6 +400,9 @@ nav[aria-label="Pagination"] { display: flex; gap: .75rem; margin-top: 1rem; }
   .range-filter { grid-template-columns: 1fr 1fr; }
   .range-filter button { grid-column: 1 / -1; }
   .split { grid-template-columns: 1fr; }
+  .overview-section-heading, .answer-heading { align-items: stretch; flex-direction: column; }
+  .overview-metric-form { width: 100%; min-width: 0; }
+  .answer-grid, .health-grid { grid-template-columns: 1fr; }
   .chart-data > summary { min-height: var(--layout-touchTarget); }
   .mobile-records { overflow: visible; border: 0; background: transparent; }
   .mobile-records table, .mobile-records tbody, .mobile-records tr, .mobile-records th, .mobile-records td { display: block; }
@@ -398,6 +422,7 @@ nav[aria-label="Pagination"] { display: flex; gap: .75rem; margin-top: 1rem; }
   .report-tabs, .conversion-navigation nav { flex-wrap: nowrap; overflow-x: auto; padding-bottom: .35rem; }
   .report-tabs a, .conversion-navigation a { white-space: nowrap; }
   .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .overview-metric-form { display: grid; grid-template-columns: 1fr; }
   .management > summary { align-items: flex-start; flex-direction: column; }
 }
 

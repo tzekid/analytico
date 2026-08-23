@@ -52,6 +52,9 @@ pub const Query = struct {
     sort: report.Sort = .count,
     limit: u16 = report.default_limit,
     page: u32 = 1,
+    overview_metric: analysis.OverviewTrendMetric = .visitors,
+    overview_currency: []const u8 = "",
+    highlighted_interval: []const u8 = "",
 };
 
 pub const ReportTimeBasis = enum {
@@ -84,6 +87,58 @@ pub const OverviewKpis = struct {
     coverage: []const u8,
     comparison_coverage: ?[]const u8,
     includes_incomplete_today: bool,
+};
+
+pub const OverviewTrendPoint = struct {
+    current_label: ?[]const u8,
+    comparison_label: ?[]const u8,
+    current: ?analysis.Measure,
+    comparison: ?analysis.Measure,
+};
+
+pub const OverviewTrend = struct {
+    metric: analysis.OverviewTrendMetric,
+    currency: []const u8,
+    points: []const OverviewTrendPoint,
+    revenue_options: []const []const u8,
+};
+
+pub const OverviewContentRow = struct {
+    label: []const u8,
+    page_views: i64,
+    visitors: i64,
+    share_basis_points: u16,
+};
+
+pub const OverviewAcquisitionRow = struct {
+    label: []const u8,
+    sessions: i64,
+    conversion: analysis.Ratio,
+};
+
+pub const OverviewConversionRow = struct {
+    goal_name: []const u8,
+    converting_people: i64,
+    conversion: analysis.Ratio,
+};
+
+pub const OverviewAudienceRow = struct {
+    label: []const u8,
+    sessions: i64,
+};
+
+pub const OverviewDetails = struct {
+    trend: OverviewTrend,
+    content: []const OverviewContentRow,
+    acquisition: []const OverviewAcquisitionRow,
+    conversions: []const OverviewConversionRow,
+    audience: []const OverviewAudienceRow,
+    daily_event_ceiling: i64,
+    accepted_events: i64,
+    ceiling_reached_days: i64,
+    last_event_utc: []const u8,
+    protocol_v1_events: i64,
+    protocol_v2_events: i64,
 };
 
 pub const GoalDraft = struct {
@@ -119,7 +174,7 @@ pub const Page = struct {
     report_time_basis: ReportTimeBasis,
     result: ?report.Result,
     overview_kpis: ?OverviewKpis = null,
-    overview_quality: ?report.TrafficQuality = null,
+    overview_details: ?OverviewDetails = null,
     collection_diagnostics: ?diagnostics.Snapshot = null,
     goals: []const meta.Goal,
     funnels: []const meta.Funnel,

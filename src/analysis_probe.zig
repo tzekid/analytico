@@ -615,11 +615,11 @@ pub fn run(
     })).trend;
     const overview_goals = [_]analysis.ResolvedGoal{
         .{
-            .id = "00000000-0000-4000-8000-000000000071",
+            .id = "00000000-0000-4000-8000-000000000072",
             .selector = .{ .kind = .exact_event, .value = "purchase" },
         },
         .{
-            .id = "00000000-0000-4000-8000-000000000072",
+            .id = "00000000-0000-4000-8000-000000000071",
             .selector = .{ .kind = .exact_event, .value = "purchase" },
         },
     };
@@ -634,6 +634,83 @@ pub fn run(
                 .end = "2026-01-02",
             },
             .active_goals = &overview_goals,
+            .daily_event_ceiling = 1,
+            .trend = .{
+                .metric = .visitors,
+                .interval = .day,
+                .current_buckets = &.{.{ .label = "2026-01-03" }},
+                .comparison_buckets = &.{.{ .label = "2026-01-02" }},
+            },
+        },
+    );
+    const cache_goal_low_values = [_][]const u8{"10.0"};
+    const cache_goal_high_values = [_][]const u8{"20.0"};
+    const cache_goal_low_predicates = [_]analysis.PropertyPredicate{.{
+        .property_ref = .{ .name = "amount", .scalar_type = .decimal },
+        .operator = .gte,
+        .values = &cache_goal_low_values,
+    }};
+    const cache_goal_high_predicates = [_]analysis.PropertyPredicate{.{
+        .property_ref = .{ .name = "amount", .scalar_type = .decimal },
+        .operator = .gte,
+        .values = &cache_goal_high_values,
+    }};
+    const cache_goal_low = [_]analysis.ResolvedGoal{.{
+        .id = "00000000-0000-4000-8000-000000000074",
+        .selector = .{
+            .kind = .exact_event,
+            .value = "purchase",
+            .predicates = &cache_goal_low_predicates,
+        },
+    }};
+    const cache_goal_high = [_]analysis.ResolvedGoal{.{
+        .id = "00000000-0000-4000-8000-000000000074",
+        .selector = .{
+            .kind = .exact_event,
+            .value = "purchase",
+            .predicates = &cache_goal_high_predicates,
+        },
+    }};
+    const cache_goal_execution = analysis.OverviewExecution{
+        .site_id = site,
+        .range = .{ .start = "2026-01-03", .end = "2026-01-03" },
+        .active_goals = &cache_goal_low,
+        .trend = .{
+            .metric = .visitors,
+            .interval = .day,
+            .current_buckets = &.{.{ .label = "2026-01-03" }},
+        },
+    };
+    const cache_goal_low_overview = try analysis_store.executeOverview(
+        allocator,
+        &store,
+        cache_goal_execution,
+    );
+    var cache_goal_high_execution = cache_goal_execution;
+    cache_goal_high_execution.active_goals = &cache_goal_high;
+    const cache_goal_high_overview = try analysis_store.executeOverview(
+        allocator,
+        &store,
+        cache_goal_high_execution,
+    );
+    const overview_revenue_trend = try analysis_store.executeOverview(
+        allocator,
+        &store,
+        .{
+            .site_id = site,
+            .range = .{ .start = "2026-01-03", .end = "2026-01-03" },
+            .comparison_range = .{
+                .start = "2026-01-02",
+                .end = "2026-01-02",
+            },
+            .active_goals = &overview_goals,
+            .trend = .{
+                .metric = .revenue,
+                .currency = "EUR",
+                .interval = .day,
+                .current_buckets = &.{.{ .label = "2026-01-03" }},
+                .comparison_buckets = &.{.{ .label = "2026-01-02" }},
+            },
         },
     );
     const overview_without_comparison = try analysis_store.executeOverview(
@@ -645,17 +722,49 @@ pub fn run(
             .active_goals = &overview_goals,
         },
     );
+    const empty_execution = analysis.OverviewExecution{
+        .site_id = "00000000-0000-4000-8000-000000000025",
+        .range = .{ .start = "2026-01-03", .end = "2026-01-03" },
+        .daily_event_ceiling = 1,
+        .comparison_range = .{
+            .start = "2026-01-02",
+            .end = "2026-01-02",
+        },
+        .trend = .{
+            .metric = .visitors,
+            .interval = .day,
+            .current_buckets = &.{.{ .label = "2026-01-03" }},
+            .comparison_buckets = &.{.{ .label = "2026-01-02" }},
+        },
+    };
     const empty_overview = try analysis_store.executeOverview(
         allocator,
         &store,
-        .{
-            .site_id = "00000000-0000-4000-8000-000000000025",
-            .range = .{ .start = "2026-01-03", .end = "2026-01-03" },
-            .comparison_range = .{
-                .start = "2026-01-02",
-                .end = "2026-01-02",
-            },
-        },
+        empty_execution,
+    );
+    try store.insert(.{
+        .event_id = "00000000-0000-4000-8000-000000000250",
+        .site_id = empty_execution.site_id,
+        .received_at_utc_micros = 1_767_398_430_000_000,
+        .received_date_utc = "2026-01-03",
+        .site_local_date = "2026-01-03",
+        .site_utc_offset_minutes = 0,
+        .kind = 1,
+        .event_name = "pageview",
+        .path = "/cache-invalidation",
+        .visitor_day_id = @splat(0x25),
+    });
+    const refreshed_empty_overview = try analysis_store.executeOverview(
+        allocator,
+        &store,
+        empty_execution,
+    );
+    var raised_ceiling_execution = empty_execution;
+    raised_ceiling_execution.daily_event_ceiling = 2;
+    const raised_ceiling_overview = try analysis_store.executeOverview(
+        allocator,
+        &store,
+        raised_ceiling_execution,
     );
     const boundary_exact = (try analysis_store.execute(allocator, &store, .{
         .query = trendQueryForSite(
@@ -781,6 +890,20 @@ pub fn run(
         return error.InvalidOverviewSemanticEvidence;
     const usd = overviewRevenue(overview_result.revenue, "USD") orelse
         return error.InvalidOverviewSemanticEvidence;
+    const overview_details = overview_result.details orelse
+        return error.InvalidOverviewSemanticEvidence;
+    const revenue_details = overview_revenue_trend.details orelse
+        return error.InvalidOverviewSemanticEvidence;
+    const empty_details = empty_overview.details orelse
+        return error.InvalidOverviewSemanticEvidence;
+    const refreshed_empty_details = refreshed_empty_overview.details orelse
+        return error.InvalidOverviewSemanticEvidence;
+    const raised_ceiling_details = raised_ceiling_overview.details orelse
+        return error.InvalidOverviewSemanticEvidence;
+    const cache_goal_low_details = cache_goal_low_overview.details orelse
+        return error.InvalidOverviewSemanticEvidence;
+    const cache_goal_high_details = cache_goal_high_overview.details orelse
+        return error.InvalidOverviewSemanticEvidence;
     if (overview_result.visitors.current != 4 or
         overview_result.visitors.comparison.? != 1 or
         overview_result.sessions.current != 4 or
@@ -808,6 +931,46 @@ pub fn run(
         !std.mem.eql(u8, gbp.comparison.?.decimal, "0.000000") or
         !std.mem.eql(u8, usd.current.decimal, "7.500000") or
         !std.mem.eql(u8, usd.comparison.?.decimal, "0.000000") or
+        overview_details.trend.current.len != 1 or
+        overview_details.trend.current[0].measure != .count or
+        overview_details.trend.current[0].measure.count != 4 or
+        overview_details.trend.comparison == null or
+        overview_details.trend.comparison.?[0].measure != .count or
+        overview_details.trend.comparison.?[0].measure.count != 1 or
+        overview_details.content.len == 0 or overview_details.content.len > 5 or
+        overview_details.acquisition.len == 0 or overview_details.acquisition.len > 5 or
+        overview_details.conversions.len != 2 or
+        !std.mem.eql(
+            u8,
+            overview_details.conversions[0].goal_id,
+            overview_goals[0].id,
+        ) or
+        !std.mem.eql(
+            u8,
+            overview_details.conversions[1].goal_id,
+            overview_goals[1].id,
+        ) or
+        overview_details.conversions[0].converting_people != 1 or
+        overview_details.conversions[1].converting_people != 1 or
+        overview_details.audience.len == 0 or overview_details.audience.len > 5 or
+        overview_details.health.accepted_events <= 0 or
+        overview_details.health.daily_event_ceiling != 1 or
+        overview_details.health.ceiling_reached_days != 1 or
+        overview_details.health.protocol_v1_events +
+            overview_details.health.protocol_v2_events !=
+            overview_details.health.accepted_events or
+        revenue_details.trend.current.len != 1 or
+        revenue_details.trend.current[0].measure != .amount or
+        !std.mem.eql(
+            u8,
+            revenue_details.trend.current[0].measure.amount.decimal,
+            "12.500000",
+        ) or
+        !std.mem.eql(
+            u8,
+            revenue_details.trend.current[0].measure.amount.currency,
+            "EUR",
+        ) or
         overview_without_comparison.visitors.comparison != null or
         overview_without_comparison.engagement_rate.comparison != null or
         empty_overview.visitors.current != 0 or
@@ -815,6 +978,24 @@ pub fn run(
         empty_overview.engagement_rate.current.denominator != 0 or
         empty_overview.conversion_rate.current.denominator != 0 or
         empty_overview.revenue.len != 0 or
+        empty_details.trend.current.len != 1 or
+        empty_details.trend.current[0].measure != .count or
+        empty_details.trend.current[0].measure.count != 0 or
+        empty_details.content.len != 0 or
+        empty_details.acquisition.len != 0 or
+        empty_details.conversions.len != 0 or
+        empty_details.audience.len != 0 or
+        empty_details.health.accepted_events != 0 or
+        refreshed_empty_overview.visitors.current != 1 or
+        refreshed_empty_details.trend.current[0].measure != .count or
+        refreshed_empty_details.trend.current[0].measure.count != 1 or
+        refreshed_empty_details.health.accepted_events != 1 or
+        raised_ceiling_details.health.daily_event_ceiling != 2 or
+        raised_ceiling_details.health.ceiling_reached_days != 0 or
+        cache_goal_low_details.conversions.len != 1 or
+        cache_goal_low_details.conversions[0].converting_people != 1 or
+        cache_goal_high_details.conversions.len != 1 or
+        cache_goal_high_details.conversions[0].converting_people != 0 or
         boundary_exact.total.len != 1 or
         boundary_exact.total[0] != .count or
         boundary_exact.total[0].count != 1 or
@@ -868,6 +1049,20 @@ pub fn run(
         .overview_converting_visitors = overview_result.conversion_rate.current.numerator,
         .overview_revenue_currencies = overview_result.revenue.len,
         .overview_history_only_currency = gbp.currency,
+        .overview_detail_trend_visitors = overview_details.trend.current[0].measure.count,
+        .overview_detail_comparison_visitors = overview_details.trend.comparison.?[0].measure.count,
+        .overview_detail_content_rows = overview_details.content.len,
+        .overview_detail_acquisition_rows = overview_details.acquisition.len,
+        .overview_detail_conversion_rows = overview_details.conversions.len,
+        .overview_detail_conversion_ties_follow_resolved_name_order = std.mem.eql(u8, overview_details.conversions[0].goal_id, overview_goals[0].id) and std.mem.eql(u8, overview_details.conversions[1].goal_id, overview_goals[1].id),
+        .overview_detail_audience_rows = overview_details.audience.len,
+        .overview_detail_revenue_eur = revenue_details.trend.current[0].measure.amount.decimal,
+        .overview_detail_health_protocol_total = overview_details.health.protocol_v1_events + overview_details.health.protocol_v2_events,
+        .overview_detail_ceiling_reached_days = overview_details.health.ceiling_reached_days,
+        .overview_detail_empty_dense_zero = empty_details.trend.current[0].measure.count == 0 and empty_details.health.accepted_events == 0,
+        .overview_detail_cache_invalidated = refreshed_empty_details.trend.current[0].measure.count == 1 and refreshed_empty_details.health.accepted_events == 1 and refreshed_empty_details.health.ceiling_reached_days == 1,
+        .overview_detail_ceiling_cache_key_exact = raised_ceiling_details.health.ceiling_reached_days == 0,
+        .overview_result_cache_selector_predicate_key_exact = cache_goal_low_details.conversions[0].converting_people == 1 and cache_goal_high_details.conversions[0].converting_people == 0,
         .overview_no_comparison = overview_without_comparison.visitors.comparison == null,
         .overview_empty_revenue_omitted = empty_overview.revenue.len == 0,
         .overview_legacy_local_boundary_exact = boundary_overview.visitors.current == boundary_exact.total[0].count,

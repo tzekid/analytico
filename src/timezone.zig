@@ -145,6 +145,21 @@ pub const Zone = struct {
         };
     }
 
+    pub fn localHourLabel(self: Zone, utc_seconds: i64) ![16]u8 {
+        const local = try self.localAt(utc_seconds);
+        const local_seconds = try addSeconds(
+            utc_seconds,
+            @as(i64, local.offset_minutes) * 60,
+        );
+        const hour: u8 = @intCast(@mod(@divFloor(local_seconds, 3_600), 24));
+        var result: [16]u8 = undefined;
+        _ = try std.fmt.bufPrint(&result, "{s}T{d:0>2}:00", .{
+            &local.date,
+            hour,
+        });
+        return result;
+    }
+
     pub fn rangeForInclusiveDates(
         self: Zone,
         start_date: []const u8,
@@ -1023,4 +1038,32 @@ test "local midnight gaps advance and overlaps select the latest next boundary" 
     try std.testing.expectEqual(@as(i64, 23 * 3600), gap.end_utc_seconds - gap.start_utc_seconds);
     const overlap = try zone.rangeForInclusiveDates("2024-10-26", "2024-10-26");
     try std.testing.expectEqual(@as(i64, 25 * 3600), overlap.end_utc_seconds - overlap.start_utc_seconds);
+}
+
+test "local hour labels follow spring gaps and repeated fall hours" {
+    const allocator = std.testing.allocator;
+    var berlin = try load(
+        allocator,
+        std.testing.io,
+        default_zoneinfo_root,
+        "Europe/Berlin",
+    );
+    defer berlin.deinit(allocator);
+
+    try std.testing.expectEqualStrings(
+        "2024-03-31T01:00",
+        &(try berlin.localHourLabel(1_711_846_799)),
+    );
+    try std.testing.expectEqualStrings(
+        "2024-03-31T03:00",
+        &(try berlin.localHourLabel(1_711_846_800)),
+    );
+    try std.testing.expectEqualStrings(
+        "2024-10-27T02:00",
+        &(try berlin.localHourLabel(1_729_989_000)),
+    );
+    try std.testing.expectEqualStrings(
+        "2024-10-27T02:00",
+        &(try berlin.localHourLabel(1_729_992_600)),
+    );
 }

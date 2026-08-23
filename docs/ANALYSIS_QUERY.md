@@ -236,10 +236,12 @@ Request values, enum names parsed from requests, SQL identifiers, functions,
 sort expressions, and JSON paths are never interpolated. A compiler test must
 prove adversarial values appear in bindings but not compiled SQL.
 
-No cache, rollup, projection, EAV table, background worker, extension, or new
+Except for D35's one exact, mutation-invalidated complete Overview-result entry,
+no cache, rollup, projection, EAV table, background worker, extension, or new
 dependency is accepted by this contract. A measured miss follows the
 optimization order in `PERFORMANCE.md` and requires a later decision where
-consequential.
+consequential. D35 does not authorize caching ordinary `AnalysisQuery`
+results.
 
 When a segment ID is present, the controller composes the resolved segment and
 ad-hoc clauses into FilterSet and marks the execution context resolved. An
@@ -310,6 +312,84 @@ path, retention, session/profile, and Live queries reuse closed
 FilterSet/EventSelector helpers where appropriate but retain specialized
 query/result types.
 
+The fixed Overview detail result is a second specialized closed consumer, not
+an ordinary user-authored `AnalysisQuery`. It contains exactly one selected
+Visitors, Sessions, Page views, all-active-goal Conversions, or
+currency-explicit Revenue trend; five Content, Acquisition, Conversions, and
+Audience rows apiece; and one compact data-health row. On a cold result-key
+miss, the KPI and detail statements execute sequentially on the single serving
+connection under one shared request deadline. They do not become per-panel HTTP
+requests or independent timeout budgets.
+
+Under decision D35, the Store retains at most one exact complete Overview result
+in a dedicated arena. Its length-prefixed key covers site, current/comparison
+dates, strict policy, configured daily ceiling, the complete ordered
+active-goal snapshot including every selector predicate property/type/operator/
+value, selected metric/currency, interval, and every current/comparison bucket.
+Every successful event-store insert, rebucket,
+deletion, or migration destroys the entry synchronously; goal and traffic-
+policy changes necessarily change the key. There is no TTL, stale fallback,
+durable cache table, background refresh, or separate KPI cache. A hit
+deep-copies the complete bounded result into the request allocator so rendering
+cannot mutate or outlive the entry. A miss executes and combines the KPI and
+details statements under the existing shared deadline.
+
+Overview interval rows are dense for count and exact-value semantics. The
+controller supplies a bounded, ordered set of site-local bucket labels derived
+from the already-loaded D27 zone, including spring gaps and collapsed repeated
+local-hour labels that match the receipt-time SQL bucket. Current and
+comparison bucket labels remain separate when their calendar lengths differ.
+Revenue selection always names one observed currency; no implicit default,
+cross-currency sum, or exchange conversion is allowed.
+
+The fixed automatic interval follows the authoritative visualization contract:
+hour for at most two inclusive local dates, day for at most 90, and week for
+91–400. Month remains an explicit typed interval for a later offline/export
+range beyond the current 400-date interactive bound; automatic interactive
+Overview does not silently coarsen 181–400 dates to month.
+
+Content rows rank normalized page paths by page views and include distinct
+modeled visitors and share of all current page views. Acquisition rows use the
+first page view's external referrer source for each full session and include
+sessions plus the session conversion ratio. Conversion rows rank active goals
+by distinct modeled converting people and use all current visitors as the
+rate denominator. Audience rows use the first meaningful session event's
+country and include sessions. All four panels use the same product-traffic,
+strict-mode, range, identity, session, and active-goal contracts as the fixed
+KPIs; path/source/country ties are label-ascending, conversion ties preserve
+the controller's name-ascending resolved-goal order, and each result is capped
+at five rows.
+
+Issue #27 links those rows to the existing native Pages, Sources, Goals, and
+Countries report destinations and keeps the existing Devices report reachable
+from Audience. Issue #31 owns later entity-detail routes,
+annotation persistence/CRUD, and actual trend markers. No placeholder storage,
+hidden filter, or non-working detail route is part of the fixed Overview.
+
+Every visible current/comparison trend interval has a bounded native Analyze
+handoff. It preserves the complete site/range/comparison context and carries a
+visible `focus` metric plus `highlight` interval label. Until issue #28 ships
+the full typed Trend route, the current Analyze page renders that focus as an
+explicit non-filtering callout above its existing working report: the full
+range remains unchanged, and the highlighted interval is never a hidden SQL
+predicate. SVG point links are pointer-reachable; the exact table provides the
+ordinary keyboard/link baseline for every point. Issue #28 may consume the
+same canonical handoff when it replaces the report surface with full Trend
+mode.
+
+`highlight` accepts only an exact bucket label generated for the resolved
+current or comparison range and site zone: canonical `YYYY-MM-DDTHH:00`,
+`YYYY-MM-DD`, or `YYYY-MM` as selected by the automatic interval. A merely
+well-shaped label outside those generated buckets is a normal 400 invalid
+request. When the current range includes today, the last current bucket is
+marked `Incomplete` in the exact table and uses a distinct square SVG marker;
+the text/shape distinction does not rely on color or mark the comparison
+bucket. For hourly ranges, the resolved request-time UTC instant is retained in
+the calendar context and current buckets stop after the bucket containing that
+instant. Future local hours are not rendered or accepted as highlights;
+comparison hours remain complete. Day, week, and month series retain their
+final current bucket and mark it incomplete.
+
 Legacy Overview visitors and legacy coverage are the exact distinct legacy
 anonymous identities with at least one product-eligible page-view or custom
 event inside each site-local period. Stored `visitor_day_start` is a metric-v1
@@ -321,8 +401,10 @@ While metric-v1 dashboard results remain on other report routes, the shared
 shell may carry the new local calendar context only when the result is visibly
 identified as UTC compatibility data. It must not relabel or partially convert
 a metric-v1 total. Issue #26 moves every Overview headline value together to
-the resolved site-local range. The separate traffic-quality section keeps a
-local received-UTC disclosure rather than applying a false page-wide warning.
+the resolved site-local range. Overview presents a compact, site-filtered data
+health summary and a native link to Live. The full separate traffic-quality
+section remains on Live with its local received-UTC disclosure rather than
+applying a false page-wide warning.
 
 D30 adds one explicitly versioned `traffic-quality` diagnostic bundle on the
 existing report transport. It is not an ordinary `AnalysisQuery` product
@@ -330,8 +412,24 @@ metric: it deliberately uses the current received-UTC report range so its
 canonical-person count is comparable to the frozen visitor-day headline. It
 does not change any existing metric-v1 output. Issue #26 completes the required
 site-local Overview migration by removing both compatibility values from the
-headline together; the diagnostic bundle remains received-UTC and explicitly
-labeled.
+headline together; the diagnostic bundle remains received-UTC, explicitly
+labeled, and fully available from Live. Overview's compact health summary
+shows the D34 configured daily cap, total stored accepted rows, site-local days
+in the selected current range that have reached that cap, and a visible warning
+when any day has reached it. It may also show last accepted receipt, protocol
+distribution, and selected-site recent collection outcomes, but it does not
+relabel those operational facts as site-local product metrics or duplicate the
+full diagnostic query. Reject and
+store-failure counts copied from the bounded #21 ring are explicitly labeled
+`since process restart`; they are volatile operator evidence, not durable
+history.
+
+When a site has no durable events, #27 gives direct installation guidance and
+a working native Live verification action. Issue #20 owns the canonical
+generated snippet and installation-verification route; #27 does not invent a
+dead setup URL before that route exists. A selected-site rejection with no
+accepted event is a distinct tracking-broken state and links to the same Live
+evidence.
 
 ## 8. Acceptance evidence
 

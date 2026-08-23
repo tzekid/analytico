@@ -94,6 +94,32 @@ pub const Interval = enum {
     }
 };
 
+pub fn automaticInterval(range: LocalDateRange) !Interval {
+    const days = try range.days();
+    if (days <= 2) return .hour;
+    if (days <= 90) return .day;
+    return .week;
+}
+
+test "automatic interval follows the bounded visualization contract" {
+    try std.testing.expectEqual(Interval.hour, try automaticInterval(.{
+        .start = "2025-01-01",
+        .end = "2025-01-02",
+    }));
+    try std.testing.expectEqual(Interval.day, try automaticInterval(.{
+        .start = "2025-01-01",
+        .end = "2025-03-31",
+    }));
+    try std.testing.expectEqual(Interval.week, try automaticInterval(.{
+        .start = "2025-01-01",
+        .end = "2025-04-01",
+    }));
+    try std.testing.expectEqual(Interval.week, try automaticInterval(.{
+        .start = "1970-01-01",
+        .end = "1971-02-04",
+    }));
+}
+
 pub const Sort = enum {
     value_desc,
     value_asc,
@@ -615,6 +641,130 @@ pub const OverviewResult = struct {
     revenue: []const ComparedAmount,
     completeness: Completeness,
     comparison_completeness: ?Completeness,
+    details: ?OverviewDetails = null,
+};
+
+pub const maximum_overview_panel_rows: u8 = 5;
+
+pub const OverviewTrendMetric = enum {
+    visitors,
+    sessions,
+    page_views,
+    conversions,
+    revenue,
+
+    pub fn name(self: OverviewTrendMetric) []const u8 {
+        return switch (self) {
+            .visitors => "visitors",
+            .sessions => "sessions",
+            .page_views => "page-views",
+            .conversions => "conversions",
+            .revenue => "revenue",
+        };
+    }
+};
+
+pub const OverviewBucket = struct {
+    label: []const u8,
+};
+
+pub const OverviewTrendSelection = struct {
+    metric: OverviewTrendMetric = .visitors,
+    currency: []const u8 = "",
+    interval: Interval,
+    current_buckets: []const OverviewBucket,
+    comparison_buckets: []const OverviewBucket = &.{},
+
+    pub fn validate(self: OverviewTrendSelection, comparison: bool) !void {
+        if (self.interval == .auto) return error.InvalidOverviewInterval;
+        if (self.current_buckets.len == 0 or
+            self.current_buckets.len > maximum_range_days or
+            self.comparison_buckets.len > maximum_range_days)
+        {
+            return error.InvalidOverviewBuckets;
+        }
+        if (comparison != (self.comparison_buckets.len != 0)) {
+            return error.InvalidOverviewBuckets;
+        }
+        if (self.metric == .revenue) {
+            if (self.currency.len != 3) return error.InvalidOverviewCurrency;
+            for (self.currency) |byte| {
+                if (byte < 'A' or byte > 'Z') return error.InvalidOverviewCurrency;
+            }
+        } else if (self.currency.len != 0) {
+            return error.InvalidOverviewCurrency;
+        }
+        try validateOverviewBuckets(self.current_buckets);
+        try validateOverviewBuckets(self.comparison_buckets);
+    }
+};
+
+fn validateOverviewBuckets(buckets: []const OverviewBucket) !void {
+    for (buckets, 0..) |bucket, index| {
+        if (bucket.label.len == 0 or bucket.label.len > 16 or
+            !std.unicode.utf8ValidateSlice(bucket.label))
+        {
+            return error.InvalidOverviewBuckets;
+        }
+        for (buckets[0..index]) |prior| {
+            if (std.mem.eql(u8, prior.label, bucket.label)) {
+                return error.InvalidOverviewBuckets;
+            }
+        }
+    }
+}
+
+pub const OverviewTrendPoint = struct {
+    label: []const u8,
+    measure: Measure,
+};
+
+pub const OverviewTrend = struct {
+    metric: OverviewTrendMetric,
+    currency: []const u8,
+    interval: Interval,
+    current: []const OverviewTrendPoint,
+    comparison: ?[]const OverviewTrendPoint,
+};
+
+pub const OverviewContentRow = struct {
+    path: []const u8,
+    page_views: i64,
+    visitors: i64,
+};
+
+pub const OverviewAcquisitionRow = struct {
+    source: []const u8,
+    sessions: i64,
+    converting_sessions: i64,
+};
+
+pub const OverviewConversionRow = struct {
+    goal_id: []const u8,
+    converting_people: i64,
+};
+
+pub const OverviewAudienceRow = struct {
+    country: []const u8,
+    sessions: i64,
+};
+
+pub const OverviewHealth = struct {
+    daily_event_ceiling: i64,
+    accepted_events: i64,
+    ceiling_reached_days: i64,
+    last_received_at_utc_micros: i64,
+    protocol_v1_events: i64,
+    protocol_v2_events: i64,
+};
+
+pub const OverviewDetails = struct {
+    trend: OverviewTrend,
+    content: []const OverviewContentRow,
+    acquisition: []const OverviewAcquisitionRow,
+    conversions: []const OverviewConversionRow,
+    audience: []const OverviewAudienceRow,
+    health: OverviewHealth,
 };
 
 pub const BreakdownLabel = struct {
@@ -757,7 +907,9 @@ pub const OverviewExecution = struct {
     comparison_range: ?LocalDateRange = null,
     active_goals: []const ResolvedGoal = &.{},
     strict_traffic_mode: bool = false,
+    daily_event_ceiling: i64 = 100_000,
     timeout_ms: u32 = maximum_timeout_ms,
+    trend: ?OverviewTrendSelection = null,
 
     pub fn validate(self: OverviewExecution) !void {
         try domain.validateUuid(self.site_id);
@@ -766,7 +918,13 @@ pub const OverviewExecution = struct {
         if (self.timeout_ms == 0 or self.timeout_ms > maximum_timeout_ms) {
             return error.InvalidAnalysisTimeout;
         }
+        if (self.daily_event_ceiling < 1 or self.daily_event_ceiling > 10_000_000) {
+            return error.InvalidDailyEventCeiling;
+        }
         try validateActiveGoals(self.active_goals, self.strict_traffic_mode);
+        if (self.trend) |trend| {
+            try trend.validate(self.comparison_range != null);
+        }
     }
 };
 

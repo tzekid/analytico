@@ -329,6 +329,58 @@ Overview, funnel, and traffic-quality parity remained within their existing
 gates. The compact environment, fixture, plan-size, accepted runs, and rejected
 observations are in `bench/results/overview-kpis-release-safe.json`.
 
+Issue #27 must time the complete fixed Overview server data path rather than
+relabeling the KPI-only measurement. The accepted KPI statement and one bounded
+details statement share one request deadline on the serving DuckDB connection.
+The normal-mode combined p95 remains below 250 ms and the already reconciled
+optional strict-mode combined p95 remains at or below 500 ms on the million-row
+fixture. The full traffic-quality v5 report stays on Live and is measured by
+its own two-second gate; Overview consumes only its compact site-filtered
+health facts and must not hide that report's cost inside an unrelated timing.
+
+The first #27 million-row details candidates failed honestly: the initial two
+overlapping wide materializations exhausted the locked 128 MiB limit; after
+narrowing, the exact uncached complete path measured 769/842/842 ms
+default and 1,071/1,274/1,274 ms strict p50/p95/p99. The combined default
+profile was 0.830 seconds: 0.219 seconds for the accepted KPI statement and
+0.616 seconds for details, led by full-session attribution and exact Content
+people. Materializing the narrowed range relation avoided no semantics but
+worsened p95 to 1,701 ms. These rejected observations do not justify a memory,
+schema, thread, or budget change.
+
+Following the governing 1.0 regression order and the explicit D35 exception to
+D29, #27 adds one exact, mutation-invalidated in-process complete-result entry
+before considering a projection/rollup. A details-only entry first measured
+221/249/249 ms default and 344/367/367 ms strict, but an independent default
+repeat reached 261 ms and failed the unchanged below-250-ms gate. Narrow KPI
+materialization also produced a fresh 262 ms failure, so neither candidate is
+accepted.
+The benchmark still performs one explicit cold warmup per policy and then ten
+complete Store calls. Every measured call after the warmup deep-clones the
+complete bounded Overview result only when its full typed key matches. The gate
+separately profiles both cold SQL statements, proves an accepted
+insert invalidates KPI, trend, and health facts, distinguishes selector
+predicates and configured ceiling in the key, and records cold miss time under
+the existing two-second deadline. This cache is removable and adds no durable
+state, worker, dependency, or stale TTL behavior.
+
+The first three independently seeded ReleaseSafe stability runs preceded the
+final YAGNI cleanup. They measured complete-result cache-hit normal p95 at 12,
+8, and 8 microseconds, strict p95 at 8, 8, and 9 microseconds, and cold
+KPI-plus-details profiles at 0.818, 0.728, and 0.858 seconds. The fourth
+independent run used the exact post-YAGNI source under PR review. It measured
+normal p95 at 29 microseconds, strict p95 at 8 microseconds, and the cold
+profile at 0.814 seconds.
+
+Three additional process runs against one fixed million-row fixture measured
+normal p95 at 8, 8, and 42 microseconds. The cold profiles are not warm-cache
+measurements and are not presented as satisfying the warm p95 budget. Metric
+switches and reads after accepted-event invalidation are cold misses under the
+existing two-second deadline. Metric-v1 Overview, funnel, and full Live
+traffic-quality parity remained inside their existing gates.
+Environment, fixture, rejected candidates, raw observations, and cache-
+invalidation evidence are in `bench/results/overview-panels-release-safe.json`.
+
 ### M4 production-MVP baseline
 
 The current ReleaseSafe package contains a 26,341,344-byte executable and a
@@ -438,6 +490,18 @@ six available fixed KPIs, definitions, deltas, identity coverage, incomplete and
 comparison states, native drill links, and the separately disclosed received-UTC
 traffic-quality diagnostic. It made zero startup API/JSON requests and kept the
 primary navigation, calendar controls, and KPI content unclipped at 360 px.
+
+### Overview trend and answer-panel first-response confirmation
+
+Issue #27's final ReleaseSafe real-Caddy, on-disk-store, and
+JavaScript-disabled Chromium run measured 6,450 compressed bytes for the
+complete authenticated Overview HTML, 5,476 compressed bytes for the versioned
+v8 CSS, and 0 KiB observed RSS growth after 100 authenticated Overview views.
+The first response contained the selected trend and exact table, all four
+answer panels, compact site-filtered health, distinct empty/broken states, and
+working native point/panel destinations. It made zero startup API/JSON requests
+and kept the chart, metric form, stacked panel records, data health, and primary
+navigation unclipped at 360 px.
 
 ## 8. Regression policy
 

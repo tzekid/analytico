@@ -77,9 +77,13 @@ measure_overview_series() {
     printf '"%s_process_ms":%d,' "$name" "$elapsed"
     printf '"%s_samples":%d,' "$name" \
         "$(jq -r '.query_samples' "$fixture_dir/$name.json")"
+    printf '"%s_server_sample_micros":%s,' "$name" \
+        "$(jq -c '.query_sample_micros' "$fixture_dir/$name.json")"
     for percentile in 50 95 99; do
         micros=$(jq -r ".query_p${percentile}_micros" \
             "$fixture_dir/$name.json")
+        printf '"%s_server_p%s_micros":%d,' "$name" "$percentile" \
+            "$micros"
         printf '"%s_server_p%s_ms":%d,' "$name" "$percentile" \
             "$(((micros + 999) / 1000))"
     done
@@ -139,8 +143,11 @@ printf '"traffic_quality_profile_bytes":%d,' \
     "$(stat -c '%s' "$fixture_dir/traffic-quality.profile")"
 overview_profile_seconds=$(sed -n \
     's/.*Total Time: \([0-9.]*\)s.*/\1/p' \
-    "$fixture_dir/overview-v2.profile" | head -n 1)
+    "$fixture_dir/overview-v2.profile" | \
+    awk '{ total += $1 } END { printf "%.6f", total }')
 [[ "$overview_profile_seconds" =~ ^[0-9]+([.][0-9]+)?$ ]]
+printf 'overview_v2_cold_profile_seconds=%s\n' \
+    "$overview_profile_seconds" >&2
 awk -v value="$overview_profile_seconds" \
     'BEGIN { exit !(value + 0 <= 1.0) }'
 printf '"overview_v2_profile_seconds":%s,' "$overview_profile_seconds"
@@ -156,6 +163,10 @@ jq -e '.metric_version == 2 and .strict_mode == false and
     .page_views > 0 and .engaged_sessions > 0 and
     .conversion_matches > 0 and .converting_visitors > 0 and
     .revenue_currencies == 0 and .legacy_people == .visitors and
+    .trend_points == 6 and .comparison_trend_points == 6 and
+    .content_rows == 5 and .acquisition_rows > 0 and .acquisition_rows <= 5 and
+    .conversion_rows == 1 and .audience_rows > 0 and .audience_rows <= 5 and
+    .accepted_events == 1000000 and
     .query_elapsed_micros > 0 and .query_samples == 10 and
     .query_p50_micros > 0 and .query_p95_micros >= .query_p50_micros and
     .query_p99_micros >= .query_p95_micros' \
@@ -186,6 +197,10 @@ jq -e --slurpfile default "$fixture_dir/overview_v2.json" '
     .page_views == $default[0].page_views and
     .conversion_matches == $default[0].conversion_matches and
     .revenue_currencies == 0 and .legacy_people == .visitors and
+    .trend_points == 6 and .comparison_trend_points == 6 and
+    .content_rows == 5 and .acquisition_rows > 0 and .acquisition_rows <= 5 and
+    .conversion_rows == 1 and .audience_rows > 0 and .audience_rows <= 5 and
+    .accepted_events == 1000000 and
     .query_elapsed_micros > 0 and .query_samples == 10 and
     .query_p50_micros > 0 and .query_p95_micros >= .query_p50_micros and
     .query_p99_micros >= .query_p95_micros
@@ -199,25 +214,28 @@ grep -q 'd34_signal_sessions' "$fixture_dir/traffic-quality.profile"
 grep -q 'range_sessions' "$fixture_dir/overview-v2.profile"
 grep -q 'person_events' "$fixture_dir/overview-v2.profile"
 grep -q 'value_events' "$fixture_dir/overview-v2.profile"
+grep -q 'OVERVIEW DETAILS STATEMENT' "$fixture_dir/overview-v2.profile"
+grep -q 'trend_buckets' "$fixture_dir/overview-v2.profile"
+grep -q 'session_facts' "$fixture_dir/overview-v2.profile"
 
 overview_p95=$(sort -n "$fixture_dir/overview.durations" | tail -n 1)
-overview_v2_server_p95=$(jq -r \
-    '((.query_p95_micros + 999) / 1000 | floor)' \
+overview_v2_server_p95_micros=$(jq -r \
+    '.query_p95_micros' \
     "$fixture_dir/overview_v2.json")
 funnel_p95=$(sort -n "$fixture_dir/funnel.durations" | tail -n 1)
 traffic_quality_p95=$(sort -n "$fixture_dir/traffic_quality.durations" | tail -n 1)
 strict_overview_p95=$(sort -n "$fixture_dir/strict_overview.durations" | tail -n 1)
-strict_overview_v2_server_p95=$(jq -r \
-    '((.query_p95_micros + 999) / 1000 | floor)' \
+strict_overview_v2_server_p95_micros=$(jq -r \
+    '.query_p95_micros' \
     "$fixture_dir/strict_overview_v2.json")
 strict_funnel_p95=$(sort -n "$fixture_dir/strict_funnel.durations" | tail -n 1)
 strict_traffic_quality_p95=$(sort -n \
     "$fixture_dir/strict_traffic_quality.durations" | tail -n 1)
 test "$overview_p95" -le 500
-test "$overview_v2_server_p95" -le 250
+test "$overview_v2_server_p95_micros" -lt 250000
 test "$funnel_p95" -le 2000
 test "$traffic_quality_p95" -le 2000
 test "$strict_overview_p95" -le 500
-test "$strict_overview_v2_server_p95" -le 500
+test "$strict_overview_v2_server_p95_micros" -le 500000
 test "$strict_funnel_p95" -le 2000
 test "$strict_traffic_quality_p95" -le 2000

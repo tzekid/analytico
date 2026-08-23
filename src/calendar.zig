@@ -44,6 +44,7 @@ pub const ComparisonUnavailable = enum {
 
 pub const Context = struct {
     timezone_name: []const u8,
+    now_utc_seconds: i64,
     utc_range: timezone.Range,
     comparison: analysis.Comparison,
     comparison_range: ?Range,
@@ -125,6 +126,7 @@ pub fn resolve(
         null;
     return .{
         .timezone_name = timezone_name,
+        .now_utc_seconds = now_utc_seconds,
         .utc_range = try zone.rangeForInclusiveDates(&current.start, &current.end),
         .comparison = comparison,
         .comparison_range = comparison_resolution.range,

@@ -3,6 +3,7 @@ const analysis = @import("../analysis.zig");
 const calendar = @import("../calendar.zig");
 const domain = @import("../domain.zig");
 const report = @import("../report.zig");
+const timezone = @import("../timezone.zig");
 const events = @import("../store/events.zig");
 const meta = @import("../store/meta.zig");
 const analysis_store = @import("../store/analysis.zig");
@@ -87,6 +88,10 @@ pub const ParsedQuery = struct {
     sort: report.Sort = .count,
     limit: u16 = report.default_limit,
     page: u32 = 1,
+    overview_metric: analysis.OverviewTrendMetric = .visitors,
+    overview_currency: []const u8 = "",
+    overview_selection_set: bool = false,
+    highlighted_interval: []const u8 = "",
 };
 
 pub fn parseQuery(
@@ -160,6 +165,17 @@ pub fn parseQuery(
         } else if (std.mem.eql(u8, name, "notice")) {
             if (!validNotice(value)) return error.InvalidNotice;
             query.notice = value;
+        } else if (std.mem.eql(u8, name, "metric") or
+            std.mem.eql(u8, name, "focus"))
+        {
+            if (query.overview_selection_set) return error.DuplicateQueryField;
+            const selection = try parseOverviewMetric(value);
+            query.overview_metric = selection.metric;
+            query.overview_currency = selection.currency;
+            query.overview_selection_set = true;
+        } else if (std.mem.eql(u8, name, "highlight")) {
+            if (!validOverviewHighlight(value)) return error.InvalidOverviewHighlight;
+            query.highlighted_interval = value;
         } else {
             return error.UnknownQueryField;
         }
@@ -193,6 +209,9 @@ pub fn finishQuery(
         .sort = parsed.sort,
         .limit = parsed.limit,
         .page = parsed.page,
+        .overview_metric = parsed.overview_metric,
+        .overview_currency = parsed.overview_currency,
+        .highlighted_interval = parsed.highlighted_interval,
     };
     try validateQuery(query);
     return query;
@@ -205,6 +224,7 @@ pub fn loadPage(
     destination: model.Destination,
     query_input: model.Query,
     calendar_context: ?calendar.Context,
+    site_zone: ?timezone.Zone,
     csrf_token: []const u8,
     notice: []const u8,
     report_timeout_ms: u32,
@@ -231,6 +251,14 @@ pub fn loadPage(
     const selected = try resolveSite(sites, query.site);
     query.site = selected.slug;
     try validateQuery(query);
+    if (query.highlighted_interval.len != 0) {
+        try validateGeneratedOverviewHighlight(
+            allocator,
+            query,
+            calendar_context orelse return error.MissingCalendarContext,
+            site_zone orelse return error.MissingCalendarZone,
+        );
+    }
 
     const goals = try metadata.listGoals(allocator, selected.slug);
     const funnels = try metadata.listFunnels(allocator, selected.slug);
@@ -290,9 +318,34 @@ pub fn loadPage(
         )
     else
         null;
+    var overview_details: ?model.OverviewDetails = null;
     const overview_kpis: ?model.OverviewKpis = if (destination == .overview) value: {
         const context = calendar_context orelse return error.MissingCalendarContext;
+        const zone = site_zone orelse return error.MissingCalendarZone;
         const resolved_goals = try resolveAnalysisGoals(allocator, goals);
+        const interval = try analysis.automaticInterval(query.range);
+        const current_buckets = try buildOverviewBuckets(
+            allocator,
+            zone,
+            query.range,
+            context.utc_range,
+            interval,
+            if (interval == .hour and context.includes_incomplete_today)
+                context.now_utc_seconds
+            else
+                null,
+        );
+        const comparison_buckets = if (context.comparison_range) |*range|
+            try buildOverviewBuckets(
+                allocator,
+                zone,
+                range.view(),
+                context.comparison_utc_range.?,
+                interval,
+                null,
+            )
+        else
+            &.{};
         const overview = analysis_store.executeOverview(
             allocator,
             event_store,
@@ -305,12 +358,25 @@ pub fn loadPage(
                     null,
                 .active_goals = resolved_goals,
                 .strict_traffic_mode = collection_policy.strict_mode,
+                .daily_event_ceiling = collection_policy.daily_event_ceiling,
                 .timeout_ms = report_timeout_ms,
+                .trend = .{
+                    .metric = query.overview_metric,
+                    .currency = query.overview_currency,
+                    .interval = interval,
+                    .current_buckets = current_buckets,
+                    .comparison_buckets = comparison_buckets,
+                },
             },
         ) catch |err| {
             if (err == error.AnalysisTimeout) return error.ReportTimeout;
             return err;
         };
+        overview_details = try buildOverviewDetails(
+            allocator,
+            overview,
+            goals,
+        );
         break :value try buildOverviewKpis(
             allocator,
             overview,
@@ -318,26 +384,6 @@ pub fn loadPage(
             context.includes_incomplete_today,
         );
     } else null;
-    var quality_request = request;
-    quality_request.kind = .traffic_quality;
-    quality_request.limit = report.maximum_limit;
-    quality_request.page = 1;
-    const overview_quality: ?report.TrafficQuality = if (destination == .overview)
-        try reports.trafficQuality(
-            allocator,
-            event_store,
-            quality_request,
-            selected.id,
-            .{
-                .strict_mode = collection_policy.strict_mode,
-                .daily_event_ceiling = collection_policy.daily_event_ceiling,
-                .active_goals = goals,
-                .heuristic_available = goals.len <= meta.maximum_active_goals,
-            },
-            report_timeout_ms,
-        )
-    else
-        null;
     return .{
         .destination = destination,
         .sites = sites,
@@ -347,7 +393,7 @@ pub fn loadPage(
         .report_time_basis = if (result != null) .metric_v1_utc else .none,
         .result = result,
         .overview_kpis = overview_kpis,
-        .overview_quality = overview_quality,
+        .overview_details = overview_details,
         .goals = goals,
         .funnels = funnels,
         .self_exclusion_origins = collection_policy.origins,
@@ -476,6 +522,157 @@ fn buildOverviewKpis(
             null,
         .includes_incomplete_today = includes_incomplete_today,
     };
+}
+
+fn buildOverviewDetails(
+    allocator: std.mem.Allocator,
+    overview: analysis.OverviewResult,
+    goals: []const meta.Goal,
+) !model.OverviewDetails {
+    const details = overview.details orelse return error.MissingOverviewDetails;
+    if (details.trend.metric == .revenue) {
+        var observed = false;
+        for (overview.revenue) |revenue| {
+            observed = observed or std.mem.eql(
+                u8,
+                revenue.currency,
+                details.trend.currency,
+            );
+        }
+        if (!observed) return error.InvalidOverviewMetric;
+    }
+    const revenue_options = try allocator.alloc([]const u8, overview.revenue.len);
+    for (revenue_options, overview.revenue) |*currency, revenue| {
+        currency.* = revenue.currency;
+    }
+
+    const comparison = details.trend.comparison orelse &.{};
+    const point_count = @max(details.trend.current.len, comparison.len);
+    const points = try allocator.alloc(model.OverviewTrendPoint, point_count);
+    for (points, 0..) |*point, index| {
+        const current = if (index < details.trend.current.len)
+            details.trend.current[index]
+        else
+            null;
+        const prior = if (index < comparison.len) comparison[index] else null;
+        point.* = .{
+            .current_label = if (current) |value| value.label else null,
+            .comparison_label = if (prior) |value| value.label else null,
+            .current = if (current) |value| value.measure else null,
+            .comparison = if (prior) |value| value.measure else null,
+        };
+    }
+
+    const content = try allocator.alloc(model.OverviewContentRow, details.content.len);
+    for (content, details.content) |*target, source| {
+        if (source.page_views < 0 or source.visitors < 0 or
+            source.visitors > source.page_views)
+        {
+            return error.InvalidOverviewDetails;
+        }
+        target.* = .{
+            .label = source.path,
+            .page_views = source.page_views,
+            .visitors = source.visitors,
+            .share_basis_points = if (overview.page_views.current == 0)
+                0
+            else
+                @intCast(@divTrunc(
+                    @as(i128, source.page_views) * 10_000,
+                    overview.page_views.current,
+                )),
+        };
+    }
+
+    const acquisition = try allocator.alloc(
+        model.OverviewAcquisitionRow,
+        details.acquisition.len,
+    );
+    for (acquisition, details.acquisition) |*target, source| {
+        target.* = .{
+            .label = source.source,
+            .sessions = source.sessions,
+            .conversion = .{
+                .numerator = source.converting_sessions,
+                .denominator = source.sessions,
+            },
+        };
+    }
+
+    const conversions = try allocator.alloc(
+        model.OverviewConversionRow,
+        details.conversions.len,
+    );
+    for (conversions, details.conversions) |*target, source| {
+        const goal = goalById(goals, source.goal_id) orelse
+            return error.InvalidOverviewDetails;
+        if (source.converting_people > overview.visitors.current) {
+            return error.InvalidOverviewDetails;
+        }
+        target.* = .{
+            .goal_name = goal.name,
+            .converting_people = source.converting_people,
+            .conversion = .{
+                .numerator = source.converting_people,
+                .denominator = overview.visitors.current,
+            },
+        };
+    }
+
+    const audience = try allocator.alloc(model.OverviewAudienceRow, details.audience.len);
+    for (audience, details.audience) |*target, source| target.* = .{
+        .label = source.country,
+        .sessions = source.sessions,
+    };
+    return .{
+        .trend = .{
+            .metric = details.trend.metric,
+            .currency = details.trend.currency,
+            .points = points,
+            .revenue_options = revenue_options,
+        },
+        .content = content,
+        .acquisition = acquisition,
+        .conversions = conversions,
+        .audience = audience,
+        .daily_event_ceiling = details.health.daily_event_ceiling,
+        .accepted_events = details.health.accepted_events,
+        .ceiling_reached_days = details.health.ceiling_reached_days,
+        .last_event_utc = if (details.health.accepted_events == 0)
+            "Never"
+        else
+            try formatUtcMicros(
+                allocator,
+                details.health.last_received_at_utc_micros,
+            ),
+        .protocol_v1_events = details.health.protocol_v1_events,
+        .protocol_v2_events = details.health.protocol_v2_events,
+    };
+}
+
+fn goalById(goals: []const meta.Goal, id: []const u8) ?meta.Goal {
+    for (goals) |goal| if (std.mem.eql(u8, goal.id, id)) return goal;
+    return null;
+}
+
+fn formatUtcMicros(allocator: std.mem.Allocator, micros: i64) ![]const u8 {
+    if (micros < 0) return error.InvalidOverviewDetails;
+    const seconds: u64 = @intCast(@divFloor(micros, 1_000_000));
+    const epoch = std.time.epoch.EpochSeconds{ .secs = seconds };
+    const year_day = epoch.getEpochDay().calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    const day_seconds = seconds % std.time.s_per_day;
+    return std.fmt.allocPrint(
+        allocator,
+        "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2} UTC",
+        .{
+            year_day.year,
+            @backingInt(month_day.month),
+            month_day.day_index + 1,
+            day_seconds / std.time.s_per_hour,
+            day_seconds % std.time.s_per_hour / std.time.s_per_min,
+        },
+    );
 }
 
 const Delta = struct {
@@ -862,6 +1059,173 @@ pub fn validateQuery(query: model.Query) !void {
     } else if (query.subject.len != 0) {
         return error.ReportSubjectNotApplicable;
     }
+    if (query.kind != .overview and !query.kind.isList() and
+        (query.overview_metric != .visitors or query.overview_currency.len != 0))
+    {
+        return error.OverviewMetricNotApplicable;
+    }
+    if (!query.kind.isList() and query.highlighted_interval.len != 0) {
+        return error.OverviewHighlightNotApplicable;
+    }
+}
+
+const ParsedOverviewMetric = struct {
+    metric: analysis.OverviewTrendMetric,
+    currency: []const u8 = "",
+};
+
+fn parseOverviewMetric(value: []const u8) !ParsedOverviewMetric {
+    inline for (.{
+        analysis.OverviewTrendMetric.visitors,
+        analysis.OverviewTrendMetric.sessions,
+        analysis.OverviewTrendMetric.page_views,
+        analysis.OverviewTrendMetric.conversions,
+    }) |metric| {
+        if (std.mem.eql(u8, value, metric.name())) return .{ .metric = metric };
+    }
+    const prefix = "revenue-";
+    if (!std.mem.startsWith(u8, value, prefix)) {
+        return error.InvalidOverviewMetric;
+    }
+    const currency = value[prefix.len..];
+    if (currency.len != 3) return error.InvalidOverviewMetric;
+    for (currency) |byte| {
+        if (byte < 'A' or byte > 'Z') return error.InvalidOverviewMetric;
+    }
+    return .{ .metric = .revenue, .currency = currency };
+}
+
+fn validOverviewHighlight(value: []const u8) bool {
+    if (value.len == 10) {
+        domain.validateDate(value) catch return false;
+        return true;
+    }
+    if (value.len == 7 and value[4] == '-') {
+        const year = std.fmt.parseInt(u16, value[0..4], 10) catch return false;
+        const month = std.fmt.parseInt(u8, value[5..7], 10) catch return false;
+        return year >= 1970 and month >= 1 and month <= 12;
+    }
+    if (value.len == 16 and value[10] == 'T' and value[13] == ':' and
+        std.mem.eql(u8, value[14..16], "00"))
+    {
+        domain.validateDate(value[0..10]) catch return false;
+        const hour = std.fmt.parseInt(u8, value[11..13], 10) catch return false;
+        return hour <= 23;
+    }
+    return false;
+}
+
+fn validateGeneratedOverviewHighlight(
+    allocator: std.mem.Allocator,
+    query: model.Query,
+    context: calendar.Context,
+    zone: timezone.Zone,
+) !void {
+    const interval = try analysis.automaticInterval(query.range);
+    const current = try buildOverviewBuckets(
+        allocator,
+        zone,
+        query.range,
+        context.utc_range,
+        interval,
+        if (interval == .hour and context.includes_incomplete_today)
+            context.now_utc_seconds
+        else
+            null,
+    );
+    for (current) |bucket| {
+        if (std.mem.eql(u8, query.highlighted_interval, bucket.label)) return;
+    }
+    if (context.comparison_range) |*range| {
+        const comparison = try buildOverviewBuckets(
+            allocator,
+            zone,
+            range.view(),
+            context.comparison_utc_range orelse
+                return error.MissingCalendarContext,
+            interval,
+            null,
+        );
+        for (comparison) |bucket| {
+            if (std.mem.eql(u8, query.highlighted_interval, bucket.label)) return;
+        }
+    }
+    return error.InvalidOverviewHighlight;
+}
+
+fn buildOverviewBuckets(
+    allocator: std.mem.Allocator,
+    zone: timezone.Zone,
+    range: analysis.LocalDateRange,
+    utc_range: timezone.Range,
+    interval: analysis.Interval,
+    hourly_cutoff_utc_seconds: ?i64,
+) ![]const analysis.OverviewBucket {
+    var output: std.ArrayList(analysis.OverviewBucket) = .empty;
+    errdefer output.deinit(allocator);
+    switch (interval) {
+        .hour => {
+            var second = utc_range.start_utc_seconds;
+            while (second < utc_range.end_utc_seconds) : (second += 3_600) {
+                if (hourly_cutoff_utc_seconds) |cutoff| {
+                    if (second > cutoff) break;
+                }
+                const label = try zone.localHourLabel(second);
+                if (output.items.len != 0 and std.mem.eql(
+                    u8,
+                    output.items[output.items.len - 1].label,
+                    &label,
+                )) continue;
+                try output.append(allocator, .{
+                    .label = try allocator.dupe(u8, &label),
+                });
+            }
+        },
+        .day => {
+            var date = try timezone.Date.parse(range.start);
+            const end = try timezone.Date.parse(range.end);
+            while (date.dayNumber() <= end.dayNumber()) : (date = try date.addDays(1)) {
+                const label = try date.format();
+                try output.append(allocator, .{
+                    .label = try allocator.dupe(u8, &label),
+                });
+            }
+        },
+        .week => {
+            var date = try timezone.Date.parse(range.start);
+            const end = try timezone.Date.parse(range.end);
+            const days_since_monday = @mod(date.dayNumber() + 3, 7);
+            date = try date.addDays(-days_since_monday);
+            while (date.dayNumber() <= end.dayNumber()) : (date = try date.addDays(7)) {
+                const label = try date.format();
+                try output.append(allocator, .{
+                    .label = try allocator.dupe(u8, &label),
+                });
+            }
+        },
+        .month => {
+            var date = (try timezone.Date.parse(range.start)).firstOfMonth();
+            const end = try timezone.Date.parse(range.end);
+            while (date.dayNumber() <= end.dayNumber()) {
+                const label = try std.fmt.allocPrint(
+                    allocator,
+                    "{d:0>4}-{d:0>2}",
+                    .{ date.year, date.month },
+                );
+                try output.append(allocator, .{ .label = label });
+                const next = if (date.month == 12)
+                    timezone.Date{ .year = date.year + 1, .month = 1, .day = 1 }
+                else
+                    timezone.Date{ .year = date.year, .month = date.month + 1, .day = 1 };
+                date = next;
+            }
+        },
+        .auto => return error.InvalidOverviewInterval,
+    }
+    if (output.items.len == 0 or output.items.len > analysis.maximum_range_days) {
+        return error.InvalidOverviewBuckets;
+    }
+    return output.toOwnedSlice(allocator);
 }
 
 fn validNotice(value: []const u8) bool {
@@ -1054,6 +1418,187 @@ test "calendar query parsing rejects ambiguity partial ranges and unknown state"
     );
 }
 
+test "Overview metric and Analyze highlight query state is closed and contextual" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const default_range = calendar.Range{
+        .start = "2025-01-01".*,
+        .end = "2025-01-02".*,
+    };
+    const overview = try finishQuery(
+        try parseQuery(
+            allocator,
+            "/admin/sites/example/overview?metric=sessions",
+            .overview,
+        ),
+        "example",
+        &default_range,
+        .previous,
+    );
+    try std.testing.expectEqual(analysis.OverviewTrendMetric.sessions, overview.overview_metric);
+
+    const handoff = try finishQuery(
+        try parseQuery(
+            allocator,
+            "/admin/sites/example/analyze?report=pages&focus=revenue-EUR&highlight=2025-01-01T12%3A00",
+            .pages,
+        ),
+        "example",
+        &default_range,
+        .previous,
+    );
+    try std.testing.expectEqual(analysis.OverviewTrendMetric.revenue, handoff.overview_metric);
+    try std.testing.expectEqualStrings("EUR", handoff.overview_currency);
+    try std.testing.expectEqualStrings("2025-01-01T12:00", handoff.highlighted_interval);
+
+    try std.testing.expectError(
+        error.DuplicateQueryField,
+        parseQuery(allocator, "/admin?metric=sessions&focus=page-views", .overview),
+    );
+    try std.testing.expectError(
+        error.InvalidOverviewMetric,
+        parseQuery(allocator, "/admin?metric=revenue-eur", .overview),
+    );
+    try std.testing.expectError(
+        error.InvalidOverviewHighlight,
+        parseQuery(allocator, "/admin?highlight=2025-01-01%20all", .pages),
+    );
+    try std.testing.expectError(
+        error.InvalidOverviewHighlight,
+        parseQuery(allocator, "/admin?highlight=2025-02-30", .pages),
+    );
+    try std.testing.expectError(
+        error.InvalidOverviewHighlight,
+        parseQuery(allocator, "/admin?highlight=2025-01-01T12%3A30", .pages),
+    );
+    try std.testing.expectError(
+        error.OverviewHighlightNotApplicable,
+        finishQuery(
+            try parseQuery(allocator, "/admin?highlight=2025-01-01", .overview),
+            "example",
+            &default_range,
+            .previous,
+        ),
+    );
+    try std.testing.expectError(
+        error.OverviewMetricNotApplicable,
+        finishQuery(
+            try parseQuery(allocator, "/admin?metric=sessions", .traffic_quality),
+            "example",
+            &default_range,
+            .previous,
+        ),
+    );
+}
+
+test "Overview highlight is one exact generated current or comparison bucket" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var utc = try timezone.load(
+        allocator,
+        std.testing.io,
+        timezone.default_zoneinfo_root,
+        "UTC",
+    );
+    defer utc.deinit(allocator);
+    const context = try calendar.resolve(
+        utc,
+        "UTC",
+        1_735_776_000,
+        .{ .start = "2025-01-01", .end = "2025-01-02" },
+        .previous,
+    );
+    var query = model.Query{
+        .site = "example",
+        .range = .{ .start = "2025-01-01", .end = "2025-01-02" },
+        .comparison = .previous,
+        .kind = .pages,
+        .highlighted_interval = "2025-01-01T12:00",
+    };
+    try validateGeneratedOverviewHighlight(allocator, query, context, utc);
+    query.highlighted_interval = "2024-12-31T12:00";
+    try validateGeneratedOverviewHighlight(allocator, query, context, utc);
+    query.highlighted_interval = "2025-01-03T00:00";
+    try std.testing.expectError(
+        error.InvalidOverviewHighlight,
+        validateGeneratedOverviewHighlight(allocator, query, context, utc),
+    );
+}
+
+test "current hourly Overview buckets stop at now and retain DST semantics" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var utc = try timezone.load(
+        allocator,
+        std.testing.io,
+        timezone.default_zoneinfo_root,
+        "UTC",
+    );
+    defer utc.deinit(allocator);
+    const utc_context = try calendar.resolve(
+        utc,
+        "UTC",
+        1_735_821_296,
+        .{ .start = "2025-01-01", .end = "2025-01-02" },
+        .previous,
+    );
+    const current = try buildOverviewBuckets(
+        allocator,
+        utc,
+        .{ .start = "2025-01-01", .end = "2025-01-02" },
+        utc_context.utc_range,
+        .hour,
+        utc_context.now_utc_seconds,
+    );
+    try std.testing.expectEqual(@as(usize, 37), current.len);
+    try std.testing.expectEqualStrings("2025-01-02T12:00", current[current.len - 1].label);
+    const comparison = try buildOverviewBuckets(
+        allocator,
+        utc,
+        utc_context.comparison_range.?.view(),
+        utc_context.comparison_utc_range.?,
+        .hour,
+        null,
+    );
+    try std.testing.expectEqual(@as(usize, 48), comparison.len);
+
+    var berlin = try timezone.load(
+        allocator,
+        std.testing.io,
+        timezone.default_zoneinfo_root,
+        "Europe/Berlin",
+    );
+    defer berlin.deinit(allocator);
+    const spring_range = try berlin.rangeForInclusiveDates("2024-03-31", "2024-03-31");
+    const spring = try buildOverviewBuckets(
+        allocator,
+        berlin,
+        .{ .start = "2024-03-31", .end = "2024-03-31" },
+        spring_range,
+        .hour,
+        1_711_848_600,
+    );
+    try std.testing.expectEqual(@as(usize, 3), spring.len);
+    try std.testing.expectEqualStrings("2024-03-31T03:00", spring[2].label);
+    for (spring) |bucket| {
+        try std.testing.expect(!std.mem.eql(u8, bucket.label, "2024-03-31T02:00"));
+    }
+    const autumn_range = try berlin.rangeForInclusiveDates("2024-10-27", "2024-10-27");
+    const autumn = try buildOverviewBuckets(
+        allocator,
+        berlin,
+        .{ .start = "2024-10-27", .end = "2024-10-27" },
+        autumn_range,
+        .hour,
+        1_729_992_600,
+    );
+    try std.testing.expectEqual(@as(usize, 3), autumn.len);
+    try std.testing.expectEqualStrings("2024-10-27T02:00", autumn[2].label);
+}
+
 test "modifying form requires and preserves typed calendar context" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1174,4 +1719,13 @@ test "Overview KPI view model formats exact deltas coverage and currencies" {
     );
     try std.testing.expect(no_comparison.comparison_coverage == null);
     try std.testing.expect(no_comparison.includes_incomplete_today);
+}
+
+test "Overview accepted-event receipt formatting preserves the Unix epoch" {
+    const value = try formatUtcMicros(std.testing.allocator, 0);
+    defer std.testing.allocator.free(value);
+    try std.testing.expectEqualStrings(
+        "1970-01-01 00:00 UTC",
+        value,
+    );
 }
