@@ -1,9 +1,11 @@
 const std = @import("std");
 const report = @import("../report.zig");
+const charts = @import("charts.zig");
+const components = @import("components.zig");
 const model = @import("model.zig");
 
 pub const stylesheet = @embedFile("style.css");
-pub const stylesheet_path = "/admin/app.v4.css";
+pub const stylesheet_path = "/admin/app.v5.css";
 pub const htmx = @embedFile("htmx_js");
 pub const htmx_gzip = @embedFile("htmx_gzip");
 pub const htmx_path = "/admin/htmx.28fae7bb.js";
@@ -36,14 +38,18 @@ pub fn page(output: *std.Io.Writer, value: model.Page) !void {
     }
     try shellStart(output, value);
     if (value.notice.len != 0) {
-        try output.writeAll("<p class=\"notice\" role=\"status\">");
-        try text(output, value.notice);
-        try output.writeAll("</p>");
+        try components.feedback(output, .{
+            .kind = .notice,
+            .message = value.notice,
+        });
     }
     if (value.form_error.len != 0) {
-        try output.writeAll("<p class=\"error\" role=\"alert\">");
-        try text(output, value.form_error);
-        try output.writeAll("</p>");
+        try components.feedback(output, .{
+            .kind = .error_message,
+            .message = value.form_error,
+            .id = "form-error-summary",
+            .focus = true,
+        });
     }
     try output.writeAll("<div class=\"page-heading\"><span class=\"eyebrow\">Analytico 1.0</span><h1>");
     try text(output, value.destination.label());
@@ -61,10 +67,11 @@ pub fn page(output: *std.Io.Writer, value: model.Page) !void {
             try reportSection(output, value);
             try definitions(output, value);
         },
-        .sessions => try output.writeAll(
-            "<section class=\"panel empty-state\"><h2>Session explorer is not available yet</h2>" ++
-                "<p>Session lists and details are not available in this build.</p></section>",
-        ),
+        .sessions => try components.emptyState(output, .{
+            .id = "sessions-empty",
+            .title = "Session explorer is not available yet",
+            .message = "Session lists and details are not available in this build.",
+        }),
         .live => try reportSection(output, value),
         .settings => {
             try trafficPolicy(output, value);
@@ -78,9 +85,12 @@ pub fn errorPage(output: *std.Io.Writer, value: model.ErrorPage) !void {
     try head(output, value.title);
     try output.writeAll("<header><h1>Analytico</h1></header><main id=\"main\" tabindex=\"-1\"><section class=\"panel\"><h2>");
     try text(output, value.title);
-    try output.writeAll("</h2><p class=\"error\" role=\"alert\">");
-    try text(output, value.message);
-    try output.writeAll("</p><p><a hx-boost=\"true\" href=\"");
+    try output.writeAll("</h2>");
+    try components.feedback(output, .{
+        .kind = .error_message,
+        .message = value.message,
+    });
+    try output.writeAll("<p><a hx-boost=\"true\" href=\"");
     try attribute(output, value.return_url);
     try output.writeAll("\">Return to dashboard</a></p></section></main>");
     try foot(output);
@@ -95,7 +105,7 @@ fn head(output: *std.Io.Writer, title: []const u8) !void {
     try attribute(output, htmx_path);
     try output.writeAll("\"></script><script defer src=\"");
     try attribute(output, dashboard_js_path);
-    try output.writeAll("\"></script></head><body hx-boost:inherited=\"true\"><a class=\"skip-link\" href=\"#main\">Skip to main content</a>");
+    try output.writeAll("\"></script></head><body hx-boost:inherited=\"true\" hx-indicator:inherited=\"#loading-region\"><a class=\"skip-link\" href=\"#main\">Skip to main content</a><p id=\"loading-region\" class=\"loading-region htmx-indicator\" role=\"status\" aria-live=\"polite\" aria-atomic=\"true\">Updating view…</p>");
 }
 
 fn foot(output: *std.Io.Writer) !void {
@@ -370,20 +380,38 @@ fn renderResult(
         .traffic_quality => |quality| try renderTrafficQuality(output, query, quality, true),
         .list => |list| {
             if (query.kind == .campaigns) try campaignTabs(output, query);
-            try output.writeAll("<div class=\"table-scroll\"><table><thead><tr><th>");
+            var maximum_primary: i64 = 0;
+            for (list.rows) |row| {
+                if (row.primary < 0 or row.secondary < 0) return error.InvalidReportCount;
+                maximum_primary = @max(maximum_primary, row.primary);
+            }
+            try output.writeAll("<div class=\"table-scroll mobile-records\"><table><caption>");
+            try text(output, reportTitle(query.kind));
+            try output.writeAll(" — exact values for the selected range</caption><thead><tr><th scope=\"col\">");
             try text(output, humanize(list.label_name));
-            try output.writeAll("</th><th>");
+            try output.writeAll("</th><th scope=\"col\">");
             try text(output, humanize(list.primary_name));
-            try output.writeAll("</th><th>");
+            try output.writeAll("</th><th scope=\"col\">");
             try text(output, humanize(list.secondary_name));
             try output.writeAll("</th></tr></thead><tbody>");
             for (list.rows) |row| {
-                try output.writeAll("<tr><td>");
+                try output.writeAll("<tr><th scope=\"row\" data-label=\"");
+                try attribute(output, humanize(list.label_name));
+                try output.writeAll("\">");
                 try text(output, row.label);
-                try output.print("</td><td>{d}</td><td>{d}</td></tr>", .{
+                try output.writeAll("</th><td data-label=\"");
+                try attribute(output, humanize(list.primary_name));
+                try output.print("\"><span class=\"cell-number\">{d}</span><progress class=\"cell-bar\" max=\"{d}\" value=\"{d}\" aria-label=\"", .{
                     row.primary,
-                    row.secondary,
+                    @max(1, maximum_primary),
+                    @max(0, row.primary),
                 });
+                try attribute(output, row.label);
+                try output.writeAll(" — ");
+                try attribute(output, humanize(list.primary_name));
+                try output.print(": {d}\"></progress></td><td data-label=\"", .{row.primary});
+                try attribute(output, humanize(list.secondary_name));
+                try output.print("\">{d}</td></tr>", .{row.secondary});
             }
             if (list.rows.len == 0) {
                 try output.writeAll("<tr><td colspan=\"3\">No results in this range.</td></tr>");
@@ -406,26 +434,27 @@ fn renderResult(
             try metric(output, "Matches", goal.total_matches);
             try metric(output, "Converted sessions", goal.matching_sessions);
             try metric(output, "Eligible sessions", goal.eligible_sessions);
-            try output.writeAll("<li><span>Conversion rate</span><strong>");
-            try percent(output, goal.matching_sessions, goal.eligible_sessions);
-            try output.writeAll("</strong></li></ul>");
+            try ratioKpi(output, "Conversion rate", goal.matching_sessions, goal.eligible_sessions);
+            try output.writeAll("</ul>");
         },
         .funnel => |funnel| {
-            try output.writeAll("<div class=\"table-scroll\"><table><thead><tr><th>Step</th><th>Sessions</th><th>Step rate</th><th>Overall</th></tr></thead><tbody>");
-            for (funnel.steps, 0..) |step, index| {
-                const prior = if (index == 0)
-                    funnel.eligible_sessions
-                else
-                    funnel.steps[index - 1].sessions;
-                try output.writeAll("<tr><td>");
-                try text(output, step.name);
-                try output.print("</td><td>{d}</td><td>", .{step.sessions});
-                try percent(output, step.sessions, prior);
-                try output.writeAll("</td><td>");
-                try percent(output, step.sessions, funnel.eligible_sessions);
-                try output.writeAll("</td></tr>");
+            if (funnel.steps.len > charts.maximum_funnel_steps) {
+                return error.TooManyFunnelSteps;
             }
-            try output.writeAll("</tbody></table></div>");
+            var steps: [charts.maximum_funnel_steps]charts.FunnelStep = undefined;
+            for (funnel.steps, 0..) |step, index| {
+                steps[index] = .{
+                    .name = step.name,
+                    .sessions = try nonnegative(step.sessions),
+                };
+            }
+            try charts.renderFunnel(output, .{
+                .id = "funnel-result",
+                .title = "Funnel result",
+                .summary = "Sessions reaching each ordered step. Median time to the next step is unavailable in the current metric-v1 report.",
+                .entrants = try nonnegative(funnel.eligible_sessions),
+                .steps = steps[0..funnel.steps.len],
+            });
         },
     }
 }
@@ -444,19 +473,22 @@ fn renderTrafficQuality(
     }
     try output.writeAll(
         "<section aria-labelledby=\"traffic-quality-heading\"><h3 id=\"traffic-quality-heading\">Traffic quality</h3>" ++
-            "<p class=\"muted\">Stored classes plus reversible query-classifier v1 diagnostics. Bot and explicit self-exclusion remain separate; strict mode excludes only current low-quality sessions.</p>" ++
-            "<ul class=\"metrics\">",
+            "<p class=\"muted\">Stored classes plus reversible query-classifier v1 diagnostics. Bot and explicit self-exclusion remain separate; strict mode excludes only current low-quality sessions.</p>",
     );
-    if (quality.ceiling_reached_days != 0) try output.print(
-        "<p role=\"status\" class=\"notice\">The daily accepted-event ceiling was reached on {d} site-local day(s) in this range. New events received after the cap returned 429.</p>",
-        .{quality.ceiling_reached_days},
-    );
+    if (quality.ceiling_reached_days != 0) {
+        var warning_buffer: [192]u8 = undefined;
+        const warning = try std.fmt.bufPrint(
+            &warning_buffer,
+            "The daily accepted-event ceiling was reached on {d} site-local day(s) in this range. New events received after the cap returned 429.",
+            .{quality.ceiling_reached_days},
+        );
+        try components.feedback(output, .{ .kind = .warning, .message = warning });
+    }
+    try output.writeAll("<ul class=\"metrics\">");
     try metric(output, "Persistent people", quality.persistent_people);
     try metric(output, "Ephemeral people", quality.ephemeral_people);
     try metric(output, "Legacy daily people", quality.legacy_people);
-    try output.writeAll("<li><span>Persistent coverage</span><strong>");
-    try percent(output, quality.persistent_people, quality.distinct_people);
-    try output.writeAll("</strong></li>");
+    try ratioKpi(output, "Persistent coverage", quality.persistent_people, quality.distinct_people);
     try metric(
         output,
         "Zero-engagement single-event sessions",
@@ -465,58 +497,54 @@ fn renderTrafficQuality(
     try metric(output, "Query candidates", quality.raw_candidates);
     try metric(output, "Current low-quality sessions", quality.current_suspected_sessions);
     try metric(output, "Contradicted candidates", quality.contradicted_candidates);
-    try output.writeAll("<li><span>Contradiction rate</span><strong>");
-    try output.print("{d}.{d:0>2}%", .{
-        quality.contradiction_basis_points / 100,
-        quality.contradiction_basis_points % 100,
-    });
-    try output.writeAll("</strong></li>");
+    try basisPointsKpi(output, "Contradiction rate", quality.contradiction_basis_points);
     try metric(output, "Accepted events", quality.accepted_events);
     try metric(output, "Prefix anomaly groups", quality.mint_anomaly_groups);
     try output.writeAll(
-        "</ul><h4>Identity quality</h4><div class=\"table-scroll\"><table><thead><tr>" ++
-            "<th>Identity quality</th><th>Events</th><th>Visitor-days</th>" ++
+        "</ul><h4>Identity quality</h4><div class=\"table-scroll mobile-records\"><table>" ++
+            "<caption>Identity-quality events and visitor-days</caption><thead><tr>" ++
+            "<th scope=\"col\">Identity quality</th><th scope=\"col\">Events</th><th scope=\"col\">Visitor-days</th>" ++
             "</tr></thead><tbody>",
     );
     for (quality.identity_quality) |row| {
-        try output.writeAll("<tr><td>");
+        try output.writeAll("<tr><th scope=\"row\" data-label=\"Identity quality\">");
         try text(output, humanize(row.quality.name()));
-        try output.print("</td><td>{d}</td><td>{d}</td></tr>", .{
+        try output.print("</th><td data-label=\"Events\">{d}</td><td data-label=\"Visitor-days\">{d}</td></tr>", .{
             row.events, row.visitor_days,
         });
     }
     try output.writeAll(
         "</tbody></table></div><h4>Stored self-exclusion</h4>" ++
-            "<div class=\"table-scroll\"><table><thead><tr>" ++
-            "<th>Source</th><th>Events</th></tr></thead><tbody>",
+            "<div class=\"table-scroll\"><table><caption>Stored exclusion source counts</caption><thead><tr>" ++
+            "<th scope=\"col\">Source</th><th scope=\"col\">Events</th></tr></thead><tbody>",
     );
     for (quality.exclusion_sources) |row| {
-        try output.writeAll("<tr><td>");
+        try output.writeAll("<tr><th scope=\"row\">");
         try text(output, humanize(@tagName(row.source)));
-        try output.print("</td><td>{d}</td></tr>", .{row.events});
+        try output.print("</th><td>{d}</td></tr>", .{row.events});
     }
     try output.writeAll(
         "</tbody></table></div><h4>Traffic class</h4>" ++
-            "<div class=\"table-scroll\"><table><thead><tr>" ++
-            "<th>Class</th><th>Events</th></tr></thead><tbody>",
+            "<div class=\"table-scroll\"><table><caption>Stored traffic-class counts</caption><thead><tr>" ++
+            "<th scope=\"col\">Class</th><th scope=\"col\">Events</th></tr></thead><tbody>",
     );
     for (quality.traffic_classes) |row| {
-        try output.writeAll("<tr><td>");
+        try output.writeAll("<tr><th scope=\"row\">");
         try text(output, humanize(row.class.name()));
-        try output.print("</td><td>{d}</td></tr>", .{row.events});
+        try output.print("</th><td>{d}</td></tr>", .{row.events});
     }
     try output.print(
         "</tbody></table></div><h4>Bounded signal evidence</h4>" ++
-            "<div class=\"table-scroll\"><table><thead><tr>" ++
-            "<th>Evidence</th><th>Events</th></tr></thead><tbody>" ++
-            "<tr><td>Client signal v1</td><td>{d}</td></tr>" ++
-            "<tr><td>WebDriver</td><td>{d}</td></tr>" ++
-            "<tr><td>Trusted interaction</td><td>{d}</td></tr>" ++
-            "<tr><td>Was visible</td><td>{d}</td></tr>" ++
-            "<tr><td>Was prerendered</td><td>{d}</td></tr>" ++
-            "<tr><td>Client-hint mismatch</td><td>{d}</td></tr>" ++
-            "<tr><td>Expected client hints absent</td><td>{d}</td></tr>" ++
-            "<tr><td>Accept-Language present</td><td>{d}</td></tr>" ++
+            "<div class=\"table-scroll\"><table><caption>Bounded client-signal evidence counts</caption><thead><tr>" ++
+            "<th scope=\"col\">Evidence</th><th scope=\"col\">Events</th></tr></thead><tbody>" ++
+            "<tr><th scope=\"row\">Client signal v1</th><td>{d}</td></tr>" ++
+            "<tr><th scope=\"row\">WebDriver</th><td>{d}</td></tr>" ++
+            "<tr><th scope=\"row\">Trusted interaction</th><td>{d}</td></tr>" ++
+            "<tr><th scope=\"row\">Was visible</th><td>{d}</td></tr>" ++
+            "<tr><th scope=\"row\">Was prerendered</th><td>{d}</td></tr>" ++
+            "<tr><th scope=\"row\">Client-hint mismatch</th><td>{d}</td></tr>" ++
+            "<tr><th scope=\"row\">Expected client hints absent</th><td>{d}</td></tr>" ++
+            "<tr><th scope=\"row\">Accept-Language present</th><td>{d}</td></tr>" ++
             "</tbody></table></div>",
         .{
             quality.signals.client_signal_v1_events,
@@ -531,16 +559,16 @@ fn renderTrafficQuality(
     );
     if (show_headlines) {
         try output.writeAll(
-            "<h4>Classifier rules</h4><div class=\"table-scroll\"><table>" ++
-                "<thead><tr><th>Rule</th><th>Class</th><th>Version</th>" ++
-                "<th>Events</th></tr></thead><tbody>",
+            "<h4>Classifier rules</h4><div class=\"table-scroll mobile-records\"><table>" ++
+                "<caption>Stored classifier rule counts</caption><thead><tr><th scope=\"col\">Rule</th><th scope=\"col\">Class</th><th scope=\"col\">Version</th>" ++
+                "<th scope=\"col\">Events</th></tr></thead><tbody>",
         );
         for (quality.rules) |row| {
-            try output.writeAll("<tr><td>");
+            try output.writeAll("<tr><th scope=\"row\" data-label=\"Rule\">");
             try text(output, if (row.rule.len == 0) "(none)" else row.rule);
-            try output.writeAll("</td><td>");
+            try output.writeAll("</th><td data-label=\"Class\">");
             try text(output, humanize(row.class.name()));
-            try output.print("</td><td>{d}</td><td>{d}</td></tr>", .{
+            try output.print("</td><td data-label=\"Version\">{d}</td><td data-label=\"Events\">{d}</td></tr>", .{
                 row.classifier_version,
                 row.events,
             });
@@ -549,16 +577,16 @@ fn renderTrafficQuality(
     }
     try output.writeAll(
         "<h4>Daily diagnostics</h4>" ++
-            "<div class=\"table-scroll\"><table><thead><tr><th>Date (UTC)</th>" ++
-            "<th>New anonymous identities</th><th>Bot events</th>" ++
-            "<th>Current low-quality sessions</th><th>Accepted (site-local date)</th>" ++
-            "<th>Prefix anomaly groups</th><th>Largest identity mint</th><th>Ceiling</th>" ++
+            "<div class=\"table-scroll mobile-records\"><table><caption>Daily traffic-quality diagnostics</caption><thead><tr><th scope=\"col\">Date (UTC)</th>" ++
+            "<th scope=\"col\">New anonymous identities</th><th scope=\"col\">Bot events</th>" ++
+            "<th scope=\"col\">Current low-quality sessions</th><th scope=\"col\">Accepted (site-local date)</th>" ++
+            "<th scope=\"col\">Prefix anomaly groups</th><th scope=\"col\">Largest identity mint</th><th scope=\"col\">Ceiling</th>" ++
             "</tr></thead><tbody>",
     );
     for (quality.days) |day| {
-        try output.writeAll("<tr><td>");
+        try output.writeAll("<tr><th scope=\"row\" data-label=\"Date (UTC)\">");
         try text(output, day.date);
-        try output.print("</td><td>{d}</td><td>{d}</td><td>{d}</td><td>{d}</td><td>{d}</td><td>{d}</td><td>{s}</td></tr>", .{
+        try output.print("</th><td data-label=\"New anonymous identities\">{d}</td><td data-label=\"Bot events\">{d}</td><td data-label=\"Current low-quality sessions\">{d}</td><td data-label=\"Accepted (site-local date)\">{d}</td><td data-label=\"Prefix anomaly groups\">{d}</td><td data-label=\"Largest identity mint\">{d}</td><td data-label=\"Ceiling\">{s}</td></tr>", .{
             day.new_anonymous_identities,
             day.bot_events,
             day.suspected_sessions,
@@ -631,9 +659,13 @@ fn definitions(output: *std.Io.Writer, value: model.Page) !void {
     if (value.goals.len == 0) try output.writeAll("<li>No goals yet.</li>");
     try output.writeAll("</ul><h3>Add goal</h3><form method=\"post\" action=\"/admin/goals\" hx-boost=\"true\" hx-sync=\"this:drop\">");
     try formCommon(output, value);
-    try output.writeAll("<label>Name<input name=\"name\" maxlength=\"120\" required value=\"");
+    try output.writeAll("<label>Name<input name=\"name\" maxlength=\"120\" required");
+    try formErrorAttributes(output, value, .goal);
+    try output.writeAll(" value=\"");
     try attribute(output, value.goal_draft.name);
-    try output.writeAll("\"></label><label>Match<select name=\"kind\">");
+    try output.writeAll("\"></label><label>Match<select name=\"kind\"");
+    try formErrorAttributes(output, value, .goal);
+    try output.writeAll(">");
     inline for (.{ "event", "path", "prefix" }) |kind| {
         try output.writeAll("<option");
         if (std.mem.eql(u8, value.goal_draft.match_kind, kind)) {
@@ -643,7 +675,9 @@ fn definitions(output: *std.Io.Writer, value: model.Page) !void {
         try text(output, kind);
         try output.writeAll("</option>");
     }
-    try output.writeAll("</select></label><label>Value<input name=\"value\" maxlength=\"1024\" required value=\"");
+    try output.writeAll("</select></label><label>Value<input name=\"value\" maxlength=\"1024\" required");
+    try formErrorAttributes(output, value, .goal);
+    try output.writeAll(" value=\"");
     try attribute(output, value.goal_draft.match_value);
     try output.writeAll("\"></label><button type=\"submit\">Add goal</button></form></section>");
 
@@ -660,9 +694,13 @@ fn definitions(output: *std.Io.Writer, value: model.Page) !void {
     if (value.funnels.len == 0) try output.writeAll("<li>No funnels yet.</li>");
     try output.writeAll("</ul><h3>Add funnel</h3><form method=\"post\" action=\"/admin/funnels\" hx-boost=\"true\" hx-sync=\"this:drop\">");
     try formCommon(output, value);
-    try output.writeAll("<label>Name<input name=\"name\" maxlength=\"120\" required value=\"");
+    try output.writeAll("<label>Name<input name=\"name\" maxlength=\"120\" required");
+    try formErrorAttributes(output, value, .funnel);
+    try output.writeAll(" value=\"");
     try attribute(output, value.funnel_draft.name);
-    try output.writeAll("\"></label><label>Steps, one <code>kind=value</code> per line<textarea name=\"steps\" maxlength=\"8192\" required>");
+    try output.writeAll("\"></label><label>Steps, one <code>kind=value</code> per line<textarea name=\"steps\" maxlength=\"8192\" required");
+    try formErrorAttributes(output, value, .funnel);
+    try output.writeAll(">");
     try text(output, value.funnel_draft.steps);
     try output.writeAll("</textarea></label><button type=\"submit\">Add funnel</button></form></section></div></details>");
 }
@@ -670,8 +708,10 @@ fn definitions(output: *std.Io.Writer, value: model.Page) !void {
 fn selfExclusions(output: *std.Io.Writer, value: model.Page) !void {
     const site = value.selected_site.?;
     try output.writeAll(
-        "<details class=\"management\"><summary><span>Self-visit exclusion</span><span class=\"muted\">",
+        "<details class=\"management\"",
     );
+    if (value.form_error_target == .network) try output.writeAll(" open");
+    try output.writeAll("><summary><span>Self-visit exclusion</span><span class=\"muted\">");
     try output.print("{d} network prefixes</span></summary><div class=\"split\">", .{
         value.excluded_networks.len,
     });
@@ -736,8 +776,10 @@ fn selfExclusions(output: *std.Io.Writer, value: model.Page) !void {
     try formCommon(output, value);
     try output.writeAll(
         "<label>IP address or fixed prefix<input name=\"network\" maxlength=\"64\" " ++
-            "placeholder=\"203.0.113.0/24\" required value=\"",
+            "placeholder=\"203.0.113.0/24\" required",
     );
+    try formErrorAttributes(output, value, .network);
+    try output.writeAll(" value=\"");
     try attribute(output, value.network_draft);
     try output.writeAll(
         "\"></label><button type=\"submit\">Add network exclusion</button></form>" ++
@@ -747,10 +789,16 @@ fn selfExclusions(output: *std.Io.Writer, value: model.Page) !void {
 
 fn trafficPolicy(output: *std.Io.Writer, value: model.Page) !void {
     if (value.selected_site == null) return;
+    const strict_mode = if (value.traffic_policy_draft) |draft|
+        draft.strict_mode
+    else
+        value.strict_mode;
     try output.writeAll(
-        "<details class=\"management\"><summary><span>Traffic safeguards</span><span class=\"muted\">",
+        "<details class=\"management\"",
     );
-    try output.writeAll(if (value.strict_mode) "Strict on" else "Strict off");
+    if (value.form_error_target == .traffic_policy) try output.writeAll(" open");
+    try output.writeAll("><summary><span>Traffic safeguards</span><span class=\"muted\">");
+    try output.writeAll(if (strict_mode) "Strict on" else "Strict off");
     try output.print(" · ceiling {d}</span></summary>", .{value.daily_event_ceiling});
     try output.writeAll(
         "<section class=\"panel\"><h2>Traffic safeguards</h2>" ++
@@ -759,12 +807,18 @@ fn trafficPolicy(output: *std.Io.Writer, value: model.Page) !void {
     );
     try formCommon(output, value);
     try output.writeAll("<label><input type=\"checkbox\" name=\"strict\" value=\"on\"");
-    if (value.strict_mode) try output.writeAll(" checked");
+    if (strict_mode) try output.writeAll(" checked");
+    try formErrorAttributes(output, value, .traffic_policy);
     try output.writeAll("> Exclude current low-quality sessions from product metrics</label>");
-    try output.print(
-        "<label>Daily accepted-event ceiling<input type=\"number\" name=\"daily_event_ceiling\" min=\"1\" max=\"10000000\" required value=\"{d}\"></label>",
-        .{value.daily_event_ceiling},
-    );
+    try output.writeAll("<label>Daily accepted-event ceiling<input type=\"number\" name=\"daily_event_ceiling\" min=\"1\" max=\"10000000\" required");
+    try formErrorAttributes(output, value, .traffic_policy);
+    try output.writeAll(" value=\"");
+    if (value.traffic_policy_draft) |draft| {
+        try attribute(output, draft.daily_event_ceiling);
+    } else {
+        try output.print("{d}", .{value.daily_event_ceiling});
+    }
+    try output.writeAll("\"></label>");
     try output.writeAll("<button type=\"submit\">Save traffic safeguards</button></form></section></details>");
 }
 
@@ -795,10 +849,70 @@ fn formCommon(output: *std.Io.Writer, value: model.Page) !void {
     try output.writeAll("\">");
 }
 
+fn formErrorAttributes(
+    output: *std.Io.Writer,
+    value: model.Page,
+    target: model.FormErrorTarget,
+) !void {
+    if (value.form_error.len != 0 and value.form_error_target == target) {
+        try output.writeAll(" aria-invalid=\"true\" aria-describedby=\"form-error-summary\"");
+    }
+}
+
 fn metric(output: *std.Io.Writer, name: []const u8, count: i64) !void {
-    try output.writeAll("<li><span>");
-    try text(output, name);
-    try output.print("</span><strong>{d}</strong></li>", .{count});
+    if (count < 0) return error.InvalidReportCount;
+    var buffer: [32]u8 = undefined;
+    const value = try std.fmt.bufPrint(&buffer, "{d}", .{count});
+    try components.kpi(output, .{ .label = name, .value = value });
+}
+
+fn ratioKpi(
+    output: *std.Io.Writer,
+    name: []const u8,
+    numerator: i64,
+    denominator: i64,
+) !void {
+    var buffer: [32]u8 = undefined;
+    const value = try percentText(&buffer, numerator, denominator);
+    try components.kpi(output, .{ .label = name, .value = value });
+}
+
+fn basisPointsKpi(
+    output: *std.Io.Writer,
+    name: []const u8,
+    basis_points: u16,
+) !void {
+    if (basis_points > 10_000) return error.InvalidReportRate;
+    var buffer: [16]u8 = undefined;
+    const value = try std.fmt.bufPrint(&buffer, "{d}.{d:0>2}%", .{
+        basis_points / 100,
+        basis_points % 100,
+    });
+    try components.kpi(output, .{ .label = name, .value = value });
+}
+
+fn percentText(buffer: []u8, numerator: i64, denominator: i64) ![]const u8 {
+    if (numerator < 0 or denominator < 0) return error.InvalidReportCount;
+    if ((denominator == 0 and numerator != 0) or
+        (denominator != 0 and numerator > denominator))
+    {
+        return error.InvalidReportRate;
+    }
+    const hundredths: u64 = if (denominator == 0)
+        0
+    else
+        @intCast((@as(u128, @intCast(numerator)) * 10_000) / @as(u64, @intCast(denominator)));
+    const fraction = hundredths % 100;
+    return std.fmt.bufPrint(buffer, "{d}.{d}{d}%", .{
+        hundredths / 100,
+        fraction / 10,
+        fraction % 10,
+    });
+}
+
+fn nonnegative(value: i64) !u64 {
+    if (value < 0) return error.InvalidReportCount;
+    return @intCast(value);
 }
 
 fn queryUrl(
@@ -916,24 +1030,11 @@ fn canonicalPath(
 }
 
 fn text(output: *std.Io.Writer, value: []const u8) !void {
-    for (value) |byte| switch (byte) {
-        '&' => try output.writeAll("&amp;"),
-        '<' => try output.writeAll("&lt;"),
-        '>' => try output.writeAll("&gt;"),
-        '"' => try output.writeAll("&quot;"),
-        '\'' => try output.writeAll("&#39;"),
-        0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f, 0x7f => try output.writeAll("&#xfffd;"),
-        else => try output.writeByte(byte),
-    };
+    try components.text(output, value);
 }
 
 fn attribute(output: *std.Io.Writer, value: []const u8) !void {
-    for (value) |byte| switch (byte) {
-        '\t' => try output.writeAll("&#9;"),
-        '\n' => try output.writeAll("&#10;"),
-        '\r' => try output.writeAll("&#13;"),
-        else => try text(output, &.{byte}),
-    };
+    try components.attribute(output, value);
 }
 
 fn urlComponent(output: *std.Io.Writer, value: []const u8) !void {
@@ -949,17 +1050,6 @@ fn urlComponent(output: *std.Io.Writer, value: []const u8) !void {
             try output.writeByte(hex[byte & 0x0f]);
         }
     }
-}
-
-fn percent(output: *std.Io.Writer, numerator: i64, denominator: i64) !void {
-    const hundredths: i64 = if (numerator <= 0 or denominator <= 0)
-        0
-    else
-        @intCast(@divTrunc(@as(i128, numerator) * 10_000, denominator));
-    try output.print("{d}.{d:0>2}%", .{
-        @divTrunc(hundredths, 100),
-        @mod(hundredths, 100),
-    });
 }
 
 fn humanize(value: []const u8) []const u8 {
@@ -1062,6 +1152,18 @@ fn expectContrast(
     try std.testing.expect((lighter + 0.05) / (darker + 0.05) >= minimum);
 }
 
+test "report percentages format zero and positive signed counts exactly" {
+    var buffer: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("0.00%", try percentText(&buffer, 0, 0));
+    try std.testing.expectEqualStrings("0.00%", try percentText(&buffer, 0, 7));
+    try std.testing.expectEqualStrings("33.33%", try percentText(&buffer, 1, 3));
+    try std.testing.expectEqualStrings("100.00%", try percentText(&buffer, 7, 7));
+    try std.testing.expectError(error.InvalidReportCount, percentText(&buffer, -1, 7));
+    try std.testing.expectError(error.InvalidReportCount, percentText(&buffer, 1, -7));
+    try std.testing.expectError(error.InvalidReportRate, percentText(&buffer, 1, 0));
+    try std.testing.expectError(error.InvalidReportRate, percentText(&buffer, 8, 7));
+}
+
 test "production stylesheet mirrors the approved accessible design tokens" {
     const source = @embedFile("../../docs/design-tokens.json");
     const parsed = try std.json.parseFromSlice(
@@ -1111,5 +1213,5 @@ test "production stylesheet mirrors the approved accessible design tokens" {
 
     try std.testing.expect(std.mem.indexOf(u8, stylesheet, "@import") == null);
     try std.testing.expect(std.mem.indexOf(u8, stylesheet, "url(") == null);
-    try std.testing.expectEqualStrings("/admin/app.v4.css", stylesheet_path);
+    try std.testing.expectEqualStrings("/admin/app.v5.css", stylesheet_path);
 }

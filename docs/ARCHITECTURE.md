@@ -296,7 +296,35 @@ not a reason to add a worker pool before load requires it.
 | Disk full | Reject writes, expose readiness failure, preserve existing files |
 | Renderer error | Return a small escaped server-rendered error page |
 
-## 9. Caching
+## 9. Server-rendered components and charts
+
+The web controller continues to own all store access and produces owned typed
+view models. The component and chart renderers accept only those values plus an
+output writer. They do not access Turso, DuckDB, the network, sessions, the
+filesystem, clock, randomness, or browser state.
+
+Shared component code is limited to proven output semantics: context escaping,
+KPI values, feedback, empty states, and action-scoped form errors. Domain tables
+and page composition stay explicit. Chart code is a closed set of trend,
+horizontal-bar, funnel, fixed-column-path, and retention renderers rather than a
+chart grammar. It validates bounded slices and stable document-local IDs,
+computes deterministic geometry from integers, emits no event handlers, and
+pairs visual output with exact captioned data. Downstream feature tickets own
+their queries, product controls, and page behavior; the rendering layer cannot
+invent or recompute metric semantics. Exact alternatives always expose the raw
+number used for geometry; a formatted label may supplement but never replace
+it. Fixed-path view models are validated as a canonical contract: nodes are
+count-descending with label tie-breaks, transitions are ranked per adjacent
+step with deterministic label tie-breaks, and incoming/outgoing edge sums must
+equal every applicable node count before any markup is written.
+
+Wide domain tables carry explicit captions, scoped headers, numeric alignment,
+and per-cell mobile labels. Form failures preserve values, focus a single error
+summary, and associate only the affected controls. HTMX may expose the loading
+state of the initiating region, but native links/forms and complete HTML remain
+the application baseline.
+
+## 10. Caching
 
 The MVP has no report cache. The expected dataset makes on-demand queries the
 simpler choice. M6 did not add a cache because measurements did not require
@@ -304,7 +332,7 @@ one. Any later cache key must include site, exact time
 range, metric-version, filters, sort, and page; its invalidation watermark is
 the latest accepted event time for that site.
 
-## 10. Dashboard and Cloudio boundary
+## 11. Dashboard and Cloudio boundary
 
 DuckDB's writable-file ownership rules prohibit a later Cloudio process from
 opening the same file concurrently. The supported candidates are:

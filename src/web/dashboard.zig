@@ -580,6 +580,13 @@ fn formErrorPage(
         "The network exclusion was not saved. Enter an IPv4 address or /24, or an IPv6 address or /48."
     else
         "The definition was not saved. Check its name, match kind, value, and step count.";
+    page.form_error_target = switch (action) {
+        .add_goal => .goal,
+        .add_funnel => .funnel,
+        .add_excluded_network => .network,
+        .update_traffic_policy => .traffic_policy,
+        .delete_goal, .delete_funnel, .delete_excluded_network => .none,
+    };
     if (action == .add_goal) {
         page.goal_draft = .{
             .name = form.required("name") catch "",
@@ -593,6 +600,14 @@ fn formErrorPage(
         };
     } else if (action == .add_excluded_network) {
         page.network_draft = form.required("network") catch "";
+    } else if (action == .update_traffic_policy) {
+        page.traffic_policy_draft = .{
+            .strict_mode = if (form.optional("strict")) |strict|
+                std.mem.eql(u8, strict, "on")
+            else
+                false,
+            .daily_event_ceiling = form.required("daily_event_ceiling") catch "",
+        };
     }
     try writePage(output, 422, page);
 }

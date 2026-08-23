@@ -62,6 +62,19 @@ pub const FunnelDraft = struct {
     steps: []const u8 = "path=/pricing\nevent=signup",
 };
 
+pub const FormErrorTarget = enum {
+    none,
+    goal,
+    funnel,
+    network,
+    traffic_policy,
+};
+
+pub const TrafficPolicyDraft = struct {
+    strict_mode: bool,
+    daily_event_ceiling: []const u8,
+};
+
 pub const Page = struct {
     destination: Destination,
     sites: []const meta.Site,
@@ -78,6 +91,8 @@ pub const Page = struct {
     csrf_token: []const u8,
     notice: []const u8 = "",
     form_error: []const u8 = "",
+    form_error_target: FormErrorTarget = .none,
+    traffic_policy_draft: ?TrafficPolicyDraft = null,
     goal_draft: GoalDraft = .{},
     funnel_draft: FunnelDraft = .{},
     network_draft: []const u8 = "",

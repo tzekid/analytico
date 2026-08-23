@@ -124,6 +124,9 @@ async function normal() {
     await pagesLink.click({ noWaitAfter: true });
     await page.waitForTimeout(50);
     const loadingCount = await page.locator(".htmx-request").count();
+    const loadingRegion = page.locator("#loading-region.htmx-request");
+    const loadingRegionVisible = await loadingRegion.isVisible();
+    const loadingRegionText = await page.locator("#loading-region").textContent();
     response = await pagesResponse.catch((error) => {
       throw new Error(
         `${error.message}\nurl=${page.url()}\nlink=${pagesMarkup}\nconsole=${JSON.stringify(expectedConsoleErrors)}`,
@@ -131,6 +134,8 @@ async function normal() {
     });
     assert.equal(response.status(), 200);
     assert.ok(loadingCount >= 1);
+    assert.equal(loadingRegionVisible, true);
+    assert.equal(loadingRegionText, "Updating view…");
     await page.waitForFunction(() =>
       document.querySelector('.report-tabs a[aria-current="page"]')?.textContent === "Pages",
     );
@@ -202,6 +207,10 @@ async function normal() {
       ),
     );
     assert.equal(
+      await page.evaluate(() => document.activeElement?.id),
+      "form-error-summary",
+    );
+    assert.equal(
       await page
         .locator('form[action="/admin/goals"] input[name="name"]')
         .inputValue(),
@@ -216,7 +225,7 @@ async function normal() {
     ).length;
     await doubleForm.locator('button[type="submit"]').dblclick();
     await page.waitForFunction(() =>
-      document.querySelector('[role="status"]')?.textContent === "Goal added.",
+      document.querySelector('.notice[role="status"]')?.textContent === "Goal added.",
     );
     const doubleAfter = enhanced.filter(
       (entry) => entry.url === `${origin}/admin/goals`,

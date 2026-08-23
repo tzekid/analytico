@@ -58,7 +58,49 @@ chart primitives, warning/empty/loading variants, and mobile record tables.
 The deterministic prototype remains a hierarchy and responsive-behavior
 reference; its markup is not copied as a component framework.
 
-The shell stylesheet is self-hosted at a versioned `/admin/app.v4.css` path.
+The shared component layer is deliberately smaller than a design-system
+framework. It owns context-safe HTML text/attribute escaping and the repeated
+KPI, feedback, empty, and form-error-summary semantics. Page composition,
+domain tables, native control markup, and product-specific forms remain
+explicit. There is no component registry, arbitrary card/widget API, generic
+table query DSL, schema-driven form builder, or client state model.
+
+The chart layer exposes exactly five typed families required by the accepted
+1.0 screens: trend, horizontal bars, funnel, fixed-column paths, and retention.
+Inputs contain raw bounded numeric values plus already formatted labels. A
+renderer may write only deterministic HTML/SVG to its supplied writer; it does
+not read a database, network, session, filesystem, clock, random source, or
+browser state. Document-local IDs are caller-supplied stable ASCII identifiers
+and are validated before they enter SVG ID or fragment syntax. Input strings
+are escaped for their output context and numeric geometry cannot be supplied as
+markup.
+
+Every rendered chart has a visible caption/summary and an adjacent exact table
+or details alternative. That alternative prints the raw number used by layout;
+optional formatted text is additional and cannot replace it. Missing trend
+intervals and incomplete retention cells remain unavailable rather than
+becoming zero. Empty, single-point, constant, and all-zero inputs have defined
+output. Long series do not make every point a keyboard stop. The fixed path
+plot uses three through five columns, no more than eight named nodes plus
+`Other` and `No further action` in each column, and direct bounded Bezier
+geometry. Its typed input contract requires count-descending nodes with label
+tie-breaks, ranked transitions per adjacent step, distinct labels/edges, and
+exact incoming/outgoing aggregate totals. On mobile the exact transition list
+retains both step and node context and uses that validated ranking;
+tables with more than three meaningful columns become labeled records, funnels
+stack, and retention keeps a sticky cohort column plus printed values. The
+retention renderer follows the functional contract's maximum of 12 cohorts and
+12 visible periods, derives each percentage from its raw returned count and
+cohort size, and represents incomplete cells separately; later retention work
+may show fewer but cannot expand this rendering bound silently.
+
+Server validation renders one focused error summary and associates only the
+affected form fields with that summary while preserving submitted values.
+Notices use restrained status semantics, errors use alerts, and loading is
+limited to the region whose existing native navigation or form is in flight.
+None of these enhancement states may replace the JavaScript-free baseline.
+
+The component stylesheet is self-hosted at a versioned `/admin/app.v5.css` path.
 Changing its bytes requires another path revision because existing responses
 may be cached privately for 24 hours.
 
@@ -66,9 +108,12 @@ may be cached privately for 24 hours.
 
 `zig build test` parses `design-tokens.json`, verifies that every token has an
 exact production CSS declaration, checks the intended normal-text contrast
-pairs, and rejects external CSS/font loading. The real dashboard browser
-scenario checks computed light and dark theme values, functional action/link
-mappings, numeric figures, wordmark typography, and mobile touch targets.
+pairs, rejects external CSS/font loading, and exercises bounded chart layout,
+escaping, ID validation, degenerate inputs, and exact alternatives. The real
+dashboard browser scenario checks computed light and dark theme values,
+functional action/link mappings, numeric figures, wordmark typography, semantic
+figure/table equivalence, focused errors, mobile record/funnel behavior,
+reduced motion, keyboard order, and touch targets.
 
 The production budget remains 12 KiB gzip for CSS. Record raw and gzip bytes in
 the issue/PR evidence using the exact embedded stylesheet served by the real
