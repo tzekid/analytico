@@ -48,16 +48,19 @@ machine-readable color, spacing, radius, type, or layout tokens.
 
 ## Ticket boundary
 
-Issue #15 applies tokens to the existing server-rendered dashboard and owner
-authentication pages. The current pre-1.0 page frame retains its existing
-76 rem content width until issue #16 implements the approved shell and consumes
-the 216 px sidebar and 1440 px content tokens. Issue #17 owns new shared
-components, chart primitives, warning/empty/loading variants, and mobile record
-tables. No prototype shell or component markup is copied by this token ticket.
+Issue #15 applied tokens to the existing server-rendered dashboard and owner
+authentication pages. Issue #16 consumes the approved 216 px sidebar and
+1440 px content tokens for the six-destination shell, with a compact rail at
+intermediate widths and complete bottom navigation plus disclosure-based
+context at mobile widths. It reuses shipped report/forms content without
+claiming the later destination features. Issue #17 owns new shared components,
+chart primitives, warning/empty/loading variants, and mobile record tables.
+The deterministic prototype remains a hierarchy and responsive-behavior
+reference; its markup is not copied as a component framework.
 
-The stylesheet is self-hosted at a versioned `/admin/app.v3.css` path. Changing
-its bytes requires another path revision because existing responses may be
-cached privately for 24 hours.
+The shell stylesheet is self-hosted at a versioned `/admin/app.v4.css` path.
+Changing its bytes requires another path revision because existing responses
+may be cached privately for 24 hours.
 
 ## Verification
 

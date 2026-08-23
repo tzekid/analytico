@@ -8,6 +8,10 @@ const setupUrl = process.argv[3];
 const mode = process.argv[4] || "accept";
 if (!origin || !setupUrl) throw new Error("usage: browser <origin> <setup-url>");
 
+function isOverview(url) {
+  return url.origin === origin && /^\/admin\/sites\/[^/]+\/overview$/.test(url.pathname);
+}
+
 async function main() {
   const loginDurations = [];
   const options = {
@@ -75,14 +79,14 @@ async function main() {
       return;
     }
     try {
-      await page.waitForURL(`${origin}/admin`, { timeout: 15000 });
+      await page.waitForURL(isOverview, { timeout: 15000 });
     } catch (_) {
       throw new Error(
         "setup failed: " + await page.locator("#setup-error").textContent() +
         " console=" + failures.join(" | ")
       );
     }
-    assert.equal(await page.locator("h1").textContent(), "Analytico");
+    assert.equal(await page.locator("h1").textContent(), "Overview");
     assert.ok(requested.every((url) => !url.includes("#token=")));
     const cookies = await context.cookies(origin);
     const session = cookies.find((cookie) => cookie.name === "analytico_session");
@@ -168,7 +172,7 @@ async function main() {
     await page.goto(`${origin}/admin/login`);
     let loginStarted = Date.now();
     await page.locator("#login-button").click();
-    await page.waitForURL(`${origin}/admin`);
+    await page.waitForURL(isOverview);
     loginDurations.push(Date.now() - loginStarted);
     const firstLoginSession = (await context.cookies(origin)).find(
       (cookie) => cookie.name === "analytico_session"
@@ -187,7 +191,7 @@ async function main() {
     await page.goto(`${origin}/admin/login`);
     loginStarted = Date.now();
     await page.locator("#login-button").click();
-    await page.waitForURL(`${origin}/admin`);
+    await page.waitForURL(isOverview);
     loginDurations.push(Date.now() - loginStarted);
     const secondLoginSession = (await context.cookies(origin)).find(
       (cookie) => cookie.name === "analytico_session"
@@ -233,6 +237,7 @@ async function main() {
     response = await noScriptPage.goto(`${origin}/admin`);
     assert.equal(response.status(), 200);
     assert.equal(await noScriptPage.locator("#report").count(), 1);
+    await noScriptPage.locator('.primary-navigation a:has-text("Settings")').click();
     await noScriptPage.locator(
       'details.management:has(form[action="/admin/traffic-policy"]) > summary',
     ).click();
@@ -249,6 +254,7 @@ async function main() {
       await noScriptPage.locator('form[action="/admin/traffic-policy"] input[name="daily_event_ceiling"]').inputValue(),
       "100001"
     );
+    await noScriptPage.locator('.primary-navigation a:has-text("Journeys")').click();
     const definitions = noScriptPage.locator(
       'details.management:has(form[action="/admin/goals"])',
     );
@@ -268,7 +274,7 @@ async function main() {
     await funnelForm.locator('button[type="submit"]').click();
     await noScriptPage.waitForURL(/notice=funnel-added/);
     assert.equal(await noScriptPage.locator("li strong", { hasText: "Signup journey" }).count(), 1);
-    await noScriptPage.locator('form[action="/admin/logout"] button').click();
+    await noScriptPage.locator('.sidebar-account form[action="/admin/logout"] button').click();
     await noScriptPage.waitForURL(`${origin}/admin/login`);
     await noScript.close();
 
@@ -278,7 +284,7 @@ async function main() {
     loginStarted = Date.now();
     await page.locator("#login-button").click();
     try {
-      await page.waitForURL(`${origin}/admin`, { timeout: 15000 });
+      await page.waitForURL(isOverview, { timeout: 15000 });
     } catch (_) {
       throw new Error("final login failed: " + await page.locator("#login-error").textContent());
     }

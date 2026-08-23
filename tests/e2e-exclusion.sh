@@ -146,7 +146,7 @@ jq -e '
 page="$fixture/admin.html"
 cookie="analytico_session=$session_token"
 curl --silent --fail --cookie "$cookie" \
-    "$dashboard/admin?site=self&start=$today&end=$today&report=overview" >"$page"
+    "$dashboard/admin/sites/self/settings/general?start=$today&end=$today" >"$page"
 csrf=$(grep -Eo 'name="csrf" value="[A-Za-z0-9_-]{43}"' "$page" |
     head -1 | cut -d '"' -f 4)
 test "${#csrf}" = 43
@@ -295,7 +295,7 @@ if grep -aF '203.0.113.9' "$data/meta.db" "$data/events.duckdb" \
     exit 1
 fi
 test "$("$binary" doctor "$data")" = \
-    "ok metadata=v4 events=v6 sites=4 goals=0 funnels=0 stored_events=12 key=ok"
+    "ok metadata=v5 events=v7 sites=4 goals=0 funnels=0 stored_events=12 key=ok"
 grep -Fq '"accepted":12' "$fixture/server.stderr"
 grep -Fq '"excluded":6' "$fixture/server.stderr"
 

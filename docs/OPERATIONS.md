@@ -176,9 +176,12 @@ layer.
 
 ## 6. Private dashboard
 
-The dashboard is served at `/admin` by the same loopback process and canonical
-hostname as the collector. Replace `analytics.example` in `deploy/Caddyfile`,
-then validate and import that one vhost:
+The dashboard uses `/admin` as its authenticated default/compatibility entry
+and redirects to the selected site's canonical
+`/admin/sites/{site}/overview` route. The same loopback process and canonical
+hostname serve the six-destination site-scoped shell and the collector.
+Replace `analytics.example` in `deploy/Caddyfile`, then validate and import
+that one vhost:
 
 ```sh
 caddy validate --config deploy/Caddyfile

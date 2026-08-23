@@ -37,9 +37,12 @@
   suspected sessions, add an explicit default-off strict policy and daily
   ceiling, and retain only secret-keyed site/receipt-day network evidence for
   bounded identity-mint warnings.
-- The current server-rendered `/admin` dashboard and optional HTMX enhancement
-  shipped after M4. HTML, native navigation, and ordinary forms remain the
-  application baseline.
+- The server-rendered dashboard now uses the six-destination, site-scoped
+  shell: Overview, Analyze, Journeys, Sessions, Live, and Settings. `/admin`
+  and the bounded legacy `site`/`report` query form redirect to the closest
+  canonical route for one compatibility release. HTML, native navigation, and
+  ordinary forms remain the application baseline; HTMX is optional enhancement
+  over the same complete documents.
 
 ## 1. Product statement
 

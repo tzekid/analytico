@@ -250,7 +250,10 @@ analytico site install ./data example https://analytics.example
 
 For a direct replacement, follow [the cutover runbook](docs/CUTOVER.md).
 
-The same process also serves a complete private dashboard at `/admin`.
+The same process also serves a complete private dashboard. `/admin` resolves
+to the default site's canonical `/admin/sites/{site}/overview` route; the
+site-scoped shell links Overview, Analyze, Journeys, Sessions, Live, and
+Settings without requiring JavaScript.
 `deploy/Caddyfile` exposes the collector and passkey-protected dashboard on one
 canonical hostname, redirects `/` to `/admin`, and rejects unknown paths. All
 report navigation, UTC date filters, pagination, and goal/funnel forms work

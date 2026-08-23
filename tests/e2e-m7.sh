@@ -110,7 +110,7 @@ cookie="analytico_session=$session_cookie"
 
 page="$fixture/page.html"
 curl --silent --fail --cookie "$cookie" \
-    "$dashboard/admin?site=example&start=2025-01-01&end=2025-01-02&report=overview" \
+    "$dashboard/admin/sites/example/overview?start=2025-01-01&end=2025-01-02" \
     >"$page"
 grep -Fq 'hx-boost:inherited="true"' "$page"
 grep -Fq '/admin/htmx.28fae7bb.js' "$page"

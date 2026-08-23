@@ -3,7 +3,7 @@ const report = @import("../report.zig");
 const model = @import("model.zig");
 
 pub const stylesheet = @embedFile("style.css");
-pub const stylesheet_path = "/admin/app.v3.css";
+pub const stylesheet_path = "/admin/app.v4.css";
 pub const htmx = @embedFile("htmx_js");
 pub const htmx_gzip = @embedFile("htmx_gzip");
 pub const htmx_path = "/admin/htmx.28fae7bb.js";
@@ -22,18 +22,19 @@ const html_headers =
 pub const headers = html_headers;
 
 pub fn page(output: *std.Io.Writer, value: model.Page) !void {
-    try head(output, "Dashboard");
-    try output.writeAll(
-        "<header class=\"app-header\"><h1><a class=\"brand\" href=\"/admin\">Analytico</a></h1>" ++
-            "<nav class=\"account-nav\" aria-label=\"Account\"><a href=\"/admin/security\">Security</a>" ++
-            "<form class=\"inline\" method=\"post\" action=\"/admin/logout\" hx-boost=\"false\">" ++
-            "<input type=\"hidden\" name=\"csrf\" value=\"",
-    );
-    try attribute(output, value.csrf_token);
-    try output.writeAll(
-        "\"><button class=\"button-secondary\" type=\"submit\">Sign out</button></form>" ++
-            "</nav></header><main>",
-    );
+    try head(output, value.destination.label());
+    if (value.selected_site == null) {
+        try output.writeAll(
+            "<header class=\"first-run-header\"><a class=\"brand\" href=\"/admin\">Analytico</a></header>" ++
+                "<main id=\"main\" class=\"first-run-main\"><section class=\"panel\"><h1>No sites configured</h1>" ++
+                "<p>Add the first site with <code>analytico site add " ++
+                "... --timezone &lt;IANA-zone&gt;</code>, " ++
+                "then restart the service.</p></section></main>",
+        );
+        try foot(output);
+        return;
+    }
+    try shellStart(output, value);
     if (value.notice.len != 0) {
         try output.writeAll("<p class=\"notice\" role=\"status\">");
         try text(output, value.notice);
@@ -44,44 +45,38 @@ pub fn page(output: *std.Io.Writer, value: model.Page) !void {
         try text(output, value.form_error);
         try output.writeAll("</p>");
     }
-    if (value.selected_site == null) {
-        try output.writeAll(
-            "<section class=\"panel\"><h2>No sites configured</h2>" ++
-                "<p>Add the first site with <code>analytico site add " ++
-                "... --timezone &lt;IANA-zone&gt;</code>, " ++
-                "then restart the service.</p></section></main>",
-        );
-        try foot(output);
-        return;
+    try output.writeAll("<div class=\"page-heading\"><span class=\"eyebrow\">Analytico 1.0</span><h1>");
+    try text(output, value.destination.label());
+    try output.writeAll("</h1><p>");
+    try text(output, destinationSummary(value.destination));
+    try output.writeAll("</p></div>");
+    switch (value.destination) {
+        .overview => try reportSection(output, value),
+        .analyze => {
+            try reportNavigation(output, value);
+            try reportSection(output, value);
+        },
+        .journeys => {
+            try journeyNavigation(output, value);
+            try reportSection(output, value);
+            try definitions(output, value);
+        },
+        .sessions => try output.writeAll(
+            "<section class=\"panel empty-state\"><h2>Session explorer is not available yet</h2>" ++
+                "<p>Session lists and details are not available in this build.</p></section>",
+        ),
+        .live => try reportSection(output, value),
+        .settings => {
+            try trafficPolicy(output, value);
+            try selfExclusions(output, value);
+        },
     }
-    try output.writeAll("<section class=\"site-context\"><div><span class=\"eyebrow\">Current site</span><strong>");
-    try text(output, value.selected_site.?.name);
-    try output.writeAll("</strong><span class=\"muted\">");
-    try text(output, value.query.start_date);
-    try output.writeAll(" to ");
-    try text(output, value.query.end_date);
-    try output.writeAll(" · UTC</span></div></section>");
-    try filters(output, value);
-    try reportNavigation(output, value);
-    try output.writeAll("<section id=\"report\"><h2>");
-    try text(output, reportTitle(value.query.kind));
-    try output.writeAll("</h2>");
-    if (value.result) |result| {
-        try renderResult(output, value.query, result, value.overview_quality);
-    } else {
-        try output.writeAll("<p class=\"muted\">Create a definition below to run this report.</p>");
-    }
-    try output.writeAll("</section>");
-    try definitions(output, value);
-    try trafficPolicy(output, value);
-    try selfExclusions(output, value);
-    try output.writeAll("</main>");
-    try foot(output);
+    try shellEnd(output, value);
 }
 
 pub fn errorPage(output: *std.Io.Writer, value: model.ErrorPage) !void {
     try head(output, value.title);
-    try output.writeAll("<header><h1>Analytico</h1></header><main><section class=\"panel\"><h2>");
+    try output.writeAll("<header><h1>Analytico</h1></header><main id=\"main\" tabindex=\"-1\"><section class=\"panel\"><h2>");
     try text(output, value.title);
     try output.writeAll("</h2><p class=\"error\" role=\"alert\">");
     try text(output, value.message);
@@ -100,16 +95,81 @@ fn head(output: *std.Io.Writer, title: []const u8) !void {
     try attribute(output, htmx_path);
     try output.writeAll("\"></script><script defer src=\"");
     try attribute(output, dashboard_js_path);
-    try output.writeAll("\"></script></head><body hx-boost:inherited=\"true\">");
+    try output.writeAll("\"></script></head><body hx-boost:inherited=\"true\"><a class=\"skip-link\" href=\"#main\">Skip to main content</a>");
 }
 
 fn foot(output: *std.Io.Writer) !void {
-    try output.writeAll("<footer>UTC dates · server-rendered · no JavaScript required</footer></body></html>");
+    try output.writeAll("<footer class=\"first-run-footer\">UTC dates · server-rendered · no JavaScript required</footer></body></html>");
 }
 
-fn filters(output: *std.Io.Writer, value: model.Page) !void {
+fn shellStart(output: *std.Io.Writer, value: model.Page) !void {
+    try output.writeAll("<div class=\"app-shell\"><aside class=\"app-sidebar\"><a class=\"brand\" href=\"");
+    try canonicalUrl(output, .overview, value.query, 1);
+    try output.writeAll("\">Analytico <b>1.0</b></a>");
+    try primaryNavigation(output, value, "primary-navigation");
+    try accountNavigation(output, value.csrf_token, "sidebar-account");
+    try output.writeAll("</aside><div class=\"app-column\"><header class=\"context-header\"><div class=\"mobile-context-heading\"><strong>");
+    try text(output, value.selected_site.?.name);
+    try output.writeAll("</strong><span class=\"muted\">");
+    try text(output, value.query.start_date);
+    try output.writeAll(" – ");
+    try text(output, value.query.end_date);
+    try output.writeAll("</span></div><div class=\"desktop-context\">");
+    try contextControls(output, value);
+    try output.writeAll("</div><details class=\"mobile-context\"><summary>Context</summary>");
+    try contextControls(output, value);
+    try accountNavigation(output, value.csrf_token, "mobile-account");
+    try output.writeAll("</details></header><main id=\"main\" tabindex=\"-1\" class=\"app-content\">");
+}
+
+fn shellEnd(output: *std.Io.Writer, value: model.Page) !void {
+    try output.writeAll("</main><footer class=\"app-footer\">UTC dates · server-rendered · no JavaScript required</footer></div></div>");
+    try primaryNavigation(output, value, "mobile-navigation");
+    try output.writeAll("</body></html>");
+}
+
+fn accountNavigation(
+    output: *std.Io.Writer,
+    csrf_token: []const u8,
+    class: []const u8,
+) !void {
+    try output.writeAll("<nav class=\"");
+    try attribute(output, class);
+    try output.writeAll(" account-nav\" aria-label=\"Account\"><a href=\"/admin/security\">Security</a>" ++
+        "<form class=\"inline\" method=\"post\" action=\"/admin/logout\" hx-boost=\"false\">" ++
+        "<input type=\"hidden\" name=\"csrf\" value=\"");
+    try attribute(output, csrf_token);
+    try output.writeAll("\"><button class=\"button-secondary\" type=\"submit\">Sign out</button></form></nav>");
+}
+
+fn primaryNavigation(
+    output: *std.Io.Writer,
+    value: model.Page,
+    class: []const u8,
+) !void {
+    try output.writeAll("<nav class=\"");
+    try attribute(output, class);
+    try output.writeAll("\" aria-label=\"Primary\">");
+    inline for (std.meta.tags(model.Destination)) |destination| {
+        try output.writeAll("<a href=\"");
+        try canonicalUrl(output, destination, value.query, 1);
+        if (destination == value.destination) {
+            try output.writeAll("\" aria-current=\"page\">");
+        } else {
+            try output.writeAll("\">");
+        }
+        try output.writeAll("<span class=\"nav-short\" aria-hidden=\"true\">");
+        try output.writeAll(destination.shortLabel());
+        try output.writeAll("</span><span class=\"nav-label\">");
+        try text(output, destination.label());
+        try output.writeAll("</span></a>");
+    }
+    try output.writeAll("</nav>");
+}
+
+fn contextControls(output: *std.Io.Writer, value: model.Page) !void {
     try output.writeAll(
-        "<section class=\"report-controls\" aria-label=\"Report controls\">" ++
+        "<div class=\"context-controls\">" ++
             "<form class=\"site-switcher\" method=\"get\" action=\"/admin\" " ++
             "data-site-switcher hx-boost=\"true\" hx-sync=\"this:replace\">" ++
             "<label><span>Site</span><select name=\"site\">",
@@ -132,39 +192,47 @@ fn filters(output: *std.Io.Writer, value: model.Page) !void {
     try attribute(output, value.query.end_date);
     try output.writeAll(
         "\"><button class=\"button-secondary\" type=\"submit\">View site</button></form>" ++
-            "<form class=\"range-filter\" method=\"get\" action=\"/admin\" " ++
-            "hx-boost=\"true\" hx-sync=\"this:replace\">" ++
-            "<input type=\"hidden\" name=\"site\" value=\"",
+            "<form class=\"range-filter\" method=\"get\" action=\"",
     );
-    try attribute(output, value.query.site);
-    try output.writeAll("\"><label><span>Start</span><input type=\"date\" name=\"start\" required value=\"");
+    try canonicalPath(output, value.destination, value.query);
+    try output.writeAll("\" hx-boost=\"true\" hx-sync=\"this:replace\"><label><span>Start</span><input type=\"date\" name=\"start\" required value=\"");
     try attribute(output, value.query.start_date);
     try output.writeAll("\"></label><label><span>End</span><input type=\"date\" name=\"end\" required value=\"");
     try attribute(output, value.query.end_date);
-    try output.writeAll("\"></label><input type=\"hidden\" name=\"report\" value=\"");
-    try attribute(output, value.query.kind.name());
-    try output.writeAll("\">");
-    if (value.query.subject.len != 0) {
+    try output.writeAll("\"></label>");
+    if (value.destination == .analyze) {
+        try output.writeAll("<input type=\"hidden\" name=\"report\" value=\"");
+        try attribute(output, value.query.kind.name());
+        try output.writeAll("\">");
+    }
+    if (value.destination == .journeys and value.query.subject.len != 0) {
         try output.writeAll("<input type=\"hidden\" name=\"subject\" value=\"");
         try attribute(output, value.query.subject);
         try output.writeAll("\">");
     }
-    if (value.query.kind == .campaigns) {
+    if (value.destination == .analyze and value.query.kind == .campaigns) {
         try output.writeAll("<input type=\"hidden\" name=\"campaign\" value=\"");
         try attribute(output, @tagName(value.query.campaign_dimension));
         try output.writeAll("\">");
     }
-    if (value.query.kind.isList()) {
+    if (value.destination == .analyze and value.query.kind.isList()) {
         try output.writeAll("<input type=\"hidden\" name=\"sort\" value=\"");
         try attribute(output, @tagName(value.query.sort));
         try output.writeAll("\">");
     }
-    if (value.query.kind.isPaginated()) {
+    if (value.destination == .analyze or
+        (value.destination == .live and value.query.limit != report.default_limit))
+    {
         try output.writeAll("<input type=\"hidden\" name=\"limit\" value=\"");
         try output.print("{d}", .{value.query.limit});
         try output.writeAll("\">");
     }
-    try output.writeAll("<button type=\"submit\">Update dates</button></form></section>");
+    try output.writeAll(
+        "<button type=\"submit\">Update dates</button></form>" ++
+            "<dl class=\"context-state\"><div><dt>Comparison</dt><dd>None</dd></div>" ++
+            "<div><dt>Segment</dt><dd>All visitors</dd></div>" ++
+            "<div><dt>Filters</dt><dd>None</dd></div></dl></div>",
+    );
 }
 
 const NavItem = struct {
@@ -173,7 +241,6 @@ const NavItem = struct {
 };
 
 const navigation = [_]NavItem{
-    .{ .kind = .overview, .label = "Overview" },
     .{ .kind = .pages, .label = "Pages" },
     .{ .kind = .entries, .label = "Entries" },
     .{ .kind = .exits, .label = "Exits" },
@@ -184,17 +251,46 @@ const navigation = [_]NavItem{
     .{ .kind = .operating_systems, .label = "OS" },
     .{ .kind = .devices, .label = "Devices" },
     .{ .kind = .events, .label = "Events" },
-    .{ .kind = .traffic_quality, .label = "Traffic quality" },
 };
+
+fn destinationSummary(destination: model.Destination) []const u8 {
+    return switch (destination) {
+        .overview => "Traffic and audience at a glance.",
+        .analyze => "Explore the currently available report presets.",
+        .journeys => "Review and manage goals and funnels.",
+        .sessions => "Inspect visits and people without losing the shared site and date context.",
+        .live => "Inspect current traffic-quality and collection diagnostics.",
+        .settings => "Manage site-level tracking safeguards and exclusions.",
+    };
+}
+
+fn reportSection(output: *std.Io.Writer, value: model.Page) !void {
+    try output.writeAll("<section id=\"report\"><h2>");
+    try text(output, reportTitle(value.query.kind));
+    try output.writeAll("</h2>");
+    if (value.result) |result| {
+        try renderResult(output, value.query, result, value.overview_quality);
+    } else {
+        try output.writeAll("<p class=\"muted\">Create a definition below to run this report.</p>");
+    }
+    try output.writeAll("</section>");
+}
 
 fn reportNavigation(output: *std.Io.Writer, value: model.Page) !void {
     try output.writeAll("<div class=\"report-navigation\"><nav class=\"report-tabs\" aria-label=\"Reports\">");
     for (navigation) |item| {
         try reportLink(output, value.query, item.kind, "", item.label);
     }
+    try output.writeAll("</nav></div>");
+}
+
+fn journeyNavigation(output: *std.Io.Writer, value: model.Page) !void {
+    try output.writeAll("<div class=\"report-navigation\"><nav class=\"report-tabs\" aria-label=\"Journey type\">");
+    try journeyTypeLink(output, value.query, .goal, "Goals");
+    try journeyTypeLink(output, value.query, .funnel, "Funnels");
     try output.writeAll("</nav>");
     if (value.goals.len != 0 or value.funnels.len != 0) {
-        try output.writeAll("<div class=\"conversion-navigation\"><span class=\"eyebrow\">Conversions</span><nav aria-label=\"Conversions\">");
+        try output.writeAll("<div class=\"conversion-navigation\"><span class=\"eyebrow\">Definitions</span><nav aria-label=\"Journey definitions\">");
     }
     for (value.goals) |goal| {
         try reportLink(output, value.query, .goal, goal.name, goal.name);
@@ -206,6 +302,23 @@ fn reportNavigation(output: *std.Io.Writer, value: model.Page) !void {
         try output.writeAll("</nav></div>");
     }
     try output.writeAll("</div>");
+}
+
+fn journeyTypeLink(
+    output: *std.Io.Writer,
+    query: model.Query,
+    kind: report.Kind,
+    label: []const u8,
+) !void {
+    try output.writeAll("<a hx-boost=\"true\" href=\"");
+    try queryUrl(output, query, kind, "", 1);
+    if (query.kind == kind) {
+        try output.writeAll("\" aria-current=\"page\">");
+    } else {
+        try output.writeAll("\">");
+    }
+    try text(output, label);
+    try output.writeAll("</a>");
 }
 
 fn reportLink(
@@ -695,29 +808,111 @@ fn queryUrl(
     subject: []const u8,
     page_number: u32,
 ) !void {
-    try output.writeAll("/admin?site=");
-    try urlComponent(output, query.site);
-    try output.writeAll("&amp;start=");
-    try urlComponent(output, query.start_date);
+    var adjusted = query;
+    adjusted.kind = kind;
+    adjusted.subject = subject;
+    adjusted.page = page_number;
+    const destination: model.Destination = switch (kind) {
+        .overview => .overview,
+        .pages,
+        .entries,
+        .exits,
+        .sources,
+        .campaigns,
+        .countries,
+        .browsers,
+        .operating_systems,
+        .devices,
+        .events,
+        => .analyze,
+        .goal, .funnel => .journeys,
+        .traffic_quality => .live,
+    };
+    try canonicalUrl(output, destination, adjusted, page_number);
+}
+
+fn canonicalUrl(
+    output: *std.Io.Writer,
+    destination: model.Destination,
+    query: model.Query,
+    page_number: u32,
+) !void {
+    var adjusted = query;
+    switch (destination) {
+        .overview => {
+            adjusted.kind = .overview;
+            adjusted.subject = "";
+        },
+        .analyze => if (!adjusted.kind.isList()) {
+            adjusted.kind = .pages;
+            adjusted.subject = "";
+        },
+        .journeys => if (adjusted.kind != .goal and adjusted.kind != .funnel) {
+            adjusted.kind = .goal;
+            adjusted.subject = "";
+        },
+        .sessions, .settings => {
+            adjusted.kind = .overview;
+            adjusted.subject = "";
+        },
+        .live => {
+            adjusted.kind = .traffic_quality;
+            adjusted.subject = "";
+        },
+    }
+    adjusted.page = page_number;
+    try canonicalPath(output, destination, adjusted);
+    try output.writeAll("?start=");
+    try urlComponent(output, adjusted.start_date);
     try output.writeAll("&amp;end=");
-    try urlComponent(output, query.end_date);
-    try output.writeAll("&amp;report=");
-    try urlComponent(output, kind.name());
-    if (subject.len != 0) {
-        try output.writeAll("&amp;subject=");
-        try urlComponent(output, subject);
+    try urlComponent(output, adjusted.end_date);
+    switch (destination) {
+        .analyze => {
+            try output.writeAll("&amp;report=");
+            try urlComponent(output, adjusted.kind.name());
+            if (adjusted.kind == .campaigns) {
+                try output.writeAll("&amp;campaign=");
+                try urlComponent(output, @tagName(adjusted.campaign_dimension));
+            }
+            try output.writeAll("&amp;sort=");
+            try urlComponent(output, @tagName(adjusted.sort));
+            try output.print("&amp;limit={d}&amp;page={d}", .{
+                adjusted.limit,
+                adjusted.page,
+            });
+        },
+        .journeys => if (adjusted.subject.len != 0) {
+            try output.writeAll("&amp;subject=");
+            try urlComponent(output, adjusted.subject);
+        },
+        .live => if (adjusted.limit != report.default_limit or adjusted.page != 1) {
+            try output.print("&amp;limit={d}&amp;page={d}", .{
+                adjusted.limit,
+                adjusted.page,
+            });
+        },
+        .overview, .sessions, .settings => {},
     }
-    if (kind == .campaigns) {
-        try output.writeAll("&amp;campaign=");
-        try urlComponent(output, @tagName(query.campaign_dimension));
-    }
-    if (kind.isList()) {
-        try output.writeAll("&amp;sort=");
-        try urlComponent(output, @tagName(query.sort));
-    }
-    if (kind.isPaginated()) {
-        try output.print("&amp;limit={d}&amp;page={d}", .{ query.limit, page_number });
-    }
+}
+
+fn canonicalPath(
+    output: *std.Io.Writer,
+    destination: model.Destination,
+    query: model.Query,
+) !void {
+    try output.writeAll("/admin/sites/");
+    try output.writeAll(query.site);
+    try output.writeAll(switch (destination) {
+        .overview => "/overview",
+        .analyze => "/analyze",
+        .journeys => if (query.kind == .funnel)
+            "/journeys/funnels"
+        else
+            "/journeys/goals",
+        .sessions => "/sessions",
+        .live => "/live",
+        .settings => "/settings/general",
+    });
 }
 
 fn text(output: *std.Io.Writer, value: []const u8) !void {
@@ -916,5 +1111,5 @@ test "production stylesheet mirrors the approved accessible design tokens" {
 
     try std.testing.expect(std.mem.indexOf(u8, stylesheet, "@import") == null);
     try std.testing.expect(std.mem.indexOf(u8, stylesheet, "url(") == null);
-    try std.testing.expectEqualStrings("/admin/app.v3.css", stylesheet_path);
+    try std.testing.expectEqualStrings("/admin/app.v4.css", stylesheet_path);
 }
