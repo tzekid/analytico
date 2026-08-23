@@ -2,6 +2,7 @@ const std = @import("std");
 const analysis = @import("../analysis.zig");
 const domain = @import("../domain.zig");
 const report = @import("../report.zig");
+const timezone = @import("../timezone.zig");
 const events = @import("../store/events.zig");
 const meta = @import("../store/meta.zig");
 const reports = @import("../store/reports.zig");
@@ -446,12 +447,21 @@ pub fn overviewV2(
     var store = try events.Store.open(allocator, event_path);
     defer store.deinit();
     try store.requireCurrent();
+    const current_buckets = try overviewDayBuckets(allocator, current);
+    const comparison_buckets = try overviewDayBuckets(allocator, comparison);
     const execution = analysis.OverviewExecution{
         .site_id = site_id,
         .range = current,
         .comparison_range = comparison,
         .active_goals = resolved,
         .strict_traffic_mode = policy.strict_mode,
+        .daily_event_ceiling = policy.daily_event_ceiling,
+        .trend = .{
+            .metric = .visitors,
+            .interval = .day,
+            .current_buckets = current_buckets,
+            .comparison_buckets = comparison_buckets,
+        },
     };
     if (profile) {
         try output.writeAll(try analysis_store.profileOverview(
@@ -480,8 +490,24 @@ pub fn overviewV2(
         durations[4],
         durations[9],
         durations[9],
-        durations.len,
+        &durations,
     );
+}
+
+fn overviewDayBuckets(
+    allocator: std.mem.Allocator,
+    range: analysis.LocalDateRange,
+) ![]const analysis.OverviewBucket {
+    var buckets: std.ArrayList(analysis.OverviewBucket) = .empty;
+    var date = try timezone.Date.parse(range.start);
+    const end = try timezone.Date.parse(range.end);
+    while (date.dayNumber() <= end.dayNumber()) : (date = try date.addDays(1)) {
+        const label = try date.format();
+        try buckets.append(allocator, .{
+            .label = try allocator.dupe(u8, &label),
+        });
+    }
+    return buckets.toOwnedSlice(allocator);
 }
 
 fn writeOverviewEvidence(
@@ -491,7 +517,7 @@ fn writeOverviewEvidence(
     p50_micros: i64,
     p95_micros: i64,
     p99_micros: i64,
-    samples: usize,
+    sample_micros: []const i64,
 ) !void {
     try std.json.Stringify.value(.{
         .metric_version = analysis.metric_version,
@@ -506,8 +532,16 @@ fn writeOverviewEvidence(
         .converting_visitors = result.conversion_rate.current.numerator,
         .revenue_currencies = result.revenue.len,
         .legacy_people = result.completeness.legacy_people,
+        .trend_points = result.details.?.trend.current.len,
+        .comparison_trend_points = result.details.?.trend.comparison.?.len,
+        .content_rows = result.details.?.content.len,
+        .acquisition_rows = result.details.?.acquisition.len,
+        .conversion_rows = result.details.?.conversions.len,
+        .audience_rows = result.details.?.audience.len,
+        .accepted_events = result.details.?.health.accepted_events,
         .query_elapsed_micros = p95_micros,
-        .query_samples = samples,
+        .query_samples = sample_micros.len,
+        .query_sample_micros = sample_micros,
         .query_p50_micros = p50_micros,
         .query_p95_micros = p95_micros,
         .query_p99_micros = p99_micros,

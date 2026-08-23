@@ -42,6 +42,8 @@ semantic, or application state model is consequential and must be added here.
 | D31 | Stored self-exclusion and non-bot inflation | Prerender/localhost guards, keyed ephemeral visitor-days, and stored bounded exclusion sources | Accepted for 1.0 issue #67 |
 | D32 | Permanent traffic class and UA classifier | Schema-5 stored classes with a pinned local classifier and one-release legacy shadow | Accepted for 1.0 issue #68 |
 | D33 | Bounded browser and receipt traffic evidence | Schema-6 closed signal fields, classifier v2, and permanent class eligibility | Accepted for 1.0 issue #69 |
+| D34 | Query-time suspected traffic and site safeguards | Reversible suspected-session filtering, keyed network-day evidence, and a daily accepted-event ceiling | Accepted for 1.0 issue #70 |
+| D35 | Exact one-entry Overview result cache | Narrowly supersede D29's cache prohibition after measured cold SQL misses | Accepted for 1.0 issue #27 |
 
 ## D01. MVP interface
 
@@ -995,7 +997,8 @@ must change in the same release.
 
 ## D29. Separate closed metric-v2 query model and finite compiler
 
-**Status:** Accepted for Analytico 1.0 issue #24
+**Status:** Accepted for Analytico 1.0 issue #24; D35 narrowly supersedes
+the cache prohibition for one exact complete Overview-result entry only
 
 **Date:** 2026-08-22
 
@@ -1034,8 +1037,11 @@ Select the separate closed model and compiler defined by
   remain unchanged. Ordinary report concepts gain typed presets; specialized
   funnel/path/retention/session/Live engines remain separate.
 - Route/calendar comparison resolution, saved Turso entities, and product UI
-  remain in their issue-backed consumers. No generic AST, ORM, cache, rollup,
-  projection, service, table, migration, or dependency is introduced.
+  remain in their issue-backed consumers. No generic AST, ORM, rollup,
+  projection, service, table, migration, or dependency is introduced. D35
+  later permits one exact, mutation-invalidated complete Overview-result cache after
+  the complete cold SQL path was measured and rejected; it does not permit a
+  generic metric-v2 cache.
 
 ### Consequences
 
@@ -1684,3 +1690,126 @@ counter, and Overview warning behavior; authenticated native settings; fresh
 and exact metadata-4/event-6 million-row migration, interruption/retry,
 backup/restore/pair rollback; real headless/human journeys; performance budgets;
 extracted-release execution; and Debug plus ReleaseSafe gates.
+
+## D35. Permit one exact mutation-invalidated Overview-result cache
+
+**Status:** Accepted for Analytico 1.0 issue #27
+
+**Date:** 2026-08-23
+
+**Issue:** #27
+
+**Supersedes:** D29 only where D29 prohibited a cache for the fixed complete
+metric-v2 Overview consumer. D29's closed query model, finite compiler,
+and prohibition on a generic report cache remain authoritative.
+
+### Context
+
+D29 deliberately introduced metric-v2 without a cache, projection, rollup,
+table, worker, service, migration, or dependency. Issue #27 adds a fixed
+Overview consumer whose KPI and details statements must share one request
+deadline and meet the million-row complete-path budgets: normal p95 below
+250 ms and optional strict p95 at or below 500 ms.
+
+The first wide details plan exhausted the locked 128 MiB DuckDB limit. After
+narrowing the exact SQL, the uncached complete path still measured
+769/842/842 ms in normal mode and 1,071/1,274/1,274 ms in strict mode at
+p50/p95/p99. Materializing the narrowed range worsened normal p95 to 1,701 ms.
+These are cold failures and remain recorded as such; a cached sample must never
+be described as cold-query performance.
+
+Caching only the bounded details statement initially measured normal
+221/249/249 ms and strict 344/367/367 ms, but a fresh independent normal run
+reached 261 ms and failed the unchanged below-250-ms gate. Further narrowing
+and materialization of the KPI inputs remained noise-sensitive, including a
+fresh 262 ms normal p95. Those candidates are rejected evidence, not accepted
+headroom.
+
+### Candidates
+
+| Candidate | Runtime and correctness | Maintenance, migration, and rollback |
+| --- | --- | --- |
+| Keep the exact cold SQL only | Smallest state model and always current, but fails both accepted complete-path p95 budgets on the million-row fixture | No invalidation work; no migration; rollback is unnecessary, but the issue cannot meet its performance contract |
+| Retain only one exact Overview-details result in the writable event Store | Avoids the measured details scan but leaves the KPI statement on every read; one fresh normal p95 reached 261 ms | Same arena, key, clone, and invalidation obligations as the complete-result entry without stable accepted headroom |
+| Retain one exact complete Overview result in the writable event Store | Exact repeated reads avoid both measured statements; synchronous mutation invalidation and a full semantic key prevent stale cross-context reuse | One bounded arena, key builder, deep clone, and mutation hooks; no schema or deployment component; rollback deletes the cache fields and hooks, returning to the measured cold behavior |
+| Add a projection or rollup | Can make cold reads consistently fast and avoid dependence on cache locality | Introduces stored derived semantics, forward migration, write/update rules, verification and restore work, and a larger rollback surface before one screen proves that cost necessary |
+
+### Recommendation
+
+Select the exact one-entry cache before a projection or rollup:
+
+- The Store owns at most one entry. Its length-prefixed key contains the site,
+  current and comparison dates, strict policy, configured daily ceiling, full
+  ordered active-goal snapshot including every selector predicate's property,
+  scalar type, operator, value count, and values, selected metric and currency,
+  interval, and every current/comparison bucket label. It therefore cannot answer a
+  different site, policy, goal, metric, currency, calendar, or timezone-derived
+  bucket context.
+- The entry contains only the already bounded complete typed Overview result:
+  fixed KPI and completeness fields, at most 16 exact-currency totals, at most
+  400 current and 400 comparison buckets, five rows in each of four panels,
+  and one health row. It lives in one dedicated process-memory arena;
+  replacement or invalidation releases the whole arena. A hit deep-copies the
+  complete result into the request allocator, so rendering cannot mutate or
+  outlive it.
+- Every successful event insert, rebucket, deletion, and migration destroys
+  the entry synchronously. Goal, strict-policy, and daily-ceiling changes alter
+  the complete key. Duplicate/no-op event
+  writes do not invalidate because they do not change report facts.
+- A miss executes the exact KPI and details statements sequentially under the
+  existing deadline and stores their combined typed result. There is no TTL,
+  stale fallback, background refresh, durable cache table, separate KPI cache,
+  generic analysis cache, extra thread, dependency, network path, or log of
+  cached report data.
+
+The million-row gate intentionally measures ten repeated complete Store calls
+after one explicit cold warmup per traffic policy. That workload represents a
+private POC owner reloading the same canonical Overview while the underlying
+file is stable; it is the accepted warm-read budget, not a claim that a metric
+switch or a read following an accepted event is warm. Event ingestion and
+metric switches can cause a cold miss. The recorded 0.772-second combined cold
+profile from the rejected details-only candidate remains honest evidence for
+that case under the two-second request deadline.
+
+The first three complete-result stability runs preceded the final YAGNI
+cleanup. They measured normal p95 at 12, 8, and 8 microseconds, strict p95 at
+8, 8, and 9 microseconds, and cold profiles at 0.818, 0.728, and 0.858 seconds.
+The fourth independent run used the exact post-YAGNI source under PR review. It
+measured normal p95 at 29 microseconds, strict p95 at 8 microseconds, and the
+cold profile at 0.814 seconds. If real operation shows that invalidations make
+cold misses the normal user path or that the deadline becomes unacceptable,
+the cache is not to be widened: a new decision must reconsider a
+projection/rollup with measured production evidence.
+
+### Consequences
+
+- Runtime memory is bounded to one exact typed result plus the one
+  request-lifetime clone in this sequential serving architecture. There is no
+  unbounded key population or eviction policy.
+- Maintenance is localized to the Store cache type, exact key construction,
+  typed cloning, and the existing event-mutation boundaries. New event mutation
+  paths must invalidate before they can be accepted.
+- Security and privacy do not gain a new data source or trust boundary. The
+  cache holds only the bounded resolved input key, including any selector
+  predicate values, and authenticated report output already available to the
+  process. It never persists or logs either, includes the site in its exact
+  key, and never adds raw network, user-agent, or request-payload data.
+- No database migration, backup change, deployment component, or rollback data
+  step is required. Code rollback removes the cache and resumes the correct but
+  slower cold SQL path.
+- D29 remains unchanged for user-authored Analysis queries and every other
+  report. Issue #28 receives no permission to generalize or multiply the cache
+  without a new measured decision.
+
+**Affected contracts:** `ANALYSIS_QUERY.md`, `ARCHITECTURE.md`,
+`PERFORMANCE.md`, and `RELEASE_CONTRACT_1.0.md`.
+
+### Acceptance evidence
+
+Issue #27 must preserve the rejected cold/OOM and details-only-cache
+observations, label cold and warm evidence separately, prove exact-key
+separation including semantically different selector predicates and accepted-mutation
+invalidation on the real on-disk Store, retain the cold profile under the
+existing deadline, meet the normal and strict warm-read budgets, and pass
+Debug plus ReleaseSafe real-browser and report-parity gates. Any later cache
+expansion is out of scope.

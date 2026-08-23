@@ -10,13 +10,18 @@ pub const maximum_path_edges: usize = 400;
 pub const maximum_retention_periods: usize = 12;
 pub const maximum_retention_rows: usize = 12;
 const maximum_label_bytes: usize = 1024;
+const maximum_href_bytes: usize = 16 * 1024;
 
 pub const TrendPoint = struct {
     label: []const u8,
-    current: ?u64,
+    comparison_interval_label: []const u8 = "",
+    current: ?i128,
+    current_incomplete: bool = false,
     current_formatted: []const u8 = "",
-    comparison: ?u64 = null,
+    current_href: []const u8 = "",
+    comparison: ?i128 = null,
     comparison_formatted: []const u8 = "",
+    comparison_href: []const u8 = "",
 };
 
 pub const TrendFigure = struct {
@@ -26,6 +31,7 @@ pub const TrendFigure = struct {
     current_label: []const u8,
     comparison_label: []const u8 = "Comparison",
     show_comparison: bool = false,
+    scale: u8 = 0,
     points: []const TrendPoint,
 };
 
@@ -105,25 +111,44 @@ pub fn renderTrend(output: *std.Io.Writer, value: TrendFigure) !void {
     if (value.points.len > maximum_trend_points) return error.TooManyTrendPoints;
     try validateRequiredLabel(value.current_label);
     try validateRequiredLabel(value.comparison_label);
-    var maximum: u64 = 0;
+    if (value.scale > 6) return error.InvalidTrendScale;
+    var minimum: i128 = 0;
+    var maximum: i128 = 0;
     var current_count: usize = 0;
     var comparison_count: usize = 0;
     var current_has_gap = false;
-    for (value.points) |point| {
-        try validateRequiredLabel(point.label);
+    var incomplete_index: ?usize = null;
+    for (value.points, 0..) |point, index| {
+        if (point.current != null) try validateRequiredLabel(point.label) else try validateLabel(point.label);
+        try validateLabel(point.comparison_interval_label);
         try validateLabel(point.current_formatted);
         try validateLabel(point.comparison_formatted);
+        try validateHref(point.current_href);
+        try validateHref(point.comparison_href);
         if (point.current) |number| {
+            minimum = @min(minimum, number);
             maximum = @max(maximum, number);
             current_count += 1;
         } else {
             current_has_gap = true;
         }
+        if (point.current_incomplete) {
+            if (point.current == null or incomplete_index != null) {
+                return error.InvalidIncompleteTrendPoint;
+            }
+            incomplete_index = index;
+        }
         if (value.show_comparison) {
             if (point.comparison) |number| {
+                minimum = @min(minimum, number);
                 maximum = @max(maximum, number);
                 comparison_count += 1;
             }
+        }
+    }
+    if (incomplete_index) |index| {
+        for (value.points[index + 1 ..]) |point| {
+            if (point.current != null) return error.InvalidIncompleteTrendPoint;
         }
     }
 
@@ -143,81 +168,104 @@ pub fn renderTrend(output: *std.Io.Writer, value: TrendFigure) !void {
                 .{ left, y, left + width, y },
             );
         }
-        try output.print("<text class=\"chart-axis\" x=\"8\" y=\"{d}\">{d}</text>", .{ top + 4, maximum });
-        try output.print("<text class=\"chart-axis\" x=\"8\" y=\"{d}\">0</text>", .{bottom + 4});
+        try output.print("<text class=\"chart-axis\" x=\"8\" y=\"{d}\">", .{top + 4});
+        try scaledNumber(output, maximum, value.scale);
+        try output.writeAll("</text>");
+        try output.print("<text class=\"chart-axis\" x=\"8\" y=\"{d}\">", .{bottom + 4});
+        try scaledNumber(output, minimum, value.scale);
+        try output.writeAll("</text>");
+        const zero_y = try pointY(0, minimum, maximum, top, height);
 
         if (!current_has_gap and current_count > 1) {
-            try output.print("<path class=\"chart-area\" d=\"M {d} {d}", .{ left, bottom });
+            try output.print("<path class=\"chart-area\" d=\"M {d} {d}", .{ left, zero_y });
             for (value.points, 0..) |point, index| {
                 try output.print(" L {d} {d}", .{
                     pointX(index, value.points.len, left, width),
-                    pointY(point.current.?, maximum, top, height),
+                    try pointY(point.current.?, minimum, maximum, top, height),
                 });
             }
-            try output.print(" L {d} {d} Z\"/>", .{ left + width, bottom });
+            try output.print(" L {d} {d} Z\"/>", .{ left + width, zero_y });
         }
 
         if (current_count > 1) {
-            try renderTrendPath(output, value.points, false, maximum, left, top, width, height);
+            try renderTrendPath(output, value.points, false, minimum, maximum, left, top, width, height);
         }
         if (value.show_comparison and comparison_count > 1) {
-            try renderTrendPath(output, value.points, true, maximum, left, top, width, height);
+            try renderTrendPath(output, value.points, true, minimum, maximum, left, top, width, height);
         }
-        if (current_count == 1) {
-            for (value.points, 0..) |point, index| if (point.current) |number| {
-                try output.print(
-                    "<circle class=\"chart-point\" aria-hidden=\"true\" cx=\"{d}\" cy=\"{d}\" r=\"4\"/>",
-                    .{ pointX(index, value.points.len, left, width), pointY(number, maximum, top, height) },
-                );
-            };
-        }
-        if (value.show_comparison and comparison_count == 1) {
-            for (value.points, 0..) |point, index| if (point.comparison) |number| {
-                try output.print(
-                    "<circle class=\"chart-compare-point\" aria-hidden=\"true\" cx=\"{d}\" cy=\"{d}\" r=\"4\"/>",
-                    .{ pointX(index, value.points.len, left, width), pointY(number, maximum, top, height) },
-                );
-            };
+        for (value.points, 0..) |point, index| {
+            if (point.current) |number| try renderTrendMarker(
+                output,
+                "chart-point",
+                point.current_href,
+                point.label,
+                point.current_incomplete,
+                pointX(index, value.points.len, left, width),
+                try pointY(number, minimum, maximum, top, height),
+            );
+            if (value.show_comparison) if (point.comparison) |number| try renderTrendMarker(
+                output,
+                "chart-compare-point",
+                point.comparison_href,
+                if (point.comparison_interval_label.len == 0)
+                    point.label
+                else
+                    point.comparison_interval_label,
+                false,
+                pointX(index, value.points.len, left, width),
+                try pointY(number, minimum, maximum, top, height),
+            );
         }
         try output.writeAll("<text class=\"chart-axis\" x=\"");
         try output.print("{d}\" y=\"276\">", .{left});
-        try components.text(output, value.points[0].label);
+        try components.text(output, firstTrendLabel(value.points));
         try output.writeAll("</text>");
         if (value.points.len > 1) {
             try output.print("<text class=\"chart-axis chart-axis-end\" x=\"{d}\" y=\"276\">", .{left + width});
-            try components.text(output, value.points[value.points.len - 1].label);
+            try components.text(output, lastTrendLabel(value.points));
             try output.writeAll("</text>");
         }
         try output.writeAll("</svg>");
     }
     try exactStart(output, value.id, value.title);
-    try output.writeAll("<thead><tr><th scope=\"col\">Interval</th><th scope=\"col\">");
+    try output.writeAll("<thead><tr><th scope=\"col\">");
+    try output.writeAll(if (value.show_comparison) "Current interval" else "Interval");
+    try output.writeAll("</th><th scope=\"col\">");
     try components.text(output, value.current_label);
     try output.writeAll("</th>");
     if (value.show_comparison) {
-        try output.writeAll("<th scope=\"col\">");
+        try output.writeAll("<th scope=\"col\">Comparison interval</th><th scope=\"col\">");
         try components.text(output, value.comparison_label);
         try output.writeAll("</th>");
     }
     try output.writeAll("</tr></thead><tbody>");
     for (value.points) |point| {
-        try output.writeAll("<tr><th scope=\"row\" data-label=\"Interval\">");
-        try components.text(output, point.label);
+        try output.writeAll("<tr><th scope=\"row\" data-label=\"");
+        try output.writeAll(if (value.show_comparison) "Current interval" else "Interval");
+        try output.writeAll("\">");
+        try intervalLink(output, point.label, point.current_href, point.current_incomplete);
         try output.writeAll("</th><td data-label=\"");
         try components.attribute(output, value.current_label);
         try output.writeAll("\">");
-        try optionalExactValue(output, point.current, point.current_formatted);
+        try optionalTrendValue(output, point.current, point.current_formatted, value.scale);
         try output.writeAll("</td>");
         if (value.show_comparison) {
-            try output.writeAll("<td data-label=\"");
+            try output.writeAll("<td data-label=\"Comparison interval\">");
+            try intervalLink(
+                output,
+                point.comparison_interval_label,
+                point.comparison_href,
+                false,
+            );
+            try output.writeAll("</td><td data-label=\"");
             try components.attribute(output, value.comparison_label);
             try output.writeAll("\">");
-            try optionalExactValue(output, point.comparison, point.comparison_formatted);
+            try optionalTrendValue(output, point.comparison, point.comparison_formatted, value.scale);
             try output.writeAll("</td>");
         }
         try output.writeAll("</tr>");
     }
-    if (value.points.len == 0) try emptyTableRow(output, if (value.show_comparison) 3 else 2);
+    if (value.points.len == 0) try emptyTableRow(output, if (value.show_comparison) 4 else 2);
     try exactEnd(output);
     try output.writeAll("</figure>");
 }
@@ -507,7 +555,8 @@ fn renderTrendPath(
     output: *std.Io.Writer,
     points: []const TrendPoint,
     comparison: bool,
-    maximum: u64,
+    minimum: i128,
+    maximum: i128,
     left: u32,
     top: u32,
     width: u32,
@@ -524,7 +573,7 @@ fn renderTrendPath(
             try output.print("{s} {d} {d}", .{
                 if (connected) " L" else "M",
                 pointX(index, points.len, left, width),
-                pointY(number, maximum, top, height),
+                try pointY(number, minimum, maximum, top, height),
             });
             connected = true;
         } else {
@@ -532,6 +581,61 @@ fn renderTrendPath(
         }
     }
     try output.writeAll("\"/>");
+}
+
+fn renderTrendMarker(
+    output: *std.Io.Writer,
+    class: []const u8,
+    href: []const u8,
+    interval: []const u8,
+    incomplete: bool,
+    x: u32,
+    y: u32,
+) !void {
+    if (href.len != 0) {
+        try output.writeAll("<a href=\"");
+        try components.attribute(output, href);
+        try output.writeAll("\" tabindex=\"-1\" aria-label=\"Open interval ");
+        try components.attribute(output, interval);
+        if (incomplete) try output.writeAll(" (incomplete)");
+        try output.writeAll(" in Analyze\">");
+    }
+    if (incomplete) {
+        try output.print("<rect class=\"{s} chart-point-incomplete\"", .{class});
+        if (href.len == 0) try output.writeAll(" aria-hidden=\"true\"");
+        try output.print(
+            " x=\"{d}\" y=\"{d}\" width=\"10\" height=\"10\" rx=\"1\"/>",
+            .{ x -| 5, y -| 5 },
+        );
+    } else {
+        try output.print("<circle class=\"{s}\"", .{class});
+        if (href.len == 0) try output.writeAll(" aria-hidden=\"true\"");
+        try output.print(" cx=\"{d}\" cy=\"{d}\" r=\"4\"/>", .{ x, y });
+    }
+    if (href.len != 0) try output.writeAll("</a>");
+}
+
+fn firstTrendLabel(points: []const TrendPoint) []const u8 {
+    for (points) |point| {
+        if (point.label.len != 0) return point.label;
+        if (point.comparison_interval_label.len != 0) {
+            return point.comparison_interval_label;
+        }
+    }
+    return "";
+}
+
+fn lastTrendLabel(points: []const TrendPoint) []const u8 {
+    var index = points.len;
+    while (index != 0) {
+        index -= 1;
+        const point = points[index];
+        if (point.label.len != 0) return point.label;
+        if (point.comparison_interval_label.len != 0) {
+            return point.comparison_interval_label;
+        }
+    }
+    return "";
 }
 
 fn validateFigure(id: []const u8, title: []const u8, summary: []const u8) !void {
@@ -548,6 +652,16 @@ fn validateLabel(label: []const u8) !void {
 fn validateRequiredLabel(label: []const u8) !void {
     try validateLabel(label);
     if (label.len == 0) return error.MissingChartLabel;
+}
+
+fn validateHref(href: []const u8) !void {
+    if (href.len > maximum_href_bytes or !std.unicode.utf8ValidateSlice(href)) {
+        return error.InvalidChartHref;
+    }
+    if (href.len != 0 and href[0] != '/') return error.InvalidChartHref;
+    for (href) |byte| if (byte < 0x20 or byte == 0x7f) {
+        return error.InvalidChartHref;
+    };
 }
 
 fn figureStart(
@@ -631,6 +745,69 @@ fn optionalExactValue(output: *std.Io.Writer, value: ?u64, formatted: []const u8
     }
 }
 
+fn optionalTrendValue(
+    output: *std.Io.Writer,
+    value: ?i128,
+    formatted: []const u8,
+    scale: u8,
+) !void {
+    if (value) |number| {
+        try output.writeAll("<span class=\"chart-raw-value\">");
+        try scaledNumber(output, number, scale);
+        try output.writeAll("</span>");
+        if (formatted.len != 0) {
+            try output.writeAll(" <span class=\"chart-formatted-value\">(");
+            try components.text(output, formatted);
+            try output.writeAll(")</span>");
+        }
+    } else {
+        try output.writeAll("Unavailable");
+    }
+}
+
+fn intervalLink(
+    output: *std.Io.Writer,
+    label: []const u8,
+    href: []const u8,
+    incomplete: bool,
+) !void {
+    if (label.len == 0) return output.writeAll("Unavailable");
+    if (href.len != 0) {
+        try output.writeAll("<a href=\"");
+        try components.attribute(output, href);
+        try output.writeAll("\">");
+    }
+    try components.text(output, label);
+    if (href.len != 0) try output.writeAll("</a>");
+    if (incomplete) {
+        try output.writeAll(" <span class=\"trend-incomplete-marker\">Incomplete</span>");
+    }
+}
+
+fn scaledNumber(output: *std.Io.Writer, value: i128, scale: u8) !void {
+    if (scale == 0) return output.print("{d}", .{value});
+    var factor: i128 = 1;
+    for (0..scale) |_| factor *= 10;
+    const negative = value < 0;
+    const magnitude: u128 = if (negative)
+        @intCast(-(value + 1) + 1)
+    else
+        @intCast(value);
+    if (negative) try output.writeByte('-');
+    const divisor: u128 = @intCast(factor);
+    try output.print("{d}.", .{magnitude / divisor});
+    const fraction = magnitude % divisor;
+    switch (scale) {
+        1 => try output.print("{d:0>1}", .{fraction}),
+        2 => try output.print("{d:0>2}", .{fraction}),
+        3 => try output.print("{d:0>3}", .{fraction}),
+        4 => try output.print("{d:0>4}", .{fraction}),
+        5 => try output.print("{d:0>5}", .{fraction}),
+        6 => try output.print("{d:0>6}", .{fraction}),
+        else => unreachable,
+    }
+}
+
 fn pointX(index: usize, count: usize, left: u32, width: u32) u32 {
     if (count <= 1) return left + width / 2;
     return left + @as(u32, @intCast(
@@ -638,8 +815,18 @@ fn pointX(index: usize, count: usize, left: u32, width: u32) u32 {
     ));
 }
 
-fn pointY(value: u64, maximum: u64, top: u32, height: u32) u32 {
-    return top + height - scaled(value, maximum, height);
+fn pointY(value: i128, minimum: i128, maximum: i128, top: u32, height: u32) !u32 {
+    if (minimum == maximum) return top + height;
+    const range = std.math.sub(i128, maximum, minimum) catch
+        return error.InvalidTrendValue;
+    const distance = std.math.sub(i128, maximum, value) catch
+        return error.InvalidTrendValue;
+    if (range <= 0 or distance < 0 or distance > range) {
+        return error.InvalidTrendValue;
+    }
+    const scaled_distance = std.math.mul(i128, distance, height) catch
+        return error.InvalidTrendValue;
+    return top + @as(u32, @intCast(@divTrunc(scaled_distance, range)));
 }
 
 fn scaled(value: u64, maximum: u64, extent: u32) u32 {
@@ -716,7 +903,7 @@ test "trend handles empty single constant gaps escaping and stable IDs" {
     const points = [_]TrendPoint{
         .{ .label = "Day <1>", .current = 7, .current_formatted = "seven visitors", .comparison = 4 },
         .{ .label = "Day 2", .current = null, .comparison = 4 },
-        .{ .label = "Day 3", .current = 7, .comparison = 4 },
+        .{ .label = "Day 3", .current = 7, .current_incomplete = true, .comparison = 4 },
     };
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     try renderTrend(&output.writer, .{
@@ -732,12 +919,14 @@ test "trend handles empty single constant gaps escaping and stable IDs" {
     try std.testing.expect(std.mem.indexOf(u8, rendered, "aria-labelledby=\"trend-fixture-title\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "Visitors &lt;trend&gt;") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "Day &lt;1&gt;") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "scope=\"row\" data-label=\"Interval\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "scope=\"row\" data-label=\"Current interval\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "class=\"chart-raw-value\">7</span>") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "(seven visitors)") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "Unavailable") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "class=\"chart-line\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "class=\"chart-compare\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "chart-point chart-point-incomplete") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "trend-incomplete-marker\">Incomplete") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "onclick") == null);
     try std.testing.expectError(error.InvalidDocumentId, renderTrend(&output.writer, .{
         .id = "bad)id",
@@ -745,6 +934,16 @@ test "trend handles empty single constant gaps escaping and stable IDs" {
         .summary = "Bad",
         .current_label = "Count",
         .points = &.{},
+    }));
+    try std.testing.expectError(error.InvalidIncompleteTrendPoint, renderTrend(&output.writer, .{
+        .id = "bad-incomplete",
+        .title = "Bad incomplete",
+        .summary = "Incomplete cannot precede another current interval.",
+        .current_label = "Count",
+        .points = &.{
+            .{ .label = "First", .current = 1, .current_incomplete = true },
+            .{ .label = "Last", .current = 2 },
+        },
     }));
 
     var single = std.Io.Writer.Allocating.init(std.testing.allocator);
@@ -760,7 +959,7 @@ test "trend handles empty single constant gaps escaping and stable IDs" {
     try std.testing.expect(std.mem.indexOf(u8, single_rendered, "<circle") != null);
     try std.testing.expect(std.mem.indexOf(u8, single_rendered, "d=\"\"") == null);
     try std.testing.expectEqual(@as(u32, 464), pointX(0, 1, 56, 816));
-    try std.testing.expectEqual(@as(u32, 244), pointY(0, 0, 24, 220));
+    try std.testing.expectEqual(@as(u32, 244), try pointY(0, 0, 0, 24, 220));
 
     var empty = std.Io.Writer.Allocating.init(std.testing.allocator);
     try renderTrend(&empty.writer, .{
@@ -788,7 +987,7 @@ test "trend handles empty single constant gaps escaping and stable IDs" {
     const constant_rendered = try constant.toOwnedSlice();
     defer std.testing.allocator.free(constant_rendered);
     try std.testing.expect(std.mem.indexOf(u8, constant_rendered, "class=\"chart-area\"") != null);
-    try std.testing.expectEqual(@as(u32, 24), pointY(5, 5, 24, 220));
+    try std.testing.expectEqual(@as(u32, 24), try pointY(5, 0, 5, 24, 220));
 
     var single_comparison = std.Io.Writer.Allocating.init(std.testing.allocator);
     try renderTrend(&single_comparison.writer, .{
@@ -805,6 +1004,48 @@ test "trend handles empty single constant gaps escaping and stable IDs" {
     const single_comparison_rendered = try single_comparison.toOwnedSlice();
     defer std.testing.allocator.free(single_comparison_rendered);
     try std.testing.expect(std.mem.indexOf(u8, single_comparison_rendered, "class=\"chart-compare-point\"") != null);
+}
+
+test "trend preserves signed exact values and bounded native interval links" {
+    const points = [_]TrendPoint{.{
+        .label = "2025-01-01T00:00",
+        .comparison_interval_label = "2024-12-31T00:00",
+        .current = -1_250_000,
+        .current_formatted = "EUR -1.250000",
+        .current_href = "/admin/sites/example/analyze?a=1&b=2",
+        .comparison = 2_500_000,
+        .comparison_formatted = "EUR 2.500000",
+        .comparison_href = "/admin/sites/example/analyze?comparison=1",
+    }};
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    try renderTrend(&output.writer, .{
+        .id = "signed-trend",
+        .title = "Revenue (EUR) over time",
+        .summary = "Signed exact values.",
+        .current_label = "Current range",
+        .comparison_label = "Comparison range",
+        .show_comparison = true,
+        .scale = 6,
+        .points = &points,
+    });
+    const rendered = output.written();
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "class=\"chart-raw-value\">-1.250000</span>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "(EUR -1.250000)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "Current interval") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "Comparison interval") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "a=1&amp;b=2") != null);
+    try std.testing.expectError(error.InvalidChartHref, renderTrend(&output.writer, .{
+        .id = "bad-href",
+        .title = "Bad href",
+        .summary = "External links are rejected.",
+        .current_label = "Current",
+        .points = &.{.{
+            .label = "Now",
+            .current = 1,
+            .current_href = "https://attacker.example/",
+        }},
+    }));
 }
 
 test "bar and funnel figures preserve exact all-zero data" {

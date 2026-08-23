@@ -69,7 +69,11 @@ Issue #25 keeps calendar controls explicit rather than adding a generic picker.
 The context header contains native preset links, inclusive custom date inputs,
 and a comparison select. It prints the selected site's timezone, resolved
 comparison dates or an unavailable explanation, and a text marker when today
-is incomplete. Exact dates remain visible on mobile. Keyboard and
+is incomplete. Pointer and keyboard trend views mark the last current bucket
+itself with the visible word
+`Incomplete` and a distinct square SVG marker; color is supplementary. The
+comparison series is never marked incomplete merely because the current range
+contains today. Exact dates remain visible on mobile. Keyboard and
 JavaScript-disabled use follows native link, details, select, date-input, and
 submit behavior; HTMX may enhance those same GETs and browser history only.
 UTC compatibility reports carry a visible warning and are never styled as if
@@ -110,7 +114,7 @@ Notices use restrained status semantics, errors use alerts, and loading is
 limited to the region whose existing native navigation or form is in flight.
 None of these enhancement states may replace the JavaScript-free baseline.
 
-The component stylesheet is self-hosted at a versioned `/admin/app.v7.css` path.
+The component stylesheet is self-hosted at a versioned `/admin/app.v8.css` path.
 Changing its bytes requires another path revision because existing responses
 may be cached privately for 24 hours.
 

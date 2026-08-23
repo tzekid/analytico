@@ -194,6 +194,43 @@ facts independently, so adjacent or overlapping ranges do not share mutable
 state. The existing maximums of 32 active goals, 16 currency series, 400 local
 dates, one report thread, and a two-second deadline apply.
 
+## Overview trend and answer panels
+
+The fixed Overview trend selects exactly one of Visitors, Sessions, Page views,
+all-active-goal Conversions, or Revenue. Revenue always selects one explicit
+observed currency. Its exact signed decimal is preserved in the visible table
+and in server-side layout input; currencies are never combined. Count and
+exact-value intervals with no eligible rows are exact zero intervals, while an
+unavailable comparison remains unavailable. Current and comparison retain
+their own ordered calendar labels when a leap or DST boundary gives them
+different shapes.
+
+An Overview point handoff does not change metric semantics. Its highlighted
+interval is presentation context only until the full Trend consumer ships; the
+working Analyze report retains the original complete date range and states
+that no interval filter was applied.
+
+The answer panels use these fixed semantics:
+
+- Content ranks paths by accepted page views, shows distinct canonical people
+  with a page view for the path, and divides each row's page views by all
+  current page views for share.
+- Acquisition attributes each included session to its deterministic first page
+  view's external referrer host, or Direct when absent. It shows sessions and
+  converting sessions divided by sessions.
+- Conversions counts distinct canonical people separately for every active
+  goal selector. Identical selectors under different goal IDs remain distinct
+  rows. The displayed rate divides each goal's converting people by all
+  current visitors.
+- Audience attributes each included session to the country on its first
+  meaningful event, using Unknown for the stored `ZZ` value, and ranks by
+  sessions. The companion Devices destination remains directly reachable.
+
+Each panel uses the same current site-local range, canonical identity,
+product-traffic/strict policy, full-session attribution, and active-goal
+snapshot as the headline. Each returns at most five rows ordered by its primary
+count descending and label ascending.
+
 ## Bots
 
 Traffic classification is versioned by D32, D33, D34, and

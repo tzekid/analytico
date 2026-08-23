@@ -1,4 +1,5 @@
 const std = @import("std");
+const analysis = @import("../analysis.zig");
 const domain = @import("../domain.zig");
 const duckdb = @import("duckdb.zig");
 const timezone = @import("../timezone.zig");
@@ -119,6 +120,7 @@ pub const LegacyMigrationEvidence = struct {
 
 pub const Store = struct {
     database: duckdb.Database,
+    overview_result_cache: ?OverviewResultCache = null,
 
     pub fn open(allocator: std.mem.Allocator, path: []const u8) !Store {
         return .{ .database = try duckdb.Database.open(allocator, path) };
@@ -139,23 +141,28 @@ pub const Store = struct {
     }
 
     pub fn deinit(self: *Store) void {
+        if (self.overview_result_cache) |*cache| cache.deinit();
         self.database.deinit();
     }
 
     pub fn migrate(self: *Store) !void {
         try self.migrateThrough(schema_version);
+        self.invalidateAnalysisCache();
     }
 
     pub fn migrateFixtureV4(self: *Store) !void {
         try self.migrateThrough(4);
+        self.invalidateAnalysisCache();
     }
 
     pub fn migrateFixtureV5(self: *Store) !void {
         try self.migrateThrough(5);
+        self.invalidateAnalysisCache();
     }
 
     pub fn migrateFixtureV6(self: *Store) !void {
         try self.migrateThrough(6);
+        self.invalidateAnalysisCache();
     }
 
     fn migrateThrough(self: *Store, target: i64) !void {
@@ -1264,6 +1271,7 @@ pub const Store = struct {
         var result = try statement.execute();
         result.deinit();
         try self.database.exec("COMMIT");
+        self.invalidateAnalysisCache();
     }
 
     pub fn insertV2(
@@ -1482,6 +1490,7 @@ pub const Store = struct {
         var result = try statement.execute();
         result.deinit();
         try self.database.exec("COMMIT");
+        self.invalidateAnalysisCache();
         return .inserted;
     }
 
@@ -1702,6 +1711,7 @@ pub const Store = struct {
         const after = try self.siteEventBounds(site_id);
         if (after.count != expected_count) return error.RebucketCountChanged;
         try self.database.exec("COMMIT");
+        self.invalidateAnalysisCache();
     }
 
     pub fn deleteBefore(self: *Store, cutoff_date: []const u8) !i64 {
@@ -1727,6 +1737,7 @@ pub const Store = struct {
             \\)
         );
         try self.database.exec("COMMIT");
+        self.invalidateAnalysisCache();
         return count;
     }
 
@@ -1753,6 +1764,7 @@ pub const Store = struct {
         var result = try statement.execute();
         result.deinit();
         try self.database.exec("COMMIT");
+        self.invalidateAnalysisCache();
         return count;
     }
 
@@ -2121,6 +2133,11 @@ pub const Store = struct {
         try self.database.checkpoint();
     }
 
+    fn invalidateAnalysisCache(self: *Store) void {
+        if (self.overview_result_cache) |*cache| cache.deinit();
+        self.overview_result_cache = null;
+    }
+
     fn eventDigest(
         self: *Store,
         allocator: std.mem.Allocator,
@@ -2186,6 +2203,16 @@ pub const Store = struct {
             return error.ExpectedScalar;
         }
         return result.int64(0, 0);
+    }
+};
+
+pub const OverviewResultCache = struct {
+    arena: std.heap.ArenaAllocator,
+    key: []const u8,
+    result: analysis.OverviewResult,
+
+    pub fn deinit(self: *OverviewResultCache) void {
+        self.arena.deinit();
     }
 };
 

@@ -351,11 +351,22 @@ the application baseline.
 
 ## 10. Caching
 
-The MVP has no report cache. The expected dataset makes on-demand queries the
-simpler choice. M6 did not add a cache because measurements did not require
-one. Any later cache key must include site, exact time
-range, metric-version, filters, sort, and page; its invalidation watermark is
-the latest accepted event time for that site.
+The historical MVP had no report cache. Decision D35 records issue #27's measured million-row
+complete path made one narrower exception before any projection or rollup: the
+event Store owns at most one exact metric-v2 complete Overview-result entry. Its key
+contains the site, exact current/comparison ranges, strict policy, configured
+daily ceiling, full active-goal snapshot including selector predicates,
+selected metric/currency, interval, and all zone-derived bucket labels. The
+entry lives in one dedicated arena,
+never on disk.
+
+Every successful event insert, rebucket, deletion, or migration synchronously
+destroys the entry. Goal and traffic-
+policy changes alter the complete key. There is no TTL, background refresh,
+stale fallback, separate KPI cache, general report cache, or new state service.
+A hit is deep-copied into the request allocator before rendering.
+`ANALYSIS_QUERY.md`
+and `PERFORMANCE.md` define the exact boundary and accepted/rejected evidence.
 
 ## 11. Dashboard and Cloudio boundary
 

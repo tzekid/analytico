@@ -86,7 +86,6 @@ async function main() {
     await assertMetric(page, "Engagement rate", "80.00%");
     await assertMetric(page, "Conversions", "4");
     await assertMetric(page, "Conversion rate", "75.00%");
-    await assertMetric(page, "Persistent coverage", "0.00%");
     assert.equal(
       await page.locator(".overview-metrics .kpi").count(),
       6,
@@ -134,18 +133,28 @@ async function main() {
     );
     assert.equal(await page.getByText(/^Revenue \(/).count(), 0);
     assert.equal(
-      await page.getByRole("heading", { name: "Traffic quality" }).count(),
+      await page.getByRole("heading", { name: "Trend", exact: true }).count(),
       1,
     );
-    assert.equal((await page.locator("body").innerText()).includes(
-      "Stored classes plus reversible query-classifier v1 diagnostics",
-    ), true);
-    assert.equal((await page.locator("body").innerText()).includes(
-      "Compatibility report: the values below still use UTC calendar dates.",
-    ), false);
-    assert.equal((await page.locator("body").innerText()).includes(
-      "Traffic-quality diagnostics below use received UTC dates",
-    ), true);
+    assert.equal(await page.locator(".answer-panel").count(), 4);
+    for (const heading of ["Content", "Acquisition", "Conversions", "Audience", "Data health"]) {
+      assert.equal(await page.getByRole("heading", { name: heading, exact: true }).count(), 1);
+    }
+    assert.equal(
+      await page.getByRole("link", { name: "Devices", exact: true }).getAttribute("href"),
+      "/admin/sites/example/analyze?from=2025-01-01&to=2025-01-02&compare=previous&report=devices&sort=count&limit=25&page=1",
+    );
+    const overviewText = await page.locator("#report").innerText();
+    assert.equal(
+      await page.locator(".health-grid div", { hasText: "Rejected since process restart" }).locator("dd").textContent(),
+      "0",
+    );
+    assert.equal(
+      await page.locator(".health-grid div", { hasText: "Store failures since process restart" }).locator("dd").textContent(),
+      "0",
+    );
+    assert.equal(overviewText.includes("Stored classes plus reversible query-classifier v1 diagnostics"), false);
+    assert.equal(await page.getByRole("link", { name: "Open full Live diagnostics" }).count(), 1);
     await assertVisualTheme(page, "light", "44px");
     if (process.env.ANALYTICO_MOBILE_SCREENSHOT_PATH) {
       await page.screenshot({
@@ -165,7 +174,135 @@ async function main() {
     assert.equal(await page.locator("#loading-region").isVisible(), false);
     assert.equal(await page.evaluate(() => localStorage.length), 0);
     assert.equal(await page.evaluate(() => sessionStorage.length), 0);
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
+    const overviewRecords = page.locator(".answer-panel .mobile-records tbody tr").first();
+    assert.equal(
+      await overviewRecords.evaluate((element) => getComputedStyle(element).display),
+      "block",
+    );
     assert.deepEqual(failures, []);
+
+    const metricForm = page.locator("form.overview-metric-form");
+    await metricForm.locator('select[name="metric"]').selectOption("sessions");
+    response = await Promise.all([
+      page.waitForNavigation({ waitUntil: "load" }),
+      metricForm.getByRole("button", { name: "Update trend" }).click(),
+    ]).then(([navigation]) => navigation);
+    assert.equal(response.status(), 200);
+    assert.match(page.url(), /[?&]metric=sessions(?:&|$)/);
+    assert.equal(await page.locator(".overview-trend figcaption").textContent(), "Sessions over time");
+    assert.equal(
+      await page.locator(".health-grid div", { hasText: "Configured daily cap" }).locator("dd").textContent(),
+      "1",
+    );
+    assert.equal(
+      await page.locator(".health-grid div", { hasText: "Ceiling-reached site-local days in range" }).locator("dd").textContent(),
+      "2",
+    );
+    assert.equal(
+      await page.getByText(
+        "The daily accepted-event ceiling was reached on 2 site-local day(s) in this range. New events received after the cap returned 429.",
+        { exact: true },
+      ).count(),
+      1,
+    );
+    const trendData = page.locator(".overview-trend .chart-data");
+    await trendData.locator(":scope > summary").click();
+    const intervalLink = trendData.locator("tbody th[scope=row] a").first();
+    const interval = await intervalLink.textContent();
+    response = await Promise.all([
+      page.waitForNavigation({ waitUntil: "load" }),
+      intervalLink.click(),
+    ]).then(([navigation]) => navigation);
+    assert.equal(response.status(), 200);
+    assert.match(page.url(), /\/admin\/sites\/example\/analyze\?/);
+    assert.match(page.url(), /from=2025-01-01&to=2025-01-02&compare=previous/);
+    assert.match(page.url(), /[?&]focus=sessions(?:&|$)/);
+    assert.match(page.url(), new RegExp(`[?&]highlight=${encodeURIComponent(interval)}(?:&|$)`));
+    assert.match(await page.locator(".analysis-focus").innerText(), new RegExp(`Sessions focus: ${interval}`));
+    assert.match(await page.locator(".analysis-focus").innerText(), /not a hidden filter/);
+    await page.goBack({ waitUntil: "load" });
+    assert.equal(await page.locator(".overview-trend figcaption").textContent(), "Sessions over time");
+
+    response = await page.goto(
+      `${origin}/admin/sites/example/overview?from=2025-01-01&to=2025-01-03&compare=previous&metric=sessions`,
+      { waitUntil: "load" },
+    );
+    assert.equal(response.status(), 200);
+    const boundedTrendData = page.locator(".overview-trend .chart-data");
+    await boundedTrendData.locator(":scope > summary").click();
+    const pointHandoffs = await boundedTrendData.locator("tbody a").evaluateAll(
+      (links) => links.map((link) => ({
+        label: link.textContent,
+        href: link.getAttribute("href"),
+      })),
+    );
+    assert.equal(pointHandoffs.length, 6);
+    for (const handoff of pointHandoffs) {
+      const target = new URL(handoff.href, origin);
+      assert.equal(target.pathname, "/admin/sites/example/analyze");
+      assert.deepEqual(
+        [...target.searchParams.keys()].sort(),
+        ["compare", "focus", "from", "highlight", "limit", "page", "report", "sort", "to"].sort(),
+      );
+      assert.equal(target.searchParams.get("from"), "2025-01-01");
+      assert.equal(target.searchParams.get("to"), "2025-01-03");
+      assert.equal(target.searchParams.get("compare"), "previous");
+      assert.equal(target.searchParams.get("report"), "pages");
+      assert.equal(target.searchParams.get("focus"), "sessions");
+      assert.equal(target.searchParams.get("highlight"), handoff.label);
+      const handoffResponse = await context.request.get(target.href);
+      assert.equal(handoffResponse.status(), 200);
+      await handoffResponse.dispose();
+    }
+
+    const devicesLink = page.getByRole("link", { name: "Devices", exact: true });
+    response = await Promise.all([
+      page.waitForNavigation({ waitUntil: "load" }),
+      devicesLink.click(),
+    ]).then(([navigation]) => navigation);
+    assert.equal(response.status(), 200);
+    assert.equal(await page.getByRole("heading", { name: "Devices", exact: true }).count(), 1);
+    await page.goBack({ waitUntil: "load" });
+
+    response = await page.goto(route("empty", "overview"), { waitUntil: "load" });
+    assert.equal(response.status(), 200);
+    assert.equal(await page.getByRole("heading", { name: "No events received yet" }).count(), 1);
+    assert.equal(await page.getByRole("link", { name: "Open Live", exact: true }).count(), 1);
+    assert.equal(
+      await page.getByText(
+        "No active goals. Traffic remains available; create a goal to measure conversions.",
+        { exact: true },
+      ).count(),
+      1,
+    );
+    assert.equal(
+      await page.locator(".health-grid div", { hasText: "Last accepted event" }).locator("dd").textContent(),
+      "Never",
+    );
+    assert.equal(
+      await page.locator(".health-grid div", { hasText: "Accepted events stored" }).locator("dd").textContent(),
+      "0",
+    );
+
+    response = await page.goto(route("broken", "overview"), { waitUntil: "load" });
+    assert.equal(response.status(), 200);
+    assert.equal(
+      await page.getByText(
+        "Tracking attempts are reaching the collector, but no event has been accepted. Open Live to inspect restart-scoped rejection evidence.",
+        { exact: true },
+      ).count(),
+      1,
+    );
+    assert.equal(
+      await page.locator(".health-grid div", { hasText: "Rejected since process restart" }).locator("dd").textContent(),
+      "1",
+    );
+    assert.equal(
+      await page.locator(".health-grid div", { hasText: "Accepted events stored" }).locator("dd").textContent(),
+      "0",
+    );
+    await page.goto(route("example", "overview", "&metric=sessions"), { waitUntil: "load" });
     await assertMobileNavigation(page);
     const mobileContext = page.locator(".mobile-context");
     const mobileCalendarUrl = page.url();
@@ -269,6 +406,7 @@ async function main() {
     await page.keyboard.press("Enter");
     assert.equal(await presetDisclosure.getAttribute("open"), null);
     await presetSummary.click();
+    const beforeTodayHour = new Date().toISOString().slice(0, 13) + ":00";
     response = await Promise.all([
       page.waitForNavigation({ waitUntil: "load" }),
       presetDisclosure.getByRole("link", { name: "Today", exact: true }).click(),
@@ -290,8 +428,36 @@ async function main() {
       ).count(),
       1,
     );
+    assert.equal(await page.locator(".overview-trend .trend-incomplete-marker").count(), 1);
+    assert.equal(
+      await page.locator(".overview-trend .trend-incomplete-marker").textContent(),
+      "Incomplete",
+    );
+    assert.equal(await page.locator(".overview-trend svg rect.chart-point-incomplete").count(), 1);
+    await page.locator(".overview-trend .chart-data > summary").click();
+    const incompleteRow = page.locator(".overview-trend tbody tr", {
+      has: page.locator(".trend-incomplete-marker"),
+    });
+    const afterTodayHour = new Date().toISOString().slice(0, 13) + ":00";
+    const incompleteHourLink = incompleteRow.locator('th[data-label="Current interval"] a');
+    const incompleteHour = await incompleteHourLink.textContent();
+    assert.ok([beforeTodayHour, afterTodayHour].includes(incompleteHour));
+    const currentIntervalLabels = await page
+      .locator('.overview-trend tbody th[data-label="Current interval"] a')
+      .allTextContents();
+    assert.ok(currentIntervalLabels.length > 0);
+    assert.ok(currentIntervalLabels.every((label) => label <= afterTodayHour));
+    response = await Promise.all([
+      page.waitForNavigation({ waitUntil: "load" }),
+      incompleteHourLink.click(),
+    ]).then(([navigation]) => navigation);
+    assert.equal(response.status(), 200);
+    assert.match(page.url(), new RegExp(`[?&]highlight=${encodeURIComponent(incompleteHour)}(?:&|$)`));
+    assert.match(await page.locator(".analysis-focus").innerText(), new RegExp(incompleteHour));
+    await page.goBack({ waitUntil: "load" });
     await page.goBack({ waitUntil: "load" });
     assert.equal(page.url(), fixedCalendarUrl);
+    assert.equal(await page.locator(".overview-trend .trend-incomplete-marker").count(), 0);
 
     await page.keyboard.press("Tab");
     assert.equal(await page.evaluate(() => document.activeElement?.className), "skip-link");

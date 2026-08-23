@@ -455,15 +455,547 @@ pub fn compileOverview(
     return builder.finish();
 }
 
+pub fn compileOverviewDetails(
+    allocator: std.mem.Allocator,
+    execution: analysis.OverviewExecution,
+) !StatementPlan {
+    try execution.validate();
+    const selection = execution.trend orelse return error.MissingOverviewTrend;
+    var builder = Builder.init(allocator);
+    if (execution.strict_traffic_mode) {
+        var goals: [analysis.maximum_active_goals]traffic.Goal = undefined;
+        for (execution.active_goals, 0..) |goal, index| goals[index] = .{
+            .kind = switch (goal.selector.kind) {
+                .exact_event => .event,
+                .exact_page => .path,
+                .page_prefix => .prefix,
+                .saved_goal => return error.UnresolvedGoalSelector,
+            },
+            .value = goal.selector.value,
+        };
+        try builder.write("WITH ");
+        try builder.appendTraffic(try traffic.classifierFragment(
+            allocator,
+            execution.site_id,
+            goals[0..execution.active_goals.len],
+            true,
+        ));
+        try builder.write(", ");
+    } else try builder.write("WITH ");
+    try builder.write(
+        "periods(period, start_date, end_date) AS (VALUES" ++
+            " (1::UTINYINT, CAST(",
+    );
+    try builder.bindText(execution.range.start);
+    try builder.write(" AS DATE), CAST(");
+    try builder.bindText(execution.range.end);
+    try builder.write(" AS DATE))");
+    if (execution.comparison_range) |range| {
+        try builder.write(", (2::UTINYINT, CAST(");
+        try builder.bindText(range.start);
+        try builder.write(" AS DATE), CAST(");
+        try builder.bindText(range.end);
+        try builder.write(" AS DATE))");
+    }
+    try builder.write("), trend_buckets(period, position, label) AS (VALUES ");
+    var first_bucket = true;
+    for (selection.current_buckets, 0..) |bucket, index| {
+        if (!first_bucket) try builder.write(", ");
+        first_bucket = false;
+        try builder.write("(1::UTINYINT, ");
+        try builder.bindInteger(@intCast(index));
+        try builder.write("::UINTEGER, ");
+        try builder.bindText(bucket.label);
+        try builder.write(")");
+    }
+    for (selection.comparison_buckets, 0..) |bucket, index| {
+        try builder.write(", (2::UTINYINT, ");
+        try builder.bindInteger(@intCast(index));
+        try builder.write("::UINTEGER, ");
+        try builder.bindText(bucket.label);
+        try builder.write(")");
+    }
+    try builder.write(
+        "), range_events AS NOT MATERIALIZED (SELECT p.period, e.session_id," ++
+            " e.kind, e.event_name, e.path, e.properties_json," ++
+            " e.value_amount, e.value_currency, ",
+    );
+    try writeBucket(&builder, selection.interval, "e");
+    try builder.write(
+        " AS bucket_label," ++
+            " struct_pack(identity_kind := CASE WHEN e.identity_quality = 1" ++
+            " AND COALESCE(l.user_id, e.user_id, '') <> '' THEN 0::UTINYINT" ++
+            " ELSE e.identity_quality END," ++
+            " user_id := CASE WHEN e.identity_quality = 1" ++
+            " AND COALESCE(l.user_id, e.user_id, '') <> ''" ++
+            " THEN COALESCE(l.user_id, e.user_id) ELSE '' END," ++
+            " anonymous_id := CASE WHEN e.identity_quality = 1" ++
+            " AND COALESCE(l.user_id, e.user_id, '') <> ''" ++
+            " THEN CAST(NULL AS UUID) ELSE e.anonymous_id END) AS person_key, ",
+    );
+    try writeGoalMatchCount(&builder, execution.active_goals, "e");
+    try builder.write(
+        " AS goal_matches FROM events e JOIN periods p" ++
+            " ON e.site_local_date BETWEEN p.start_date AND p.end_date" ++
+            " LEFT JOIN identity_links l ON l.site_id = e.site_id" ++
+            " AND l.anonymous_id = e.anonymous_id WHERE e.site_id = ",
+    );
+    try builder.bindText(execution.site_id);
+    try builder.write(
+        " AND e.kind IN (1, 2) AND e.identity_quality IN (1, 2, 3)" ++
+            " AND e.traffic_class IN (1, 5)",
+    );
+    if (execution.strict_traffic_mode) try builder.write(
+        " AND e.session_id NOT IN (SELECT session_id" ++
+            " FROM d34_current_suspected_sessions)",
+    );
+    try builder.write(
+        "), current_sessions AS MATERIALIZED (SELECT DISTINCT session_id" ++
+            " FROM range_events WHERE period = 1)," ++
+            " session_facts AS MATERIALIZED (SELECT e.session_id, bool_or(",
+    );
+    try writeAnyGoalMatch(&builder, execution.active_goals, "e");
+    try builder.write(
+        ") AS converted," ++
+            " COALESCE(NULLIF(first(e.referrer_host ORDER BY" ++
+            " e.occurred_at_utc_micros, e.sequence," ++
+            " e.received_at_utc_micros, e.event_id)" ++
+            " FILTER (WHERE e.kind = 1), ''), 'Direct') AS source," ++
+            " CASE WHEN first(e.country_code ORDER BY" ++
+            " e.occurred_at_utc_micros, e.sequence," ++
+            " e.received_at_utc_micros, e.event_id)" ++
+            " FILTER (WHERE e.kind IN (1, 2)) IN ('ZZ', '')" ++
+            " THEN 'Unknown' ELSE first(e.country_code ORDER BY" ++
+            " e.occurred_at_utc_micros, e.sequence," ++
+            " e.received_at_utc_micros, e.event_id)" ++
+            " FILTER (WHERE e.kind IN (1, 2)) END AS country" ++
+            " FROM events e SEMI JOIN current_sessions s" ++
+            " USING (session_id) WHERE e.site_id = ",
+    );
+    try builder.bindText(execution.site_id);
+    try builder.write(" AND e.traffic_class IN (1, 5) GROUP BY e.session_id),");
+
+    try builder.write(" trend_values AS (");
+    switch (selection.metric) {
+        .visitors => {
+            try builder.write(
+                "SELECT e.period, e.bucket_label AS label," ++
+                    " count(DISTINCT e.person_key)::BIGINT AS numerator," ++
+                    " CAST(NULL AS VARCHAR) AS amount FROM range_events e" ++
+                    " GROUP BY e.period, label",
+            );
+        },
+        .sessions, .page_views, .conversions => {
+            try builder.write("SELECT e.period, e.bucket_label AS label, ");
+            switch (selection.metric) {
+                .sessions => try builder.write("count(DISTINCT e.session_id)::BIGINT"),
+                .page_views => try builder.write("count(*) FILTER (WHERE e.kind = 1)::BIGINT"),
+                .conversions => try builder.write("sum(e.goal_matches)::BIGINT"),
+                else => unreachable,
+            }
+            try builder.write(
+                " AS numerator, CAST(NULL AS VARCHAR) AS amount" ++
+                    " FROM range_events e GROUP BY e.period, label",
+            );
+        },
+        .revenue => {
+            try builder.write(
+                "SELECT e.period, e.bucket_label AS label," ++
+                    " 0::BIGINT AS numerator," ++
+                    " CAST(sum(e.value_amount) AS VARCHAR) AS amount" ++
+                    " FROM range_events e WHERE e.value_amount IS NOT NULL" ++
+                    " AND e.value_currency = ",
+            );
+            try builder.bindText(selection.currency);
+            try builder.write(" GROUP BY e.period, label");
+        },
+    }
+    try builder.write(
+        "), trend_rows AS (SELECT b.period, b.position, b.label," ++
+            " COALESCE(v.numerator, 0)::BIGINT AS numerator," ++
+            " COALESCE(v.amount, '0.000000') AS amount" ++
+            " FROM trend_buckets b LEFT JOIN trend_values v" ++
+            " ON v.period = b.period AND v.label = b.label)," ++
+            " content_rows AS (SELECT path, count(*)::BIGINT AS page_views," ++
+            " count(DISTINCT person_key)::BIGINT AS visitors" ++
+            " FROM range_events WHERE period = 1 AND kind = 1 GROUP BY path)," ++
+            " acquisition_rows AS (SELECT sf.source," ++
+            " count(*)::BIGINT AS sessions," ++
+            " count(*) FILTER (WHERE sf.converted)::BIGINT AS converting_sessions" ++
+            " FROM current_sessions cs JOIN session_facts sf USING (session_id)" ++
+            " GROUP BY sf.source)," ++
+            " audience_rows AS (SELECT sf.country, count(*)::BIGINT AS sessions" ++
+            " FROM current_sessions cs JOIN session_facts sf USING (session_id)" ++
+            " GROUP BY sf.country), goal_rows AS (",
+    );
+    if (execution.active_goals.len == 0) {
+        try builder.write(
+            "SELECT '' AS goal_id, 0::UINTEGER AS goal_position," ++
+                " 0::BIGINT AS converting_people WHERE FALSE",
+        );
+    } else {
+        for (execution.active_goals, 0..) |goal, index| {
+            if (index != 0) try builder.write(" UNION ALL ");
+            try builder.write("SELECT ");
+            try builder.bindText(goal.id);
+            try builder.write(" AS goal_id, ");
+            try builder.bindInteger(@intCast(index));
+            try builder.write(
+                "::UINTEGER AS goal_position," ++
+                    " count(DISTINCT e.person_key)::BIGINT" ++
+                    " AS converting_people FROM range_events e" ++
+                    " WHERE e.period = 1 AND ",
+            );
+            try writeSelector(&builder, goal.selector, "e");
+        }
+    }
+    try builder.write(
+        "), health_days AS MATERIALIZED (SELECT site_local_date," ++
+            " count(*)::BIGINT AS accepted_events," ++
+            " COALESCE(max(received_at_utc_micros), 0)::BIGINT AS last_received," ++
+            " count(*) FILTER (WHERE protocol_version = 1)::BIGINT AS protocol_v1," ++
+            " count(*) FILTER (WHERE protocol_version = 2)::BIGINT AS protocol_v2" ++
+            " FROM events WHERE site_id = ",
+    );
+    try builder.bindText(execution.site_id);
+    try builder.write(" GROUP BY site_local_date), health_row AS (SELECT" ++
+        " COALESCE(sum(accepted_events), 0)::BIGINT AS accepted_events," ++
+        " COALESCE(max(last_received), 0)::BIGINT AS last_received," ++
+        " COALESCE(sum(protocol_v1), 0)::BIGINT AS protocol_v1," ++
+        " COALESCE(sum(protocol_v2), 0)::BIGINT AS protocol_v2," ++
+        " count(*) FILTER (WHERE site_local_date BETWEEN CAST(");
+    try builder.bindText(execution.range.start);
+    try builder.write(" AS DATE) AND CAST(");
+    try builder.bindText(execution.range.end);
+    try builder.write(" AS DATE) AND accepted_events >= ");
+    try builder.bindInteger(execution.daily_event_ceiling);
+    try builder.write(")::BIGINT AS ceiling_reached_days FROM health_days");
+    try builder.write(
+        ") SELECT 'trend' AS section, t.label, t.position::BIGINT AS position," ++
+            " t.numerator, 0::BIGINT AS denominator, t.amount," ++
+            " ",
+    );
+    if (selection.metric == .revenue) {
+        try builder.bindText(selection.currency);
+    } else try builder.write("''");
+    try builder.write(
+        " AS currency, t.period::BIGINT AS aux, 0::BIGINT AS extra," ++
+            " 0::BIGINT AS health_extra" ++
+            " FROM trend_rows t UNION ALL SELECT * FROM (SELECT 'content', path," ++
+            " row_number() OVER (ORDER BY page_views DESC, path ASC)::BIGINT," ++
+            " page_views, visitors, CAST(NULL AS VARCHAR), '', 0::BIGINT, 0::BIGINT," ++
+            " 0::BIGINT" ++
+            " FROM content_rows ORDER BY page_views DESC, path ASC LIMIT 5)" ++
+            " UNION ALL SELECT * FROM (SELECT 'acquisition', source," ++
+            " row_number() OVER (ORDER BY sessions DESC, source ASC)::BIGINT," ++
+            " sessions, converting_sessions, CAST(NULL AS VARCHAR), '', 0::BIGINT, 0::BIGINT," ++
+            " 0::BIGINT" ++
+            " FROM acquisition_rows ORDER BY sessions DESC, source ASC LIMIT 5)" ++
+            " UNION ALL SELECT * FROM (SELECT 'conversion', goal_id," ++
+            " row_number() OVER (ORDER BY converting_people DESC," ++
+            " goal_position ASC)::BIGINT," ++
+            " converting_people, 0::BIGINT, CAST(NULL AS VARCHAR), '', 0::BIGINT, 0::BIGINT," ++
+            " 0::BIGINT" ++
+            " FROM goal_rows ORDER BY converting_people DESC," ++
+            " goal_position ASC LIMIT 5)" ++
+            " UNION ALL SELECT * FROM (SELECT 'audience', country," ++
+            " row_number() OVER (ORDER BY sessions DESC, country ASC)::BIGINT," ++
+            " sessions, 0::BIGINT, CAST(NULL AS VARCHAR), '', 0::BIGINT, 0::BIGINT," ++
+            " 0::BIGINT" ++
+            " FROM audience_rows ORDER BY sessions DESC, country ASC LIMIT 5)" ++
+            " UNION ALL SELECT 'health', '', 0::BIGINT, accepted_events," ++
+            " last_received, CAST(NULL AS VARCHAR), '', protocol_v1, protocol_v2," ++
+            " ceiling_reached_days" ++
+            " FROM health_row ORDER BY section, aux, position",
+    );
+    return builder.finish();
+}
+
 pub fn executeOverview(
     allocator: std.mem.Allocator,
     event_store: *events.Store,
     execution: analysis.OverviewExecution,
 ) !analysis.OverviewResult {
+    try execution.validate();
+    const cache_key = if (execution.trend != null)
+        try overviewCacheKey(allocator, execution)
+    else
+        null;
+    if (cache_key) |key| {
+        if (event_store.overview_result_cache) |cache| {
+            if (std.mem.eql(u8, cache.key, key)) {
+                return cloneOverviewResult(allocator, cache.result);
+            }
+        }
+    }
     const plan = try compileOverview(allocator, execution);
     var budget = deadline.Budget.init(execution.timeout_ms);
     var result = try executePlan(&event_store.database, plan, &budget);
-    defer result.deinit();
+    var decoded = decodeOverview(allocator, execution, &result) catch |err| {
+        result.deinit();
+        return err;
+    };
+    result.deinit();
+    if (execution.trend != null) {
+        const detail_plan = try compileOverviewDetails(allocator, execution);
+        var detail_result = try executePlan(
+            &event_store.database,
+            detail_plan,
+            &budget,
+        );
+        defer detail_result.deinit();
+        decoded.details = try decodeOverviewDetails(
+            allocator,
+            execution,
+            &detail_result,
+        );
+        try cacheOverviewResult(
+            event_store,
+            cache_key.?,
+            decoded,
+        );
+    }
+    return decoded;
+}
+
+fn overviewCacheKey(
+    allocator: std.mem.Allocator,
+    execution: analysis.OverviewExecution,
+) ![]const u8 {
+    const trend = execution.trend orelse return error.MissingOverviewTrend;
+    var key = std.Io.Writer.Allocating.init(allocator);
+    try key.writer.writeAll("overview-result-v1|metric-v2|");
+    try cacheKeySlice(&key.writer, execution.site_id);
+    try cacheKeySlice(&key.writer, execution.range.start);
+    try cacheKeySlice(&key.writer, execution.range.end);
+    if (execution.comparison_range) |range| {
+        try key.writer.writeAll("comparison|");
+        try cacheKeySlice(&key.writer, range.start);
+        try cacheKeySlice(&key.writer, range.end);
+    } else try key.writer.writeAll("no-comparison|");
+    try key.writer.print("strict={d}|ceiling={d}|metric={s}|interval={s}|", .{
+        @intFromBool(execution.strict_traffic_mode),
+        execution.daily_event_ceiling,
+        trend.metric.name(),
+        @tagName(trend.interval),
+    });
+    try cacheKeySlice(&key.writer, trend.currency);
+    try key.writer.print("goals={d}|", .{execution.active_goals.len});
+    for (execution.active_goals) |goal| {
+        try cacheKeySlice(&key.writer, goal.id);
+        try cacheKeySlice(&key.writer, @tagName(goal.selector.kind));
+        try cacheKeySlice(&key.writer, goal.selector.value);
+        try key.writer.print("predicates={d}|", .{goal.selector.predicates.len});
+        for (goal.selector.predicates) |predicate| {
+            try cacheKeySlice(&key.writer, predicate.property_ref.name);
+            try cacheKeySlice(
+                &key.writer,
+                predicate.property_ref.scalar_type.name(),
+            );
+            try cacheKeySlice(&key.writer, predicate.operator.name());
+            try key.writer.print("values={d}|", .{predicate.values.len});
+            for (predicate.values) |value| {
+                try cacheKeySlice(&key.writer, value);
+            }
+        }
+    }
+    try key.writer.print("current={d}|", .{trend.current_buckets.len});
+    for (trend.current_buckets) |bucket| try cacheKeySlice(&key.writer, bucket.label);
+    try key.writer.print("comparison={d}|", .{trend.comparison_buckets.len});
+    for (trend.comparison_buckets) |bucket| try cacheKeySlice(&key.writer, bucket.label);
+    return key.toOwnedSlice();
+}
+
+fn cacheKeySlice(output: *std.Io.Writer, value: []const u8) !void {
+    try output.print("{d}:", .{value.len});
+    try output.writeAll(value);
+    try output.writeByte('|');
+}
+
+fn cacheOverviewResult(
+    event_store: *events.Store,
+    key: []const u8,
+    result: analysis.OverviewResult,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    errdefer arena.deinit();
+    const allocator = arena.allocator();
+    const owned_key = try allocator.dupe(u8, key);
+    const owned_result = try cloneOverviewResult(allocator, result);
+    if (event_store.overview_result_cache) |*prior| prior.deinit();
+    event_store.overview_result_cache = .{
+        .arena = arena,
+        .key = owned_key,
+        .result = owned_result,
+    };
+}
+
+fn cloneOverviewResult(
+    allocator: std.mem.Allocator,
+    source: analysis.OverviewResult,
+) !analysis.OverviewResult {
+    return .{
+        .visitors = source.visitors,
+        .sessions = source.sessions,
+        .page_views = source.page_views,
+        .engagement_rate = source.engagement_rate,
+        .conversions = source.conversions,
+        .conversion_rate = source.conversion_rate,
+        .revenue = try cloneComparedAmounts(allocator, source.revenue),
+        .completeness = try cloneCompleteness(allocator, source.completeness),
+        .comparison_completeness = if (source.comparison_completeness) |value|
+            try cloneCompleteness(allocator, value)
+        else
+            null,
+        .details = if (source.details) |details|
+            try cloneOverviewDetails(allocator, details)
+        else
+            null,
+    };
+}
+
+fn cloneComparedAmounts(
+    allocator: std.mem.Allocator,
+    source: []const analysis.ComparedAmount,
+) ![]const analysis.ComparedAmount {
+    const output = try allocator.alloc(analysis.ComparedAmount, source.len);
+    for (output, source) |*target, value| target.* = .{
+        .currency = try allocator.dupe(u8, value.currency),
+        .current = try cloneExactAmount(allocator, value.current),
+        .comparison = if (value.comparison) |comparison|
+            try cloneExactAmount(allocator, comparison)
+        else
+            null,
+    };
+    return output;
+}
+
+fn cloneExactAmount(
+    allocator: std.mem.Allocator,
+    source: analysis.ExactAmount,
+) !analysis.ExactAmount {
+    return .{
+        .decimal = try allocator.dupe(u8, source.decimal),
+        .currency = try allocator.dupe(u8, source.currency),
+        .value_count = source.value_count,
+    };
+}
+
+fn cloneCompleteness(
+    allocator: std.mem.Allocator,
+    source: analysis.Completeness,
+) !analysis.Completeness {
+    return .{
+        .total_people = source.total_people,
+        .persistent_people = source.persistent_people,
+        .ephemeral_people = source.ephemeral_people,
+        .legacy_people = source.legacy_people,
+        .persistent_basis_points = source.persistent_basis_points,
+        .persistent_since_local_date = if (source.persistent_since_local_date) |date|
+            try allocator.dupe(u8, date)
+        else
+            null,
+    };
+}
+
+fn cloneOverviewDetails(
+    allocator: std.mem.Allocator,
+    source: analysis.OverviewDetails,
+) !analysis.OverviewDetails {
+    return .{
+        .trend = .{
+            .metric = source.trend.metric,
+            .currency = try allocator.dupe(u8, source.trend.currency),
+            .interval = source.trend.interval,
+            .current = try cloneOverviewTrendPoints(allocator, source.trend.current),
+            .comparison = if (source.trend.comparison) |points|
+                try cloneOverviewTrendPoints(allocator, points)
+            else
+                null,
+        },
+        .content = try cloneOverviewContent(allocator, source.content),
+        .acquisition = try cloneOverviewAcquisition(allocator, source.acquisition),
+        .conversions = try cloneOverviewConversions(allocator, source.conversions),
+        .audience = try cloneOverviewAudience(allocator, source.audience),
+        .health = source.health,
+    };
+}
+
+fn cloneOverviewTrendPoints(
+    allocator: std.mem.Allocator,
+    source: []const analysis.OverviewTrendPoint,
+) ![]const analysis.OverviewTrendPoint {
+    const output = try allocator.alloc(analysis.OverviewTrendPoint, source.len);
+    for (output, source) |*target, point| target.* = .{
+        .label = try allocator.dupe(u8, point.label),
+        .measure = switch (point.measure) {
+            .count => |value| .{ .count = value },
+            .ratio => |value| .{ .ratio = value },
+            .amount => |value| .{ .amount = .{
+                .decimal = try allocator.dupe(u8, value.decimal),
+                .currency = try allocator.dupe(u8, value.currency),
+                .value_count = value.value_count,
+            } },
+        },
+    };
+    return output;
+}
+
+fn cloneOverviewContent(
+    allocator: std.mem.Allocator,
+    source: []const analysis.OverviewContentRow,
+) ![]const analysis.OverviewContentRow {
+    const output = try allocator.alloc(analysis.OverviewContentRow, source.len);
+    for (output, source) |*target, row| target.* = .{
+        .path = try allocator.dupe(u8, row.path),
+        .page_views = row.page_views,
+        .visitors = row.visitors,
+    };
+    return output;
+}
+
+fn cloneOverviewAcquisition(
+    allocator: std.mem.Allocator,
+    source: []const analysis.OverviewAcquisitionRow,
+) ![]const analysis.OverviewAcquisitionRow {
+    const output = try allocator.alloc(analysis.OverviewAcquisitionRow, source.len);
+    for (output, source) |*target, row| target.* = .{
+        .source = try allocator.dupe(u8, row.source),
+        .sessions = row.sessions,
+        .converting_sessions = row.converting_sessions,
+    };
+    return output;
+}
+
+fn cloneOverviewConversions(
+    allocator: std.mem.Allocator,
+    source: []const analysis.OverviewConversionRow,
+) ![]const analysis.OverviewConversionRow {
+    const output = try allocator.alloc(analysis.OverviewConversionRow, source.len);
+    for (output, source) |*target, row| target.* = .{
+        .goal_id = try allocator.dupe(u8, row.goal_id),
+        .converting_people = row.converting_people,
+    };
+    return output;
+}
+
+fn cloneOverviewAudience(
+    allocator: std.mem.Allocator,
+    source: []const analysis.OverviewAudienceRow,
+) ![]const analysis.OverviewAudienceRow {
+    const output = try allocator.alloc(analysis.OverviewAudienceRow, source.len);
+    for (output, source) |*target, row| target.* = .{
+        .country = try allocator.dupe(u8, row.country),
+        .sessions = row.sessions,
+    };
+    return output;
+}
+
+fn decodeOverview(
+    allocator: std.mem.Allocator,
+    execution: analysis.OverviewExecution,
+    result: *duckdb.Result,
+) !analysis.OverviewResult {
     if (result.columnCount() != 11 or result.rowCount() > 64) {
         return error.InvalidOverviewResult;
     }
@@ -625,6 +1157,146 @@ pub fn executeOverview(
         .revenue = decoded_revenue,
         .completeness = current_coverage,
         .comparison_completeness = comparison_coverage,
+        .details = null,
+    };
+}
+
+fn decodeOverviewDetails(
+    allocator: std.mem.Allocator,
+    execution: analysis.OverviewExecution,
+    result: *duckdb.Result,
+) !analysis.OverviewDetails {
+    const selection = execution.trend orelse return error.MissingOverviewTrend;
+    const maximum_rows = selection.current_buckets.len +
+        selection.comparison_buckets.len +
+        analysis.maximum_overview_panel_rows * 4 + 1;
+    if (result.columnCount() != 10 or result.rowCount() > maximum_rows) {
+        return error.InvalidOverviewDetails;
+    }
+    var current: std.ArrayList(analysis.OverviewTrendPoint) = .empty;
+    var comparison: std.ArrayList(analysis.OverviewTrendPoint) = .empty;
+    var content: std.ArrayList(analysis.OverviewContentRow) = .empty;
+    var acquisition: std.ArrayList(analysis.OverviewAcquisitionRow) = .empty;
+    var conversions: std.ArrayList(analysis.OverviewConversionRow) = .empty;
+    var audience: std.ArrayList(analysis.OverviewAudienceRow) = .empty;
+    var health: ?analysis.OverviewHealth = null;
+
+    for (0..result.rowCount()) |row| {
+        const section = try result.text(allocator, 0, row);
+        const label = try result.text(allocator, 1, row);
+        const position = result.int64(2, row);
+        const numerator = result.int64(3, row);
+        const denominator = result.int64(4, row);
+        if (position < 0 or numerator < 0 or denominator < 0) {
+            return error.InvalidOverviewDetails;
+        }
+        if (std.mem.eql(u8, section, "trend")) {
+            const period = result.int64(7, row);
+            const buckets = if (period == 1)
+                selection.current_buckets
+            else if (period == 2)
+                selection.comparison_buckets
+            else
+                return error.InvalidOverviewDetails;
+            if (position >= buckets.len or
+                !std.mem.eql(u8, label, buckets[@intCast(position)].label))
+            {
+                return error.InvalidOverviewDetails;
+            }
+            const point = analysis.OverviewTrendPoint{
+                .label = label,
+                .measure = if (selection.metric == .revenue)
+                    .{ .amount = .{
+                        .decimal = try result.text(allocator, 5, row),
+                        .currency = try result.text(allocator, 6, row),
+                        .value_count = 0,
+                    } }
+                else
+                    .{ .count = numerator },
+            };
+            if (period == 1) {
+                if (position != current.items.len) return error.InvalidOverviewDetails;
+                try current.append(allocator, point);
+            } else {
+                if (position != comparison.items.len) return error.InvalidOverviewDetails;
+                try comparison.append(allocator, point);
+            }
+        } else if (std.mem.eql(u8, section, "content")) {
+            if (position != content.items.len + 1 or denominator > numerator) {
+                return error.InvalidOverviewDetails;
+            }
+            try content.append(allocator, .{
+                .path = label,
+                .page_views = numerator,
+                .visitors = denominator,
+            });
+        } else if (std.mem.eql(u8, section, "acquisition")) {
+            if (position != acquisition.items.len + 1 or denominator > numerator) {
+                return error.InvalidOverviewDetails;
+            }
+            try acquisition.append(allocator, .{
+                .source = label,
+                .sessions = numerator,
+                .converting_sessions = denominator,
+            });
+        } else if (std.mem.eql(u8, section, "conversion")) {
+            if (position != conversions.items.len + 1) return error.InvalidOverviewDetails;
+            try conversions.append(allocator, .{
+                .goal_id = label,
+                .converting_people = numerator,
+            });
+        } else if (std.mem.eql(u8, section, "audience")) {
+            if (position != audience.items.len + 1) return error.InvalidOverviewDetails;
+            try audience.append(allocator, .{
+                .country = label,
+                .sessions = numerator,
+            });
+        } else if (std.mem.eql(u8, section, "health")) {
+            if (health != null or label.len != 0 or position != 0) {
+                return error.InvalidOverviewDetails;
+            }
+            health = .{
+                .daily_event_ceiling = execution.daily_event_ceiling,
+                .accepted_events = numerator,
+                .ceiling_reached_days = result.int64(9, row),
+                .last_received_at_utc_micros = denominator,
+                .protocol_v1_events = result.int64(7, row),
+                .protocol_v2_events = result.int64(8, row),
+            };
+            if (health.?.protocol_v1_events < 0 or health.?.protocol_v2_events < 0 or
+                health.?.ceiling_reached_days < 0 or
+                health.?.ceiling_reached_days > @as(i64, @intCast(try execution.range.days())) or
+                health.?.protocol_v1_events + health.?.protocol_v2_events != numerator)
+            {
+                return error.InvalidOverviewDetails;
+            }
+        } else return error.InvalidOverviewDetails;
+    }
+    if (current.items.len != selection.current_buckets.len or
+        comparison.items.len != selection.comparison_buckets.len or health == null or
+        content.items.len > analysis.maximum_overview_panel_rows or
+        acquisition.items.len > analysis.maximum_overview_panel_rows or
+        conversions.items.len > analysis.maximum_overview_panel_rows or
+        audience.items.len > analysis.maximum_overview_panel_rows)
+    {
+        return error.InvalidOverviewDetails;
+    }
+    return .{
+        .trend = .{
+            .metric = selection.metric,
+            .currency = selection.currency,
+            .interval = selection.interval,
+            .current = try current.toOwnedSlice(allocator),
+            .comparison = if (execution.comparison_range != null)
+                try comparison.toOwnedSlice(allocator)
+            else
+                null,
+        },
+        .content = try content.toOwnedSlice(allocator),
+        .acquisition = try acquisition.toOwnedSlice(allocator),
+        .conversions = try conversions.toOwnedSlice(allocator),
+        .audience = try audience.toOwnedSlice(allocator),
+        .health = health.?,
     };
 }
 
@@ -633,7 +1305,32 @@ pub fn profileOverview(
     event_store: *events.Store,
     execution: analysis.OverviewExecution,
 ) ![]u8 {
-    const plan = try compileOverview(allocator, execution);
+    var output = std.Io.Writer.Allocating.init(allocator);
+    try output.writer.writeAll("OVERVIEW KPI STATEMENT\n");
+    try profileOverviewPlan(
+        allocator,
+        event_store,
+        try compileOverview(allocator, execution),
+        &output.writer,
+    );
+    if (execution.trend != null) {
+        try output.writer.writeAll("OVERVIEW DETAILS STATEMENT\n");
+        try profileOverviewPlan(
+            allocator,
+            event_store,
+            try compileOverviewDetails(allocator, execution),
+            &output.writer,
+        );
+    }
+    return output.toOwnedSlice();
+}
+
+fn profileOverviewPlan(
+    allocator: std.mem.Allocator,
+    event_store: *events.Store,
+    plan: StatementPlan,
+    output: *std.Io.Writer,
+) !void {
     var sql = std.Io.Writer.Allocating.init(allocator);
     try sql.writer.writeAll("EXPLAIN ANALYZE ");
     try sql.writer.writeAll(plan.sql);
@@ -649,12 +1346,10 @@ pub fn profileOverview(
     if (result.columnCount() != 2 or result.rowCount() == 0) {
         return error.InvalidOverviewProfile;
     }
-    var output = std.Io.Writer.Allocating.init(allocator);
     for (0..result.rowCount()) |row| {
-        try output.writer.writeAll(try result.text(allocator, 1, row));
-        try output.writer.writeByte('\n');
+        try output.writeAll(try result.text(allocator, 1, row));
+        try output.writeByte('\n');
     }
-    return output.toOwnedSlice();
 }
 
 const OverviewPeriodState = struct {
@@ -982,11 +1677,7 @@ fn validateCombination(query: analysis.Query) !void {
 fn resolveInterval(query: analysis.Query) !analysis.Interval {
     if (query.mode == .breakdown) return .auto;
     if (query.interval != .auto) return query.interval;
-    const days = try query.range.days();
-    if (days <= 2) return .hour;
-    if (days <= 45) return .day;
-    if (days <= 180) return .week;
-    return .month;
+    return analysis.automaticInterval(query.range);
 }
 
 fn compileRows(
