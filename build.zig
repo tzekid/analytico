@@ -411,6 +411,29 @@ pub fn build(b: *std.Build) void {
         "e2e-passkey-p1",
         "Run owner bootstrap through real Turso, HTTP, Chromium, and WebAuthn",
     ).dependOn(&passkey_p1_e2e.step);
+
+    const onboarding_e2e = b.addSystemCommand(&.{
+        "bash",
+        "tests/e2e-onboarding.sh",
+    });
+    onboarding_e2e.addArtifactArg(app);
+    onboarding_e2e.step.dependOn(b.getInstallStep());
+    b.step(
+        "e2e-onboarding",
+        "Create the first site through passkey auth, real stores, Caddy, and Chromium",
+    ).dependOn(&onboarding_e2e.step);
+
+    const metadata6_migration_e2e = b.addSystemCommand(&.{
+        "bash",
+        "scripts/run-metadata5-gate.sh",
+    });
+    metadata6_migration_e2e.addArtifactArg(app);
+    metadata6_migration_e2e.addArg("tests/e2e-metadata6-migration.sh");
+    metadata6_migration_e2e.step.dependOn(b.getInstallStep());
+    b.step(
+        "e2e-metadata6-migration",
+        "Migrate and roll back the exact deployed metadata-5/event-7 predecessor",
+    ).dependOn(&metadata6_migration_e2e.step);
 }
 
 fn addHtmxAssets(

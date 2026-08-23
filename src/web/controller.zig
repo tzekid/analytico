@@ -74,6 +74,179 @@ pub fn formContext(form: Form) !FormContext {
     };
 }
 
+pub fn submitSite(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    metadata: *meta.Store,
+    form: Form,
+    csrf_token: []const u8,
+    zoneinfo_root: []const u8,
+    now_utc_micros: i64,
+) !model.SiteSubmission {
+    const draft = model.SiteDraft{
+        .name = form.optional("name") orelse "",
+        .slug = form.optional("slug") orelse "",
+        .origin = form.optional("origin") orelse "",
+        .timezone = form.optional("timezone") orelse "",
+        .currency = form.optional("currency") orelse "",
+    };
+    var errors = model.SiteFormErrors{};
+    const name = std.mem.trim(u8, draft.name, " \t\r\n");
+    domain.validateName(name, 120) catch {
+        errors.name = "Enter a display name between 1 and 120 UTF-8 bytes.";
+    };
+
+    const raw_slug = std.mem.trim(u8, draft.slug, " \t\r\n");
+    const slug = if (raw_slug.len != 0)
+        try allocator.dupe(u8, raw_slug)
+    else if (errors.name.len == 0)
+        try generatedSlug(allocator, name)
+    else
+        try allocator.dupe(u8, "");
+    if (slug.len != 0) {
+        domain.validateSlug(slug) catch {
+            errors.slug = "Use 1–48 lowercase letters, numbers, or hyphens.";
+        };
+    }
+
+    const raw_origin = std.mem.trim(u8, draft.origin, " \t\r\n");
+    const origin = domain.normalizeOrigin(allocator, raw_origin) catch value: {
+        errors.origin = "Enter an exact HTTPS origin, or loopback HTTP for development.";
+        break :value try allocator.dupe(u8, "");
+    };
+    if (errors.origin.len == 0 and !secureOrLoopbackOrigin(origin)) {
+        errors.origin = "Use HTTPS unless the origin is localhost, 127.0.0.1, or [::1].";
+    }
+
+    const timezone_name = std.mem.trim(u8, draft.timezone, " \t\r\n");
+    if (!validSiteTimezone(
+        allocator,
+        io,
+        zoneinfo_root,
+        timezone_name,
+        @divFloor(now_utc_micros, 1_000_000),
+    )) {
+        errors.timezone = "Choose an installed IANA timezone such as UTC or Europe/Berlin.";
+    }
+
+    const currency = std.mem.trim(u8, draft.currency, " \t\r\n");
+    domain.validateCurrency(currency) catch {
+        errors.currency = "Use three uppercase letters such as EUR, or leave this empty.";
+    };
+    if (errors.any()) {
+        return .{ .invalid = .{
+            .csrf_token = csrf_token,
+            .draft = draft,
+            .errors = errors,
+        } };
+    }
+
+    const id = try domain.randomUuid(io);
+    _ = metadata.createSite(allocator, .{
+        .id = &id,
+        .slug = slug,
+        .name = name,
+        .origin = origin,
+        .timezone_name = timezone_name,
+        .default_currency = currency,
+        .created_at_utc_micros = now_utc_micros,
+    }) catch |err| switch (err) {
+        error.SiteSlugConflict => return .{ .invalid = .{
+            .csrf_token = csrf_token,
+            .draft = draft,
+            .errors = .{ .slug = "That slug already belongs to a different site configuration." },
+        } },
+        error.SiteOriginConflict => return .{ .invalid = .{
+            .csrf_token = csrf_token,
+            .draft = draft,
+            .errors = .{ .origin = "That exact origin already belongs to another site or outcome." },
+        } },
+        error.SiteTimezoneConflict => return .{ .invalid = .{
+            .csrf_token = csrf_token,
+            .draft = draft,
+            .errors = .{ .timezone = "That site already has a different reporting timezone." },
+        } },
+        error.SiteCurrencyConflict => return .{ .invalid = .{
+            .csrf_token = csrf_token,
+            .draft = draft,
+            .errors = .{ .currency = "That site already has a different default currency." },
+        } },
+        else => return err,
+    };
+    return .{ .stored = .{ .slug = slug } };
+}
+
+fn generatedSlug(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
+    var output: std.ArrayList(u8) = .empty;
+    errdefer output.deinit(allocator);
+    var separator_pending = false;
+    for (name) |byte| {
+        if (std.ascii.isAlphanumeric(byte)) {
+            if (separator_pending and output.items.len != 0) {
+                if (output.items.len >= 47) break;
+                try output.append(allocator, '-');
+            }
+            separator_pending = false;
+            if (output.items.len >= 48) break;
+            try output.append(allocator, std.ascii.toLower(byte));
+        } else {
+            separator_pending = true;
+        }
+    }
+    if (output.items.len == 0) return allocator.dupe(u8, "site");
+    return output.toOwnedSlice(allocator);
+}
+
+fn secureOrLoopbackOrigin(origin: []const u8) bool {
+    if (std.mem.startsWith(u8, origin, "https://")) return true;
+    if (!std.mem.startsWith(u8, origin, "http://")) return false;
+    const authority = origin["http://".len..];
+    return exactHostOrPort(authority, "localhost") or
+        exactHostOrPort(authority, "127.0.0.1") or
+        exactHostOrPort(authority, "[::1]");
+}
+
+fn exactHostOrPort(authority: []const u8, host: []const u8) bool {
+    return std.mem.eql(u8, authority, host) or
+        authority.len > host.len + 1 and
+            std.mem.startsWith(u8, authority, host) and
+            authority[host.len] == ':';
+}
+
+test "site creation permits only exact HTTP loopback origins" {
+    inline for (.{
+        "http://localhost",
+        "http://localhost:8080",
+        "http://127.0.0.1",
+        "http://127.0.0.1:8080",
+        "http://[::1]",
+        "http://[::1]:8080",
+    }) |origin| {
+        try std.testing.expect(secureOrLoopbackOrigin(origin));
+    }
+    inline for (.{
+        "http://localhost.evil",
+        "http://localhost.evil:8080",
+        "http://127.0.0.1.evil",
+        "http://[::1].evil",
+    }) |origin| {
+        try std.testing.expect(!secureOrLoopbackOrigin(origin));
+    }
+}
+
+fn validSiteTimezone(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    zoneinfo_root: []const u8,
+    name: []const u8,
+    now_utc_seconds: i64,
+) bool {
+    var zone = timezone.load(allocator, io, zoneinfo_root, name) catch return false;
+    defer zone.deinit(allocator);
+    _ = zone.localAt(now_utc_seconds) catch return false;
+    return true;
+}
+
 pub const ParsedQuery = struct {
     site: []const u8 = "",
     from: ?[]const u8 = null,

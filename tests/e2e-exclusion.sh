@@ -43,16 +43,20 @@ site_port=$((51300 + ($$ % 300)))
 secure_site_port=$((51700 + ($$ % 300)))
 upstream="http://127.0.0.1:$server_port"
 dashboard="http://localhost:$proxy_port"
-site_origin="http://127.0.0.2:$site_port"
+self_origin="http://127.0.0.2:$site_port"
+ephemeral_origin="http://127.0.0.4:$site_port"
+prerender_origin="http://127.0.0.5:$site_port"
 real_prerender_origin="https://prerender.test:$secure_site_port"
 data="$fixture/data"
 today=$(date -u +%F)
 
 "$binary" init "$data" >/dev/null
-for slug in self ephemeral prerender; do
-    "$binary" site add "$data" "$slug" "$slug fixture" "$site_origin" \
-        --timezone UTC >/dev/null
-done
+"$binary" site add "$data" self "self fixture" "$self_origin" \
+    --timezone UTC >/dev/null
+"$binary" site add "$data" ephemeral "ephemeral fixture" "$ephemeral_origin" \
+    --timezone UTC >/dev/null
+"$binary" site add "$data" prerender "prerender fixture" "$prerender_origin" \
+    --timezone UTC >/dev/null
 "$binary" site origin-add "$data" self "http://127.0.0.3:$site_port" >/dev/null
 "$binary" site add "$data" real-prerender "real prerender fixture" \
     "$real_prerender_origin" --timezone UTC >/dev/null
@@ -178,7 +182,7 @@ send_v2() {
         "$self_site" "$event_id" "$anonymous_id" "$session_id" \
         "$now_ms" "$optional" "$path")
     test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
-        -X POST "$upstream/v2/event" -H "Origin: $site_origin" \
+        -X POST "$upstream/v2/event" -H "Origin: $self_origin" \
         -H 'X-Forwarded-For: 203.0.113.9' \
         -H 'User-Agent: Mozilla/5.0 Chrome/151.0' \
         -H 'Content-Type: text/plain' --data-binary "$body")" = 204
@@ -192,7 +196,7 @@ send_excluded_identify() {
         "$self_site" "$identify_event" "$identify_anon" \
         "$identify_session" "$now_ms")
     test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
-        -X POST "$upstream/v2/event" -H "Origin: $site_origin" \
+        -X POST "$upstream/v2/event" -H "Origin: $self_origin" \
         -H 'X-Forwarded-For: 198.51.100.9' \
         -H 'User-Agent: Mozilla/5.0 Chrome/151.0' \
         -H 'Content-Type: text/plain' --data-binary "$body")" = 204
@@ -297,7 +301,7 @@ if grep -aF '203.0.113.9' "$data/meta.db" "$data/events.duckdb" \
     exit 1
 fi
 test "$("$binary" doctor "$data")" = \
-    "ok metadata=v5 events=v7 sites=4 goals=0 funnels=0 stored_events=12 key=ok"
+    "ok metadata=v6 events=v7 sites=4 goals=0 funnels=0 stored_events=12 key=ok"
 grep -Fq '"accepted":12' "$fixture/server.stderr"
 grep -Fq '"excluded":6' "$fixture/server.stderr"
 

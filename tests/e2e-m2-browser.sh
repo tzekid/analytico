@@ -94,7 +94,7 @@ wait "$collector_pid" 2>/dev/null || true
 collector_pid=
 
 test "$("$binary" doctor "$fixture_dir")" = \
-    "ok metadata=v4 events=v6 sites=1 goals=0 funnels=0 stored_events=9 key=ok"
+    "ok metadata=v6 events=v7 sites=1 goals=0 funnels=0 stored_events=9 key=ok"
 
 if grep -aE '(browser-(chromium|firefox|webkit)\?|noscript-(chromium|firefox|webkit)\?)' \
     "$fixture_dir/events.duckdb" "$fixture_dir/server.stdout" \

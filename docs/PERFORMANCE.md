@@ -503,6 +503,22 @@ working native point/panel destinations. It made zero startup API/JSON requests
 and kept the chart, metric form, stacked panel records, data health, and primary
 navigation unclipped at 360 px.
 
+### First-run and site-creation confirmation
+
+Issue #19's final ReleaseSafe real-Caddy, on-disk-store, and Chromium run
+measured 734 compressed bytes for the complete first-run HTML and 5,722
+compressed bytes for the versioned v9 CSS. The JavaScript-disabled site
+creation path made only document and stylesheet requests, accepted one event
+without a process restart, remained unclipped at 360 px, and showed 0 KiB RSS
+growth after 100 authenticated Install views. The separate cold workflow
+observation was 17,012 KiB and is recorded as non-steady process evidence, not
+as the warm-view measurement.
+
+The final Debug run measured the same 734-byte HTML and 5,722-byte CSS, with
+0 KiB warm-view RSS growth. Its separate cold workflow observation was 23,008
+KiB. Both modes passed the same response, request, JavaScript-off, keyboard,
+authentication, validation, and immediate-collection assertions.
+
 ## 8. Regression policy
 
 For a stable benchmark environment:

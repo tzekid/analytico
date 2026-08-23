@@ -36,7 +36,10 @@
   to event schema 7 plus metadata schema 5, derive reversible query-time
   suspected sessions, add an explicit default-off strict policy and daily
   ceiling, and retain only secret-keyed site/receipt-day network evidence for
-  bounded identity-mint warnings.
+  bounded identity-mint warnings. D36 and issue #19 advance metadata to schema
+  6 and add authenticated browser site creation through D19 durable autocommits,
+  stored optional default currency, unique origin ownership, and an in-process
+  collection-policy refresh.
 - The server-rendered dashboard now uses the six-destination, site-scoped
   shell: Overview, Analyze, Journeys, Sessions, Live, and Settings. `/admin`
   and the bounded legacy `site`/`report` query form redirect to the closest
@@ -92,6 +95,15 @@ verified backups, upgrades the binary, and can restore the two embedded files.
 - Create, list, disable, and delete sites.
 - Give each site a public random identifier.
 - Allow one or more exact origins per site.
+- After passkey bootstrap, a blank installation creates its first site through
+  a native browser form without a CLI command or service restart. The form
+  stores an explicit IANA timezone and empty or three-uppercase-byte default
+  currency, preserves invalid submitted values, and reaches a site-scoped
+  Install destination.
+- Site creation follows D19 durable autocommits plus explicit compensating
+  delete, not an explicit multi-write Turso transaction. Exact completed
+  resubmission returns the existing site outcome; conflicting slug or origin
+  remains a field error.
 - Treat all configured origins as operator-controlled input, not request input.
 
 ### F2. Page views
@@ -163,9 +175,10 @@ Commands use explicit paths or the same validated configuration file as the
 service. Destructive commands require the exact site slug and an explicit
 confirmation flag when stdin is not interactive.
 
-Site creation requires an explicit IANA timezone. Existing sites upgraded to
-metadata schema 3 require `site timezone-set`; a site that already has events
-requires the service to be stopped and the explicit offline-rebucket flag.
+CLI site creation remains available for automation and recovery and requires
+an explicit IANA timezone. Existing sites upgraded to metadata schema 3 require
+`site timezone-set`; a site that already has events requires the service to be
+stopped and the explicit offline-rebucket flag.
 
 ### F6. Tracker
 

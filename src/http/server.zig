@@ -401,7 +401,14 @@ fn handle(context: *Context, stream: std.Io.net.Stream) !void {
             .events = context.events,
             .csrf_token = session.csrf_token,
             .origin = policy.origin,
+            .zoneinfo_root = context.zoneinfo_root,
             .report_timeout_ms = context.report_timeout_ms,
+            .collection_available = if (std.mem.eql(u8, path, "/admin") or
+                std.mem.eql(u8, path, "/admin/") or
+                std.mem.endsWith(u8, path, "/install"))
+                context.events_healthy and pathsReady(context)
+            else
+                true,
             .site_calendar = .{
                 .context = context,
                 .get = dashboardSiteCalendar,

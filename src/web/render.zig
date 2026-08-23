@@ -7,7 +7,7 @@ const components = @import("components.zig");
 const model = @import("model.zig");
 
 pub const stylesheet = @embedFile("style.css");
-pub const stylesheet_path = "/admin/app.v8.css";
+pub const stylesheet_path = "/admin/app.v9.css";
 pub const htmx = @embedFile("htmx_js");
 pub const htmx_gzip = @embedFile("htmx_gzip");
 pub const htmx_path = "/admin/htmx.28fae7bb.js";
@@ -31,9 +31,8 @@ pub fn page(output: *std.Io.Writer, value: model.Page) !void {
         try output.writeAll(
             "<header class=\"first-run-header\"><a class=\"brand\" href=\"/admin\">Analytico</a></header>" ++
                 "<main id=\"main\" class=\"first-run-main\"><section class=\"panel\"><h1>No sites configured</h1>" ++
-                "<p>Add the first site with <code>analytico site add " ++
-                "... --timezone &lt;IANA-zone&gt;</code>, " ++
-                "then restart the service.</p></section></main>",
+                "<p>Create the first site in the authenticated browser; no service restart is required.</p>" ++
+                "<a class=\"button\" href=\"/admin/sites/new\">Create site</a></section></main>",
         );
         try foot(output);
         return;
@@ -104,16 +103,245 @@ pub fn errorPage(output: *std.Io.Writer, value: model.ErrorPage) !void {
     try foot(output);
 }
 
+pub fn firstRunPage(output: *std.Io.Writer, value: model.FirstRunPage) !void {
+    try onboardingHead(output, "Create your first site");
+    try onboardingHeader(output);
+    try output.writeAll(
+        "<main id=\"main\" tabindex=\"-1\" class=\"first-run-main onboarding-main\">" ++
+            "<section class=\"panel onboarding-hero\"><span class=\"eyebrow\">First run</span>" ++
+            "<h1>Turn visits into useful answers</h1>" ++
+            "<p>Create the first site in this browser. Analytico will store its exact " ++
+            "origin and reporting timezone, then activate collection without a restart.</p>" ++
+            "<a class=\"button\" href=\"/admin/sites/new\">Create site</a>" ++
+            "<p class=\"field-help\">If setup is blocked, run <code>analytico doctor DATA</code> " ++
+            "and consult the <a href=\"https://github.com/tzekid/analytico/blob/master/docs/OPERATIONS.md\">operator documentation</a>.</p></section>" ++
+            "<section class=\"panel\"><h2>Setup health</h2><dl class=\"setup-health\">" ++
+            "<div><dt>Metadata</dt><dd>",
+    );
+    if (value.runtime_ready) {
+        try output.writeAll("Ready · schema ");
+    } else {
+        try output.writeAll("Check readiness · expected schema ");
+    }
+    try output.print("{d}", .{value.metadata_schema});
+    try output.writeAll("</dd></div><div><dt>Events</dt><dd>");
+    if (value.runtime_ready) {
+        try output.writeAll("Ready · schema ");
+    } else {
+        try output.writeAll("Check readiness · expected schema ");
+    }
+    try output.print("{d}", .{value.event_schema});
+    try output.writeAll("</dd></div><div><dt>Collector</dt><dd>");
+    if (value.runtime_ready) {
+        try output.writeAll("Ready for a site policy");
+    } else {
+        try output.writeAll("Collection unavailable · run doctor and check /readyz");
+    }
+    try output.writeAll("</dd></div></dl></section></main>");
+    try foot(output);
+}
+
+pub fn siteFormPage(output: *std.Io.Writer, value: model.SiteFormPage) !void {
+    try onboardingHead(output, "Create site");
+    try onboardingHeader(output);
+    try output.writeAll(
+        "<main id=\"main\" tabindex=\"-1\" class=\"first-run-main onboarding-main\">" ++
+            "<div class=\"page-heading\"><span class=\"eyebrow\">Site setup</span>" ++
+            "<h1>Create site</h1><p>Use explicit reporting and collection settings. " ++
+            "You can change additional settings later.</p></div>",
+    );
+    if (value.errors.any()) {
+        try components.feedback(output, .{
+            .kind = .error_message,
+            .message = "Check the marked fields. No site was created.",
+            .id = "site-form-errors",
+            .focus = true,
+        });
+    }
+    try output.writeAll(
+        "<form class=\"panel site-form\" method=\"post\" action=\"/admin/sites\">" ++
+            "<input type=\"hidden\" name=\"csrf\" value=\"",
+    );
+    try attribute(output, value.csrf_token);
+    try output.writeAll("\"><label for=\"site-name\">Display name</label><input id=\"site-name\" name=\"name\" maxlength=\"120\" required autocomplete=\"organization\"");
+    try siteFieldAttributes(output, value.errors.name, "site-name-error");
+    try output.writeAll(" value=\"");
+    try attribute(output, value.draft.name);
+    try output.writeAll("\">");
+    try siteFieldError(output, value.errors.name, "site-name-error");
+    try output.writeAll(
+        "<label for=\"site-slug\">Slug</label>" ++
+            "<p class=\"field-help\" id=\"site-slug-help\">Leave blank to derive it from the name.</p>" ++
+            "<input id=\"site-slug\" name=\"slug\" maxlength=\"48\" " ++
+            "aria-describedby=\"site-slug-help",
+    );
+    if (value.errors.slug.len != 0) try output.writeAll(" site-slug-error");
+    try output.writeAll("\" value=\"");
+    try attribute(output, value.draft.slug);
+    try output.writeAll("\"");
+    if (value.errors.slug.len != 0) try output.writeAll(" aria-invalid=\"true\"");
+    try output.writeAll(">");
+    try siteFieldError(output, value.errors.slug, "site-slug-error");
+    try output.writeAll(
+        "<label for=\"site-origin\">Primary origin</label>" ++
+            "<p class=\"field-help\" id=\"site-origin-help\">Exact HTTPS origin; loopback HTTP is allowed for development.</p>" ++
+            "<input id=\"site-origin\" name=\"origin\" type=\"url\" maxlength=\"512\" required " ++
+            "placeholder=\"https://example.com\" aria-describedby=\"site-origin-help",
+    );
+    if (value.errors.origin.len != 0) try output.writeAll(" site-origin-error");
+    try output.writeAll("\" value=\"");
+    try attribute(output, value.draft.origin);
+    try output.writeAll("\"");
+    if (value.errors.origin.len != 0) try output.writeAll(" aria-invalid=\"true\"");
+    try output.writeAll(">");
+    try siteFieldError(output, value.errors.origin, "site-origin-error");
+    try output.writeAll(
+        "<label for=\"site-timezone\">Reporting timezone</label>" ++
+            "<p class=\"field-help\" id=\"site-timezone-help\">Choose explicitly; the server never guesses. Example: Europe/Berlin.</p>" ++
+            "<input id=\"site-timezone\" name=\"timezone\" maxlength=\"255\" required " ++
+            "autocomplete=\"off\" placeholder=\"Europe/Berlin\" aria-describedby=\"site-timezone-help",
+    );
+    if (value.errors.timezone.len != 0) try output.writeAll(" site-timezone-error");
+    try output.writeAll("\" value=\"");
+    try attribute(output, value.draft.timezone);
+    try output.writeAll("\"");
+    if (value.errors.timezone.len != 0) try output.writeAll(" aria-invalid=\"true\"");
+    try output.writeAll(">");
+    try siteFieldError(output, value.errors.timezone, "site-timezone-error");
+    try output.writeAll(
+        "<label for=\"site-currency\">Default currency <span class=\"muted\">(optional)</span></label>" ++
+            "<p class=\"field-help\" id=\"site-currency-help\">Three uppercase letters such as EUR. Currencies are never converted or combined.</p>" ++
+            "<input id=\"site-currency\" name=\"currency\" maxlength=\"3\" pattern=\"[A-Z]{3}\" " ++
+            "placeholder=\"EUR\" aria-describedby=\"site-currency-help",
+    );
+    if (value.errors.currency.len != 0) try output.writeAll(" site-currency-error");
+    try output.writeAll("\" value=\"");
+    try attribute(output, value.draft.currency);
+    try output.writeAll("\"");
+    if (value.errors.currency.len != 0) try output.writeAll(" aria-invalid=\"true\"");
+    try output.writeAll(">");
+    try siteFieldError(output, value.errors.currency, "site-currency-error");
+    try output.writeAll(
+        "<div class=\"form-actions\"><button type=\"submit\">Create site</button>" ++
+            "<a class=\"button button-secondary\" href=\"/admin\">Cancel</a>" ++
+            "</div></form></main>",
+    );
+    try foot(output);
+}
+
+pub fn installPage(output: *std.Io.Writer, value: model.InstallPage) !void {
+    try onboardingHead(output, "Install tracker");
+    try onboardingHeader(output);
+    try output.writeAll(
+        "<main id=\"main\" tabindex=\"-1\" class=\"first-run-main onboarding-main\">" ++
+            "<div class=\"page-heading\"><span class=\"eyebrow\">Site ready</span><h1>Install tracker</h1>",
+    );
+    if (value.policy_active) {
+        try output.writeAll(
+            "<p>The site is stored and its collection policy is active without a restart.</p>",
+        );
+    } else {
+        try output.writeAll(
+            "<p role=\"status\">The site is stored, but its collection policy is not active " ++
+                "in this running process. Restart the service or submit the same site form after recovery.</p>",
+        );
+    }
+    if (!value.collection_available) {
+        try output.writeAll(
+            "<p role=\"alert\"><strong>Collection unavailable:</strong> collector storage is not " ++
+                "ready in this running process. Restore the configured paths and confirm readiness " ++
+                "before installing the tracker.</p>",
+        );
+    }
+    try output.writeAll("</div><section class=\"panel\"><h2>");
+    try text(output, value.site.name);
+    try output.writeAll("</h2><dl class=\"configuration-list\"><div><dt>Site ID</dt><dd><code>");
+    try text(output, value.site.id);
+    try output.writeAll("</code></dd></div><div><dt>Slug</dt><dd><code>");
+    try text(output, value.site.slug);
+    try output.writeAll("</code></dd></div><div><dt>Timezone</dt><dd>");
+    try text(output, value.site.timezone_name);
+    try output.writeAll("</dd></div><div><dt>Default currency</dt><dd>");
+    if (value.site.default_currency.len == 0) {
+        try output.writeAll("Not set");
+    } else {
+        try text(output, value.site.default_currency);
+    }
+    try output.writeAll("</dd></div></dl><h3>Configured origins</h3><ul>");
+    for (value.site.origins) |origin| {
+        try output.writeAll("<li><code>");
+        try text(output, origin);
+        try output.writeAll("</code></li>");
+    }
+    try output.writeAll(
+        "</ul></section><section class=\"panel\"><h2>Tracker setup</h2>" ++
+            "<p>The canonical snippet and first-event verification are not available in this build yet. " ++
+            "This URL remains the site-scoped setup destination.</p>" ++
+            "<p><a class=\"button button-secondary\" href=\"/admin/sites/",
+    );
+    try attribute(output, value.site.slug);
+    try output.writeAll("/overview\">Open Overview</a></p></section></main>");
+    try foot(output);
+}
+
+fn onboardingHeader(output: *std.Io.Writer) !void {
+    try output.writeAll("<header class=\"first-run-header onboarding-header\"><a class=\"brand\" href=\"/admin\">Analytico <b>1.0</b></a></header>");
+}
+
+fn siteFieldAttributes(
+    output: *std.Io.Writer,
+    message: []const u8,
+    error_id: []const u8,
+) !void {
+    if (message.len == 0) return;
+    try output.writeAll(" aria-invalid=\"true\" aria-describedby=\"");
+    try attribute(output, error_id);
+    try output.writeByte('"');
+}
+
+fn siteFieldError(
+    output: *std.Io.Writer,
+    message: []const u8,
+    error_id: []const u8,
+) !void {
+    if (message.len == 0) return;
+    try output.writeAll("<p class=\"field-error\" id=\"");
+    try attribute(output, error_id);
+    try output.writeAll("\">");
+    try text(output, message);
+    try output.writeAll("</p>");
+}
+
 fn head(output: *std.Io.Writer, title: []const u8) !void {
+    try documentHead(output, title, true);
+}
+
+fn onboardingHead(output: *std.Io.Writer, title: []const u8) !void {
+    try documentHead(output, title, false);
+}
+
+fn documentHead(
+    output: *std.Io.Writer,
+    title: []const u8,
+    include_scripts: bool,
+) !void {
     try output.writeAll("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>");
     try text(output, title);
     try output.writeAll(" · Analytico</title><link rel=\"stylesheet\" href=\"");
     try attribute(output, stylesheet_path);
-    try output.writeAll("\"><script defer src=\"");
-    try attribute(output, htmx_path);
-    try output.writeAll("\"></script><script defer src=\"");
-    try attribute(output, dashboard_js_path);
-    try output.writeAll("\"></script></head><body hx-boost:inherited=\"true\" hx-indicator:inherited=\"#loading-region\"><a class=\"skip-link\" href=\"#main\">Skip to main content</a><p id=\"loading-region\" class=\"loading-region htmx-indicator\" role=\"status\" aria-live=\"polite\" aria-atomic=\"true\">Updating view…</p>");
+    if (include_scripts) {
+        try output.writeAll("\"><script defer src=\"");
+        try attribute(output, htmx_path);
+        try output.writeAll("\"></script><script defer src=\"");
+        try attribute(output, dashboard_js_path);
+        try output.writeAll("\"></script></head><body hx-boost:inherited=\"true\" hx-indicator:inherited=\"#loading-region\">");
+    } else {
+        try output.writeAll("\"></head><body>");
+    }
+    try output.writeAll("<a class=\"skip-link\" href=\"#main\">Skip to main content</a>");
+    if (include_scripts) {
+        try output.writeAll("<p id=\"loading-region\" class=\"loading-region htmx-indicator\" role=\"status\" aria-live=\"polite\" aria-atomic=\"true\">Updating view…</p>");
+    }
 }
 
 fn foot(output: *std.Io.Writer) !void {
@@ -208,7 +436,8 @@ fn contextControls(output: *std.Io.Writer, value: model.Page) !void {
     try output.writeAll("</select></label>");
     try calendarHiddenFields(output, value.query);
     try output.writeAll(
-        "<button class=\"button-secondary\" type=\"submit\">View site</button></form>" ++
+        "<button class=\"button-secondary\" type=\"submit\">View site</button>" ++
+            "<a class=\"button button-secondary\" href=\"/admin/sites/new\">Create site</a></form>" ++
             "<details class=\"date-presets\"><summary>",
     );
     try text(output, context.selected_preset.label());
@@ -1742,5 +1971,5 @@ test "production stylesheet mirrors the approved accessible design tokens" {
 
     try std.testing.expect(std.mem.indexOf(u8, stylesheet, "@import") == null);
     try std.testing.expect(std.mem.indexOf(u8, stylesheet, "url(") == null);
-    try std.testing.expectEqualStrings("/admin/app.v8.css", stylesheet_path);
+    try std.testing.expectEqualStrings("/admin/app.v9.css", stylesheet_path);
 }

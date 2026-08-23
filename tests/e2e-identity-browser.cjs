@@ -17,6 +17,7 @@ if (!collector || !siteA || !siteB || !Number.isInteger(fixturePort)) {
 const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const fixtureOrigin = `http://127.0.0.2:${fixturePort}`;
+const fixtureOriginB = `http://127.0.0.3:${fixturePort}`;
 
 function html(site) {
   return `<!doctype html>
@@ -206,23 +207,22 @@ async function verifyPersistenceAndReset() {
       assert.equal(tracked.session_id, afterReset.session);
       assert.equal(tracked.sequence, 0);
       assert.equal(tracked.identity_quality, "persistent");
+      assert.deepEqual(
+        (await storageKeys(restoredPage, siteA)).keys,
+        [`anl:${siteA}:a`, `anl:${siteA}:s`],
+      );
 
       accepted = nextV2(restoredPage);
-      await restoredPage.goto(`${fixtureOrigin}/b`, { waitUntil: "load" });
+      await restoredPage.goto(`${fixtureOriginB}/b`, { waitUntil: "load" });
       const otherSite = await accepted;
       assert.equal(otherSite.site, siteB);
       assert.equal(otherSite.identity_quality, "persistent");
       assert.notEqual(otherSite.anonymous_id, afterReset.anonymous);
       unlinked = { site: siteB, anonymous: otherSite.anonymous_id };
-      const both = await restoredPage.evaluate(
-        ([a, b]) => ({
-          a: [`anl:${a}:a`, `anl:${a}:s`],
-          b: [`anl:${b}:a`, `anl:${b}:s`],
-          keys: Object.keys(localStorage).sort(),
-        }),
-        [siteA, siteB],
+      assert.deepEqual(
+        (await storageKeys(restoredPage, siteB)).keys,
+        [`anl:${siteB}:a`, `anl:${siteB}:s`],
       );
-      assert.deepEqual(both.keys, [...both.a, ...both.b].sort());
       await restoredContext.close();
     } finally {
       await restoredBrowser.close();

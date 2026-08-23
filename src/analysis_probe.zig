@@ -23,6 +23,7 @@ pub fn seedTrafficQuality(
         return error.TrafficQualitySeedRequiresEmptyStores;
     }
     try metadata.addSite(
+        allocator,
         site,
         "quality",
         "Traffic Quality",
@@ -102,6 +103,7 @@ pub fn seedHeuristics(
         return error.HeuristicsSeedRequiresEmptyStores;
     }
     try metadata.addSite(
+        allocator,
         site,
         "heuristics",
         "Heuristics",
