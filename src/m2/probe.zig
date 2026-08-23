@@ -352,10 +352,10 @@ pub fn propertyMillion(
         \\  signal_version, navigator_webdriver, trusted_interactions,
         \\  was_visible, was_prerendered, viewport_bucket,
         \\  beacon_timing_bucket, client_hint_consistency,
-        \\  accept_language_present
+        \\  accept_language_present, network_day_id
         \\)
         \\SELECT
-        \\  6, 2, 2,
+        \\  7, 2, 2,
         \\  CAST('00000000-0000-4000-8000-000000000f11' AS UUID),
         \\  '00000000-0000-4000-8000-000000000f10',
         \\  1767225600000000 + i * 1000,
@@ -390,7 +390,8 @@ pub fn propertyMillion(
         \\  ',"region":"r' || CAST(i % 8 AS VARCHAR) || '"}',
         \\  '{}', CAST(NULL AS DECIMAL(18,6)), '', 0, 0,
         \\  CAST('benchmark' AS BLOB), i = 0, '', 1, 2, '',
-        \\  0, FALSE, 0, FALSE, FALSE, 0, 0, 0, FALSE
+        \\  0, FALSE, 0, FALSE, FALSE, 0, 0, 0, FALSE,
+        \\  from_hex('00000000000000000000000000000000')
         \\FROM range(1000000) rows(i);
     );
     try store.checkpoint();

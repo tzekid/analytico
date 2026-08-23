@@ -252,7 +252,7 @@ pub fn million(
         \\  classifier_version, bot_rule, signal_version,
         \\  navigator_webdriver, trusted_interactions, was_visible,
         \\  was_prerendered, viewport_bucket, beacon_timing_bucket,
-        \\  client_hint_consistency, accept_language_present
+        \\  client_hint_consistency, accept_language_present, network_day_id
         \\)
         \\WITH generated AS (
         \\  SELECT
@@ -299,7 +299,7 @@ pub fn million(
         \\  FROM generated
         \\)
         \\SELECT
-        \\  6, 1, 1, event_id, site_id,
+        \\  7, 1, 1, event_id, site_id,
         \\  received_at, received_at, received_date, received_date, 0,
         \\  kind, event_name, path, '', '', CAST(
         \\    substr(identity_hash, 1, 8) || '-' ||
@@ -312,7 +312,8 @@ pub fn million(
         \\  '', 'US', '', 'Chrome', 'Linux', 'desktop',
         \\  '', '', '', '', '', '{}', '{}', CAST(NULL AS DECIMAL(18,6)), '',
         \\  0, 0, visitor_day_id, visitor_day_start, '', 1, 0, '',
-        \\  0, FALSE, 0, FALSE, FALSE, 0, 0, 0, FALSE
+        \\  0, FALSE, 0, FALSE, FALSE, 0, 0, 0, FALSE,
+        \\  from_hex('00000000000000000000000000000000')
         \\FROM sequenced
     );
     defer statement.deinit();
@@ -403,13 +404,13 @@ pub fn legacyVerify(
     var store = try events.Store.open(allocator, event_path);
     defer store.deinit();
     try store.migrate();
-    if (try store.migrationVersion() != 6) return error.LegacyMigrationVersion;
+    if (try store.migrationVersion() != 7) return error.LegacyMigrationVersion;
     var result = try store.database.query(
         \\SELECT count(*), count(DISTINCT session_id),
         \\       count(*) FILTER (WHERE visitor_day_start),
         \\       count(*) FILTER (WHERE session_start),
         \\       count(*) FILTER (
-        \\         WHERE event_schema_version = 6
+        \\         WHERE event_schema_version = 7
         \\           AND protocol_version = 1 AND tracker_version = 1
         \\           AND identity_quality = 3
         \\           AND occurred_at_utc_micros = received_at_utc_micros
@@ -426,6 +427,8 @@ pub fn legacyVerify(
         \\           AND viewport_bucket = 0 AND beacon_timing_bucket = 0
         \\           AND client_hint_consistency = 0
         \\           AND NOT accept_language_present
+        \\           AND network_day_id =
+        \\             from_hex('00000000000000000000000000000000')
         \\       ),
         \\       count(DISTINCT anonymous_id), sum(sequence)
         \\FROM events
@@ -446,7 +449,7 @@ pub fn legacyVerify(
     {
         return error.LegacyIdentityLink;
     }
-    try output.writeAll("legacy event schema v1 migrated to v3\n");
+    try output.writeAll("legacy event schema v1 migrated to v7\n");
 }
 
 pub fn legacyEvidence(
@@ -484,6 +487,7 @@ pub fn identityCoverage(
             site_id,
             start_local_date,
             end_local_date,
+            .{},
             2_000,
         ),
         .{},

@@ -205,7 +205,8 @@ pub fn run(
             "\"rejected\":{d},\"rate_limited\":{d},\"bots\":{d}," ++
             "\"unknown_country\":{d},\"unknown_client\":{d}," ++
             "\"duplicates\":{d},\"conflicts\":{d},\"write_failures\":{d}," ++
-            "\"request_failures\":{d},\"excluded\":{d}}}\n",
+            "\"request_failures\":{d},\"excluded\":{d}," ++
+            "\"daily_ceiling_rejected\":{d}}}\n",
         .{
             context.counters.accepted,
             context.counters.rejected,
@@ -218,6 +219,7 @@ pub fn run(
             context.counters.write_failures,
             context.counters.request_failures,
             context.counters.excluded,
+            context.counters.daily_ceiling_rejected,
         },
     );
 }
@@ -234,6 +236,7 @@ const Counters = struct {
     write_failures: u64 = 0,
     request_failures: u64 = 0,
     excluded: u64 = 0,
+    daily_ceiling_rejected: u64 = 0,
 };
 
 const Context = struct {
@@ -563,6 +566,10 @@ fn postEvent(
         prepared,
         policy,
     ) catch |err| {
+        if (err == error.DailyEventCeilingReached) {
+            try rejectDailyCeiling(context, output);
+            return;
+        }
         try reject(
             context,
             output,
@@ -672,6 +679,10 @@ fn postEventV2(
         now,
         policy,
     ) catch |err| {
+        if (err == error.DailyEventCeilingReached) {
+            try rejectDailyCeiling(context, output);
+            return;
+        }
         const status: u16 = switch (err) {
             error.EventIdConflict,
             error.IdentityConflict,
@@ -737,6 +748,10 @@ fn pixelEvent(
         prepared,
         policy,
     ) catch |err| {
+        if (err == error.DailyEventCeilingReached) {
+            try rejectDailyCeiling(context, output);
+            return;
+        }
         try reject(
             context,
             output,
@@ -806,7 +821,13 @@ fn acceptEvent(
     const traffic = client.traffic.withExclusion(exclusion_source);
     const local = policy.timezone.localAt(now.seconds) catch
         return error.TimezoneUnavailable;
-    context.events.insert(.{
+    const network_day_id = try domain.deriveNetworkDayId(
+        context.master_key,
+        prepared.site_id,
+        &now.date,
+        client_ip,
+    );
+    context.events.insertWithCeiling(.{
         .event_id = &event_id,
         .site_id = prepared.site_id,
         .received_at_utc_micros = now.micros,
@@ -834,10 +855,14 @@ fn acceptEvent(
         .signals = .{},
         .client_hint_consistency = receipt.client_hint_consistency,
         .accept_language_present = receipt.accept_language_present,
-    }) catch {
-        context.events_healthy = false;
-        context.counters.write_failures += 1;
-        return error.EventWriteFailed;
+        .network_day_id = network_day_id,
+    }, policy.metadata.daily_event_ceiling) catch |err| switch (err) {
+        error.DailyEventCeilingReached => return err,
+        else => {
+            context.events_healthy = false;
+            context.counters.write_failures += 1;
+            return error.EventWriteFailed;
+        },
     };
     context.counters.accepted += 1;
     if (traffic.class.isExcluded()) {
@@ -895,7 +920,13 @@ fn acceptEventV2(
     const traffic = client.traffic.withExclusion(exclusion_source);
     const local = policy.timezone.localAt(now.seconds) catch
         return error.TimezoneUnavailable;
-    const outcome = context.events.insertV2(allocator, .{
+    const network_day_id = try domain.deriveNetworkDayId(
+        context.master_key,
+        prepared.site_id,
+        &now.date,
+        client_ip,
+    );
+    const outcome = context.events.insertV2WithCeiling(allocator, .{
         .event_id = prepared.event_id,
         .site_id = prepared.site_id,
         .received_at_utc_micros = now.micros,
@@ -937,7 +968,8 @@ fn acceptEventV2(
         .signals = prepared.signals,
         .client_hint_consistency = receipt.client_hint_consistency,
         .accept_language_present = receipt.accept_language_present,
-    }) catch |err| switch (err) {
+        .network_day_id = network_day_id,
+    }, policy.metadata.daily_event_ceiling) catch |err| switch (err) {
         error.EventIdConflict,
         error.IdentityConflict,
         error.IdentityQualityConflict,
@@ -945,6 +977,7 @@ fn acceptEventV2(
             context.counters.conflicts += 1;
             return err;
         },
+        error.DailyEventCeilingReached => return err,
         else => {
             context.events_healthy = false;
             context.counters.write_failures += 1;
@@ -1195,6 +1228,18 @@ fn writeError(output: *std.Io.Writer, status: u16) !void {
         "text/plain; charset=utf-8",
         no_store_headers,
         body,
+    );
+}
+
+fn rejectDailyCeiling(context: *Context, output: *std.Io.Writer) !void {
+    context.counters.daily_ceiling_rejected += 1;
+    context.counters.rejected += 1;
+    try response.write(
+        output,
+        429,
+        "text/plain; charset=utf-8",
+        no_store_headers,
+        "daily event ceiling reached\n",
     );
 }
 

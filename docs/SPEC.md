@@ -32,8 +32,11 @@
   visible old/new classifier shadow evidence without storing raw UAs.
   D33 and issue #69 advance to schema 6, store only bounded browser/receipt
   evidence, add webdriver and client-hint-mismatch hard rules, end the completed
-  shadow, and promote the permanent class predicate. Soft heuristics remain
-  reversible query-time work owned by #70.
+  shadow, and promote the permanent class predicate. D34 and issue #70 advance
+  to event schema 7 plus metadata schema 5, derive reversible query-time
+  suspected sessions, add an explicit default-off strict policy and daily
+  ceiling, and retain only secret-keyed site/receipt-day network evidence for
+  bounded identity-mint warnings.
 - The current server-rendered `/admin` dashboard and optional HTMX enhancement
   shipped after M4. HTML, native navigation, and ordinary forms remain the
   application baseline.
@@ -123,6 +126,11 @@ For a site and inclusive UTC date range under metric v1, report:
 
 Every list has an explicit order, stable tie-breaker, default limit, and maximum
 limit. Exact metric semantics are defined in [DATA_MODEL.md](DATA_MODEL.md).
+Default reports include query-time suspected sessions. An explicitly enabled
+strict policy excludes only current suspects through the shared versioned
+product relation; trusted interaction, engagement, scroll, later activity,
+goal conversion, or persistent return vetoes that verdict. Traffic-quality
+diagnostics remain visible independently of strict mode.
 
 ### F5. CLI
 
@@ -165,6 +173,9 @@ requires the service to be stopped and the explicit offline-rebucket flag.
 - Use local persistent storage, not network-mounted database files.
 - Expose loopback-only liveness and readiness endpoints.
 - Produce bounded structured logs without visitor identifiers or payloads.
+- Expose the explicit per-site daily accepted-event ceiling and strict traffic
+  setting through authenticated native forms, with visible bounded health
+  evidence rather than silent collection loss.
 - Support a tested stop-the-service backup and restore procedure.
 
 ## 4. Non-functional requirements
@@ -178,11 +189,16 @@ requires the service to be stopped and the explicit offline-rebucket flag.
   as identified people.
 - Reports expose their UTC range and applied filters.
 - Partial upstream/enrichment failure does not invent data.
+- Query-time traffic suspicion is labeled rather than asserted as a person
+  verdict, remains reversible, and exposes its standing contradiction rate.
 
 ### Historical metric-v1 privacy
 
 - No cookies or local storage in the MVP.
 - No raw IP address or full user-agent string is persisted.
+- A network prefix used for schema-7 anomaly evidence is persisted only as a
+  secret-keyed 16-byte value scoped to site and receipt UTC date; the bytes are
+  never logged, rendered, or exported.
 - Visitor pseudonyms rotate at the UTC day boundary and are site-scoped.
 - Only recognized UTM keys survive URL parsing.
 - Referrers are reduced to a normalized host; paths and query strings are
@@ -206,7 +222,8 @@ requires the service to be stopped and the explicit offline-rebucket flag.
 ### Performance
 
 - A valid collection request performs one bounded parse, one classification,
-  and one durable event insert.
+  and one transaction containing the bounded site/day ceiling check plus its
+  durable event/link work.
 - Reports query on demand; there is no always-running aggregation worker.
 - The performance and resource budgets in
   [PERFORMANCE.md](PERFORMANCE.md) are release gates.

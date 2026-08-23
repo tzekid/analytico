@@ -85,6 +85,159 @@ pub fn seedTrafficQuality(
     try output.writeAll("traffic-quality fixture committed sites=1 events=15 links=2\n");
 }
 
+pub fn seedHeuristics(
+    allocator: std.mem.Allocator,
+    output: *std.Io.Writer,
+    directory: []const u8,
+) !void {
+    const meta_path = try std.fs.path.join(allocator, &.{ directory, "meta.db" });
+    const event_path = try std.fs.path.join(allocator, &.{ directory, "events.duckdb" });
+    var metadata = try meta.Store.open(allocator, meta_path);
+    defer metadata.deinit();
+    try metadata.requireCurrent();
+    var event_store = try events.Store.open(allocator, event_path);
+    defer event_store.deinit();
+    try event_store.requireCurrent();
+    if (try metadata.siteCount() != 0 or try event_store.eventCount() != 0) {
+        return error.HeuristicsSeedRequiresEmptyStores;
+    }
+    try metadata.addSite(
+        site,
+        "heuristics",
+        "Heuristics",
+        "https://heuristics.example",
+        "UTC",
+        1_777_161_600_000_000,
+    );
+    try metadata.addGoal(
+        allocator,
+        "00000000-0000-4000-8000-000000000070",
+        "heuristics",
+        "Purchase",
+        .event,
+        "purchase",
+        1_777_161_600_000_001,
+    );
+    try analysis_store.seedSemanticFixture(&event_store.database);
+    try event_store.database.exec(
+        \\INSERT INTO events
+        \\SELECT template.* REPLACE (
+        \\  7 AS event_schema_version, CAST(v.event_id AS UUID) AS event_id,
+        \\  v.received_at AS received_at_utc_micros,
+        \\  v.received_at AS occurred_at_utc_micros,
+        \\  CAST('2026-08-23' AS DATE) AS received_date_utc,
+        \\  CAST('2026-08-23' AS DATE) AS site_local_date,
+        \\  v.kind AS kind, v.event_name AS event_name, v.path AS path,
+        \\  CAST(v.anonymous_id AS UUID) AS anonymous_id,
+        \\  CAST(v.session_id AS UUID) AS session_id, v.sequence AS sequence,
+        \\  v.sequence = 0 AS session_start,
+        \\  from_hex(md5(v.anonymous_id)) AS visitor_day_id,
+        \\  v.sequence = 0 AS visitor_day_start,
+        \\  repeat('7', 64) AS event_payload_digest,
+        \\  v.traffic_class AS traffic_class,
+        \\  v.classifier_version AS classifier_version,
+        \\  v.bot_rule AS bot_rule, v.signal_version AS signal_version,
+        \\  v.webdriver AS navigator_webdriver,
+        \\  v.trusted AS trusted_interactions,
+        \\  v.visible AS was_visible, FALSE AS was_prerendered,
+        \\  v.viewport AS viewport_bucket, v.timing AS beacon_timing_bucket,
+        \\  v.hint AS client_hint_consistency,
+        \\  v.language_present AS accept_language_present,
+        \\  v.engagement_ms AS engagement_ms, v.scroll AS max_scroll_depth,
+        \\  from_hex('22222222222222222222222222222222') AS network_day_id
+        \\) FROM events template CROSS JOIN (VALUES
+        \\ ('00000000-0000-4000-8000-000000000201',1777161600000000,1,'pageview','/candidate','00000000-0000-4000-8000-000000000201','00000000-0000-4000-8000-000000000301',0,1,2,'',1,FALSE,0,FALSE,4,1,3,FALSE,0,0),
+        \\ ('00000000-0000-4000-8000-000000000202',1777161601000000,1,'pageview','/ordinary','00000000-0000-4000-8000-000000000202','00000000-0000-4000-8000-000000000302',0,1,2,'',1,FALSE,0,TRUE,4,2,1,TRUE,0,0),
+        \\ ('00000000-0000-4000-8000-000000000203',1777161602000000,1,'pageview','/historical','00000000-0000-4000-8000-000000000203','00000000-0000-4000-8000-000000000303',0,1,2,'',0,FALSE,0,FALSE,0,0,0,FALSE,0,0),
+        \\ ('00000000-0000-4000-8000-000000000204',1777161603000000,1,'pageview','/second-page-veto','00000000-0000-4000-8000-000000000204','00000000-0000-4000-8000-000000000304',0,1,2,'',1,FALSE,0,FALSE,4,1,3,FALSE,0,0),
+        \\ ('00000000-0000-4000-8000-000000000205',1777161604000000,1,'pageview','/human-second-page','00000000-0000-4000-8000-000000000204','00000000-0000-4000-8000-000000000304',1,1,2,'',1,FALSE,1,TRUE,4,3,1,TRUE,0,0),
+        \\ ('00000000-0000-4000-8000-000000000206',1777161605000000,1,'pageview','/engagement-veto','00000000-0000-4000-8000-000000000206','00000000-0000-4000-8000-000000000306',0,1,2,'',1,FALSE,0,FALSE,4,1,3,FALSE,0,0),
+        \\ ('00000000-0000-4000-8000-000000000207',1777161606000000,3,'engagement','/engagement-veto','00000000-0000-4000-8000-000000000206','00000000-0000-4000-8000-000000000306',1,1,2,'',1,FALSE,1,TRUE,4,3,1,TRUE,10000,50),
+        \\ ('00000000-0000-4000-8000-000000000208',1777161607000000,2,'purchase','/goal-veto','00000000-0000-4000-8000-000000000208','00000000-0000-4000-8000-000000000308',0,1,2,'',1,FALSE,0,FALSE,4,1,3,FALSE,0,0),
+        \\ ('00000000-0000-4000-8000-000000000209',1777161608000000,1,'pageview','/return-veto','00000000-0000-4000-8000-0000000000a1','00000000-0000-4000-8000-000000000309',0,1,2,'',1,FALSE,0,FALSE,4,1,3,FALSE,0,0),
+        \\ ('00000000-0000-4000-8000-000000000210',1777161609000000,1,'pageview','/hard-webdriver','00000000-0000-4000-8000-000000000210','00000000-0000-4000-8000-000000000310',0,3,2,'signal.webdriver',1,TRUE,0,FALSE,4,1,3,FALSE,0,0),
+        \\ ('00000000-0000-4000-8000-000000000211',1777161610000000,1,'pageview','/hard-ua','00000000-0000-4000-8000-000000000211','00000000-0000-4000-8000-000000000311',0,2,1,'crawler.google',1,FALSE,0,FALSE,4,1,3,FALSE,0,0)
+        \\) v(event_id,received_at,kind,event_name,path,anonymous_id,session_id,
+        \\ sequence,traffic_class,classifier_version,bot_rule,signal_version,
+        \\ webdriver,trusted,visible,viewport,timing,hint,language_present,
+        \\ engagement_ms,scroll)
+        \\WHERE template.event_id = CAST('00000000-0000-4000-8000-000000000107' AS UUID);
+        \\INSERT INTO events
+        \\SELECT template.* REPLACE (
+        \\  7 AS event_schema_version,
+        \\  CAST(md5('mint-event-' || CAST(i AS VARCHAR)) AS UUID) AS event_id,
+        \\  1777161700000000 + i AS received_at_utc_micros,
+        \\  1777161700000000 + i AS occurred_at_utc_micros,
+        \\  CAST('2026-08-23' AS DATE) AS received_date_utc,
+        \\  CAST('2026-08-23' AS DATE) AS site_local_date,
+        \\  'pageview' AS event_name, '/mint' AS path,
+        \\  CAST(md5('mint-anonymous-' || CAST(i AS VARCHAR)) AS UUID) AS anonymous_id,
+        \\  CAST(md5('mint-session-' || CAST(i AS VARCHAR)) AS UUID) AS session_id,
+        \\  0 AS sequence, TRUE AS session_start,
+        \\  from_hex(md5('mint-visitor-' || CAST(i AS VARCHAR))) AS visitor_day_id,
+        \\  TRUE AS visitor_day_start, repeat('8', 64) AS event_payload_digest,
+        \\  1 AS traffic_class, 2 AS classifier_version, '' AS bot_rule,
+        \\  0 AS signal_version, FALSE AS navigator_webdriver,
+        \\  0 AS trusted_interactions, FALSE AS was_visible,
+        \\  FALSE AS was_prerendered, 0 AS viewport_bucket,
+        \\  0 AS beacon_timing_bucket, 0 AS client_hint_consistency,
+        \\  FALSE AS accept_language_present,
+        \\  from_hex('33333333333333333333333333333333') AS network_day_id
+        \\) FROM events template CROSS JOIN range(65) minted(i)
+        \\WHERE template.event_id = CAST('00000000-0000-4000-8000-000000000107' AS UUID);
+    );
+    try metadata.checkpoint();
+    try event_store.checkpoint();
+    try output.writeAll("heuristics fixture committed events=88 candidates=5 current=1\n");
+}
+
+pub fn checkHeuristics(
+    allocator: std.mem.Allocator,
+    output: *std.Io.Writer,
+    directory: []const u8,
+) !void {
+    const event_path = try std.fs.path.join(allocator, &.{ directory, "events.duckdb" });
+    var event_store = try events.Store.open(allocator, event_path);
+    defer event_store.deinit();
+    try event_store.requireCurrent();
+    const query = analysis.Query{
+        .site_id = site,
+        .range = .{ .start = "2026-08-23", .end = "2026-08-23" },
+        .mode = .trend,
+        .metric = .{ .kind = .page_views },
+        .interval = .day,
+    };
+    const goals = [_]analysis.ResolvedGoal{.{
+        .id = "00000000-0000-4000-8000-000000000070",
+        .selector = .{ .kind = .exact_event, .value = "purchase" },
+    }};
+    const default_result = (try analysis_store.execute(
+        allocator,
+        &event_store,
+        .{ .query = query, .active_goals = &goals },
+    )).trend;
+    const strict_result = (try analysis_store.execute(
+        allocator,
+        &event_store,
+        .{
+            .query = query,
+            .active_goals = &goals,
+            .strict_traffic_mode = true,
+        },
+    )).trend;
+    if (default_result.total.len != 1 or strict_result.total.len != 1 or
+        default_result.total[0] != .count or strict_result.total[0] != .count)
+    {
+        return error.InvalidHeuristicsAnalysisResult;
+    }
+    try std.json.Stringify.value(.{
+        .metric_version = analysis.metric_version,
+        .default_page_views = default_result.total[0].count,
+        .strict_page_views = strict_result.total[0].count,
+    }, .{}, output);
+    try output.writeByte('\n');
+}
+
 pub fn run(
     allocator: std.mem.Allocator,
     io: std.Io,

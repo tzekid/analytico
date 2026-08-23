@@ -691,6 +691,7 @@ pub const Execution = struct {
     query: Query,
     comparison_range: ?LocalDateRange = null,
     active_goals: []const ResolvedGoal = &.{},
+    strict_traffic_mode: bool = false,
     segment_resolved: bool = false,
     timeout_ms: u32 = maximum_timeout_ms,
 
@@ -716,6 +717,9 @@ pub const Execution = struct {
         }
         for (self.active_goals, 0..) |goal, index| {
             try goal.validate();
+            if (self.strict_traffic_mode and goal.selector.predicates.len != 0) {
+                return error.UnsupportedStrictGoalPredicate;
+            }
             for (self.active_goals[0..index]) |prior| {
                 if (std.mem.eql(u8, goal.id, prior.id)) {
                     return error.DuplicateResolvedGoal;

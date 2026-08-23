@@ -39,6 +39,13 @@ pub const Form = struct {
         }
         return error.MissingFormField;
     }
+
+    pub fn optional(self: Form, name: []const u8) ?[]const u8 {
+        for (self.fields) |field| {
+            if (std.mem.eql(u8, field.name, name)) return field.value;
+        }
+        return null;
+    }
 };
 
 pub const Field = struct {
@@ -202,6 +209,12 @@ pub fn loadPage(
             selected.id,
             selected_goal,
             selected_steps,
+            .{
+                .strict_mode = collection_policy.strict_mode,
+                .daily_event_ceiling = collection_policy.daily_event_ceiling,
+                .active_goals = goals,
+                .heuristic_available = goals.len <= meta.maximum_active_goals,
+            },
             report_timeout_ms,
         )
     else
@@ -216,6 +229,12 @@ pub fn loadPage(
             event_store,
             quality_request,
             selected.id,
+            .{
+                .strict_mode = collection_policy.strict_mode,
+                .daily_event_ceiling = collection_policy.daily_event_ceiling,
+                .active_goals = goals,
+                .heuristic_available = goals.len <= meta.maximum_active_goals,
+            },
             report_timeout_ms,
         )
     else
@@ -230,6 +249,8 @@ pub fn loadPage(
         .funnels = funnels,
         .self_exclusion_origins = collection_policy.origins,
         .excluded_networks = collection_policy.excluded_networks,
+        .strict_mode = collection_policy.strict_mode,
+        .daily_event_ceiling = collection_policy.daily_event_ceiling,
         .csrf_token = csrf_token,
         .notice = notice,
     };
@@ -337,6 +358,30 @@ pub fn deleteExcludedNetwork(
         allocator,
         try form.required("site"),
         try form.required("network"),
+    );
+}
+
+pub fn updateTrafficPolicy(
+    allocator: std.mem.Allocator,
+    metadata: *meta.Store,
+    form: Form,
+    now_micros: i64,
+) !void {
+    const strict_mode = if (form.optional("strict")) |value|
+        std.mem.eql(u8, value, "on") or return error.InvalidStrictMode
+    else
+        false;
+    const ceiling = std.fmt.parseInt(
+        i64,
+        try form.required("daily_event_ceiling"),
+        10,
+    ) catch return error.InvalidDailyEventCeiling;
+    try metadata.updateTrafficPolicy(
+        allocator,
+        try form.required("site"),
+        strict_mode,
+        ceiling,
+        now_micros,
     );
 }
 

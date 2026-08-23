@@ -119,11 +119,17 @@ string/number conversion is permitted.
 
 ## 4. Metric and dimension semantics
 
-Metric v2 uses `site_local_date`, applies D33's versioned product-eligibility
-predicate, and treats only page-view/custom-event rows as independently
-meaningful. The predicate is `traffic_class IN (human-presumed, suspected)`;
-traffic class never
-overloads the device dimension. Canonical person identity follows D26 and D28:
+Metric v2 uses `site_local_date`, applies D34's versioned product-eligibility
+relation, and treats only page-view/custom-event rows as independently
+meaningful. Stored declared bots, automation, and exclusions are always out.
+With site strict mode off, D33's `traffic_class IN (human-presumed, suspected)`
+base remains compatible and D34's derived suspected sessions stay included.
+With strict mode on, the same bound query relation additionally excludes only
+query-classifier-v1 current suspects after trusted interaction, engagement,
+scroll, active-goal conversion, and persistent-return vetoes. Session and
+visitor-day metrics derive distinct eligible facts rather than relying only on
+stored start flags. Traffic class never overloads the device dimension.
+Canonical person identity follows D26 and D28:
 
 Trend buckets follow the receipt-time authority in `PROTOCOL.md` and D27.
 Day, week, and month intervals derive from the persisted `site_local_date`.

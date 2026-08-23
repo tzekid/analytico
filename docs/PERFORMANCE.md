@@ -12,7 +12,10 @@
 > scroll, value, and opt-in automatic behavior. D31 adds one bounded
 > self-exclusion key; the current tracker remains below the 5 KiB Brotli budget.
 > D32 adds a compile-time UA rule table only; it adds no tracker bytes or
-> runtime data load.
+> runtime data load. D34 adds one secret-keyed network-day derivation, one
+> bounded site/day ceiling check in the existing event transaction, and one
+> bounded query-time session-quality relation; it adds no tracker, dependency,
+> network request, worker, or rollup.
 
 The numbers in this file are budgets, not claims. M0 records the first measured
 baseline on the target VPS. A release passes both the absolute budget and the
@@ -73,7 +76,7 @@ documented rather than silently changed.
 | User-Agent classification input | 1,024 bytes maximum |
 | Sec-CH-UA consistency input | 512 bytes classified; longer is mismatch |
 | Per-request temporary allocation retained after response | 0 bytes |
-| Database statements for a valid event | 1 insert transaction |
+| Database work for a valid event | 1 transaction with 1 bounded site/day count plus insert/link work |
 | Collector response body | 0 bytes for POST; fixed GIF for pixel |
 | Upstream network requests | 0 |
 | Background jobs created | 0 |
@@ -105,8 +108,10 @@ four trusted-interaction listeners remove themselves on first trusted evidence.
 - Query deadline: 2 seconds.
 - Result rows decoded before pagination: query-specific and covered by `LIMIT`;
   never a full unbounded collection in Zig memory.
-- Traffic-quality version 4 returns at most 100 daily rows and 64 class/rule
-  rows from one static bound statement under the same deadline.
+- Traffic-quality version 5 returns at most 100 daily rows and 64 class/rule
+  rows from one static bound statement under the same deadline. D34 binds at
+  most 32 active goal selectors and returns only fixed prefix-anomaly counts;
+  network-day group keys never enter the result.
 - JSON/CSV export uses streaming output and a separate offline command.
 
 Report SQL must begin with site and time predicates. Query plans and timings for
@@ -217,6 +222,16 @@ two-second deadline. The same exact run measured Overview p95 at 81 ms and the
 eight-step funnel p95 at 923 ms; the checkpointed DuckDB file was 23,605,248
 bytes. These results include the fixed signal-evidence totals and permanent
 traffic predicate rather than reusing the schema-5 measurements.
+
+### Query-time classifier and traffic-quality v5 gate
+
+Issue #70 records new same-host ReleaseSafe measurements rather than inferring
+them from schema 6. The gate measures 100 real loopback collection requests,
+the schema-7 million-event Overview/funnel/traffic-quality paths, strict-off
+parity, and strict-on query work. Existing absolute insert and two-second
+interactive deadlines remain blocking; a miss follows the documented
+regression policy before any cache, projection, rollup, dependency, or service
+is proposed.
 
 ### Analytico 1.0 property-query gate
 

@@ -58,7 +58,7 @@ are not passes.
 
 ### Data semantics
 
-- Protocol version 2, event schema version 6, and metric version 2 are
+- Protocol version 2, event schema version 7, metadata schema version 5, and metric version 2 are
   documented and exercised together while schema-3 rows upgrade without lost
   facts and the documented protocol-v1 and metric-v1 compatibility paths
   remain honest.
@@ -76,6 +76,10 @@ are not passes.
   [`ANALYSIS_QUERY.md`](ANALYSIS_QUERY.md): closed types, canonical bounded
   serialization, explicit filter scopes, finite reviewed SQL fragments, bound
   values, typed unsupported-state failures, and preserved metric-v1 output.
+- D34 query classification is reversible, default-off parity is exact, every
+  documented human-evidence veto wins, strict mode uses one shared product
+  predicate, and traffic-quality v5 exposes bounded contradiction/cap/anomaly
+  evidence without raw or rendered network identifiers.
 
 ### Architecture and security
 
@@ -151,14 +155,14 @@ are not passes.
 | --- | --- | --- |
 | Scope and traceability | Closed/descoped milestone; shipped docs; validated matrix; limitations | #4, #50 |
 | Debug and ReleaseSafe | Clean build and tests plus formatter/diff/license checks | #47, #50 |
-| Real executable and HTTP | On-disk Turso/DuckDB; loopback collector/admin; real routes and forms | #47, #48 |
-| Performance and assets | Standard million-event fixture; latency/RSS/disk/cardinality; response and asset bytes | #46, #50 |
-| Migration and time | Fresh/exact-baseline/repeated upgrade; row/metric preservation; TZif/DST | #47, #49 |
+| Real executable and HTTP | On-disk Turso/DuckDB; loopback collector/admin; real routes and forms | #47, #48, #70 |
+| Performance and assets | Standard million-event fixture; latency/RSS/disk/cardinality; response and asset bytes | #46, #50, #70 |
+| Migration and time | Fresh/exact-baseline/repeated upgrade; row/metric preservation; TZif/DST | #47, #49, #70 |
 | JavaScript-off and browser | Required enabled journeys; complete native baseline; history/focus/error behavior | #47, #48 |
 | Mobile and accessibility | 390×844 journey; responsive transformations; keyboard/contrast/zoom/screen-reader evidence | #47, #48 |
-| Security and privacy | Passkey/session/origin/CSRF/CSP; escaping; collector limits; identity conflicts; sensitive-data audit | #48 |
-| Backup and rollback | Verified database pair; restore; old/candidate binary rehearsal; disk/corrupt/newer-schema failures | #49 |
-| Release artifact | Checksums/provenance/licenses; extracted-artifact full gates; migration and rollback notes | #49, #50 |
+| Security and privacy | Passkey/session/origin/CSRF/CSP; escaping; collector limits; identity conflicts; sensitive-data audit | #48, #70 |
+| Backup and rollback | Verified database pair; restore; old/candidate binary rehearsal; disk/corrupt/newer-schema failures | #49, #70 |
+| Release artifact | Checksums/provenance/licenses; extracted-artifact full gates; migration and rollback notes | #49, #50, #70 |
 | Owner product/design review | Desktop/mobile/light/dark review record with all findings disposed | #48, #50 |
 
 The owning issue must convert each minimum-evidence phrase into exact commands,

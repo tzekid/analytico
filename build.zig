@@ -163,6 +163,17 @@ pub fn build(b: *std.Build) void {
         "Run traffic-quality diagnostics through real CLI and on-disk stores",
     ).dependOn(&traffic_quality_e2e.step);
 
+    const heuristics_e2e = b.addSystemCommand(&.{
+        "bash",
+        "tests/e2e-heuristics.sh",
+    });
+    heuristics_e2e.addArtifactArg(app);
+    heuristics_e2e.step.dependOn(b.getInstallStep());
+    b.step(
+        "e2e-heuristics",
+        "Run query heuristics and collection caps through real stores and HTTP",
+    ).dependOn(&heuristics_e2e.step);
+
     const classifier_e2e = b.addSystemCommand(&.{
         "bash",
         "tests/e2e-classifier.sh",
@@ -197,6 +208,18 @@ pub fn build(b: *std.Build) void {
         "e2e-schema6-migration",
         "Migrate and roll back the exact deployed schema-5 predecessor",
     ).dependOn(&schema6_migration_e2e.step);
+
+    const schema7_migration_e2e = b.addSystemCommand(&.{
+        "bash",
+        "scripts/run-schema6-gate.sh",
+    });
+    schema7_migration_e2e.addArtifactArg(app);
+    schema7_migration_e2e.addArg("tests/e2e-schema7-migration.sh");
+    schema7_migration_e2e.step.dependOn(b.getInstallStep());
+    b.step(
+        "e2e-schema7-migration",
+        "Migrate and roll back the exact deployed schema-6 predecessor",
+    ).dependOn(&schema7_migration_e2e.step);
 
     const exclusion_e2e = b.addSystemCommand(&.{
         "bash",

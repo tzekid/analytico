@@ -2,7 +2,7 @@
 
 > **Status:** Sections 1–10 describe the shipped one-process runtime, its frozen
 > protocol-v1 compatibility path, additive protocol-v2 collector foundation,
-> event schema 6, protocol-v2 tracker anonymous identity, and 30-minute client
+> event schema 7, protocol-v2 tracker anonymous identity, and 30-minute client
 > sessions. The remaining 1.0 evolution is stated separately below; it
 > preserves this runtime shape and lands only with its issue evidence.
 
@@ -106,6 +106,10 @@ consumes that source into the permanent D32 traffic class, classifier version,
 and bounded rule and retains one release-only legacy verdict for comparison.
 Event schema 6 adds D33's closed browser/receipt evidence, removes the completed
 shadow byte, and promotes permanent class eligibility without a new store.
+Event schema 7 adds D34's keyed site/receipt-day network-prefix pseudonym. It is
+the only new event fact needed for durable identity-mint warnings; query-time
+suspected verdicts remain derived and never rewrite the append-oriented rows.
+Metadata schema 5 owns the per-site strict flag and daily accepted-event cap.
 
 Decision D29 adds a parallel pure `AnalysisQuery` model and finite metric-v2
 store compiler. The domain model validates and canonicalizes state without I/O;
@@ -209,8 +213,9 @@ change, Caddy change, process, or background work was added. During the deployed
 #68 release, product queries retained the legacy verdict while the same bounded
 diagnostics statement exposed new/old disagreement. Six fixed `u64` process
 counters exposed the same comparison for newly inserted nonexcluded rows at
-shutdown; D33 ends that temporary boundary. Every otherwise accepted event
-remains stored.
+shutdown; D33 ends that temporary boundary. At the D32/D33 boundary every
+otherwise accepted event remains stored; D34 later adds only its explicit,
+visible daily-ceiling rejection and still never drops by traffic verdict.
 
 D33's event schema 6 stores one optional versioned browser-evidence bundle plus
 bounded receipt-derived consistency/presence values, never their raw inputs.
@@ -221,16 +226,31 @@ facts. The existing tracker remains immutable at its old hash while one new
 current hash is added. No session table, fingerprint, dependency, setting,
 runtime file/network access, process, or background work is introduced.
 
+D34's event schema 7 stores only a secret-keyed 16-byte network-day pseudonym;
+raw IP/prefix and the rate limiter's unkeyed hash remain transient. Metadata 5
+stores strict mode default-off and a bounded daily ceiling. Query classifier v1
+combines the D33 soft facts only in bound DuckDB SQL and accepts a bounded goal
+snapshot loaded by the application from Turso. A visible 429 ceiling check runs
+inside the single-writer transaction before identity/event commit. No tracker,
+Caddy path, second state model, worker, rollup, or runtime classifier data is
+added.
+
 ## 6. Report flow
 
 1. Parse and validate site, date range, pagination, filters, and report kind.
-2. Load the site and any goal/funnel definition from Turso with an application
-   timeout.
+2. Load the site traffic policy and any bounded goal/funnel definition from
+   Turso with an application timeout.
 3. Build one of a closed set of report query plans.
 4. Bind all data values and execute on DuckDB with a deadline and interrupt.
 5. Decode into an owned typed report.
 6. Render table, JSON, or CSV in the CLI, or deterministic HTML from the same
    report type in the dashboard.
+
+D34 reports also derive one versioned session-quality relation. Stored traffic
+facts and diagnostics remain independent of strict state. Strict product
+queries exclude only current suspects after all human-evidence vetoes and
+derive distinct eligible session/daily-identity boundaries. A goal snapshot is
+bound as data; DuckDB never queries Turso.
 
 The shipped metric-v1 reports continue to convert UTC dates directly. The D27
 range resolver converts inclusive local dates into half-open UTC instants with

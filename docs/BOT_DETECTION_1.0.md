@@ -3,8 +3,9 @@
 This plan corrects inflated visitor counts and establishes layered bot
 detection. It is sequenced so each phase delivers value alone and every
 detection change is measurable before it affects product metrics. Tracked in
-GitHub issues #66–#70; execute in that order. Phases 0–3 describe the #69
-candidate, while phase 4 remains planned work.
+GitHub issues #66–#70; execute in that order. Phases 0–3 describe the deployed
+#69 boundary. D34 governs phase 4 and issue #70 supplies its implementation and
+release evidence.
 
 ## Motivation
 
@@ -85,12 +86,22 @@ for #70 and cannot classify in this phase.
 
 ### Phase 4 — Query-time heuristics and verification (#70, P1)
 
-Suspected classification (zero-engagement single-event sessions with agreeing
-soft signals and no human evidence), strict-mode toggle default off,
-identity-mint anomaly flag, per-site daily accepted-event ceiling with a
-data-health warning, and the classifier-health contradiction-rate metric as
-the standing precision check. Explicitly out: ML scoring, IP-reputation
-feeds, JS challenges.
+Query classifier v1 starts from a signal-v1 human-presumed session whose first
+meaningful event has at least two of fast beacon, narrow viewport, never
+visible, expected Chromium hints absent, and Accept-Language absent. It remains
+currently suspected only while the whole session has one meaningful event and
+no trusted interaction, engagement, scroll, active-goal conversion, or
+persistent return. Historical/unknown evidence and prerendering never count.
+
+The query keeps a raw candidate cohort and reports later human contradictions
+as its standing precision check. Strict mode is a per-site setting defaulting
+off and excludes only current query-time suspects. Event schema 7 adds only a
+keyed site/UTC-day network-prefix pseudonym for the >64 fresh-identity warning;
+metadata 5 stores strict mode and the explicit per-site daily accepted-event
+ceiling. The ceiling returns visible 429 failures once reached and does not
+silently drop or delete accepted rows. D34 defines exact semantics, privacy,
+migration, and rollback. Explicitly out: ML scoring, IP-reputation feeds, JS
+challenges, fingerprints, background scoring, and automatic strict enablement.
 
 ## Sequencing against the milestone
 
