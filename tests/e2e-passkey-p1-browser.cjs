@@ -233,7 +233,9 @@ async function main() {
     response = await noScriptPage.goto(`${origin}/admin`);
     assert.equal(response.status(), 200);
     assert.equal(await noScriptPage.locator("#report").count(), 1);
-    await noScriptPage.locator("details.management > summary").click();
+    await noScriptPage.locator(
+      'details.management:has(form[action="/admin/goals"]) > summary',
+    ).click();
     const goalForm = noScriptPage.locator('form[action="/admin/goals"]');
     await goalForm.locator('input[name="name"]').fill("Signup");
     await goalForm.locator('select[name="kind"]').selectOption("event");

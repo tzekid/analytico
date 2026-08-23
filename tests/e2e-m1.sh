@@ -24,14 +24,14 @@ expect_failure() {
 }
 
 init_output=$("$binary" init "$fixture_dir")
-test "$init_output" = "initialized metadata=v3 events=v3 key=created"
+test "$init_output" = "initialized metadata=v4 events=v4 key=created"
 test -s "$fixture_dir/meta.db"
 test -s "$fixture_dir/events.duckdb"
 test "$(stat -c '%a' "$fixture_dir/visitor.key")" = "600"
 test "$(stat -c '%s' "$fixture_dir/visitor.key")" = "32"
 key_hash=$(sha256sum "$fixture_dir/visitor.key" | cut -d' ' -f1)
 test "$("$binary" init "$fixture_dir")" = \
-    "initialized metadata=v3 events=v3 key=existing"
+    "initialized metadata=v4 events=v4 key=existing"
 test "$(sha256sum "$fixture_dir/visitor.key" | cut -d' ' -f1)" = "$key_hash"
 
 site_output=$(
@@ -64,7 +64,7 @@ expect_failure "$binary" site property-add "$fixture_dir" example nested/value
 install_snippet=$("$binary" site install "$fixture_dir" example \
     https://analytics.example)
 [[ "$install_snippet" == *\
-'<script defer src="https://analytics.example/tracker.81c3b777.js" data-site="'"$site_id"'" data-spa="auto" data-engagement="true"></script>'* ]]
+'<script defer src="https://analytics.example/tracker.6de111c9.js" data-site="'"$site_id"'" data-spa="auto" data-engagement="true"></script>'* ]]
 [[ "$install_snippet" == *\
 'src="https://analytics.example/v1/p.gif?site='"$site_id"'&amp;path=%2F"'* ]]
 [[ "$install_snippet" == *$'CSP merge:\n  script-src https://analytics.example\n  connect-src https://analytics.example\n  img-src https://analytics.example' ]]
@@ -127,7 +127,7 @@ event_output=$("$binary" event add "$fixture_dir" example pageview \
 [[ "$event_output" == "event committed "* ]]
 doctor=$("$binary" doctor "$fixture_dir")
 test "$doctor" = \
-    "ok metadata=v3 events=v3 sites=1 goals=3 funnels=1 stored_events=1 key=ok"
+    "ok metadata=v4 events=v4 sites=1 goals=3 funnels=1 stored_events=1 key=ok"
 expect_failure "$binary" event add "$fixture_dir" example pageview \
     'not-a-path' 1700000000000001 2023-11-14 203.0.113.42 Firefox Linux desktop
 test "$("$binary" doctor "$fixture_dir")" = "$doctor"
@@ -144,6 +144,6 @@ expect_failure "$binary" site delete "$fixture_dir" example --confirm Wrong
 test "$("$binary" site delete "$fixture_dir" example --confirm example)" = \
     "site deleted example"
 test "$("$binary" doctor "$fixture_dir")" = \
-    "ok metadata=v3 events=v3 sites=0 goals=0 funnels=0 stored_events=0 key=ok"
+    "ok metadata=v4 events=v4 sites=0 goals=0 funnels=0 stored_events=0 key=ok"
 
 echo "M1 durable-domain real-process end-to-end checks passed"

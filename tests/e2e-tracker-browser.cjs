@@ -13,8 +13,8 @@ if (!collector || !site || !Number.isInteger(fixturePort)) {
   );
 }
 
-const fixtureOrigin = `http://127.0.0.1:${fixturePort}`;
-const tracker = `${collector}/tracker.81c3b777.js`;
+const fixtureOrigin = `http://127.0.0.2:${fixturePort}`;
+const tracker = `${collector}/tracker.6de111c9.js`;
 
 function html(mode) {
   let attributes = "";
@@ -374,7 +374,7 @@ async function verifyAutomaticAndValue(browser) {
 async function main() {
   await new Promise((resolve, reject) => {
     server.once("error", reject);
-    server.listen(fixturePort, "127.0.0.1", resolve);
+    server.listen(fixturePort, "0.0.0.0", resolve);
   });
   const browser = await launch();
   try {

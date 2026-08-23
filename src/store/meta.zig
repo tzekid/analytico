@@ -2,7 +2,8 @@ const std = @import("std");
 const turso = @import("turso");
 const domain = @import("../domain.zig");
 
-pub const schema_version: i64 = 3;
+pub const schema_version: i64 = 4;
+pub const maximum_excluded_networks: usize = 16;
 
 pub const Site = struct {
     id: []u8,
@@ -49,6 +50,7 @@ pub const SitePolicy = struct {
     timezone_name: []u8,
     origins: []const []u8,
     properties: []const []u8,
+    excluded_networks: []const []u8,
 
     pub fn allowsOrigin(self: SitePolicy, origin: []const u8) bool {
         for (self.origins) |allowed| {
@@ -60,6 +62,13 @@ pub const SitePolicy = struct {
     pub fn allowsProperty(self: SitePolicy, property: []const u8) bool {
         for (self.properties) |allowed| {
             if (std.mem.eql(u8, allowed, property)) return true;
+        }
+        return false;
+    }
+
+    pub fn excludesNetwork(self: SitePolicy, client_ip: []const u8) !bool {
+        for (self.excluded_networks) |configured| {
+            if (try domain.networkPrefixMatches(configured, client_ip)) return true;
         }
         return false;
     }
@@ -253,6 +262,20 @@ pub const Store = struct {
             \\INSERT INTO meta_migrations VALUES (3, 'explicit-site-timezones', 0);
         , .{ .diagnostics = &diagnostics }) catch |err| {
             std.log.err("metadata migration v3 failed: {s}", .{diagnostics.text()});
+            return err;
+        };
+        if (current < 4) _ = self.connection.execBatch(
+            \\CREATE TABLE IF NOT EXISTS site_excluded_networks (
+            \\  site_id TEXT NOT NULL,
+            \\  network_prefix TEXT NOT NULL,
+            \\  created_at_utc_micros INTEGER NOT NULL,
+            \\  PRIMARY KEY (site_id, network_prefix),
+            \\  FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE CASCADE,
+            \\  CHECK (length(network_prefix) BETWEEN 9 AND 64)
+            \\);
+            \\INSERT INTO meta_migrations VALUES (4, 'self-excluded-networks', 0);
+        , .{ .diagnostics = &diagnostics }) catch |err| {
+            std.log.err("metadata migration v4 failed: {s}", .{diagnostics.text()});
             return err;
         };
     }
@@ -589,6 +612,57 @@ pub const Store = struct {
         if (changed != 1) return error.SiteNotFound;
     }
 
+    pub fn addExcludedNetwork(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        slug: []const u8,
+        input: []const u8,
+        now_micros: i64,
+    ) !void {
+        const site_id = try self.siteIdBySlug(allocator, slug);
+        var rows = try self.connection.queryParams(
+            "SELECT count(*) FROM site_excluded_networks WHERE site_id = ?1",
+            .{site_id},
+            .{},
+        );
+        defer rows.deinit();
+        const row = (try rows.next()) orelse return error.MissingCountRow;
+        const count = try row.get(i64, 0);
+        try rows.finish(null);
+        if (count < 0 or count >= maximum_excluded_networks) {
+            return error.TooManyNetworkExclusions;
+        }
+        var buffer: [64]u8 = undefined;
+        const canonical = try domain.canonicalNetworkPrefix(&buffer, input);
+        _ = try self.connection.execParams(
+            \\INSERT INTO site_excluded_networks (
+            \\  site_id, network_prefix, created_at_utc_micros
+            \\) VALUES (?1, ?2, ?3)
+        ,
+            .{ site_id, canonical, now_micros },
+            .{},
+        );
+    }
+
+    pub fn deleteExcludedNetwork(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        slug: []const u8,
+        input: []const u8,
+    ) !void {
+        const site_id = try self.siteIdBySlug(allocator, slug);
+        var buffer: [64]u8 = undefined;
+        const canonical = try domain.canonicalNetworkPrefix(&buffer, input);
+        const changed = try self.connection.execParams(
+            \\DELETE FROM site_excluded_networks
+            \\WHERE site_id = ?1 AND network_prefix = ?2
+        ,
+            .{ site_id, canonical },
+            .{},
+        );
+        if (changed != 1) return error.NetworkExclusionNotFound;
+    }
+
     pub fn addGoal(
         self: *Store,
         allocator: std.mem.Allocator,
@@ -861,12 +935,30 @@ pub const Store = struct {
         ,
             id,
         );
+        const excluded_networks = try self.stringColumn(
+            allocator,
+            \\SELECT network_prefix FROM site_excluded_networks
+            \\WHERE site_id = ?1 ORDER BY network_prefix
+        ,
+            id,
+        );
+        if (excluded_networks.len > maximum_excluded_networks) {
+            return error.TooManyNetworkExclusions;
+        }
+        for (excluded_networks) |configured| {
+            var buffer: [64]u8 = undefined;
+            const canonical = try domain.canonicalNetworkPrefix(&buffer, configured);
+            if (!std.mem.eql(u8, canonical, configured)) {
+                return error.InvalidStoredNetworkPrefix;
+            }
+        }
         return .{
             .id = owned_id,
             .disabled = disabled,
             .timezone_name = timezone.zone_name,
             .origins = origins,
             .properties = properties,
+            .excluded_networks = excluded_networks,
         };
     }
 

@@ -52,6 +52,7 @@ pub const PayloadV2 = struct {
     session_id: []const u8,
     sequence: u32,
     occurred_at_ms: i64,
+    self_excluded: bool = false,
     type: []const u8,
     name: ?[]const u8 = null,
     page: ?PageV2 = null,
@@ -103,6 +104,7 @@ pub const PreparedV2 = struct {
     value_currency: []const u8,
     engagement_ms: u32,
     max_scroll_depth: u8,
+    self_excluded: bool,
     event_payload_digest: [64]u8,
 };
 
@@ -363,6 +365,7 @@ pub fn preparePostV2(
         .value_currency = value_currency,
         .engagement_ms = engagement_ms,
         .max_scroll_depth = max_scroll_depth,
+        .self_excluded = payload.self_excluded,
         .event_payload_digest = undefined,
     };
     prepared.event_payload_digest = digestPreparedV2(prepared);
@@ -659,6 +662,10 @@ fn digestPreparedV2(prepared: PreparedV2) [64]u8 {
     hashField(&hasher, "currency", prepared.value_currency);
     hashInteger(&hasher, "engagement", prepared.engagement_ms);
     hashInteger(&hasher, "scroll", prepared.max_scroll_depth);
+    // Preserve the pre-D31 digest for absent/false so an unchanged event
+    // remains idempotent across the schema-4 upgrade. A true flag adds a new
+    // component and therefore conflicts with an already stored unflagged row.
+    if (prepared.self_excluded) hashInteger(&hasher, "self_excluded", 1);
     var digest: [32]u8 = undefined;
     hasher.final(&digest);
     return std.fmt.bytesToHex(digest, .lower);

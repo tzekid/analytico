@@ -1,10 +1,10 @@
 # Data model and metric semantics
 
 > **Status:** Sections 1–9 define the shipped analytics-metadata subset in
-> Turso, DuckDB event schema 3, and metric semantics v1. Authentication storage
+> Turso, DuckDB event schema 4, and metric semantics v1. Authentication storage
 > remains governed by its own specification. The daily-pseudonym and UTC-day
 > rules remain the compatibility contract for existing rows and current
-> reports. Section 10 records the remaining 1.0 transition; event schema 3 does
+> reports. Section 10 records the remaining 1.0 transition; event schema 4 does
 > not by itself claim that metric v2 or site-local reporting is shipped.
 
 This document is the contract for durable fields and reported numbers. SQL
@@ -101,6 +101,25 @@ must select a zone, and serving fails closed until that choice and any required
 rebucket complete. `rebucket_pending=1` is a narrow recovery marker for the
 cross-store offline operation; it is never a usable site policy.
 
+### `site_excluded_networks`
+
+```sql
+CREATE TABLE site_excluded_networks (
+    site_id TEXT NOT NULL,
+    network_prefix TEXT NOT NULL,
+    created_at_utc_micros INTEGER NOT NULL,
+    PRIMARY KEY (site_id, network_prefix),
+    FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE CASCADE,
+    CHECK (length(network_prefix) BETWEEN 9 AND 64)
+);
+```
+
+Metadata migration 4 adds this bounded D31 policy. Each site has at most 16
+rows. The application canonicalizes operator input to an IPv4 `/24` or IPv6
+`/48` before insertion. These rows are explicit configuration; visitor IP
+addresses and hashes are never persisted. Successful authenticated changes
+refresh the collector's in-memory policy without restart.
+
 ### `site_event_properties`
 
 ```sql
@@ -176,7 +195,7 @@ CREATE TABLE event_migrations (
 );
 ```
 
-### `events` — event schema migration 3
+### `events` — event schema migration 4
 
 ```sql
 CREATE TABLE events (
@@ -221,7 +240,9 @@ CREATE TABLE events (
 
     visitor_day_id BLOB NOT NULL,
     visitor_day_start BOOLEAN NOT NULL,
-    event_payload_digest VARCHAR NOT NULL
+    event_payload_digest VARCHAR NOT NULL,
+    exclusion_source UTINYINT NOT NULL,
+    CHECK (exclusion_source BETWEEN 0 AND 3)
 );
 
 CREATE TABLE identity_links (
@@ -239,8 +260,14 @@ Conventions:
 - `kind` values 1–4 are page view, custom event, engagement, and identify.
 - `identity_quality` values 1–3 are persistent, ephemeral, and migrated
   legacy daily identity.
-- `event_schema_version=3`; protocol/tracker versions are 1 for compatibility
+- `event_schema_version=4`; protocol/tracker versions are 1 for compatibility
   events and 2 for v2 envelopes.
+- `exclusion_source` is the temporary D31 closed bitset: 0 none, 1 tracker
+  self-flag, 2 configured network prefix, and 3 both. Product queries require
+  zero; diagnostics include every value. Event migration 4 preserves every
+  schema-3 field byte-for-byte, changes only the row schema version, and
+  initializes the marker to zero. #68 migrates nonzero values to permanent
+  `traffic_class=excluded` in event schema 5 and removes this temporary field.
 - Absent optional strings are empty rather than `NULL` to simplify bounded
   grouping and decoding; only absent exact value amount is `NULL`.
 - `properties_json` and `user_traits_json` are canonical bounded flat JSON.
@@ -290,6 +317,14 @@ initially writes the shipped UTC date and offset zero. Issue #11 replaces those
 placeholders under an explicit site zone before the site may serve; the
 exact-baseline gate proves the rebucket and metric-v1 compatibility before
 metric-v2 date queries consume those values.
+
+Migration 4 performs a transactional create/backfill/swap. Before the swap it
+compares source and target row counts plus XOR, sum, minimum, and maximum
+aggregate fingerprints over every preserved field, then verifies every new row
+has row schema 4 and `exclusion_source=0`. The streaming check stays inside the
+fixed DuckDB memory budget even for the million-event gate. The migration
+neither reclassifies historical traffic nor changes identity, session, time,
+property, value, or metric-v1 compatibility facts.
 
 ## 4. Normalization
 
@@ -493,7 +528,7 @@ bounded by the report contract.
 
 ## 8. Time ranges — metric v1
 
-- Metric-v1 compatibility reports over event schema 3 use UTC only.
+- Metric-v1 compatibility reports over event schemas 3 and 4 use UTC only.
 - CLI date input is `[start_date, end_date]`, converted to the half-open instant
   range `[start 00:00:00Z, day_after_end 00:00:00Z)`.
 - Maximum interactive range is 400 days.
@@ -529,7 +564,9 @@ typed property canonicalization and DuckDB query primitives, and issue #11
 provides explicit TZif-backed site-local dates. Issue #13 provides the exact
 legacy migration, mixed-data coverage, and rollback evidence. Issue #12
 provides the tracker SPA, engagement/scroll, exact value, and opt-in automatic
-event producers for those schema-3 fields.
+event producers for those schema-3 fields. D31 and issue #67 advance the table
+to schema 4 with a temporary stored self-exclusion source while preserving the
+schema-3 facts.
 
 ### Identity and sessions
 

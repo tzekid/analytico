@@ -112,7 +112,7 @@ test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
     "$dashboard/not-a-route")" = 404
 
 cookie_file="$fixture/session.cookie"
-TMPDIR="$fixture" NODE_PATH="$module_root" \
+TMPDIR=/tmp NODE_PATH="$module_root" \
     PLAYWRIGHT_BROWSERS_PATH="$browser_root" \
     ANALYTICO_CHROMIUM_PATH="$chromium_path" \
     node tests/e2e-passkey-session.cjs "$dashboard" "$setup_url" "$cookie_file"
@@ -146,7 +146,7 @@ rss_after=$(awk '$1 == "VmRSS:" { print $2 }' "/proc/$server_pid/status")
 rss_growth_kib=$((rss_after - rss_before))
 test "$rss_growth_kib" -le 8192
 
-TMPDIR="$fixture" NODE_PATH="$module_root" \
+TMPDIR=/tmp NODE_PATH="$module_root" \
     PLAYWRIGHT_BROWSERS_PATH="$browser_root" \
     ANALYTICO_CHROMIUM_PATH="$chromium_path" \
     node tests/e2e-m6-browser.cjs "$dashboard" "$session_cookie" \

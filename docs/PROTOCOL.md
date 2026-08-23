@@ -20,7 +20,8 @@ accepted v1 events or metric-v1 visitor-day semantics.
 | `GET` | `/tracker.fb64c486.js` | Immutable protocol-v2 anonymous-identity tracker | `200` JavaScript |
 | `GET` | `/tracker.78135195.js` | Immutable protocol-v2 session tracker | `200` JavaScript |
 | `GET` | `/tracker.d9e94247.js` | Immutable protocol-v2 identify tracker | `200` JavaScript |
-| `GET` | `/tracker.81c3b777.js` | Immutable current SPA/engagement tracker | `200` JavaScript |
+| `GET` | `/tracker.81c3b777.js` | Immutable compatibility SPA/engagement tracker | `200` JavaScript |
+| `GET` | `/tracker.6de111c9.js` | Immutable current tracker with stored self-exclusion | `200` JavaScript |
 | `GET` | `/tracker.js` | Short-cache alias of the protocol-v2 tracker | `200` JavaScript |
 | `POST` | `/v1/event` | Page view or custom event | `204` empty |
 | `POST` | `/v2/event` | Bounded version-2 event envelope | `204` empty |
@@ -110,7 +111,7 @@ numbers are rejected. The exact JSON parser behavior is covered by a corpus.
 
 | Status | Meaning |
 | --- | --- |
-| `204` | Event committed |
+| `204` | Event committed, including an explicitly self-excluded event |
 | `400` | Malformed or semantically invalid |
 | `403` | Origin is not allowed |
 | `404` | Site is unknown or disabled |
@@ -141,6 +142,7 @@ The common required envelope is:
   "session_id": "00000000-0000-4000-8000-000000000003",
   "sequence": 4,
   "occurred_at_ms": 1787227532123,
+  "self_excluded": true,
   "type": "event",
   "name": "sign_up",
   "page": {
@@ -166,7 +168,15 @@ server receipt time; receipt time remains authoritative for acceptance and
 bucketing. `received_date_utc` retains the UTC compatibility date, while the
 server also derives stable `site_local_date` and `site_utc_offset_minutes`
 from the loaded site TZif policy. `identity_quality` is exactly `persistent`
-or `ephemeral`.
+or `ephemeral`. `self_excluded` is an optional boolean common to all four event
+types; absent and false mean no tracker self-flag, while true sets the tracker
+bit in the stored exclusion source.
+
+The canonical protocol-v2 payload digest adds a component when
+`self_excluded=true`. Absent and false preserve the pre-D31 digest so unchanged
+events remain idempotent across migration; changing an existing event to true
+conflicts. Network-prefix classification comes from the first receipt context:
+a later idempotent replay does not rewrite the stored exclusion source.
 
 Event-specific fields are closed:
 
@@ -266,12 +276,21 @@ content-hashed path:
 - site-scoped first-party `localStorage` keys `anl:<site-uuid>:a` (anonymous
   UUID) and `anl:<site-uuid>:s` (session record
   `{id,last_activity_ms,sequence}`), plus optional `anl:<site-uuid>:u`
-  identified-user state;
+  identified-user state and the operator-controlled `anl:<site-uuid>:x`
+  self-exclusion flag;
+- exact localhost names (`localhost`, subdomains of `.localhost`, `127.0.0.1`,
+  and IPv6 loopback) return before identity setup or network activity;
+- an initial page view is deferred while `document.prerendering` is true and
+  emitted only after `prerenderingchange`; a document that is never activated
+  emits no page view, not-found event, or engagement;
 - the session UUID is reused while inactivity is at most 30 minutes, including
   across UTC midnight, and rotates only after more than 30 minutes;
 - sequence is persisted with the session record and sent on each event;
 - when storage throws, in-memory IDs are used and events are marked
   `identity_quality=ephemeral`;
+- when the self-exclusion flag is present, every otherwise valid envelope adds
+  `self_excluded:true`; the collector stores and classifies those events rather
+  than suppressing the request;
 - when UUID generation fails, the tracker does not send;
 - storage, serialization, beacon, and fetch failures never throw into the host
   page;
@@ -318,12 +337,21 @@ content-hashed path:
   legacy-browser compatibility layer is shipped;
 - minified and compressed bytes recorded by the performance gate.
 
+The authenticated dashboard sets or clears the flag through a bounded
+no-network cross-origin handshake. It opens the site's configured exact origin
+with a site-bound control fragment. That fragment marks the control page itself
+as self-excluded immediately. The tracker accepts the durable change only from
+its own collector/dashboard origin and the opening window through
+`postMessage`, strips the fragment locally, and sends no configuration request.
+A copied fragment cannot durably change another browser's flag without that
+origin-checked opener handshake.
+
 Usage:
 
 ```html
 <script
   defer
-  src="https://analytics.example/tracker.81c3b777.js"
+  src="https://analytics.example/tracker.6de111c9.js"
   data-site="00000000-0000-4000-8000-000000000000"
   data-spa="auto"
   data-engagement="true"
@@ -351,6 +379,13 @@ the short-cache `/tracker.js` alias alone advances to the current tracker.
   equally privileged local operator can supply the overwritten forwarding
   headers.
 - Country is read only from the specifically configured trusted header.
+
+After site and origin validation, the collector compares only the transient
+normalized IPv4 `/24` or IPv6 `/48` prefix with at most 16 explicit per-site
+network exclusions. Raw IP input is neither stored nor logged. A match sets the
+network bit in the stored event's temporary `exclusion_source`; it never drops
+the event. Dashboard mutations refresh the bounded in-memory site-policy
+snapshot before returning success.
 
 The site identifier is public and appears in browser markup. It is not an
 authorization credential.

@@ -93,6 +93,13 @@ The optional `--report-timeout-ms 1..2000` flag exists for constrained
 deployments and acceptance testing; production defaults to the fixed 2,000 ms
 interactive deadline.
 
+Metadata migration 4 adds the bounded per-site network-exclusion policy and
+event migration 4 adds the temporary stored self-exclusion classification.
+They are forward-only schema changes: stop the sole writer, create and verify a
+matched backup, run `migrate`, then start the candidate. An older binary must
+use a restored pre-migration database pair; switching only the executable is
+not rollback.
+
 DuckDB is configured before its configuration is locked: one query thread,
 128 MiB memory, 256 MiB temp limit, insertion-order preservation off,
 community extensions off, and external access off.
@@ -148,6 +155,7 @@ caddy validate --config deploy/Caddyfile
 
 The vhost exposes `/tracker.aef65945.js`, `/tracker.fb64c486.js`,
 `/tracker.78135195.js`, `/tracker.d9e94247.js`, `/tracker.81c3b777.js`,
+`/tracker.6de111c9.js`,
 `/tracker.js`, `/v1/event`, `/v2/event`, `/v1/p.gif`, `/admin`, and
 `/admin/*`. `/` redirects to `/admin`;
 all other paths, including health endpoints, receive `404`.
@@ -297,12 +305,12 @@ conservative free-space preflight. `init`, `report`, `site`, `event`, goal,
 funnel, and authentication commands never substitute for this explicit step.
 
 Migrations are numbered and transactional. Killing the process during the
-million-row v1-to-v3 DuckDB migration chain and retrying with the same verified
-backup is an automated release gate. A binary refuses a database with a newer
-unknown schema. Event schema 3 requires database-pair restoration before an
-event-schema-2 binary is started for rollback. Metric-v1 reports continue to
-use their original UTC dates; explicit timezone rebucketing populates the
-separate site-local date/offset before the service can become ready.
+million-row DuckDB migration chain and retrying with the same verified backup
+is an automated release gate. A binary refuses a database with a newer unknown
+schema. Event schemas 3 and 4 require database-pair restoration before an older
+binary is started for rollback. Metric-v1 reports continue to use their
+original UTC dates; explicit timezone rebucketing populates the separate
+site-local date/offset before the service can become ready.
 
 Keep the previous release directory and the verified pre-upgrade backup.
 Rollback means stopping the new binary, restoring both stores and the key from

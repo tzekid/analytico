@@ -142,6 +142,8 @@ pub fn loadPage(
             .result = null,
             .goals = &.{},
             .funnels = &.{},
+            .self_exclusion_origins = &.{},
+            .excluded_networks = &.{},
             .csrf_token = csrf_token,
             .notice = notice,
         };
@@ -155,6 +157,7 @@ pub fn loadPage(
 
     const goals = try metadata.listGoals(allocator, selected.slug);
     const funnels = try metadata.listFunnels(allocator, selected.slug);
+    const collection_policy = try metadata.sitePolicy(allocator, selected.id);
     if (query.kind == .goal and query.subject.len == 0 and goals.len != 0) {
         query.subject = goals[0].name;
     }
@@ -225,6 +228,8 @@ pub fn loadPage(
         .overview_quality = overview_quality,
         .goals = goals,
         .funnels = funnels,
+        .self_exclusion_origins = collection_policy.origins,
+        .excluded_networks = collection_policy.excluded_networks,
         .csrf_token = csrf_token,
         .notice = notice,
     };
@@ -306,6 +311,32 @@ pub fn deleteFunnel(
         allocator,
         try form.required("site"),
         try form.required("name"),
+    );
+}
+
+pub fn addExcludedNetwork(
+    allocator: std.mem.Allocator,
+    metadata: *meta.Store,
+    form: Form,
+    now_micros: i64,
+) !void {
+    try metadata.addExcludedNetwork(
+        allocator,
+        try form.required("site"),
+        try form.required("network"),
+        now_micros,
+    );
+}
+
+pub fn deleteExcludedNetwork(
+    allocator: std.mem.Allocator,
+    metadata: *meta.Store,
+    form: Form,
+) !void {
+    try metadata.deleteExcludedNetwork(
+        allocator,
+        try form.required("site"),
+        try form.required("network"),
     );
 }
 

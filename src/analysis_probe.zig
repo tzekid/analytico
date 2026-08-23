@@ -39,9 +39,47 @@ pub fn seedTrafficQuality(
         \\  CAST('00000000-0000-4000-8000-000000000107' AS UUID)
         \\)
     );
+    try event_store.database.exec(
+        \\INSERT INTO events SELECT * REPLACE (
+        \\  CAST('00000000-0000-4000-8000-000000000113' AS UUID) AS event_id,
+        \\  1767398410000000 AS received_at_utc_micros,
+        \\  1767398410000000 AS occurred_at_utc_micros,
+        \\  '/excluded-tracker' AS path, 'Excluded tracker' AS page_title,
+        \\  CAST('00000000-0000-4000-8000-0000000000e1' AS UUID) AS anonymous_id,
+        \\  CAST('00000000-0000-4000-8000-0000000000d1' AS UUID) AS session_id,
+        \\  TRUE AS visitor_day_start, TRUE AS session_start,
+        \\  repeat('1', 64) AS event_payload_digest,
+        \\  1 AS exclusion_source
+        \\) FROM events
+        \\WHERE event_id = CAST('00000000-0000-4000-8000-000000000107' AS UUID);
+        \\INSERT INTO events SELECT * REPLACE (
+        \\  CAST('00000000-0000-4000-8000-000000000114' AS UUID) AS event_id,
+        \\  1767398411000000 AS received_at_utc_micros,
+        \\  1767398411000000 AS occurred_at_utc_micros,
+        \\  '/excluded-network' AS path, 'Excluded network' AS page_title,
+        \\  CAST('00000000-0000-4000-8000-0000000000e2' AS UUID) AS anonymous_id,
+        \\  CAST('00000000-0000-4000-8000-0000000000d2' AS UUID) AS session_id,
+        \\  TRUE AS visitor_day_start, TRUE AS session_start,
+        \\  repeat('2', 64) AS event_payload_digest,
+        \\  2 AS exclusion_source
+        \\) FROM events
+        \\WHERE event_id = CAST('00000000-0000-4000-8000-000000000107' AS UUID);
+        \\INSERT INTO events SELECT * REPLACE (
+        \\  CAST('00000000-0000-4000-8000-000000000115' AS UUID) AS event_id,
+        \\  1767398412000000 AS received_at_utc_micros,
+        \\  1767398412000000 AS occurred_at_utc_micros,
+        \\  '/excluded-both' AS path, 'Excluded both' AS page_title,
+        \\  CAST('00000000-0000-4000-8000-0000000000e3' AS UUID) AS anonymous_id,
+        \\  CAST('00000000-0000-4000-8000-0000000000d3' AS UUID) AS session_id,
+        \\  TRUE AS visitor_day_start, TRUE AS session_start,
+        \\  repeat('3', 64) AS event_payload_digest,
+        \\  3 AS exclusion_source
+        \\) FROM events
+        \\WHERE event_id = CAST('00000000-0000-4000-8000-000000000107' AS UUID);
+    );
     try metadata.checkpoint();
     try event_store.checkpoint();
-    try output.writeAll("traffic-quality fixture committed sites=1 events=12 links=2\n");
+    try output.writeAll("traffic-quality fixture committed sites=1 events=15 links=2\n");
 }
 
 pub fn run(

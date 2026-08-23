@@ -58,9 +58,10 @@ are not passes.
 
 ### Data semantics
 
-- Protocol version 2, event schema version 3, and metric version 2 are
-  documented and exercised together while the documented protocol-v1 and
-  metric-v1 compatibility paths remain honest.
+- Protocol version 2, event schema version 4, and metric version 2 are
+  documented and exercised together while schema-3 rows upgrade without lost
+  facts and the documented protocol-v1 and metric-v1 compatibility paths
+  remain honest.
 - Persistent anonymous identity, optional identification, reset, conflicts,
   session rotation, cross-midnight sessions, and multi-device links match D26
   without inferred fingerprint joins.

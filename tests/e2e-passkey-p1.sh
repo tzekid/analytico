@@ -34,7 +34,7 @@ port=$((49000 + ($$ % 500)))
 origin="http://localhost:$port"
 data="$fixture/data"
 "$binary" init "$data" >"$fixture/init.txt"
-grep -Fq 'metadata=v3' "$fixture/init.txt"
+grep -Fq 'metadata=v4' "$fixture/init.txt"
 "$binary" site add "$data" example Example https://example.com \
     --timezone UTC >/dev/null
 
@@ -55,7 +55,7 @@ SQL
 legacy_backup="$fixture/legacy-backup"
 "$binary" backup "$legacy" "$legacy_backup" >/dev/null
 "$binary" migrate "$legacy" "$legacy_backup" >"$fixture/upgrade.txt"
-grep -Fq 'metadata=v3 events=v3' "$fixture/upgrade.txt"
+grep -Fq 'metadata=v4 events=v4' "$fixture/upgrade.txt"
 "$binary" site timezone-set "$legacy" preserved UTC >/dev/null
 "$binary" site list "$legacy" | grep -Fq $'preserved\t'
 
@@ -111,7 +111,7 @@ test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
     -H 'Cookie: analytico_session=invalid-session-token-that-is-long-enough' \
     "$origin/admin/private-unknown")" = 303
 
-TMPDIR="$fixture" NODE_PATH="$module_root" \
+TMPDIR=/tmp NODE_PATH="$module_root" \
     PLAYWRIGHT_BROWSERS_PATH="$browser_root" \
     ANALYTICO_CHROMIUM_PATH="$chromium_path" \
     node tests/e2e-passkey-p1-browser.cjs "$origin" "$setup_url" \
@@ -183,7 +183,7 @@ test "$(head -c 200000 /dev/zero | tr '\0' x | curl --silent \
     --data-binary @-)" = 413
 
 wrong_access_url="$actual_origin/admin/setup#token=$wrong_token"
-TMPDIR="$fixture" NODE_PATH="$module_root" \
+TMPDIR=/tmp NODE_PATH="$module_root" \
     PLAYWRIGHT_BROWSERS_PATH="$browser_root" \
     ANALYTICO_CHROMIUM_PATH="$chromium_path" \
     node tests/e2e-passkey-p1-browser.cjs \

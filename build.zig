@@ -163,6 +163,17 @@ pub fn build(b: *std.Build) void {
         "Run traffic-quality diagnostics through real CLI and on-disk stores",
     ).dependOn(&traffic_quality_e2e.step);
 
+    const exclusion_e2e = b.addSystemCommand(&.{
+        "bash",
+        "tests/e2e-exclusion.sh",
+    });
+    exclusion_e2e.addArtifactArg(app);
+    exclusion_e2e.step.dependOn(b.getInstallStep());
+    b.step(
+        "e2e-exclusion",
+        "Run stored self-exclusion through real Chromium and live stores",
+    ).dependOn(&exclusion_e2e.step);
+
     const legacy_migration_e2e = b.addSystemCommand(&.{
         "bash",
         "scripts/run-v0.3-gate.sh",

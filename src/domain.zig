@@ -13,6 +13,24 @@ pub const MatchKind = enum(i64) {
     }
 };
 
+pub const ExclusionSource = enum(u8) {
+    none = 0,
+    tracker = 1,
+    network = 2,
+    both = 3,
+
+    pub fn classify(tracker: bool, network: bool) ExclusionSource {
+        if (tracker and network) return .both;
+        if (tracker) return .tracker;
+        if (network) return .network;
+        return .none;
+    }
+
+    pub fn isExcluded(self: ExclusionSource) bool {
+        return self != .none;
+    }
+};
+
 pub const Event = struct {
     event_id: []const u8,
     site_id: []const u8,
@@ -35,6 +53,7 @@ pub const Event = struct {
     utm_term: []const u8 = "",
     utm_content: []const u8 = "",
     properties_json: []const u8 = "{}",
+    exclusion_source: ExclusionSource = .none,
 };
 
 pub const EventV2 = struct {
@@ -74,6 +93,7 @@ pub const EventV2 = struct {
     max_scroll_depth: u8,
     visitor_day_id: [16]u8,
     event_payload_digest: []const u8,
+    exclusion_source: ExclusionSource = .none,
 };
 
 pub fn canonicalPersonKey(
@@ -300,7 +320,63 @@ pub fn networkPrefixHash(site_id: []const u8, value: []const u8) !u64 {
     return hash.final();
 }
 
-fn networkPrefix(value: []const u8) !struct { bytes: [16]u8, len: usize } {
+pub fn canonicalNetworkPrefix(
+    buffer: *[64]u8,
+    value: []const u8,
+) ![]const u8 {
+    const prefix = try configuredNetworkPrefix(value);
+    if (prefix.len == 3) {
+        return std.fmt.bufPrint(buffer, "{d}.{d}.{d}.0/24", .{
+            prefix.bytes[0],
+            prefix.bytes[1],
+            prefix.bytes[2],
+        });
+    }
+    const first = (@as(u16, prefix.bytes[0]) << 8) | prefix.bytes[1];
+    const second = (@as(u16, prefix.bytes[2]) << 8) | prefix.bytes[3];
+    const third = (@as(u16, prefix.bytes[4]) << 8) | prefix.bytes[5];
+    return std.fmt.bufPrint(buffer, "{x}:{x}:{x}::/48", .{
+        first,
+        second,
+        third,
+    });
+}
+
+pub fn networkPrefixMatches(
+    configured: []const u8,
+    client_ip: []const u8,
+) !bool {
+    const expected = try configuredNetworkPrefix(configured);
+    const actual = try networkPrefix(client_ip);
+    return expected.len == actual.len and
+        std.mem.eql(u8, expected.bytes[0..expected.len], actual.bytes[0..actual.len]);
+}
+
+const NetworkPrefix = struct { bytes: [16]u8, len: usize };
+
+fn configuredNetworkPrefix(value: []const u8) !NetworkPrefix {
+    if (value.len == 0 or value.len > 64) return error.InvalidNetworkPrefix;
+    const slash = std.mem.findScalar(u8, value, '/');
+    const address_text = if (slash) |index| value[0..index] else value;
+    const prefix = networkPrefix(address_text) catch return error.InvalidNetworkPrefix;
+    if (slash) |index| {
+        if (index == 0 or index + 1 == value.len or
+            std.mem.findScalar(u8, value[index + 1 ..], '/') != null)
+        {
+            return error.InvalidNetworkPrefix;
+        }
+        const bits = std.fmt.parseInt(u8, value[index + 1 ..], 10) catch
+            return error.InvalidNetworkPrefix;
+        if ((prefix.len == 3 and bits != 24) or
+            (prefix.len == 6 and bits != 48))
+        {
+            return error.InvalidNetworkPrefix;
+        }
+    }
+    return prefix;
+}
+
+fn networkPrefix(value: []const u8) !NetworkPrefix {
     const address = std.Io.net.IpAddress.parse(value, 0) catch return error.InvalidIpAddress;
     var output: [16]u8 = @splat(0);
     return switch (address) {
@@ -317,4 +393,32 @@ fn networkPrefix(value: []const u8) !struct { bytes: [16]u8, len: usize } {
 
 fn isLeapYear(year: u16) bool {
     return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0);
+}
+
+test "network exclusions canonicalize and match only fixed prefixes" {
+    var buffer: [64]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "203.0.113.0/24",
+        try canonicalNetworkPrefix(&buffer, "203.0.113.99"),
+    );
+    try std.testing.expect(try networkPrefixMatches(
+        "203.0.113.0/24",
+        "203.0.113.200",
+    ));
+    try std.testing.expect(!(try networkPrefixMatches(
+        "203.0.113.0/24",
+        "203.0.114.1",
+    )));
+    try std.testing.expectEqualStrings(
+        "2001:db8:abcd::/48",
+        try canonicalNetworkPrefix(&buffer, "2001:db8:abcd:1234::1"),
+    );
+    try std.testing.expect(try networkPrefixMatches(
+        "2001:db8:abcd::/48",
+        "2001:db8:abcd:ffff::1",
+    ));
+    try std.testing.expectError(
+        error.InvalidNetworkPrefix,
+        canonicalNetworkPrefix(&buffer, "203.0.113.0/16"),
+    );
 }

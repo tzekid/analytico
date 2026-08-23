@@ -196,7 +196,7 @@ timeout_output=$(
 test "$timeout_output" = "report timeout interrupted and connection reused"
 grep -q 'Interrupted' "$fixture_dir/timeout.stderr"
 test "$("$binary" doctor "$fixture_dir")" = \
-    "ok metadata=v3 events=v3 sites=2 goals=3 funnels=1 stored_events=14 key=ok"
+    "ok metadata=v4 events=v4 sites=2 goals=3 funnels=1 stored_events=14 key=ok"
 
 legacy_dir="$fixture_dir/legacy"
 mkdir "$legacy_dir"

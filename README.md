@@ -10,7 +10,7 @@ dashboard, removable HTMX enhancement, and the optional Cloudio boundary. The
 executable owns the exact embedded
 stores, numbered schemas, validated sites/origins and v1 property allowlists,
 goals/funnels, a private visitor key, dual bounded collector protocols, event
-schema 3, daily-identity compatibility, direct durable event insertion, a tiny
+schema 4, stored self-exclusion, daily-identity compatibility, direct durable event insertion, a tiny
 self-hosted v1 tracker plus a v2 identity tracker, a JavaScript-free pixel, complete typed CLI reports,
 verified lifecycle commands, a hardened single-service deployment, and
 checksummed release packaging.
@@ -230,7 +230,7 @@ Use the content-hashed protocol-v2 tracker:
 
 ```html
 <script defer
-  src="https://analytics.example/tracker.81c3b777.js"
+  src="https://analytics.example/tracker.6de111c9.js"
   data-site="YOUR-SITE-UUID"
   data-spa="auto"
   data-engagement="true"></script>

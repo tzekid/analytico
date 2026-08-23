@@ -24,7 +24,9 @@
   Issue #24 defines the separate closed metric-v2 AnalysisQuery/compiler
   boundary without changing metric-v1 reports. Schema 3 does not retroactively
   turn visitor-days into people or claim the later product routes and views are
-  complete.
+  complete. D31 and issue #67 advance stored events to schema 4 for explicit
+  self-exclusion, close prerender and ephemeral-identity inflation, and retain
+  every observed self-excluded row for diagnostics.
 - The current server-rendered `/admin` dashboard and optional HTMX enhancement
   shipped after M4. HTML, native navigation, and ordinary forms remain the
   application baseline.

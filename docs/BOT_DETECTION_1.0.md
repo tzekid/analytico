@@ -9,8 +9,9 @@ GitHub issues #66–#70; execute in that order.
 
 - The Overview "Daily visitors" headline is a visitor-day total, not a person
   count, and is not comparable to GA-style monthly users.
-- The tracker fires during Chrome prerendering; ephemeral-storage visitors
-  mint a fresh visitor-day per page load; owner self-visits count.
+- Before phase 1, the tracker fired during Chrome prerendering;
+  ephemeral-storage visitors minted a fresh visitor-day per page load; owner
+  self-visits counted.
 - The UA classifier is six case-sensitive substrings: it misses HTTP
   libraries, HeadlessChrome, and tokenless named bots, and can false-positive
   on real devices ("Cubot" phones). Raw UAs are discarded at ingest, so
@@ -49,11 +50,15 @@ Prerender guard and localhost guard in the tracker. Ephemeral
 (`identity_quality = ephemeral`) events derive their visitor-day from the
 network prefix + coarse client key instead of the per-load anonymous id.
 Self-visit exclusion: dashboard-set localStorage flag plus internal
-network-prefix exclusion at collection.
+network-prefix classification at collection. Every self-excluded event remains
+stored under the bounded temporary `exclusion_source` classification and is
+reported in diagnostics while product metrics omit it. #68 migrates that
+temporary representation to `traffic_class=excluded`; no observed event is
+dropped between phases.
 
 ### Phase 2 — Traffic class and versioned classifier (#68, P0)
 
-Schema 4 adds `traffic_class`
+Schema 5 adds `traffic_class`
 (`human-presumed | declared-bot | automation | excluded | suspected`),
 `classifier_version`, and matched `bot_rule` per event; `device_category`
 returns to a pure device dimension. Vendored, versioned, compile-time UA rule

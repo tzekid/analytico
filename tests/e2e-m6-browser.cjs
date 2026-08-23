@@ -76,7 +76,7 @@ async function main() {
       1,
     );
     assert.equal((await page.locator("body").innerText()).includes(
-      "no additional event is excluded",
+      "self-excluded events stay stored but do not enter product metrics",
     ), true);
     await assertVisualTheme(page, "light", "44px");
     if (process.env.ANALYTICO_MOBILE_SCREENSHOT_PATH) {
@@ -223,7 +223,9 @@ async function main() {
     );
     assert.ok((await page.locator("body").innerText()).includes(unsafeText));
 
-    await page.locator("details.management > summary").click();
+    await page.locator(
+      'details.management:has(form[action="/admin/goals"]) > summary',
+    ).click();
     const goalForm = page.locator('form[action="/admin/goals"]');
     await goalForm.locator('input[name="name"]').fill("kept goal");
     await goalForm.locator('select[name="kind"]').selectOption("event");

@@ -37,7 +37,7 @@ trap cleanup EXIT
 
 "$binary" init "$fixture" >/dev/null
 "$binary" site add "$fixture" tracker "Tracker browser" \
-    "http://127.0.0.1:$fixture_port" --timezone UTC >/dev/null
+    "http://127.0.0.2:$fixture_port" --timezone UTC >/dev/null
 site=$("$binary" site list "$fixture" |
     awk -F '\t' '$1 == "tracker" { print $2 }')
 
@@ -146,7 +146,7 @@ jq -e '
 ' <<<"$purchase" >/dev/null
 
 doctor=$("$binary" doctor "$fixture")
-[[ "$doctor" == ok\ metadata=v3\ events=v3\ sites=1\ goals=0\ funnels=0\ stored_events=*\ key=ok ]]
+[[ "$doctor" == ok\ metadata=v4\ events=v4\ sites=1\ goals=0\ funnels=0\ stored_events=*\ key=ok ]]
 stored_events=$(sed -n 's/.*stored_events=\([0-9][0-9]*\).*/\1/p' <<<"$doctor")
 expected_events=$(jq -r .stored_events_expected "$fixture/browser-result.json")
 if [[ "$stored_events" != "$expected_events" ]]; then
@@ -170,7 +170,7 @@ gzip --test public/tracker.js.gz
 test "$(stat -c '%s' public/tracker.js)" -le 8192
 test "$(stat -c '%s' public/tracker.js.br)" -le 5120
 test "$(sha256sum public/tracker.js | cut -d' ' -f1)" = \
-    "81c3b7770d010bcb43d854b31fe0da85151f28017a2b469b4d34797e86d2b8df"
+    "6de111c93fb57ccef475d7716e1eff1f1eaa1367b6135d4c8910bb74ead141a6"
 test "$(sha256sum src/http/tracker.d9e94247.min.js | cut -d' ' -f1)" = \
     "d9e94247f97fa84795f5a9bb493a0d383b2aac11565e80e6ceb670b4e9e05c2c"
 if grep -aE '(document\.cookie|FormData|innerHTML|XMLHttpRequest|import\()' \

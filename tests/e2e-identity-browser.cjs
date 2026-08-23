@@ -16,7 +16,7 @@ if (!collector || !siteA || !siteB || !Number.isInteger(fixturePort)) {
 
 const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const fixtureOrigin = `http://127.0.0.1:${fixturePort}`;
+const fixtureOrigin = `http://127.0.0.2:${fixturePort}`;
 
 function html(site) {
   return `<!doctype html>
@@ -24,7 +24,7 @@ function html(site) {
 <meta charset="utf-8">
 <title>Analytico identity fixture</title>
 <main><h1>Useful server-rendered state</h1><p>${site}</p></main>
-<script defer src="${collector}/tracker.81c3b777.js" data-site="${site}"></script>
+<script defer src="${collector}/tracker.6de111c9.js" data-site="${site}"></script>
 </html>`;
 }
 
@@ -481,7 +481,7 @@ async function verifyRandomValuesFallback() {
 async function main() {
   await new Promise((resolve, reject) => {
     server.once("error", reject);
-    server.listen(fixturePort, "127.0.0.1", resolve);
+    server.listen(fixturePort, "0.0.0.0", resolve);
   });
   try {
     const unlinked = await verifyPersistenceAndReset();

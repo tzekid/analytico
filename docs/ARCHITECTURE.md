@@ -2,7 +2,7 @@
 
 > **Status:** Sections 1–10 describe the shipped one-process runtime, its frozen
 > protocol-v1 compatibility path, additive protocol-v2 collector foundation,
-> event schema 3, protocol-v2 tracker anonymous identity, and 30-minute client
+> event schema 4, protocol-v2 tracker anonymous identity, and 30-minute client
 > sessions. The remaining 1.0 evolution is stated separately below; it
 > preserves this runtime shape and lands only with its issue evidence.
 
@@ -133,17 +133,21 @@ offer distributed transactions.
    administration operation or process restart.
 3. It validates the exact `Origin` or request referrer origin.
 4. It parses a bounded payload into a domain `IncomingEvent`.
-5. Domain normalization removes arbitrary query strings, canonicalizes the
+5. It classifies an operator self-exclusion from the tracker flag and/or one of
+   at most 16 configured normalized network prefixes. The raw IP remains
+   transient; the event is still stored.
+6. Domain normalization removes arbitrary query strings, canonicalizes the
    path and referral host, validates the event name and bounded flat
    properties, and derives coarse dimensions. The frozen v1 path additionally
    enforces its configured property allowlist.
-6. On the shipped protocol-v1 path, a keyed daily pseudonym is derived from
+7. On protocol v1, and for storage-unavailable protocol-v2 events, a keyed
+   daily pseudonym is derived from
    site, UTC date, normalized network prefix, and coarse user-agent input. Raw
    inputs are then discarded.
-7. The DuckDB adapter inserts one event in a short transaction. V2 checks its
+8. The DuckDB adapter inserts one event in a short transaction. V2 checks its
    canonical digest for site-scoped idempotency and commits an identify link
    atomically when applicable.
-8. Only after commit does the adapter return success.
+9. Only after commit does the adapter return success.
 
 At the target traffic level, direct durable inserts are simpler and more honest
 than an in-memory queue. A queue is reconsidered only after measured write
@@ -179,6 +183,15 @@ introduced. Decisions D26–D28 govern this version boundary. The single
 dependency-free protocol-v2 tracker now owns bounded opt-in SPA, engagement,
 scroll, and automatic-event behavior without creating an application state
 model or startup configuration request.
+
+D31 adds no fingerprint or configuration fetch. The dashboard uses a
+site-bound, origin-checked `postMessage` handshake to set the site's first-party
+self-exclusion flag. Metadata migration 4 stores at most 16 explicit network
+prefixes per site and an authenticated non-destructive mutation refreshes the
+in-memory policy without restart. Event schema 4 stores the closed temporary
+`exclusion_source` (`none`, tracker flag, network prefix, or both). Product
+queries require `none`; diagnostics retain all rows. #68 migrates this field to
+the permanent traffic-class representation.
 
 ## 6. Report flow
 
