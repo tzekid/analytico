@@ -2,9 +2,10 @@
 
 > **Status:** Sections 1–10 describe the shipped one-process runtime, its frozen
 > protocol-v1 compatibility path, additive protocol-v2 collector foundation,
-> event schema 7, protocol-v2 tracker anonymous identity, and 30-minute client
-> sessions. The remaining 1.0 evolution is stated separately below; it
-> preserves this runtime shape and lands only with its issue evidence.
+> event schema 7, metadata schema 6, protocol-v2 tracker anonymous identity,
+> and 30-minute client sessions. The remaining 1.0 evolution is stated
+> separately below; it preserves this runtime shape and lands only with its
+> issue evidence.
 
 ## 1. Runtime shape
 
@@ -68,6 +69,14 @@ Preset links and custom/comparison forms target the same canonical routes, so
 HTMX history enhances ordinary browser history instead of creating another
 calendar state.
 
+The authenticated onboarding adapter follows the same boundary. It renders a
+typed no-site state, accepts one bounded native create form, and redirects to a
+site-scoped Install destination. Validation and canonicalization finish before
+metadata I/O. The metadata adapter follows D19 durable autocommits and explicit
+compensation; only after the complete stored outcome does the composition root
+replace the in-memory collection-policy snapshot. No JavaScript state, API
+refetch, or database call enters the renderer.
+
 An interface is introduced only when a second real implementation or a
 deterministic test seam needs the same semantics. Until then, functions accept
 the concrete store or a narrow function pointer owned by the caller.
@@ -95,8 +104,8 @@ A folder is created only when its first concrete module is implemented.
 
 ### Turso
 
-Turso contains relational state with small cardinality and ordinary
-transactions:
+Turso contains relational state with small cardinality. Multi-write operations
+follow D19 durable autocommits and explicit compensation on the pinned engine:
 
 - site identity and allowed origins;
 - goal and funnel definitions;
@@ -128,7 +137,9 @@ shadow byte, and promotes permanent class eligibility without a new store.
 Event schema 7 adds D34's keyed site/receipt-day network-prefix pseudonym. It is
 the only new event fact needed for durable identity-mint warnings; query-time
 suspected verdicts remain derived and never rewrite the append-oriented rows.
-Metadata schema 5 owns the per-site strict flag and daily accepted-event cap.
+Metadata schema 5 introduced the per-site strict flag and daily accepted-event
+cap. Metadata schema 6 adds D36's one-to-one explicit default currency and
+unique origin ownership without changing collection or event facts.
 
 Decision D29 adds a parallel pure `AnalysisQuery` model and finite metric-v2
 store compiler. The domain model validates and canonicalizes state without I/O;
@@ -258,6 +269,18 @@ snapshot loaded by the application from Turso. A visible 429 ceiling check runs
 inside the single-writer transaction before identity/event commit. No tracker,
 Caddy path, second state model, worker, rollup, or runtime classifier data is
 added.
+
+D36's metadata schema 6 adds one required `site_settings` row per site with an
+empty or three-uppercase-byte default currency and one unique index over exact
+origins. Existing sites receive empty currency because no earlier fact proves a
+preference. Browser creation inserts the site parent and required children as
+D19 durable autocommits, synchronously deletes a newly inserted parent after a
+returned child error, and reports a failed compensation. Exact stored-input
+comparison resolves completed retries; conflicting values are never
+overwritten. A successful metadata outcome triggers the existing bounded
+policy reload before redirect, so collection accepts the new site without a
+restart. No operation log, generic transaction layer, process, dependency, or
+DuckDB migration is added.
 
 ## 6. Report flow
 

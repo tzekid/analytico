@@ -25,7 +25,9 @@ if (!dashboard || !sessionToken || !collector || !selfSite || !ephemeralSite ||
   );
 }
 
-const siteOrigin = `http://127.0.0.2:${fixturePort}`;
+const selfOrigin = `http://127.0.0.2:${fixturePort}`;
+const ephemeralOrigin = `http://127.0.0.4:${fixturePort}`;
+const prerenderOrigin = `http://127.0.0.5:${fixturePort}`;
 const localhostOrigin = `http://127.0.0.1:${fixturePort}`;
 const speculativeRequests = [];
 const fixtureRequests = [];
@@ -250,7 +252,7 @@ async function selfExclusion(browser) {
   });
   const popupPromise = context.waitForEvent("page");
   await management.locator(
-    `a[data-self-exclusion="on"][data-origin="${siteOrigin}"]`,
+    `a[data-self-exclusion="on"][data-origin="${selfOrigin}"]`,
   ).click();
   const enabledPopup = await popupPromise;
   const enabledRequest = await eventPromise;
@@ -268,7 +270,7 @@ async function selfExclusion(browser) {
     flagged,
     (body) => body.site === selfSite && body.page.path === "/flagged",
   );
-  await flagged.goto(`${siteOrigin}/flagged`, { waitUntil: "load" });
+  await flagged.goto(`${selfOrigin}/flagged`, { waitUntil: "load" });
   const flaggedEvent = await eventPromise;
   assert.equal(flaggedEvent.self_excluded, true);
 
@@ -281,7 +283,7 @@ async function selfExclusion(browser) {
   });
   const disabledPopupPromise = context.waitForEvent("page");
   await management.locator(
-    `a[data-self-exclusion="off"][data-origin="${siteOrigin}"]`,
+    `a[data-self-exclusion="off"][data-origin="${selfOrigin}"]`,
   ).click();
   const disabledPopup = await disabledPopupPromise;
   const disabledRequest = await eventPromise;
@@ -298,7 +300,7 @@ async function selfExclusion(browser) {
     included,
     (body) => body.site === selfSite && body.page.path === "/included",
   );
-  await included.goto(`${siteOrigin}/included`, { waitUntil: "load" });
+  await included.goto(`${selfOrigin}/included`, { waitUntil: "load" });
   const includedEvent = await eventPromise;
   assert.equal("self_excluded" in includedEvent, false);
 
@@ -342,14 +344,14 @@ async function prerender(browser) {
     const body = bodyFor(request);
     if (body && body.site === prerenderSite) neverRequests += 1;
   });
-  await never.goto(`${siteOrigin}/prerender-never`, { waitUntil: "load" });
+  await never.goto(`${prerenderOrigin}/prerender-never`, { waitUntil: "load" });
   await never.waitForTimeout(100);
   assert.equal(neverRequests, 0);
   assert.equal((await storage(never, prerenderSite)).keys.length, 0);
   await never.close();
 
   const activated = await context.newPage();
-  await activated.goto(`${siteOrigin}/prerender-activated`, { waitUntil: "load" });
+  await activated.goto(`${prerenderOrigin}/prerender-activated`, { waitUntil: "load" });
   await activated.waitForTimeout(100);
   assert.equal((await storage(activated, prerenderSite)).keys.length, 0);
   const accepted = nextAccepted(
@@ -452,7 +454,7 @@ async function storageBlocked(browser) {
       (body) => body.site === ephemeralSite &&
         body.page.path === `/ephemeral-${suffix}`,
     );
-    await page.goto(`${siteOrigin}/ephemeral-${suffix}`, { waitUntil: "load" });
+    await page.goto(`${ephemeralOrigin}/ephemeral-${suffix}`, { waitUntil: "load" });
     events.push(await accepted);
     await page.close();
   }

@@ -71,6 +71,11 @@ curl --fail http://127.0.0.1:4318/readyz
 32-byte visitor key. Re-running it preserves the key. Do not copy one
 installation's key into another except as part of a matched restore.
 
+The `site add` command above remains the automation and recovery path. After
+passkey bootstrap, the normal first-site path is the authenticated browser form
+at `/admin`; it stores the same required policy and refreshes the running
+collector without a service restart.
+
 ## 3. Process contract
 
 The checked-in service invokes the exact production parser:
@@ -328,16 +333,19 @@ match the live pair before migration starts. The event file also receives a
 conservative free-space preflight. `init`, `report`, `site`, `event`, goal,
 funnel, and authentication commands never substitute for this explicit step.
 
-Migrations are numbered and transactional. Event migration 5 must preserve
-every schema-4 row and identity link, prove the complete D32 mapping and
-preserved-field fingerprints, and remove `exclusion_source` only in the swap
-transaction. Killing the process during the
-million-row DuckDB migration chain and retrying with the same verified backup
-is an automated release gate. A binary refuses a database with a newer unknown
-schema. Event schemas 3, 4, 5, 6, and 7 require database-pair restoration before an
-older binary is started for rollback. Metric-v1 reports continue to use their
-original UTC dates; explicit timezone rebucketing populates the separate
-site-local date/offset before the service can become ready.
+Migrations are numbered. DuckDB event migrations use one transactional
+create/backfill/swap. Turso metadata migrations follow D19 replayable durable
+autocommits and write their ledger row last; compensation is not described as
+a database transaction. Event migration 5 must preserve every schema-4 row and
+identity link, prove the complete D32 mapping and preserved-field fingerprints,
+and remove `exclusion_source` only in the swap transaction. Killing the process
+during the million-row DuckDB migration chain and retrying with the same
+verified backup is an automated release gate. A binary refuses a database with
+a newer unknown schema. Event schemas 3, 4, 5, 6, and 7 require database-pair
+restoration before an older binary is started for rollback. Metric-v1 reports
+continue to use their original UTC dates; explicit timezone rebucketing
+populates the separate site-local date/offset before the service can become
+ready.
 
 Event migration 6 must preserve every schema-5 row/link/class/version/rule and
 every unrelated-field fingerprint, add only the documented unknown evidence,
@@ -388,6 +396,21 @@ network-day privacy/anomaly evidence, daily-ceiling 429/idempotency behavior,
 and one authenticated native traffic-policy journey. Rollback restores the
 matched metadata-4/event-6 pair and prior release symlink. There is no tracker
 or Caddy change for schema 7.
+
+For the metadata-schema-6 deployment, stop the sole writer and create a
+verified metadata-5/event-7 pair backup. Independently restore that backup and
+prove the exact metadata-5 predecessor opens it before migration. The candidate
+must preserve all site, origin, timezone, exclusion, traffic-policy, goal,
+funnel, authentication, and event facts; backfill one empty `site_settings` row
+per existing site; and create unique origin ownership before writing the v6
+ledger. A predecessor with cross-site duplicate origins fails closed before
+the ledger and requires operator correction; migration never chooses an owner.
+
+After migration, verify metadata 6/event 7, `doctor`, existing report parity,
+authenticated first-site creation, exact completed resubmission, and immediate
+collection under the refreshed policy. Rollback restores the matched
+metadata-5/event-7 pair before starting the prior binary. There is no DuckDB,
+tracker, Caddy, process, or dependency change for metadata schema 6.
 
 ## 11. Retention and site deletion
 

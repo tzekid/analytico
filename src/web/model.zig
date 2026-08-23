@@ -198,3 +198,50 @@ pub const ErrorPage = struct {
     message: []const u8,
     return_url: []const u8 = "/admin",
 };
+
+pub const FirstRunPage = struct {
+    metadata_schema: i64,
+    event_schema: i64,
+    runtime_ready: bool,
+};
+
+pub const SiteDraft = struct {
+    name: []const u8 = "",
+    slug: []const u8 = "",
+    origin: []const u8 = "",
+    timezone: []const u8 = "",
+    currency: []const u8 = "",
+};
+
+pub const SiteFormErrors = struct {
+    name: []const u8 = "",
+    slug: []const u8 = "",
+    origin: []const u8 = "",
+    timezone: []const u8 = "",
+    currency: []const u8 = "",
+
+    pub fn any(self: SiteFormErrors) bool {
+        return self.name.len != 0 or self.slug.len != 0 or
+            self.origin.len != 0 or self.timezone.len != 0 or
+            self.currency.len != 0;
+    }
+};
+
+pub const SiteFormPage = struct {
+    csrf_token: []const u8,
+    draft: SiteDraft = .{},
+    errors: SiteFormErrors = .{},
+};
+
+pub const SiteSubmission = union(enum) {
+    invalid: SiteFormPage,
+    stored: struct {
+        slug: []const u8,
+    },
+};
+
+pub const InstallPage = struct {
+    site: meta.SiteConfiguration,
+    policy_active: bool,
+    collection_available: bool,
+};

@@ -39,7 +39,7 @@ trap cleanup EXIT
 "$binary" site add "$fixture_dir" alpha "Identity A" \
     "http://127.0.0.2:$fixture_port" --timezone UTC >/dev/null
 "$binary" site add "$fixture_dir" beta "Identity B" \
-    "http://127.0.0.2:$fixture_port" --timezone UTC >/dev/null
+    "http://127.0.0.3:$fixture_port" --timezone UTC >/dev/null
 site_a=$("$binary" site list "$fixture_dir" |
     awk -F '\t' '$1 == "alpha" { print $2 }')
 site_b=$("$binary" site list "$fixture_dir" |
@@ -185,7 +185,7 @@ then
 fi
 
 doctor=$("$binary" doctor "$fixture_dir")
-[[ "$doctor" == ok\ metadata=v4\ events=v6\ sites=2\ * ]]
+[[ "$doctor" == ok\ metadata=v6\ events=v7\ sites=2\ * ]]
 [[ "$doctor" == *key=ok ]]
 
 if grep -aE '(prior-user|blocked)' \

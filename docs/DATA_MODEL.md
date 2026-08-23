@@ -1,7 +1,7 @@
 # Data model and metric semantics
 
 > **Status:** Sections 1–9 define the shipped analytics-metadata subset in
-> Turso metadata schema 5, DuckDB event schema 7, and metric semantics v1. Authentication storage
+> Turso metadata schema 6, DuckDB event schema 7, and metric semantics v1. Authentication storage
 > remains governed by its own specification. The daily-pseudonym and UTC-day
 > rules remain the compatibility contract for existing rows and current
 > reports. Section 10 records the remaining 1.0 transition; event schema 7 does
@@ -77,10 +77,12 @@ CREATE TABLE site_origins (
     PRIMARY KEY (site_id, origin),
     FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE CASCADE
 );
+CREATE UNIQUE INDEX site_origins_unique_origin ON site_origins(origin);
 ```
 
 An origin is an exact normalized `scheme://host[:port]`. Wildcards are not
-accepted in the MVP.
+accepted in the MVP. Metadata schema 6 makes one origin belong to exactly one
+site so browser creation cannot produce ambiguous collector authorization.
 
 ### `site_timezones`
 
@@ -141,6 +143,26 @@ accepted-event ceiling of 100,000; new sites receive the same row. The
 authenticated native settings form may change only those closed values and
 refreshes the in-memory collector policy before its 303 response. Missing or
 invalid policy fails closed. No diagnostic or migration enables strict mode.
+
+### `site_settings`
+
+```sql
+CREATE TABLE site_settings (
+    site_id TEXT PRIMARY KEY,
+    default_currency TEXT NOT NULL,
+    FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE CASCADE,
+    CHECK (default_currency = '' OR (
+        length(default_currency) = 3 AND
+        default_currency NOT GLOB '*[^A-Z]*'
+    ))
+);
+```
+
+Metadata migration 6 backfills exactly one row per existing site with an empty
+currency. Empty means no owner preference was recorded; it is not an inferred
+EUR or an instruction to combine currencies. Browser-created sites persist the
+owner's explicit empty or three-uppercase-ASCII value. D36 adds no settings
+revision, tracking-option bitset, or second configuration model.
 
 ### `site_event_properties`
 
@@ -665,7 +687,8 @@ Deleting a site is two-phase:
 
 1. Disable it in Turso so new events are rejected.
 2. With the service stopped, delete its DuckDB `identity_links` and `events`
-   rows, checkpoint, then delete the Turso configuration in a transaction.
+   rows, checkpoint, then delete the Turso parent with its foreign-key cascades
+   as one durable statement.
 
 Retention deletes expired `events` rows, then deletes `identity_links` whose
 `(site_id, anonymous_id)` no longer exists in `events`.
@@ -694,7 +717,9 @@ D33 and issue #69 advance to schema 6 with bounded browser/receipt evidence,
 end the completed shadow, and promote permanent-class product eligibility.
 D34 and issue #70 advance to event schema 7 and metadata 5, add only keyed
 daily-prefix evidence plus explicit site safeguards, and keep soft verdicts in
-the reversible query layer.
+the reversible query layer. D36 and issue #19 advance metadata to schema 6,
+store the explicit optional site currency, and make origin ownership unique;
+event schema 7 and every stored event fact remain unchanged.
 
 ### Identity and sessions
 

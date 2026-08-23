@@ -44,6 +44,7 @@ semantic, or application state model is consequential and must be added here.
 | D33 | Bounded browser and receipt traffic evidence | Schema-6 closed signal fields, classifier v2, and permanent class eligibility | Accepted for 1.0 issue #69 |
 | D34 | Query-time suspected traffic and site safeguards | Reversible suspected-session filtering, keyed network-day evidence, and a daily accepted-event ceiling | Accepted for 1.0 issue #70 |
 | D35 | Exact one-entry Overview result cache | Narrowly supersede D29's cache prohibition after measured cold SQL misses | Accepted for 1.0 issue #27 |
+| D36 | Browser site creation and metadata schema 6 | D19 durable autocommits, exact retry, stored settings, and unique origin ownership | Accepted for 1.0 issue #19 |
 
 ## D01. MVP interface
 
@@ -1813,3 +1814,143 @@ invalidation on the real on-disk Store, retain the cold profile under the
 existing deadline, meet the normal and strict warm-read budgets, and pass
 Debug plus ReleaseSafe real-browser and report-parity gates. Any later cache
 expansion is out of scope.
+
+## D36. Browser site creation and metadata schema 6
+
+**Status:** Accepted for Analytico 1.0 issue #19
+
+**Date:** 2026-08-23
+
+**Issue:** #19
+
+**Preserves:** D19. No explicit multi-write Turso transaction is introduced or
+implied by this decision.
+
+### Context
+
+The authenticated no-site dashboard currently tells the owner to use the CLI
+and restart the service. The 1.0 onboarding contract instead requires a native
+browser form for name, slug, primary origin, timezone, and optional default
+currency, followed by an in-process collection-policy refresh and an Install
+destination. Metadata schema 5 has no durable default-currency field and does
+not prevent one exact origin from belonging to several sites.
+
+The planning package says creation occurs in one Turso transaction. That
+wording is lower authority than D19. On the exact pinned Turso Database
+`0.8.0-pre.2` and owner filesystem, explicit multi-write transactions produced
+the measured false `pwrite: quota exceeded` failure while the same autocommit
+writes succeeded. This decision corrects the mechanism without weakening the
+user-visible all-or-cleanly-reported outcome.
+
+### Write-mechanism candidates
+
+| Candidate | Runtime and failure behavior | Maintenance and rollback |
+| --- | --- | --- |
+| Re-test and use an explicit multi-write transaction | Ideal atomicity if the measured engine/filesystem behavior changed | The pin and environment evidence have not changed; superseding D19 would require a new successful real-store result and a different rollback contract |
+| Preserve D19 durable autocommits plus synchronous parent compensation | Uses the shipped engine, makes each successful row durable, and deletes a newly inserted parent after a returned child-write error | A process crash can expose incomplete configuration until `doctor` or exact retry repairs it; the code must never swallow a failed compensation |
+| Add an operation log, idempotency table, or generic saga | Could identify every interrupted attempt | Adds durable states, cleanup policy, and abstractions for one sequential private-owner form without a second consumer |
+
+Select D19 durable autocommits with synchronous compensation. Insert the site
+parent first, then its required origin, timezone, settings, and traffic-policy
+children. If a child returns an error for a newly inserted parent, issue one
+explicit cascading parent delete. If that delete also fails, return a distinct
+compensation failure so `doctor` can report the incomplete site. This sequence
+is not called a transaction.
+
+### Settings-shape candidates
+
+| Candidate | Data semantics | Migration and extension cost |
+| --- | --- | --- |
+| Keep currency only in the submitted form or infer EUR | No migration | Loses explicit owner configuration and can silently mislabel later revenue |
+| Add nullable/default columns directly to `sites` | Direct lookup | Couples unrelated settings to the identity row and makes future bounded settings alter the core table repeatedly |
+| Add one `site_settings` row per site with only `default_currency` | Explicit one-to-one ownership and honest empty value | One small forward migration and one required child lookup |
+
+Select the one-to-one table. Metadata schema 6 adds:
+
+```sql
+CREATE TABLE site_settings (
+    site_id TEXT PRIMARY KEY,
+    default_currency TEXT NOT NULL,
+    FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE CASCADE,
+    CHECK (default_currency = '' OR (
+        length(default_currency) = 3 AND
+        default_currency NOT GLOB '*[^A-Z]*'
+    ))
+);
+CREATE UNIQUE INDEX site_origins_unique_origin ON site_origins(origin);
+```
+
+Existing sites receive the empty currency because no earlier fact proves an
+EUR or other preference. New browser-created sites store either empty or
+exactly three uppercase ASCII bytes. No settings revision, tracking-options
+bitset, background task, cache, dependency, or second configuration model is
+added by #19.
+
+### Idempotency, validation, and refresh
+
+The server validates every field before metadata writes. HTTPS is required
+except for explicit loopback HTTP development origins, and the selected IANA
+timezone must load through the configured bounded TZif reader. A blank slug is
+derived deterministically from the trimmed display name; the editable value
+uses the existing slug grammar.
+
+The single sequential owner process resolves an exact completed resubmission
+by comparing the stored name, slug, origin, timezone, and currency and resolves
+the existing site outcome. A missing child with no conflicting stored value may
+be filled by the same input after a process interruption. A differing slug
+owner, origin owner, name, timezone, or currency is a field conflict and is
+never overwritten as an idempotent retry. The unique slug and origin
+constraints are the durable final guard; no request token becomes persistent
+state.
+
+Only after the durable site outcome does the serving process rebuild and swap
+its bounded in-memory collection-policy snapshot. A refresh failure returns an
+honest recoverable error that says the site exists. Repeating the same form
+resolves that stored outcome before another refresh attempt and never inserts
+a second site. The renderer receives typed drafts, field errors, and stored
+configuration; it performs no database, clock, filesystem, or network work.
+
+### Migration, security, and rollback
+
+Metadata migration 6 uses D19 replayable autocommits: create the table, backfill
+one empty settings row per site with conflict-safe insertion, create the unique
+origin index, and write the migration ledger row last. A predecessor containing
+cross-site duplicate origins fails before the v6 ledger rather than assigning
+ownership silently. Re-running after correction is safe.
+
+The migration requires the normal verified pair backup. Acceptance uses the
+exact deployed metadata-5/event-7 predecessor, proves an independent restore
+with its old binary, preserves every site/origin/timezone/policy row, repeats
+the candidate migration, and proves rollback by restoring the matched pair for
+the old binary. No DuckDB schema or event fact changes.
+
+Creation remains behind the existing passkey session, exact dashboard Origin
+check, CSRF token, bounded form parser, and context-safe renderer. Site IDs are
+public random UUIDs, not secrets. No request query, raw network identifier,
+user agent, passkey material, or form body is logged or added to analytics.
+The unique origin index prevents ambiguous collector authorization without
+creating a new trust boundary.
+
+Runtime cost is a handful of bounded metadata writes and one existing policy
+reload only when the owner creates or exactly retries a site. Memory adds no
+persistent process structure beyond the already required policy snapshot.
+Maintenance is limited to the numbered migration, required-child validation,
+and the concrete onboarding routes. Code rollback requires the matched
+metadata-5/event-7 database restore because the old binary rejects metadata 6.
+
+**Affected contracts:** `DATA_MODEL.md`, `ARCHITECTURE.md`, `SPEC.md`,
+`OPERATIONS.md`, `RELEASE_CONTRACT_1.0.md`, issue #19, and downstream issue
+#20. The package flow's “one Turso transaction” sentence is superseded by D19
+and this decision; the visible form outcome remains all complete, compensated,
+or honestly recoverable.
+
+### Acceptance evidence
+
+Issue #19 must prove fresh passkey-authenticated browser creation with
+JavaScript disabled, preserved field values, no partial site after validation
+or returned child failure, exact completed resubmission, slug and origin
+conflicts, resolvable timezone and secure/loopback origin rules, a post-commit
+refresh failure that leaves one durable retryable site, immediate collection
+without restart, a working Install handoff, exact metadata-5/event-7 migration
+and pair rollback, response/asset/accessibility budgets, and Debug plus
+ReleaseSafe gates.

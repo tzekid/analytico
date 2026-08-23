@@ -2,7 +2,7 @@ const std = @import("std");
 const turso = @import("turso");
 const domain = @import("../domain.zig");
 
-pub const schema_version: i64 = 5;
+pub const schema_version: i64 = 6;
 pub const maximum_excluded_networks: usize = 16;
 pub const maximum_active_goals: usize = 32;
 pub const default_daily_event_ceiling: i64 = 100_000;
@@ -13,6 +13,49 @@ pub const Site = struct {
     slug: []u8,
     name: []u8,
     disabled: bool,
+};
+
+pub const SiteConfiguration = struct {
+    id: []u8,
+    slug: []u8,
+    name: []u8,
+    origins: []const []u8,
+    timezone_name: []u8,
+    default_currency: []u8,
+};
+
+pub const CreateSiteInput = struct {
+    id: []const u8,
+    slug: []const u8,
+    name: []const u8,
+    origin: []const u8,
+    timezone_name: []const u8,
+    default_currency: []const u8,
+    created_at_utc_micros: i64,
+};
+
+pub const CreateSiteOutcome = struct {
+    created: bool,
+};
+
+const StoredSiteIdentity = struct {
+    id: []u8,
+    name: []u8,
+    disabled: bool,
+};
+
+const StoredSiteChildren = struct {
+    origins: []const []u8,
+    timezone_name: ?[]u8,
+    default_currency: ?[]u8,
+    traffic_policy_present: bool,
+
+    fn deinit(self: StoredSiteChildren, allocator: std.mem.Allocator) void {
+        for (self.origins) |origin| allocator.free(origin);
+        allocator.free(self.origins);
+        if (self.timezone_name) |value| allocator.free(value);
+        if (self.default_currency) |value| allocator.free(value);
+    }
 };
 
 pub const Goal = struct {
@@ -302,6 +345,26 @@ pub const Store = struct {
             std.log.err("metadata migration v5 failed: {s}", .{diagnostics.text()});
             return err;
         };
+        if (current < 6) _ = self.connection.execBatch(
+            \\CREATE TABLE IF NOT EXISTS site_settings (
+            \\  site_id TEXT PRIMARY KEY,
+            \\  default_currency TEXT NOT NULL,
+            \\  FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE CASCADE,
+            \\  CHECK (default_currency = '' OR (
+            \\    length(default_currency) = 3 AND
+            \\    default_currency NOT GLOB '*[^A-Z]*'
+            \\  ))
+            \\);
+            \\INSERT INTO site_settings (site_id, default_currency)
+            \\SELECT id, '' FROM sites
+            \\ON CONFLICT(site_id) DO NOTHING;
+            \\CREATE UNIQUE INDEX IF NOT EXISTS site_origins_unique_origin
+            \\  ON site_origins(origin);
+            \\INSERT INTO meta_migrations VALUES (6, 'site-settings-and-origin-owner', 0);
+        , .{ .diagnostics = &diagnostics }) catch |err| {
+            std.log.err("metadata migration v6 failed: {s}", .{diagnostics.text()});
+            return err;
+        };
     }
 
     pub fn migrateProbe(self: *Store) !void {
@@ -388,10 +451,19 @@ pub const Store = struct {
             .{"00000000-0000-4000-8000-000000000001"},
             .{},
         );
+        _ = try self.connection.execParams(
+            \\INSERT INTO site_settings (site_id, default_currency)
+            \\VALUES (?1, '')
+            \\ON CONFLICT(site_id) DO NOTHING
+        ,
+            .{"00000000-0000-4000-8000-000000000001"},
+            .{},
+        );
     }
 
     pub fn addSite(
         self: *Store,
+        allocator: std.mem.Allocator,
         id: []const u8,
         slug: []const u8,
         name: []const u8,
@@ -399,26 +471,97 @@ pub const Store = struct {
         timezone_name: []const u8,
         created_at: i64,
     ) !void {
-        try domain.validateUuid(id);
-        try domain.validateSlug(slug);
-        try domain.validateName(name, 120);
+        const outcome = try self.createSite(allocator, .{
+            .id = id,
+            .slug = slug,
+            .name = name,
+            .origin = origin,
+            .timezone_name = timezone_name,
+            .default_currency = "",
+            .created_at_utc_micros = created_at,
+        });
+        if (!outcome.created) return error.SiteAlreadyExists;
+    }
+
+    pub fn createSite(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        input: CreateSiteInput,
+    ) !CreateSiteOutcome {
+        try domain.validateUuid(input.id);
+        try domain.validateSlug(input.slug);
+        try domain.validateName(input.name, 120);
+        try domain.validateCurrency(input.default_currency);
+        const normalized_origin = try domain.normalizeOrigin(allocator, input.origin);
+        defer allocator.free(normalized_origin);
+        if (!std.mem.eql(u8, normalized_origin, input.origin)) {
+            return error.InvalidOrigin;
+        }
+
+        const existing = try self.siteIdentityBySlug(allocator, input.slug);
+        const origin_owner = try self.siteIdByOrigin(allocator, input.origin);
+        defer if (origin_owner) |owner| allocator.free(owner);
+        if (existing) |site| {
+            defer allocator.free(site.id);
+            defer allocator.free(site.name);
+            if (site.disabled or !std.mem.eql(u8, site.name, input.name)) {
+                return error.SiteSlugConflict;
+            }
+            var children = try self.siteChildren(allocator, site.id);
+            defer children.deinit(allocator);
+            if (origin_owner) |owner| {
+                if (!std.mem.eql(u8, owner, site.id)) {
+                    return error.SiteOriginConflict;
+                }
+            }
+            if (children.origins.len != 0 and
+                !containsString(children.origins, input.origin))
+            {
+                return error.SiteOriginConflict;
+            }
+            if (children.timezone_name) |stored_timezone| {
+                if (!std.mem.eql(u8, stored_timezone, input.timezone_name)) {
+                    return error.SiteTimezoneConflict;
+                }
+            }
+            if (children.default_currency) |stored_currency| {
+                if (!std.mem.eql(u8, stored_currency, input.default_currency)) {
+                    return error.SiteCurrencyConflict;
+                }
+            }
+            try self.completeMissingSiteChildren(site.id, input, children);
+            return .{ .created = false };
+        }
+        if (origin_owner != null) return error.SiteOriginConflict;
 
         _ = try self.connection.execParams(
             \\INSERT INTO sites
             \\  (id, slug, name, created_at_utc_micros, disabled_at_utc_micros)
             \\VALUES (?1, ?2, ?3, ?4, NULL)
         ,
-            .{ id, slug, name, created_at },
+            .{ input.id, input.slug, input.name, input.created_at_utc_micros },
             .{},
         );
-        errdefer _ = self.connection.execParams(
-            "DELETE FROM sites WHERE id = ?1",
-            .{id},
-            .{},
-        ) catch 0;
+        self.insertSiteChildren(input.id, input) catch |write_error| {
+            const deleted = self.connection.execParams(
+                "DELETE FROM sites WHERE id = ?1",
+                .{input.id},
+                .{},
+            ) catch return error.SiteCompensationFailed;
+            if (deleted != 1) return error.SiteCompensationFailed;
+            return write_error;
+        };
+        return .{ .created = true };
+    }
+
+    fn insertSiteChildren(
+        self: *Store,
+        site_id: []const u8,
+        input: CreateSiteInput,
+    ) !void {
         _ = try self.connection.execParams(
             "INSERT INTO site_origins (site_id, origin) VALUES (?1, ?2)",
-            .{ id, origin },
+            .{ site_id, input.origin },
             .{},
         );
         _ = try self.connection.execParams(
@@ -426,7 +569,14 @@ pub const Store = struct {
             \\  (site_id, zone_name, revision, rebucket_pending)
             \\VALUES (?1, ?2, 1, 0)
         ,
-            .{ id, timezone_name },
+            .{ site_id, input.timezone_name },
+            .{},
+        );
+        _ = try self.connection.execParams(
+            \\INSERT INTO site_settings (site_id, default_currency)
+            \\VALUES (?1, ?2)
+        ,
+            .{ site_id, input.default_currency },
             .{},
         );
         _ = try self.connection.execParams(
@@ -434,9 +584,197 @@ pub const Store = struct {
             \\  (site_id, strict_mode, daily_event_ceiling, updated_at_utc_micros)
             \\VALUES (?1, 0, 100000, ?2)
         ,
-            .{ id, created_at },
+            .{ site_id, input.created_at_utc_micros },
             .{},
         );
+    }
+
+    fn completeMissingSiteChildren(
+        self: *Store,
+        site_id: []const u8,
+        input: CreateSiteInput,
+        children: StoredSiteChildren,
+    ) !void {
+        if (children.origins.len == 0) {
+            _ = try self.connection.execParams(
+                "INSERT INTO site_origins (site_id, origin) VALUES (?1, ?2)",
+                .{ site_id, input.origin },
+                .{},
+            );
+        }
+        if (children.timezone_name == null) {
+            _ = try self.connection.execParams(
+                \\INSERT INTO site_timezones
+                \\  (site_id, zone_name, revision, rebucket_pending)
+                \\VALUES (?1, ?2, 1, 0)
+            ,
+                .{ site_id, input.timezone_name },
+                .{},
+            );
+        }
+        if (children.default_currency == null) {
+            _ = try self.connection.execParams(
+                \\INSERT INTO site_settings (site_id, default_currency)
+                \\VALUES (?1, ?2)
+            ,
+                .{ site_id, input.default_currency },
+                .{},
+            );
+        }
+        if (!children.traffic_policy_present) {
+            _ = try self.connection.execParams(
+                \\INSERT INTO site_traffic_policy
+                \\  (site_id, strict_mode, daily_event_ceiling, updated_at_utc_micros)
+                \\VALUES (?1, 0, 100000, ?2)
+            ,
+                .{ site_id, input.created_at_utc_micros },
+                .{},
+            );
+        }
+    }
+
+    fn siteChildren(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        site_id: []const u8,
+    ) !StoredSiteChildren {
+        const origins = try self.stringColumn(
+            allocator,
+            "SELECT origin FROM site_origins WHERE site_id = ?1 ORDER BY origin",
+            site_id,
+        );
+        errdefer {
+            for (origins) |origin| allocator.free(origin);
+            allocator.free(origins);
+        }
+        const timezone_name = try self.optionalString(
+            allocator,
+            "SELECT zone_name FROM site_timezones WHERE site_id = ?1",
+            site_id,
+        );
+        errdefer if (timezone_name) |value| allocator.free(value);
+        const default_currency = try self.optionalString(
+            allocator,
+            "SELECT default_currency FROM site_settings WHERE site_id = ?1",
+            site_id,
+        );
+        errdefer if (default_currency) |value| allocator.free(value);
+        return .{
+            .origins = origins,
+            .timezone_name = timezone_name,
+            .default_currency = default_currency,
+            .traffic_policy_present = try self.rowExists(
+                "SELECT 1 FROM site_traffic_policy WHERE site_id = ?1",
+                site_id,
+            ),
+        };
+    }
+
+    pub fn siteConfigurationBySlug(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        slug: []const u8,
+    ) !SiteConfiguration {
+        try domain.validateSlug(slug);
+        const identity = (try self.siteIdentityBySlug(allocator, slug)) orelse
+            return error.SiteNotFound;
+        const origins = try self.stringColumn(
+            allocator,
+            "SELECT origin FROM site_origins WHERE site_id = ?1 ORDER BY origin",
+            identity.id,
+        );
+        if (origins.len == 0) return error.SiteOriginRequired;
+        const timezone_name = (try self.optionalString(
+            allocator,
+            "SELECT zone_name FROM site_timezones WHERE site_id = ?1",
+            identity.id,
+        )) orelse return error.SiteTimezoneRequired;
+        const default_currency = (try self.optionalString(
+            allocator,
+            "SELECT default_currency FROM site_settings WHERE site_id = ?1",
+            identity.id,
+        )) orelse return error.SiteSettingsRequired;
+        try domain.validateCurrency(default_currency);
+        return .{
+            .id = identity.id,
+            .slug = try allocator.dupe(u8, slug),
+            .name = identity.name,
+            .origins = origins,
+            .timezone_name = timezone_name,
+            .default_currency = default_currency,
+        };
+    }
+
+    fn siteIdentityBySlug(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        slug: []const u8,
+    ) !?StoredSiteIdentity {
+        var rows = try self.connection.queryParams(
+            \\SELECT id, name, disabled_at_utc_micros IS NOT NULL
+            \\FROM sites WHERE slug = ?1
+        ,
+            .{slug},
+            .{},
+        );
+        defer rows.deinit();
+        const row = (try rows.next()) orelse {
+            try rows.finish(null);
+            return null;
+        };
+        const result = StoredSiteIdentity{
+            .id = try allocator.dupe(u8, try row.get([]const u8, 0)),
+            .name = try allocator.dupe(u8, try row.get([]const u8, 1)),
+            .disabled = (try row.get(i64, 2)) != 0,
+        };
+        if ((try rows.next()) != null) return error.UnexpectedSiteRow;
+        try rows.finish(null);
+        return result;
+    }
+
+    fn siteIdByOrigin(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        origin: []const u8,
+    ) !?[]u8 {
+        return self.optionalString(
+            allocator,
+            "SELECT site_id FROM site_origins WHERE origin = ?1",
+            origin,
+        );
+    }
+
+    fn optionalString(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        sql: []const u8,
+        parameter: []const u8,
+    ) !?[]u8 {
+        var rows = try self.connection.queryParams(sql, .{parameter}, .{});
+        defer rows.deinit();
+        const row = (try rows.next()) orelse {
+            try rows.finish(null);
+            return null;
+        };
+        const result = try allocator.dupe(u8, try row.get([]const u8, 0));
+        if ((try rows.next()) != null) return error.UnexpectedMetadataRow;
+        try rows.finish(null);
+        return result;
+    }
+
+    fn rowExists(
+        self: *Store,
+        sql: []const u8,
+        parameter: []const u8,
+    ) !bool {
+        var rows = try self.connection.queryParams(sql, .{parameter}, .{});
+        defer rows.deinit();
+        const exists = (try rows.next()) != null;
+        if (exists and (try rows.next()) != null) {
+            return error.UnexpectedMetadataRow;
+        }
+        try rows.finish(null);
+        return exists;
     }
 
     pub fn siteTimezone(
@@ -981,6 +1319,8 @@ pub const Store = struct {
             "SELECT origin FROM site_origins WHERE site_id = ?1 ORDER BY origin",
             id,
         );
+        if (origins.len == 0) return error.SiteOriginRequired;
+        try self.requireValidSiteSettings(id);
         const properties = try self.stringColumn(
             allocator,
             \\SELECT property_name FROM site_event_properties
@@ -1035,6 +1375,19 @@ pub const Store = struct {
             .strict_mode = strict_value == 1,
             .daily_event_ceiling = daily_event_ceiling,
         };
+    }
+
+    fn requireValidSiteSettings(self: *Store, site_id: []const u8) !void {
+        var rows = try self.connection.queryParams(
+            "SELECT default_currency FROM site_settings WHERE site_id = ?1",
+            .{site_id},
+            .{},
+        );
+        defer rows.deinit();
+        const row = (try rows.next()) orelse return error.SiteSettingsRequired;
+        try domain.validateCurrency(try row.get([]const u8, 0));
+        if ((try rows.next()) != null) return error.UnexpectedSiteSettingsRow;
+        try rows.finish(null);
     }
 
     pub fn updateTrafficPolicy(
@@ -1148,9 +1501,206 @@ pub const Store = struct {
     }
 };
 
+fn containsString(values: []const []const u8, expected: []const u8) bool {
+    for (values) |value| {
+        if (std.mem.eql(u8, value, expected)) return true;
+    }
+    return false;
+}
+
 fn validateMatch(kind: domain.MatchKind, value: []const u8) !void {
     switch (kind) {
         .event => try domain.validateIdentifier(value),
         .path, .prefix => _ = try domain.normalizePath(value),
     }
+}
+
+test "site creation classifies exact retries before repairing missing children" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const backing_allocator = std.testing.allocator;
+    const path = try std.fmt.allocPrint(
+        backing_allocator,
+        ".zig-cache/tmp/{s}/meta.db",
+        .{temporary.sub_path},
+    );
+    defer backing_allocator.free(path);
+    var store = try Store.open(backing_allocator, path);
+    defer store.deinit();
+    try store.migrate();
+
+    var arena = std.heap.ArenaAllocator.init(backing_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const input = CreateSiteInput{
+        .id = "00000000-0000-4000-8000-000000000019",
+        .slug = "example",
+        .name = "Example",
+        .origin = "https://example.com",
+        .timezone_name = "UTC",
+        .default_currency = "EUR",
+        .created_at_utc_micros = 1,
+    };
+    try std.testing.expect((try store.createSite(allocator, input)).created);
+    try std.testing.expect(!(try store.createSite(allocator, input)).created);
+
+    var changed = input;
+    changed.id = "00000000-0000-4000-8000-000000000020";
+    changed.origin = "https://changed.example";
+    try std.testing.expectError(
+        error.SiteOriginConflict,
+        store.createSite(allocator, changed),
+    );
+    changed = input;
+    changed.timezone_name = "Europe/Berlin";
+    try std.testing.expectError(
+        error.SiteTimezoneConflict,
+        store.createSite(allocator, changed),
+    );
+    changed = input;
+    changed.default_currency = "USD";
+    try std.testing.expectError(
+        error.SiteCurrencyConflict,
+        store.createSite(allocator, changed),
+    );
+
+    const complete = try store.siteConfigurationBySlug(allocator, input.slug);
+    try std.testing.expectEqual(@as(usize, 1), complete.origins.len);
+    try std.testing.expectEqualStrings(input.origin, complete.origins[0]);
+    try std.testing.expectEqualStrings(input.timezone_name, complete.timezone_name);
+    try std.testing.expectEqualStrings(input.default_currency, complete.default_currency);
+
+    _ = try store.connection.execBatch(
+        \\DELETE FROM site_origins WHERE site_id =
+        \\  '00000000-0000-4000-8000-000000000019';
+        \\DELETE FROM site_settings WHERE site_id =
+        \\  '00000000-0000-4000-8000-000000000019';
+    , .{});
+    changed = input;
+    changed.timezone_name = "Europe/Berlin";
+    try std.testing.expectError(
+        error.SiteTimezoneConflict,
+        store.createSite(allocator, changed),
+    );
+    try std.testing.expect(!try store.rowExists(
+        "SELECT 1 FROM site_origins WHERE site_id = ?1",
+        input.id,
+    ));
+    try std.testing.expect(!try store.rowExists(
+        "SELECT 1 FROM site_settings WHERE site_id = ?1",
+        input.id,
+    ));
+    try std.testing.expect(!(try store.createSite(allocator, input)).created);
+    const repaired = try store.siteConfigurationBySlug(allocator, input.slug);
+    try std.testing.expectEqual(@as(usize, 1), repaired.origins.len);
+    try std.testing.expectEqualStrings(input.origin, repaired.origins[0]);
+    try std.testing.expectEqualStrings(input.timezone_name, repaired.timezone_name);
+    try std.testing.expectEqualStrings(input.default_currency, repaired.default_currency);
+    _ = try store.sitePolicy(allocator, input.id);
+}
+
+test "probe seed preserves the metadata 6 settings invariant" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const allocator = std.testing.allocator;
+    const path = try std.fmt.allocPrint(
+        allocator,
+        ".zig-cache/tmp/{s}/meta.db",
+        .{temporary.sub_path},
+    );
+    defer allocator.free(path);
+    var store = try Store.open(allocator, path);
+    defer store.deinit();
+    try store.migrateProbe();
+    try store.seedProbeSite();
+
+    const currency = (try store.optionalString(
+        allocator,
+        "SELECT default_currency FROM site_settings WHERE site_id = ?1",
+        "00000000-0000-4000-8000-000000000001",
+    )) orelse return error.MissingProbeSiteSettings;
+    defer allocator.free(currency);
+    try std.testing.expectEqualStrings("", currency);
+}
+
+test "returned child write failure synchronously compensates the new parent" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const backing_allocator = std.testing.allocator;
+    const path = try std.fmt.allocPrint(
+        backing_allocator,
+        ".zig-cache/tmp/{s}/meta.db",
+        .{temporary.sub_path},
+    );
+    defer backing_allocator.free(path);
+    var store = try Store.open(backing_allocator, path);
+    defer store.deinit();
+    try store.migrate();
+    _ = try store.connection.execBatch(
+        \\CREATE TRIGGER reject_site_settings
+        \\BEFORE INSERT ON site_settings
+        \\BEGIN SELECT RAISE(ABORT, 'fixture child failure'); END;
+    , .{});
+
+    var arena = std.heap.ArenaAllocator.init(backing_allocator);
+    defer arena.deinit();
+    var failed = false;
+    _ = store.createSite(arena.allocator(), .{
+        .id = "00000000-0000-4000-8000-000000000021",
+        .slug = "compensate",
+        .name = "Compensate",
+        .origin = "https://compensate.example",
+        .timezone_name = "UTC",
+        .default_currency = "",
+        .created_at_utc_micros = 1,
+    }) catch {
+        failed = true;
+    };
+    try std.testing.expect(failed);
+    try std.testing.expectEqual(@as(i64, 0), try store.siteCount());
+}
+
+test "failed compensation remains visible as an incomplete site" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const backing_allocator = std.testing.allocator;
+    const path = try std.fmt.allocPrint(
+        backing_allocator,
+        ".zig-cache/tmp/{s}/meta.db",
+        .{temporary.sub_path},
+    );
+    defer backing_allocator.free(path);
+    var store = try Store.open(backing_allocator, path);
+    defer store.deinit();
+    try store.migrate();
+    _ = try store.connection.execBatch(
+        \\CREATE TRIGGER reject_site_settings
+        \\BEFORE INSERT ON site_settings
+        \\BEGIN SELECT RAISE(ABORT, 'fixture child failure'); END;
+        \\CREATE TRIGGER reject_site_delete
+        \\BEFORE DELETE ON sites
+        \\BEGIN SELECT RAISE(ABORT, 'fixture compensation failure'); END;
+    , .{});
+
+    var arena = std.heap.ArenaAllocator.init(backing_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const site_id = "00000000-0000-4000-8000-000000000022";
+    try std.testing.expectError(
+        error.SiteCompensationFailed,
+        store.createSite(allocator, .{
+            .id = site_id,
+            .slug = "incomplete",
+            .name = "Incomplete",
+            .origin = "https://incomplete.example",
+            .timezone_name = "UTC",
+            .default_currency = "",
+            .created_at_utc_micros = 1,
+        }),
+    );
+    try std.testing.expectEqual(@as(i64, 1), try store.siteCount());
+    try std.testing.expectError(
+        error.SiteSettingsRequired,
+        store.sitePolicy(allocator, site_id),
+    );
 }

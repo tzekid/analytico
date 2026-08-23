@@ -345,6 +345,7 @@ fn siteCommand(
         _ = try site_timezone.localAt(@divFloor(try nowMicros(), 1_000_000));
         const id = try domain.randomUuid(io);
         try store.addSite(
+            allocator,
             &id,
             args[4],
             args[5],

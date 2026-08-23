@@ -28,10 +28,10 @@ cleanup() {
 }
 trap cleanup EXIT
 live="$fixture/live"
-"$current" init "$live" >/dev/null
-"$current" site add "$live" migration Migration https://migration.example \
+"$previous" init "$live" >/dev/null
+"$previous" site add "$live" migration Migration https://migration.example \
     --timezone UTC >/dev/null
-site_id=$("$current" site list "$live" |
+site_id=$("$previous" site list "$live" |
     awk -F '\t' '$1 == "migration" { print $2 }')
 rm "$live/events.duckdb"
 "$current" m2 schema4-fixture "$live" "$site_id" >/dev/null
@@ -56,9 +56,9 @@ test "$("$previous" report "$verified" migration 2026-08-20 2026-08-20 \
     overview --format json)" = "$before"
 
 test "$("$current" migrate "$live" "$backup")" = \
-    "migrated metadata=v4 events=v6"
+    "migrated metadata=v6 events=v7"
 test "$("$current" doctor "$live")" = \
-    "ok metadata=v4 events=v6 sites=1 goals=0 funnels=0 stored_events=6 key=ok"
+    "ok metadata=v6 events=v7 sites=1 goals=0 funnels=0 stored_events=6 key=ok"
 test "$("$current" report "$live" migration 2026-08-20 2026-08-20 \
     overview --format json)" = "$before"
 test "$("$current" m2 identity-links "$live")" = 1
@@ -116,7 +116,7 @@ jq -e '
 # Current migration is idempotent; rollback is a matched pair restore opened by
 # the exact schema-4 predecessor.
 test "$("$current" migrate "$live" "$backup")" = \
-    "migrated metadata=v4 events=v6"
+    "migrated metadata=v6 events=v7"
 rolled_back="$fixture/rolled-back"
 "$previous" restore "$backup" "$rolled_back" --verify >/dev/null
 test "$("$previous" doctor "$rolled_back")" = \
@@ -178,13 +178,13 @@ if wait "$migration_pid" 2>/dev/null; then
 fi
 migration_pid=
 test "$("$current" migrate "$million" "$million_backup")" = \
-    "migrated metadata=v4 events=v6"
+    "migrated metadata=v6 events=v7"
 test "$("$current" doctor "$million")" = \
-    "ok metadata=v4 events=v6 sites=1 goals=0 funnels=0 stored_events=1000000 key=ok"
+    "ok metadata=v6 events=v7 sites=1 goals=0 funnels=0 stored_events=1000000 key=ok"
 test "$("$current" report "$million" million \
     2025-01-01 2025-01-31 overview --format json)" = "$million_before"
 test "$("$current" migrate "$million" "$million_backup")" = \
-    "migrated metadata=v4 events=v6"
+    "migrated metadata=v6 events=v7"
 
 printf '%s\n' "$quality"
 echo "exact schema-4 mapping, million-row interruption/retry, repeat, backup, restore, and rollback passed"

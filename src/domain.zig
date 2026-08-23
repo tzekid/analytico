@@ -222,6 +222,14 @@ pub fn validateName(value: []const u8, maximum: usize) !void {
     }
 }
 
+pub fn validateCurrency(value: []const u8) !void {
+    if (value.len == 0) return;
+    if (value.len != 3) return error.InvalidCurrency;
+    for (value) |byte| {
+        if (byte < 'A' or byte > 'Z') return error.InvalidCurrency;
+    }
+}
+
 pub fn validateIdentifier(value: []const u8) !void {
     if (value.len == 0 or value.len > 64) return error.InvalidIdentifier;
     for (value) |byte| {
@@ -555,4 +563,12 @@ test "network day identifiers are keyed and scoped to site and UTC date" {
         &base,
         &(try deriveNetworkDayId(key, site_b, "2026-08-23", "203.0.113.4")),
     ));
+}
+
+test "site currency is empty or three uppercase ASCII bytes" {
+    try validateCurrency("");
+    try validateCurrency("EUR");
+    try std.testing.expectError(error.InvalidCurrency, validateCurrency("EU"));
+    try std.testing.expectError(error.InvalidCurrency, validateCurrency("eur"));
+    try std.testing.expectError(error.InvalidCurrency, validateCurrency("E1R"));
 }

@@ -20,10 +20,12 @@ pub const Dependencies = struct {
     events: *events.Store,
     csrf_token: []const u8,
     origin: []const u8,
+    zoneinfo_root: []const u8 = timezone.default_zoneinfo_root,
     report_timeout_ms: u32,
     policy_refresh: ?PolicyRefresh = null,
     site_calendar: ?SiteCalendarLookup = null,
     diagnostics: ?DiagnosticsLookup = null,
+    collection_available: bool = true,
 };
 
 pub const PolicyRefresh = struct {
@@ -143,6 +145,32 @@ pub fn handle(
         try getLegacyPage(dependencies, request, output);
         return true;
     }
+    if (std.mem.eql(u8, path, "/admin/sites/new")) {
+        if (!std.mem.eql(u8, request.method, "GET")) {
+            try methodNotAllowed(output, "GET");
+        } else {
+            try writeSiteForm(output, 200, .{
+                .csrf_token = dependencies.csrf_token,
+            });
+        }
+        return true;
+    }
+    if (std.mem.eql(u8, path, "/admin/sites")) {
+        if (!std.mem.eql(u8, request.method, "POST")) {
+            try methodNotAllowed(output, "POST");
+        } else {
+            try postSite(dependencies, request, output);
+        }
+        return true;
+    }
+    if (installSiteForPath(path)) |site_slug| {
+        if (!std.mem.eql(u8, request.method, "GET")) {
+            try methodNotAllowed(output, "GET");
+        } else {
+            try getInstall(dependencies, output, site_slug);
+        }
+        return true;
+    }
     if (routeFor(path)) |route| {
         if (!std.mem.eql(u8, request.method, "GET")) {
             try methodNotAllowed(output, "GET");
@@ -158,6 +186,16 @@ pub fn handle(
     }
     try postAction(dependencies, request, output, action);
     return true;
+}
+
+fn installSiteForPath(path: []const u8) ?[]const u8 {
+    const prefix = "/admin/sites/";
+    if (!std.mem.startsWith(u8, path, prefix)) return null;
+    const site, const suffix = std.mem.cutScalar(u8, path[prefix.len..], '/') orelse
+        return null;
+    domain.validateSlug(site) catch return null;
+    if (!std.mem.eql(u8, suffix, "install")) return null;
+    return site;
 }
 
 const Action = enum {
@@ -237,6 +275,212 @@ fn actionFor(path: []const u8) ?Action {
     return null;
 }
 
+fn postSite(
+    dependencies: Dependencies,
+    request: request_mod.Request,
+    output: *std.Io.Writer,
+) !void {
+    if (!validFormContentType(try request.header("content-type"))) {
+        try writeError(output, .{
+            .status = 415,
+            .title = "Unsupported form",
+            .message = "Use a normal URL-encoded HTML form.",
+            .return_url = "/admin/sites/new",
+        });
+        return;
+    }
+    if (!try sameOrigin(request, dependencies.origin)) {
+        try writeError(output, .{
+            .status = 403,
+            .title = "Forbidden",
+            .message = "The site form did not come from this dashboard origin.",
+            .return_url = "/admin/sites/new",
+        });
+        return;
+    }
+    const form = controller.Form.parse(
+        dependencies.allocator,
+        request.body,
+    ) catch {
+        try writeError(output, .{
+            .status = 400,
+            .title = "Invalid form",
+            .message = "The submitted site form was malformed or too large.",
+            .return_url = "/admin/sites/new",
+        });
+        return;
+    };
+    controller.verifyCsrf(form, dependencies.csrf_token) catch {
+        try writeError(output, .{
+            .status = 403,
+            .title = "Forbidden",
+            .message = "The form token was missing or stale. Reload and try again.",
+            .return_url = "/admin/sites/new",
+        });
+        return;
+    };
+    const now = currentMicros() catch {
+        try writeError(output, .{
+            .status = 503,
+            .title = "Clock unavailable",
+            .message = "The server could not safely timestamp this site.",
+            .return_url = "/admin/sites/new",
+        });
+        return;
+    };
+    const submission = controller.submitSite(
+        dependencies.allocator,
+        dependencies.io,
+        dependencies.metadata,
+        form,
+        dependencies.csrf_token,
+        dependencies.zoneinfo_root,
+        now,
+    ) catch |err| {
+        std.log.err("site creation failed: {s}", .{@errorName(err)});
+        if (err == error.SiteCompensationFailed) {
+            try writeError(output, .{
+                .status = 503,
+                .title = "Site cleanup failed",
+                .message = "A metadata write and its compensating delete both failed. Run analytico doctor before retrying; an incomplete site may remain.",
+                .return_url = "/admin/sites/new",
+            });
+        } else {
+            try writeError(output, .{
+                .status = 503,
+                .title = "Site was not created",
+                .message = "Metadata storage rejected the operation. No success is claimed; it is safe to reload and retry after storage recovers.",
+                .return_url = "/admin/sites/new",
+            });
+        }
+        return;
+    };
+    switch (submission) {
+        .invalid => |page| try writeSiteForm(output, 422, page),
+        .stored => |stored| {
+            const refresh = dependencies.policy_refresh orelse {
+                try siteRefreshFailed(dependencies.allocator, output, stored.slug);
+                return;
+            };
+            refresh.run() catch {
+                try siteRefreshFailed(dependencies.allocator, output, stored.slug);
+                return;
+            };
+            try redirectToInstall(dependencies.allocator, output, stored.slug);
+        },
+    }
+}
+
+fn getInstall(
+    dependencies: Dependencies,
+    output: *std.Io.Writer,
+    site_slug: []const u8,
+) !void {
+    const site = dependencies.metadata.siteConfigurationBySlug(
+        dependencies.allocator,
+        site_slug,
+    ) catch |err| switch (err) {
+        error.SiteNotFound => {
+            try writeError(output, .{
+                .status = 404,
+                .title = "Site not found",
+                .message = "The selected site no longer exists.",
+            });
+            return;
+        },
+        else => return err,
+    };
+    var body = std.Io.Writer.Allocating.init(std.heap.page_allocator);
+    defer body.deinit();
+    const policy_active = if (dependencies.site_calendar) |lookup|
+        lookup.find(site.id) != null
+    else
+        false;
+    try render.installPage(&body.writer, .{
+        .site = site,
+        .policy_active = policy_active,
+        .collection_available = dependencies.collection_available,
+    });
+    try response.write(
+        output,
+        200,
+        "text/html; charset=utf-8",
+        render.headers,
+        body.written(),
+    );
+}
+
+fn writeSiteForm(
+    output: *std.Io.Writer,
+    status: u16,
+    page: model.SiteFormPage,
+) !void {
+    var body = std.Io.Writer.Allocating.init(std.heap.page_allocator);
+    defer body.deinit();
+    try render.siteFormPage(&body.writer, page);
+    try response.write(
+        output,
+        status,
+        "text/html; charset=utf-8",
+        render.headers,
+        body.written(),
+    );
+}
+
+fn writeFirstRun(output: *std.Io.Writer, runtime_ready: bool) !void {
+    var body = std.Io.Writer.Allocating.init(std.heap.page_allocator);
+    defer body.deinit();
+    try render.firstRunPage(&body.writer, .{
+        .metadata_schema = meta.schema_version,
+        .event_schema = events.schema_version,
+        .runtime_ready = runtime_ready,
+    });
+    try response.write(
+        output,
+        200,
+        "text/html; charset=utf-8",
+        render.headers,
+        body.written(),
+    );
+}
+
+fn redirectToInstall(
+    allocator: std.mem.Allocator,
+    output: *std.Io.Writer,
+    site_slug: []const u8,
+) !void {
+    var headers = std.Io.Writer.Allocating.init(allocator);
+    try headers.writer.print(
+        "Cache-Control: no-store\r\nLocation: /admin/sites/{s}/install\r\n",
+        .{site_slug},
+    );
+    try response.write(
+        output,
+        303,
+        "text/plain; charset=utf-8",
+        headers.written(),
+        "see other\n",
+    );
+}
+
+fn siteRefreshFailed(
+    allocator: std.mem.Allocator,
+    output: *std.Io.Writer,
+    site_slug: []const u8,
+) !void {
+    const install_url = try std.fmt.allocPrint(
+        allocator,
+        "/admin/sites/{s}/install",
+        .{site_slug},
+    );
+    try writeError(output, .{
+        .status = 503,
+        .title = "Collection policy refresh failed",
+        .message = "The site exists, but the running collector could not load its policy. Restart the service or submit the same site form after recovery; no second site will be inserted.",
+        .return_url = install_url,
+    });
+}
+
 fn getLegacyPage(
     dependencies: Dependencies,
     request: request_mod.Request,
@@ -264,23 +508,7 @@ fn getLegacyPage(
     };
     const sites = try dependencies.metadata.listSites(dependencies.allocator);
     if (sites.len == 0) {
-        const range = try currentUtcRange(now);
-        const loaded = try controller.loadPage(
-            dependencies.allocator,
-            dependencies.metadata,
-            dependencies.events,
-            .overview,
-            .{
-                .site = "no-site",
-                .range = range.view(),
-            },
-            null,
-            null,
-            dependencies.csrf_token,
-            noticeMessage(parsed.notice),
-            dependencies.report_timeout_ms,
-        );
-        try writePage(output, 200, loaded);
+        try writeFirstRun(output, dependencies.collection_available);
         return;
     }
     const selected = controller.resolveSite(sites, parsed.site) catch {
@@ -345,20 +573,7 @@ fn getPage(
     };
     const sites = try dependencies.metadata.listSites(dependencies.allocator);
     if (sites.len == 0) {
-        const range = try currentUtcRange(now);
-        const loaded = try controller.loadPage(
-            dependencies.allocator,
-            dependencies.metadata,
-            dependencies.events,
-            route.destination,
-            .{ .site = route.site, .range = range.view(), .kind = route.default_kind },
-            null,
-            null,
-            dependencies.csrf_token,
-            "",
-            dependencies.report_timeout_ms,
-        );
-        try writePage(output, 200, loaded);
+        try writeFirstRun(output, dependencies.collection_available);
         return;
     }
     const selected = controller.resolveSite(sites, route.site) catch {
@@ -1150,6 +1365,68 @@ test "canonical dashboard URL preserves Overview trend handoff state" {
         "/admin/sites/example/overview?from=2025-01-01&to=2025-01-02&compare=previous&metric=revenue-EUR",
         output.written(),
     );
+}
+
+test "post-commit refresh failure leaves one exact retryable site" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const backing_allocator = std.testing.allocator;
+    const path = try std.fmt.allocPrint(
+        backing_allocator,
+        ".zig-cache/tmp/{s}/meta.db",
+        .{temporary.sub_path},
+    );
+    defer backing_allocator.free(path);
+    var metadata = try meta.Store.open(backing_allocator, path);
+    defer metadata.deinit();
+    try metadata.migrate();
+
+    var arena = std.heap.ArenaAllocator.init(backing_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const form = try controller.Form.parse(
+        allocator,
+        "csrf=fixture-token&name=Retry+site&slug=retry-site&" ++
+            "origin=https%3A%2F%2Fretry.example&timezone=UTC&currency=EUR",
+    );
+    const first = try controller.submitSite(
+        allocator,
+        std.testing.io,
+        &metadata,
+        form,
+        "fixture-token",
+        timezone.default_zoneinfo_root,
+        1_777_161_600_000_000,
+    );
+    switch (first) {
+        .invalid => return error.UnexpectedInvalidSiteFixture,
+        .stored => {},
+    }
+    try std.testing.expectEqual(@as(i64, 1), try metadata.siteCount());
+    var marker: u8 = 0;
+    const refresh = PolicyRefresh{
+        .context = &marker,
+        .apply = failPolicyRefreshFixture,
+    };
+    try std.testing.expectError(error.FixturePolicyRefresh, refresh.run());
+    const second = try controller.submitSite(
+        allocator,
+        std.testing.io,
+        &metadata,
+        form,
+        "fixture-token",
+        timezone.default_zoneinfo_root,
+        1_777_161_600_000_001,
+    );
+    switch (second) {
+        .invalid => return error.UnexpectedInvalidSiteFixture,
+        .stored => {},
+    }
+    try std.testing.expectEqual(@as(i64, 1), try metadata.siteCount());
+}
+
+fn failPolicyRefreshFixture(_: *anyopaque) !void {
+    return error.FixturePolicyRefresh;
 }
 
 fn acceptsEncoding(value: []const u8, expected: []const u8) bool {

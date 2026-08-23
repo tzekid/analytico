@@ -58,7 +58,8 @@ are not passes.
 
 ### Data semantics
 
-- Protocol version 2, event schema version 7, metadata schema version 5, and metric version 2 are
+- Protocol version 2, event schema version 7, metadata schema version 6, and
+  metric version 2 are
   documented and exercised together while schema-3 rows upgrade without lost
   facts and the documented protocol-v1 and metric-v1 compatibility paths
   remain honest.
@@ -124,6 +125,10 @@ are not passes.
 - Fresh installation, exact inspected-baseline upgrade, repeated upgrade,
   pre/post row validation, backup, restore, candidate promotion, and
   database-pair rollback pass with disposable real files.
+- Metadata schema 6 additionally proves D19 replayable autocommits from the
+  exact metadata-5/event-7 predecessor, one empty settings row per existing
+  site, preserved site policy, unique origin ownership, old-binary restore and
+  pair rollback, and no silent assignment when predecessor origins conflict.
 - Core real-browser journeys pass with JavaScript enabled; the complete native
   baseline passes with JavaScript disabled. Mobile, keyboard, focus, contrast,
   reduced-motion, chart/table, zoom, and screen-reader checks meet the written
