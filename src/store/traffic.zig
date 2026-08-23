@@ -30,27 +30,39 @@ pub fn classifierFragment(
     var output = std.Io.Writer.Allocating.init(allocator);
     var bindings: std.ArrayList(Binding) = .empty;
     try output.writer.writeAll(
-        "site_product_events AS (SELECT e.*, CASE" ++
-            " WHEN e.identity_quality = 1 AND COALESCE(l.user_id, e.user_id, '') <> ''" ++
-            " THEN 'u:' || COALESCE(l.user_id, e.user_id)" ++
-            " WHEN e.identity_quality = 1 THEN 'a:' || CAST(e.anonymous_id AS VARCHAR)" ++
-            " ELSE '' END AS d34_person_key" ++
-            " FROM events e LEFT JOIN identity_links l" ++
-            " ON l.site_id = e.site_id AND l.anonymous_id = e.anonymous_id" ++
+        "site_product_events AS NOT MATERIALIZED (SELECT e.* FROM events e" ++
             " WHERE e.site_id = ? AND e.traffic_class IN (1, 5))," ++
+            " d34_signal_sessions AS (SELECT DISTINCT session_id" ++
+            " FROM site_product_events WHERE signal_version = 1)," ++
             " d34_first_meaningful AS (SELECT * EXCLUDE (d34_position) FROM (" ++
-            " SELECT e.*, row_number() OVER (PARTITION BY session_id" ++
+            " SELECT e.site_id, e.received_date_utc, e.event_id," ++
+            " e.received_at_utc_micros, e.occurred_at_utc_micros," ++
+            " e.anonymous_id, e.user_id, e.session_id, e.sequence," ++
+            " e.identity_quality, e.traffic_class, e.signal_version," ++
+            " e.trusted_interactions, e.engagement_ms, e.max_scroll_depth," ++
+            " e.viewport_bucket, e.beacon_timing_bucket, e.was_visible," ++
+            " e.client_hint_consistency, e.accept_language_present," ++
+            " row_number() OVER (PARTITION BY session_id" ++
             " ORDER BY occurred_at_utc_micros, sequence," ++
             " received_at_utc_micros, event_id) AS d34_position" ++
-            " FROM site_product_events e WHERE kind IN (1, 2)) ranked" ++
+            " FROM site_product_events e JOIN d34_signal_sessions s" ++
+            " USING (session_id) WHERE kind IN (1, 2)) ranked" ++
             " WHERE d34_position = 1)," ++
             " d34_session_summary AS (SELECT session_id," ++
             " count(*) FILTER (WHERE kind IN (1, 2))::BIGINT AS meaningful_events," ++
             " bit_or(trusted_interactions)::BIGINT AS trusted_interactions," ++
             " sum(engagement_ms)::BIGINT AS engagement_ms," ++
             " max(max_scroll_depth)::BIGINT AS max_scroll_depth" ++
-            " FROM site_product_events GROUP BY session_id)," ++
-            " d34_raw_candidates AS (SELECT f.* FROM d34_first_meaningful f" ++
+            " FROM site_product_events JOIN d34_signal_sessions" ++
+            " USING (session_id) GROUP BY session_id)," ++
+            " d34_raw_candidates AS (SELECT f.session_id," ++
+            " f.received_date_utc, f.identity_quality, CASE" ++
+            " WHEN f.identity_quality = 1 AND COALESCE(l.user_id, f.user_id, '') <> ''" ++
+            " THEN 'u:' || COALESCE(l.user_id, f.user_id)" ++
+            " WHEN f.identity_quality = 1 THEN 'a:' || CAST(f.anonymous_id AS VARCHAR)" ++
+            " ELSE '' END AS d34_person_key" ++
+            " FROM d34_first_meaningful f LEFT JOIN identity_links l" ++
+            " ON l.site_id = f.site_id AND l.anonymous_id = f.anonymous_id" ++
             " WHERE ? = 1 AND f.traffic_class = 1 AND f.signal_version = 1" ++
             " AND f.trusted_interactions = 0 AND f.engagement_ms = 0" ++
             " AND f.max_scroll_depth = 0 AND" ++
@@ -68,9 +80,14 @@ pub fn classifierFragment(
     try writeGoalExists(&output.writer, allocator, &bindings, goals, "c.session_id");
     try output.writer.writeAll(
         " OR (c.identity_quality = 1 AND c.d34_person_key != '' AND EXISTS (" ++
-            " SELECT 1 FROM site_product_events r" ++
+            " SELECT 1 FROM site_product_events r LEFT JOIN identity_links rl" ++
+            " ON rl.site_id = r.site_id AND rl.anonymous_id = r.anonymous_id" ++
             " WHERE r.kind IN (1, 2) AND r.identity_quality = 1" ++
-            " AND r.d34_person_key = c.d34_person_key" ++
+            " AND CASE" ++
+            " WHEN COALESCE(rl.user_id, r.user_id, '') <> ''" ++
+            " THEN 'u:' || COALESCE(rl.user_id, r.user_id)" ++
+            " ELSE 'a:' || CAST(r.anonymous_id AS VARCHAR) END" ++
+            " = c.d34_person_key" ++
             " AND r.session_id != c.session_id))) AS contradicted" ++
             " FROM d34_raw_candidates c" ++
             " JOIN d34_session_summary s USING (session_id))," ++

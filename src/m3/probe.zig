@@ -1,6 +1,8 @@
 const std = @import("std");
 const domain = @import("../domain.zig");
+const report = @import("../report.zig");
 const events = @import("../store/events.zig");
+const meta = @import("../store/meta.zig");
 const reports = @import("../store/reports.zig");
 
 const day_one_micros: i64 = 1_735_689_600_000_000;
@@ -266,7 +268,10 @@ pub fn million(
         \\    DATE '2025-01-01' + ((i // 86400)::INTEGER) AS received_date,
         \\    CAST(lpad(((i // 10) % 5000)::VARCHAR, 16, '0') AS BLOB)
         \\      AS visitor_day_id,
-        \\    CAST(lpad((i // 10)::VARCHAR, 32, '0') AS UUID) AS session_id,
+        \\    CASE WHEN i >= 999000 AND i % 10 = 9
+        \\      THEN CAST(lpad(i::VARCHAR, 32, '0') AS UUID)
+        \\      ELSE CAST(lpad((i // 10)::VARCHAR, 32, '0') AS UUID)
+        \\    END AS session_id,
         \\    CASE WHEN i % 10 >= 8 THEN 2 ELSE 1 END AS kind,
         \\    CASE
         \\      WHEN i % 10 = 8 THEN 'signup'
@@ -312,7 +317,11 @@ pub fn million(
         \\  '', 'US', '', 'Chrome', 'Linux', 'desktop',
         \\  '', '', '', '', '', '{}', '{}', CAST(NULL AS DECIMAL(18,6)), '',
         \\  0, 0, visitor_day_id, visitor_day_start, '', 1, 0, '',
-        \\  0, FALSE, 0, FALSE, FALSE, 0, 0, 0, FALSE,
+        \\  CASE WHEN i >= 999000 AND i % 10 = 9 THEN 1 ELSE 0 END,
+        \\  FALSE, 0, FALSE, FALSE,
+        \\  CASE WHEN i >= 999000 AND i % 10 = 9 THEN 1 ELSE 0 END,
+        \\  CASE WHEN i >= 999000 AND i % 10 = 9 THEN 1 ELSE 0 END,
+        \\  0, FALSE,
         \\  from_hex('00000000000000000000000000000000')
         \\FROM sequenced
     );
@@ -335,6 +344,58 @@ pub fn timeout(
     try store.migrate();
     try reports.timeoutProbe(&store);
     try output.writeAll("report timeout interrupted and connection reused\n");
+}
+
+pub fn trafficQualityProfile(
+    allocator: std.mem.Allocator,
+    output: *std.Io.Writer,
+    directory: []const u8,
+    site_slug: []const u8,
+    start_date: []const u8,
+    end_date: []const u8,
+) !void {
+    try domain.validateSlug(site_slug);
+    try domain.validateDate(start_date);
+    try domain.validateDate(end_date);
+    const start_day = try report.dateDay(start_date);
+    const end_day = try report.dateDay(end_date);
+    if (end_day < start_day or end_day - start_day + 1 > report.maximum_range_days) {
+        return error.InvalidReportRange;
+    }
+    const metadata_path = try std.fs.path.join(allocator, &.{ directory, "meta.db" });
+    var metadata = try meta.Store.open(allocator, metadata_path);
+    defer metadata.deinit();
+    try metadata.requireCurrent();
+    const site_id = try metadata.siteIdBySlug(allocator, site_slug);
+    const active_goals = try metadata.listGoals(allocator, site_slug);
+    const policy = try metadata.sitePolicy(allocator, site_id);
+
+    const event_path = try std.fs.path.join(allocator, &.{ directory, "events.duckdb" });
+    var store = try events.Store.open(allocator, event_path);
+    defer store.deinit();
+    try store.requireCurrent();
+    const request: report.Request = .{
+        .directory = directory,
+        .site_slug = site_slug,
+        .start_date = start_date,
+        .end_date = end_date,
+        .start_day = start_day,
+        .end_day = end_day,
+        .kind = .traffic_quality,
+    };
+    const profile = try reports.trafficQualityProfile(
+        allocator,
+        &store,
+        request,
+        site_id,
+        .{
+            .strict_mode = policy.strict_mode,
+            .daily_event_ceiling = policy.daily_event_ceiling,
+            .active_goals = active_goals,
+            .heuristic_available = active_goals.len <= meta.maximum_active_goals,
+        },
+    );
+    try output.writeAll(profile);
 }
 
 pub fn legacyCreate(

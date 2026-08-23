@@ -148,6 +148,20 @@ pub fn main(init: std.process.Init) !void {
         try m3_probe.timeout(allocator, output, args[3]);
         return;
     }
+    if (args.len == 7 and
+        std.mem.eql(u8, args[1], "m3") and
+        std.mem.eql(u8, args[2], "traffic-quality-profile"))
+    {
+        try m3_probe.trafficQualityProfile(
+            allocator,
+            output,
+            args[3],
+            args[4],
+            args[5],
+            args[6],
+        );
+        return;
+    }
     if (args.len == 4 and
         std.mem.eql(u8, args[1], "m4") and
         std.mem.eql(u8, args[2], "legacy-million"))
@@ -233,6 +247,7 @@ pub fn main(init: std.process.Init) !void {
         \\  analytico m3 seed <directory> <site-id>
         \\  analytico m3 million <directory> <site-id>
         \\  analytico m3 timeout <directory>
+        \\  analytico m3 traffic-quality-profile <directory> <site-slug> <start-date> <end-date>
         \\  analytico m3 legacy-create <directory>
         \\  analytico m3 legacy-verify <directory>
         \\  analytico m3 legacy-evidence <directory>

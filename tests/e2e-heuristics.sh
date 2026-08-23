@@ -76,9 +76,10 @@ test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
 occurred_ms=$(date +%s%3N)
 send() {
     local suffix=$1
+    local path=${2:-/cap-$suffix}
     local body
-    body=$(printf '{"v":2,"site":"%s","event_id":"00000000-0000-4000-8000-0000000008%s","anonymous_id":"00000000-0000-4000-8000-0000000009%s","identity_quality":"persistent","session_id":"00000000-0000-4000-8000-000000000a%s","sequence":0,"occurred_at_ms":%s,"type":"pageview","page":{"path":"/cap-%s","hostname":"cap.example"}}' \
-        "$site_id" "$suffix" "$suffix" "$suffix" "$occurred_ms" "$suffix")
+    body=$(printf '{"v":2,"site":"%s","event_id":"00000000-0000-4000-8000-0000000008%s","anonymous_id":"00000000-0000-4000-8000-0000000009%s","identity_quality":"persistent","session_id":"00000000-0000-4000-8000-000000000a%s","sequence":0,"occurred_at_ms":%s,"type":"pageview","page":{"path":"%s","hostname":"cap.example"}}' \
+        "$site_id" "$suffix" "$suffix" "$suffix" "$occurred_ms" "$path")
     curl --silent --output "$cap/body" --write-out '%{http_code}' \
         -X POST "$base/v2/event" -H 'Content-Type: text/plain' \
         -H 'Origin: https://cap.example' -H 'X-Forwarded-For: 198.51.100.42' \
@@ -86,8 +87,9 @@ send() {
         --data-binary "$body"
 }
 test "$(send 01)" = 204
-test "$(send 01)" = 204
 test "$(send 02)" = 204
+test "$(send 01)" = 204
+test "$(send 01 /conflicting-replay)" = 409
 test "$(send 03)" = 429
 test "$(cat "$cap/body")" = "daily event ceiling reached"
 test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
@@ -96,7 +98,7 @@ kill -TERM "$server_pid"
 wait "$server_pid"
 server_pid=
 stopped=$(jq -c 'select(.code == "serve_stopped")' "$cap/server.stderr")
-jq -e '.accepted == 2 and .duplicates == 1 and
+jq -e '.accepted == 2 and .duplicates == 1 and .conflicts == 1 and
     .daily_ceiling_rejected == 1 and .write_failures == 0' \
     <<<"$stopped" >/dev/null
 test "$("$binary" m2 identity-links "$cap")" = 0
