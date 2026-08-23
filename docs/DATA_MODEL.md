@@ -601,3 +601,9 @@ They read schema-3 facts in place, use site-local dates, canonical identity,
 explicit session/person filter scopes, and exact value/currency groups. They do
 not add a projection, EAV table, rollup, cache table, or migration. Existing
 metric-v1 queries continue to read their UTC visitor-day compatibility columns.
+
+`METRIC_SEMANTICS_V2.md` and D30 define the additive #66 traffic-quality
+diagnostic bridge. It reads schema-3 facts without a migration and aligns its
+canonical-person selection to the current received-UTC Overview range so the
+person and visitor-day values are comparable. It never reinterprets legacy
+daily identities as persistent people and does not classify or drop events.

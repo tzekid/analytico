@@ -29,6 +29,7 @@ pub const Page = struct {
     selected_site: ?meta.Site,
     query: Query,
     result: ?report.Result,
+    overview_quality: ?report.TrafficQuality = null,
     goals: []const meta.Goal,
     funnels: []const meta.Funnel,
     csrf_token: []const u8,

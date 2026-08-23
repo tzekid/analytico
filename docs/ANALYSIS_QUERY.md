@@ -256,6 +256,14 @@ until an explicit compatibility-removal issue. Funnel, path, retention,
 session/profile, and Live queries reuse closed FilterSet/EventSelector helpers
 where appropriate but retain specialized query/result types.
 
+D30 adds one explicitly versioned `traffic-quality` diagnostic bundle on the
+existing report transport. It is not an ordinary `AnalysisQuery` product
+metric: it deliberately uses the current received-UTC report range so its
+canonical-person count is comparable to the frozen visitor-day headline. It
+does not change any existing metric-v1 output. A later site-local Overview
+migration must move both headline values together rather than mixing date
+contexts.
+
 ## 8. Acceptance evidence
 
 Issue #24 must provide:

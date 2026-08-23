@@ -30,6 +30,13 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
     if (args.len == 4 and
+        std.mem.eql(u8, args[1], "analysis") and
+        std.mem.eql(u8, args[2], "traffic-quality-seed"))
+    {
+        try analysis_probe.seedTrafficQuality(allocator, output, args[3]);
+        return;
+    }
+    if (args.len == 4 and
         std.mem.eql(u8, args[1], "m0") and
         std.mem.eql(u8, args[2], "probe"))
     {

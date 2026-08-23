@@ -38,6 +38,7 @@ semantic, or application state model is consequential and must be added here.
 | D27 | 1.0 site-local time | Explicit IANA zone with bounded host-TZif reader and stored local dates | Accepted; implemented by #11 with #13 migration evidence |
 | D28 | Protocol-v2 and event-schema-3 foundation | Separate bounded route, explicit identity quality, single-writer idempotency, transactional schema swap | Accepted for 1.0 issue #6 |
 | D29 | Typed metric-v2 analysis boundary | Separate closed domain model and finite bound-SQL compiler; preserve metric-v1 reports | Accepted for 1.0 issue #24 |
+| D30 | Traffic-quality compatibility diagnostics | Add a versioned bounded diagnostic bundle aligned to the frozen UTC Overview range | Accepted for 1.0 issue #66 |
 
 ## D01. MVP interface
 
@@ -1057,3 +1058,68 @@ currency behavior, current report preset/parity, timeout/interrupt reuse, and
 Debug/ReleaseSafe gates. Later issues prove route, browser, rendering, saved
 state, and specialized-analysis consumers rather than broadening this compiler
 silently.
+
+## D30. Additive traffic-quality diagnostics beside metric-v1 Overview
+
+**Status:** Accepted for Analytico 1.0 issue #66
+
+**Date:** 2026-08-23
+
+**Issue:** #66
+
+### Context
+
+The current Overview's `visitor_days` value is a metric-v1 receipt-UTC
+compatibility total, but its UI calls the value "Daily visitors." #66 must
+label that total honestly, place a canonical distinct-person count beside it,
+and expose traffic composition before later classifier changes. D29 also
+freezes existing metric-v1 report output and defines ordinary metric-v2
+analysis over site-local dates.
+
+### Candidates
+
+| Candidate | Advantages | Costs and risks |
+| --- | --- | --- |
+| Add fields to the metric-v1 Overview SQL/output | One query and one report shape | Breaks exact metric-v1 compatibility and D29; silently versions an operational interface |
+| Put a site-local person count beside the UTC visitor-day total | Reuses ordinary metric-v2 range semantics | Two values under one date filter can cover different boundary events and cannot be compared honestly |
+| Add a separately versioned diagnostics result on the existing bounded report transport, using the current received-UTC range for both values | Preserves every old output; keeps the comparison honest; supplies CLI and dashboard consumers without a schema or service | A later site-local Overview migration must move both values together and retain the documented diagnostic version |
+
+### Recommendation
+
+Select the additive diagnostics result:
+
+- Existing report kinds' SQL and table/JSON/CSV bytes remain unchanged. The new
+  `traffic-quality` kind declares metric semantics 2 and traffic-quality
+  diagnostics version 1.
+- The report uses one static bound DuckDB statement, the existing 400-day input
+  limit, at most 100 decoded daily rows per page, and one existing query
+  deadline. Values never become SQL text.
+- Canonical people use meaningful non-bot events and identity links. Coverage
+  remains explicit so ephemeral and legacy pseudo-people are not presented as
+  compatible persistent users.
+- Identity-quality composition excludes current bot rows, while bot events are
+  shown separately. No event is dropped or reclassified by #66.
+- The dashboard keeps its UTC date label, renames "Daily visitors" to
+  "Visitor-days," and renders the diagnostics in the first server response.
+- No schema, migration, cache, rollup, background process, collector behavior,
+  dependency, network request, fingerprint, or runtime data file is added.
+
+### Consequences
+
+- A future site-local Overview migration cannot change only one of the two
+  headline ranges. It must migrate visitor-days and distinct people together.
+- Schema 4 traffic class work may replace the current device-bot predicate, but
+  it must preserve visible diagnostic accounting and version the new meaning.
+- Rollback removes the additive report, renderer, and documentation only. No
+  database restore or compatibility fallback is required.
+
+**Affected contracts:** `BOT_DETECTION_1.0.md`, `METRIC_SEMANTICS_V2.md`,
+`DATA_MODEL.md`, and `ANALYSIS_QUERY.md`.
+
+### Acceptance evidence
+
+Issue #66 must prove exact traffic-quality table/JSON/CSV output through the
+real CLI and on-disk Turso/DuckDB files, canonical-person collapse, identity
+coverage, zero days, zero-engagement observation, identity mint dates, current
+bot accounting, unchanged metric-v1 output, server-rendered dashboard behavior,
+and Debug/ReleaseSafe execution.
