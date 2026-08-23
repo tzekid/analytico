@@ -274,6 +274,19 @@ The M6 UI remains deliberately downstream of the product core:
 5. M7 may enhance the same endpoints with body-level swaps of the same complete
    server HTML; it does not introduce a fragment renderer or second state model.
 
+Issue #17 adds only a narrow output vocabulary over those typed models. Shared
+code covers context escaping, KPI/feedback/empty/form-error semantics, and five
+explicit chart families: trend, horizontal bars, funnel, fixed-column paths,
+and retention. Chart inputs and work are bounded; IDs are stable and validated;
+empty, single, constant, missing, and incomplete data remain honest; every
+visual has an exact captioned data alternative that retains the raw number used
+for geometry. Fixed-path inputs fail closed unless nodes and transitions use
+the documented deterministic rank and all adjacent edge aggregates preserve
+node totals. Tables retain their domain markup and gain scoped headers and
+labeled mobile records rather than a generic table component. Product queries,
+filters, builders, path/retention semantics, and page-specific controls remain
+owned by their later tickets.
+
 The implemented UI does not fetch JSON after receiving the same state in HTML.
 It does not open the DuckDB file from a second process. The later Cloudio
 integration selected the ownership-safe ordinary-link boundary in decision

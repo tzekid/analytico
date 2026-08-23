@@ -24,6 +24,8 @@ comptime {
     _ = @import("auth/cli.zig");
     _ = @import("auth/render.zig");
     _ = @import("auth/http.zig");
+    _ = @import("web/components.zig");
+    _ = @import("web/charts.zig");
     _ = @import("http/request.zig");
     _ = @import("http/response.zig");
     _ = @import("http/rate_limit.zig");

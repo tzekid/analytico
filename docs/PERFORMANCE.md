@@ -310,6 +310,10 @@ These apply only when the dashboard exists:
 | Blocking third-party requests | 0 |
 | Initial requests | ≤ 3: HTML, CSS, optional HTMX |
 | Largest server-rendered table page | 100 rows |
+| Trend points per rendered series | ≤ 400 |
+| Funnel steps | 2–8 |
+| Path plot | 3–5 columns; ≤ 10 nodes per column; ≤ 400 edges |
+| Retention matrix | ≤ 12 cohorts × 12 visible periods |
 
 With JavaScript disabled, the same navigation, filters, date forms,
 pagination, goal management, and funnel management must work.
@@ -344,6 +348,26 @@ the mobile primary navigation within a 360 px viewport, and grew RSS by 4,884
 KiB after 100 authenticated views. The existing application-authored browser
 island remains 1,802 bytes raw and 696 bytes gzip; the shell adds no script,
 dependency, API request, or client state.
+
+### Shared component and chart gate
+
+Issue #17 keeps the existing HTML, CSS, request, and RSS ceilings. Pure chart
+tests cover the maximum bounded inputs as well as empty, single, constant,
+missing, and all-zero cases. The real ReleaseSafe dashboard gate renders the
+existing funnel result through the SVG/table path, transforms a real report
+table into labeled mobile records, and verifies exact semantic alternatives,
+JavaScript-off operation, dark/mobile styling, error focus, and reduced motion.
+It records the compressed HTML/CSS bytes and 100-view RSS observation rather
+than inferring them from issue #16. No chart allocates a client runtime, adds a
+request, or changes report SQL.
+
+On 2026-08-23, the accepted ReleaseSafe M6 run on the standard owner host
+measured 2,418 bytes gzip for the authenticated Overview HTML, 4,934 bytes gzip
+for the v5 CSS, and 776 KiB RSS growth after 100 authenticated Overview views.
+The corresponding final Debug run measured 2,416 bytes, 4,934 bytes, and
+-2,320 KiB (allocator/process sampling may produce a negative observation).
+Both real Chromium runs used JavaScript-off first navigation, exercised the
+native mutation/error paths, and passed the same response/request ceilings.
 
 ## 8. Regression policy
 

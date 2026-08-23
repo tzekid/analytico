@@ -123,6 +123,13 @@ are not passes.
   baseline passes with JavaScript disabled. Mobile, keyboard, focus, contrast,
   reduced-motion, chart/table, zoom, and screen-reader checks meet the written
   accessibility contract.
+- Server-rendered chart families validate bounded typed inputs and stable IDs,
+  handle empty/single/constant/missing data honestly, expose no inline handlers,
+  and pair every visual value with an exact captioned table/details alternative.
+- Wide tables preserve captions and scoped headers when they become labeled
+  mobile records. Server form failures preserve submitted values, focus one
+  error summary, and associate the affected controls without making JavaScript
+  part of validation or recovery.
 - The one-million-event mixed-data fixture passes the accepted latency, memory,
   disk, cardinality, asset, and response-size budgets. Measurements record the
   standard environment and any variance.

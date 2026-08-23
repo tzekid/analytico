@@ -78,6 +78,7 @@ async function main() {
     await assertMetric(page, "Distinct people", "4");
     await assertMetric(page, "Sessions", "5");
     await assertMetric(page, "Custom events", "5");
+    await assertMetric(page, "Persistent coverage", "0.00%");
     assert.equal(
       await page.getByRole("heading", { name: "Traffic quality" }).count(),
       1,
@@ -101,6 +102,7 @@ async function main() {
     assert.equal(firstViewRequests.filter((kind) => kind === "xhr").length, 0);
     assert.equal(await page.locator("script").count(), 2);
     assert.equal(await page.evaluate(() => typeof window.htmx), "undefined");
+    assert.equal(await page.locator("#loading-region").isVisible(), false);
     assert.equal(await page.evaluate(() => localStorage.length), 0);
     assert.equal(await page.evaluate(() => sessionStorage.length), 0);
     assert.deepEqual(failures, []);
@@ -110,6 +112,45 @@ async function main() {
     assert.equal(await mobileContext.locator("form.site-switcher").isVisible(), true);
     assert.equal(await mobileContext.getByText("All visitors", { exact: true }).isVisible(), true);
     await mobileContext.locator("summary").click();
+    response = await page.goto(
+      route("example", "analyze", "&report=pages"),
+      { waitUntil: "load" },
+    );
+    assert.equal(response.status(), 200);
+    const mobileTable = page.locator(".mobile-records table").first();
+    assert.equal(await mobileTable.locator("caption").count(), 1);
+    assert.equal(
+      await mobileTable.locator('thead th[scope="col"]').count(),
+      3,
+    );
+    const mobileRows = await mobileTable.locator("tbody tr").count();
+    assert.ok(mobileRows > 0);
+    assert.equal(
+      await mobileTable.locator('tbody th[scope="row"]').count(),
+      mobileRows,
+    );
+    assert.equal(
+      await mobileTable.locator("tbody tr").first().evaluate((element) =>
+        getComputedStyle(element).display),
+      "block",
+    );
+    assert.equal(
+      await mobileTable.locator("progress.cell-bar").count(),
+      mobileRows,
+    );
+    response = await page.goto(
+      route("example", "journeys/funnels", "&subject=Journey"),
+      { waitUntil: "load" },
+    );
+    assert.equal(response.status(), 200);
+    await page.locator(".funnel-figure .chart-data > summary").click();
+    await assertFunnelFigure(page, true);
+    if (process.env.ANALYTICO_COMPONENT_MOBILE_SCREENSHOT_PATH) {
+      await page.screenshot({
+        path: process.env.ANALYTICO_COMPONENT_MOBILE_SCREENSHOT_PATH,
+        fullPage: true,
+      });
+    }
     await cdp.send("Network.emulateNetworkConditions", {
       offline: false,
       latency: 0,
@@ -118,9 +159,16 @@ async function main() {
       connectionType: "none",
     });
     await page.setViewportSize({ width: 1440, height: 900 });
-    if (process.env.ANALYTICO_SCREENSHOT_PATH) {
+    response = await page.goto(
+      route("example", "journeys/funnels", "&subject=Journey"),
+      { waitUntil: "load" },
+    );
+    assert.equal(response.status(), 200);
+    await page.locator(".funnel-figure .chart-data > summary").click();
+    await assertFunnelFigure(page, false);
+    if (process.env.ANALYTICO_COMPONENT_SCREENSHOT_PATH) {
       await page.screenshot({
-        path: process.env.ANALYTICO_SCREENSHOT_PATH,
+        path: process.env.ANALYTICO_COMPONENT_SCREENSHOT_PATH,
         fullPage: true,
       });
     }
@@ -128,6 +176,12 @@ async function main() {
       waitUntil: "load",
     });
     assert.equal(response.status(), 200);
+    if (process.env.ANALYTICO_SCREENSHOT_PATH) {
+      await page.screenshot({
+        path: process.env.ANALYTICO_SCREENSHOT_PATH,
+        fullPage: true,
+      });
+    }
     await page.keyboard.press("Tab");
     assert.equal(await page.evaluate(() => document.activeElement?.className), "skip-link");
     await page.keyboard.press("Enter");
@@ -274,6 +328,28 @@ async function main() {
     assert.equal(modifyingOrigin, origin);
     assert.equal(await page.locator('[role="alert"]').count(), 1);
     assert.equal(
+      await page.evaluate(() => document.activeElement?.id),
+      "form-error-summary",
+    );
+    assert.equal(
+      await page
+        .locator('form[action="/admin/goals"] input[name="name"]')
+        .getAttribute("aria-describedby"),
+      "form-error-summary",
+    );
+    assert.equal(
+      await page
+        .locator('form[action="/admin/goals"] input[name="name"]')
+        .getAttribute("aria-invalid"),
+      "true",
+    );
+    assert.equal(
+      await page
+        .locator('form[action="/admin/funnels"] input[name="name"]')
+        .getAttribute("aria-invalid"),
+      null,
+    );
+    assert.equal(
       await page
         .locator('form[action="/admin/goals"] input[name="name"]')
         .inputValue(),
@@ -299,7 +375,10 @@ async function main() {
         .click(),
     ]).then(([navigation]) => navigation);
     assert.equal(response.status(), 200);
-    assert.equal(await page.locator('[role="status"]').textContent(), "Goal added.");
+    assert.equal(
+      await page.locator('.notice[role="status"]').textContent(),
+      "Goal added.",
+    );
     assert.match(page.url(), /start=2025-01-01/);
     assert.match(page.url(), /end=2025-01-02/);
 
@@ -310,7 +389,7 @@ async function main() {
     ]).then(([navigation]) => navigation);
     assert.equal(response.status(), 200);
     assert.equal(
-      await page.locator('[role="status"]').textContent(),
+      await page.locator('.notice[role="status"]').textContent(),
       "Goal deleted.",
     );
 
@@ -325,7 +404,7 @@ async function main() {
     ]).then(([navigation]) => navigation);
     assert.equal(response.status(), 200);
     assert.equal(
-      await page.locator('[role="status"]').textContent(),
+      await page.locator('.notice[role="status"]').textContent(),
       "Funnel added.",
     );
 
@@ -336,9 +415,43 @@ async function main() {
     ]).then(([navigation]) => navigation);
     assert.equal(response.status(), 200);
     assert.equal(
-      await page.locator('[role="status"]').textContent(),
+      await page.locator('.notice[role="status"]').textContent(),
       "Funnel deleted.",
     );
+
+    response = await page.goto(route("example", "settings/general"), {
+      waitUntil: "load",
+    });
+    assert.equal(response.status(), 200);
+    const policyForm = page.locator('form[action="/admin/traffic-policy"]');
+    await policyForm.locator("xpath=ancestor::details/summary").click();
+    await policyForm.locator('input[name="strict"]').check();
+    await policyForm.locator('input[name="daily_event_ceiling"]').evaluate(
+      (input) => input.min = "0",
+    );
+    await policyForm.locator('input[name="daily_event_ceiling"]').fill("0");
+    response = await Promise.all([
+      page.waitForResponse(
+        (candidate) =>
+          candidate.url() === `${origin}/admin/traffic-policy` &&
+          candidate.request().method() === "POST",
+      ),
+      policyForm.locator('button[type="submit"]').click(),
+    ]).then(([post]) => post);
+    assert.equal(response.status(), 422);
+    assert.equal(await page.evaluate(() => document.activeElement?.id), "form-error-summary");
+    assert.equal(await policyForm.locator('input[name="strict"]').isChecked(), true);
+    assert.equal(
+      await policyForm.locator('input[name="daily_event_ceiling"]').inputValue(),
+      "0",
+    );
+    assert.equal(
+      await policyForm.locator('input[name="daily_event_ceiling"]').getAttribute("aria-invalid"),
+      "true",
+    );
+    assert.equal(await policyForm.locator("xpath=ancestor::details").getAttribute("open"), "");
+
+    await assertTextSpacingAndNarrowReflow(page, cdp);
 
     await context.close();
 
@@ -356,12 +469,37 @@ async function main() {
     assert.equal(response.status(), 200);
     await assertMetric(darkPage, "Page views", "8");
     await assertVisualTheme(darkPage, "dark", "40px");
+    await darkPage.emulateMedia({ reducedMotion: "reduce" });
+    assert.equal(
+      await darkPage.locator(".desktop-context .range-filter button").evaluate((element) =>
+        getComputedStyle(element).transitionDuration),
+      "0s",
+    );
     if (process.env.ANALYTICO_DARK_SCREENSHOT_PATH) {
       await darkPage.screenshot({
         path: process.env.ANALYTICO_DARK_SCREENSHOT_PATH,
         fullPage: true,
       });
     }
+    await darkPage.emulateMedia({
+      colorScheme: "dark",
+      reducedMotion: "reduce",
+      forcedColors: "active",
+    });
+    response = await darkPage.goto(
+      route("example", "journeys/funnels", "&subject=Journey"),
+      { waitUntil: "load" },
+    );
+    assert.equal(response.status(), 200);
+    assert.equal(
+      await darkPage.evaluate(() => matchMedia("(forced-colors: active)").matches),
+      true,
+    );
+    const forcedColors = await darkPage.locator(".funnel-figure").evaluate((figure) => ({
+      bar: getComputedStyle(figure.querySelector(".funnel-bar")).fill,
+      track: getComputedStyle(figure.querySelector(".funnel-track")).fill,
+    }));
+    assert.notEqual(forcedColors.bar, forcedColors.track);
     await darkContext.close();
   } finally {
     await browser.close();
@@ -371,12 +509,18 @@ async function main() {
       engine: "chromium",
       javascript: "disabled",
       report_families: 13,
-      native_form_mutations: 5,
+      native_form_mutations: 6,
       startup_api_requests: 0,
       persistent_storage_entries: 0,
       canonical_destinations: 6,
       keyboard_skip_link: "main",
       mobile_primary_navigation: "unclipped",
+      mobile_record_table: "stacked-labeled-records",
+      funnel_figure: "svg-plus-exact-table",
+      form_error_focus: "summary",
+      reduced_motion: "zero-duration",
+      forced_colors: "distinct-funnel-bar-and-track",
+      narrow_reflow: "720-css-pixels-with-text-spacing",
       first_view: "useful-over-64KiBps-link",
       visual_themes: ["light", "dark"],
       contrast: "wcag-aa",
@@ -402,6 +546,7 @@ async function assertMobileNavigation(page) {
     return {
       left: rect.left,
       right: rect.right,
+      height: rect.height,
       viewport: document.documentElement.clientWidth,
       clipped: element.scrollWidth > element.clientWidth,
     };
@@ -409,6 +554,7 @@ async function assertMobileNavigation(page) {
   for (const bound of bounds) {
     assert.ok(bound.left >= 0);
     assert.ok(bound.right <= bound.viewport + 0.5);
+    assert.ok(bound.height >= 44);
     assert.equal(bound.clipped, false);
   }
 }
@@ -440,6 +586,97 @@ async function assertMetric(page, label, expected) {
     has: page.getByText(label, { exact: true }),
   });
   assert.equal(await item.locator("strong").textContent(), expected);
+}
+
+async function assertFunnelFigure(page, mobile) {
+  const figure = page.locator("figure.funnel-figure");
+  assert.equal(await figure.count(), 1);
+  assert.equal(await figure.getAttribute("aria-labelledby"), "funnel-result-title");
+  assert.equal(await figure.getAttribute("aria-describedby"), "funnel-result-summary");
+  assert.equal(
+    await figure.locator('svg[role="img"][focusable="false"]').count(),
+    1,
+  );
+  assert.equal(
+    await figure.locator("svg").evaluate((element) => getComputedStyle(element).display),
+    mobile ? "none" : "block",
+  );
+  assert.equal(
+    await figure.locator("table caption").textContent(),
+    "Funnel result — exact values",
+  );
+  if (mobile) {
+    const widths = await figure.locator("table caption").evaluate((caption) => ({
+      caption: caption.getBoundingClientRect().width,
+      table: caption.parentElement.getBoundingClientRect().width,
+    }));
+    assert.ok(
+      widths.caption >= widths.table - 1,
+      `mobile caption ${widths.caption}px did not fill ${widths.table}px table`,
+    );
+  }
+  assert.equal(await figure.locator('thead th[scope="col"]').count(), 6);
+  assert.equal(await figure.locator('tbody th[scope="row"]').count(), 3);
+  assert.equal(
+    await figure.locator('tbody tr').last().locator('td[data-label="Sessions"]').textContent(),
+    "2",
+  );
+  assert.equal(await figure.locator("[onclick]").count(), 0);
+  assert.equal(
+    await page.getByRole("figure", { name: "Funnel result" }).count(),
+    1,
+  );
+  assert.equal(
+    await page.getByRole("table", {
+      name: "Funnel result — exact values",
+      includeHidden: true,
+    }).count(),
+    1,
+  );
+}
+
+async function assertTextSpacingAndNarrowReflow(page, cdp) {
+  await page.setViewportSize({ width: 720, height: 900 });
+  const response = await page.goto(
+    route("example", "journeys/funnels", "&subject=Journey"),
+    { waitUntil: "load" },
+  );
+  assert.equal(response.status(), 200);
+  await cdp.send("DOM.enable");
+  await cdp.send("CSS.enable");
+  const frameTree = await cdp.send("Page.getFrameTree");
+  const inspector = await cdp.send("CSS.createStyleSheet", {
+    frameId: frameTree.frameTree.frame.id,
+  });
+  await cdp.send("CSS.setStyleSheetText", {
+    styleSheetId: inspector.styleSheetId,
+    text: `
+    * {
+      letter-spacing: .12em !important;
+      line-height: 1.5 !important;
+      word-spacing: .16em !important;
+    }
+    p { margin-block: 2em !important; }
+  `,
+  });
+  await page.locator(".funnel-figure .chart-data > summary").click();
+  const reflow = await page.evaluate(() => {
+    const clipped = [...document.querySelectorAll(
+      "h1, figcaption, .chart-summary, .chart-data > summary, button, a",
+    )].filter((element) => {
+      const style = getComputedStyle(element);
+      if (style.display === "none" || style.visibility === "hidden") return false;
+      return element.scrollWidth > element.clientWidth + 1 ||
+        element.scrollHeight > element.clientHeight + 1;
+    }).map((element) => element.textContent.trim());
+    return {
+      documentOverflow: document.documentElement.scrollWidth >
+        document.documentElement.clientWidth + 1,
+      clipped,
+    };
+  });
+  assert.equal(reflow.documentOverflow, false);
+  assert.deepEqual(reflow.clipped, []);
 }
 
 async function assertVisualTheme(page, theme, expectedControlHeight) {
