@@ -1,3 +1,5 @@
+const analysis = @import("../analysis.zig");
+const calendar = @import("../calendar.zig");
 const meta = @import("../store/meta.zig");
 const report = @import("../report.zig");
 
@@ -41,14 +43,19 @@ pub const Destination = enum {
 
 pub const Query = struct {
     site: []const u8 = "",
-    start_date: []const u8,
-    end_date: []const u8,
+    range: analysis.LocalDateRange,
+    comparison: analysis.Comparison = .previous,
     kind: report.Kind = .overview,
     subject: []const u8 = "",
     campaign_dimension: report.CampaignDimension = .all,
     sort: report.Sort = .count,
     limit: u16 = report.default_limit,
     page: u32 = 1,
+};
+
+pub const ReportTimeBasis = enum {
+    none,
+    metric_v1_utc,
 };
 
 pub const GoalDraft = struct {
@@ -80,6 +87,8 @@ pub const Page = struct {
     sites: []const meta.Site,
     selected_site: ?meta.Site,
     query: Query,
+    calendar_context: ?calendar.Context,
+    report_time_basis: ReportTimeBasis,
     result: ?report.Result,
     overview_quality: ?report.TrafficQuality = null,
     goals: []const meta.Goal,

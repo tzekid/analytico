@@ -65,6 +65,16 @@ domain tables, native control markup, and product-specific forms remain
 explicit. There is no component registry, arbitrary card/widget API, generic
 table query DSL, schema-driven form builder, or client state model.
 
+Issue #25 keeps calendar controls explicit rather than adding a generic picker.
+The context header contains native preset links, inclusive custom date inputs,
+and a comparison select. It prints the selected site's timezone, resolved
+comparison dates or an unavailable explanation, and a text marker when today
+is incomplete. Exact dates remain visible on mobile. Keyboard and
+JavaScript-disabled use follows native link, details, select, date-input, and
+submit behavior; HTMX may enhance those same GETs and browser history only.
+UTC compatibility reports carry a visible warning and are never styled as if
+their values used the new local context.
+
 The chart layer exposes exactly five typed families required by the accepted
 1.0 screens: trend, horizontal bars, funnel, fixed-column paths, and retention.
 Inputs contain raw bounded numeric values plus already formatted labels. A
@@ -100,7 +110,7 @@ Notices use restrained status semantics, errors use alerts, and loading is
 limited to the region whose existing native navigation or form is in flight.
 None of these enhancement states may replace the JavaScript-free baseline.
 
-The component stylesheet is self-hosted at a versioned `/admin/app.v5.css` path.
+The component stylesheet is self-hosted at a versioned `/admin/app.v6.css` path.
 Changing its bytes requires another path revision because existing responses
 may be cached privately for 24 hours.
 

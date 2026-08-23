@@ -1,10 +1,13 @@
 const std = @import("std");
+const analysis = @import("../analysis.zig");
+const calendar = @import("../calendar.zig");
 const domain = @import("../domain.zig");
 const request_mod = @import("../http/request.zig");
 const response = @import("../http/response.zig");
 const events = @import("../store/events.zig");
 const meta = @import("../store/meta.zig");
 const report = @import("../report.zig");
+const timezone = @import("../timezone.zig");
 const controller = @import("controller.zig");
 const model = @import("model.zig");
 const render = @import("render.zig");
@@ -18,6 +21,7 @@ pub const Dependencies = struct {
     origin: []const u8,
     report_timeout_ms: u32,
     policy_refresh: ?PolicyRefresh = null,
+    site_calendar: ?SiteCalendarLookup = null,
 };
 
 pub const PolicyRefresh = struct {
@@ -26,6 +30,20 @@ pub const PolicyRefresh = struct {
 
     fn run(self: PolicyRefresh) !void {
         try self.apply(self.context);
+    }
+};
+
+pub const SiteCalendar = struct {
+    timezone_name: []const u8,
+    zone: timezone.Zone,
+};
+
+pub const SiteCalendarLookup = struct {
+    context: *anyopaque,
+    get: *const fn (*anyopaque, []const u8) ?SiteCalendar,
+
+    fn find(self: SiteCalendarLookup, site_id: []const u8) ?SiteCalendar {
+        return self.get(self.context, site_id);
     }
 };
 
@@ -205,45 +223,47 @@ fn getLegacyPage(
     request: request_mod.Request,
     output: *std.Io.Writer,
 ) !void {
-    const range = currentRange() catch {
+    const now = currentSeconds() catch {
         try writeError(output, .{
             .status = 503,
             .title = "Clock unavailable",
-            .message = "The server could not determine a safe UTC report range.",
+            .message = "The server could not determine a safe report calendar.",
         });
         return;
     };
-    const query = controller.parseQuery(
+    const parsed = controller.parseQuery(
         dependencies.allocator,
         request.target,
-        &range.start,
-        &range.end,
         .overview,
     ) catch {
         try writeError(output, .{
             .status = 400,
             .title = "Invalid report request",
-            .message = "Check the site, UTC date range, report, sort, and page values.",
+            .message = "Check the site, local date range, comparison, report, sort, and page values.",
         });
         return;
     };
     const sites = try dependencies.metadata.listSites(dependencies.allocator);
     if (sites.len == 0) {
+        const range = try currentUtcRange(now);
         const loaded = try controller.loadPage(
             dependencies.allocator,
             dependencies.metadata,
             dependencies.events,
             .overview,
-            query,
+            .{
+                .site = "no-site",
+                .range = range.view(),
+            },
+            null,
             dependencies.csrf_token,
-            noticeMessage(request.target),
+            noticeMessage(parsed.notice),
             dependencies.report_timeout_ms,
         );
         try writePage(output, 200, loaded);
         return;
     }
-    var canonical_query = query;
-    const selected = controller.resolveSite(sites, query.site) catch {
+    const selected = controller.resolveSite(sites, parsed.site) catch {
         try writeError(output, .{
             .status = 404,
             .title = "Report not found",
@@ -251,21 +271,41 @@ fn getLegacyPage(
         });
         return;
     };
-    canonical_query.site = selected.slug;
-    controller.validateQuery(canonical_query) catch {
+    const site_calendar = dependencies.site_calendar orelse {
+        try calendarUnavailable(output);
+        return;
+    };
+    const selected_calendar = site_calendar.find(selected.id) orelse {
+        try calendarUnavailable(output);
+        return;
+    };
+    const default_range = calendar.rangeForPreset(
+        selected_calendar.zone,
+        now,
+        .last_30_days,
+    ) catch {
+        try calendarUnavailable(output);
+        return;
+    };
+    const query = controller.finishQuery(
+        parsed,
+        selected.slug,
+        &default_range,
+        .previous,
+    ) catch {
         try writeError(output, .{
             .status = 400,
             .title = "Invalid report request",
-            .message = "Check the site, UTC date range, report, sort, and page values.",
+            .message = "Check the site, local date range, comparison, report, sort, and page values.",
         });
         return;
     };
     try redirectToCanonical(
         dependencies.allocator,
         output,
-        legacyDestination(canonical_query.kind),
-        canonical_query,
-        noticeCode(request.target),
+        legacyDestination(query.kind),
+        query,
+        parsed.notice,
     );
 }
 
@@ -275,60 +315,124 @@ fn getPage(
     output: *std.Io.Writer,
     route: Route,
 ) !void {
-    const range = currentRange() catch {
+    const now = currentSeconds() catch {
         try writeError(output, .{
             .status = 503,
             .title = "Clock unavailable",
-            .message = "The server could not determine a safe UTC report range.",
+            .message = "The server could not determine a safe report calendar.",
         });
         return;
     };
-    var query = controller.parseQuery(
-        dependencies.allocator,
-        request.target,
-        &range.start,
-        &range.end,
-        route.default_kind,
-    ) catch {
-        try writeError(output, .{
-            .status = 400,
-            .title = "Invalid report request",
-            .message = "Check the site, UTC date range, report, sort, and page values.",
-        });
-        return;
-    };
-    if (query.site.len != 0 or !kindAllowed(route, query.kind)) {
-        try writeError(output, .{
-            .status = 400,
-            .title = "Invalid report request",
-            .message = "The site path and destination do not accept that report state.",
-        });
+    const sites = try dependencies.metadata.listSites(dependencies.allocator);
+    if (sites.len == 0) {
+        const range = try currentUtcRange(now);
+        const loaded = try controller.loadPage(
+            dependencies.allocator,
+            dependencies.metadata,
+            dependencies.events,
+            route.destination,
+            .{ .site = route.site, .range = range.view(), .kind = route.default_kind },
+            null,
+            dependencies.csrf_token,
+            "",
+            dependencies.report_timeout_ms,
+        );
+        try writePage(output, 200, loaded);
         return;
     }
-    query.site = route.site;
-    controller.validateQuery(query) catch {
+    const selected = controller.resolveSite(sites, route.site) catch {
         try writeError(output, .{
-            .status = 400,
-            .title = "Invalid report request",
-            .message = "Check the site, UTC date range, report, sort, and page values.",
+            .status = 404,
+            .title = "Report not found",
+            .message = "The selected site no longer exists.",
         });
         return;
     };
+    const site_calendar = dependencies.site_calendar orelse {
+        try calendarUnavailable(output);
+        return;
+    };
+    const selected_calendar = site_calendar.find(selected.id) orelse {
+        try calendarUnavailable(output);
+        return;
+    };
+    const default_range = calendar.rangeForPreset(
+        selected_calendar.zone,
+        now,
+        .last_30_days,
+    ) catch {
+        try calendarUnavailable(output);
+        return;
+    };
+    const default_query = model.Query{
+        .site = selected.slug,
+        .range = default_range.view(),
+        .comparison = .previous,
+        .kind = route.default_kind,
+    };
+    const parsed = controller.parseQuery(
+        dependencies.allocator,
+        request.target,
+        route.default_kind,
+    ) catch {
+        try invalidQueryPage(dependencies.allocator, output, route.destination, default_query);
+        return;
+    };
+    if (parsed.site.len != 0 or !kindAllowed(route, parsed.kind)) {
+        try invalidQueryPage(dependencies.allocator, output, route.destination, default_query);
+        return;
+    }
+    const query = controller.finishQuery(
+        parsed,
+        selected.slug,
+        &default_range,
+        .previous,
+    ) catch {
+        try invalidQueryPage(dependencies.allocator, output, route.destination, default_query);
+        return;
+    };
+    const resolved_calendar = calendar.resolve(
+        selected_calendar.zone,
+        selected_calendar.timezone_name,
+        now,
+        query.range,
+        query.comparison,
+    ) catch {
+        try invalidQueryPage(dependencies.allocator, output, route.destination, default_query);
+        return;
+    };
+    if (!try isCanonicalTarget(
+        dependencies.allocator,
+        request.target,
+        route.destination,
+        query,
+        parsed.notice,
+    )) {
+        try redirectToCanonical(
+            dependencies.allocator,
+            output,
+            route.destination,
+            query,
+            parsed.notice,
+        );
+        return;
+    }
     const loaded = controller.loadPage(
         dependencies.allocator,
         dependencies.metadata,
         dependencies.events,
         route.destination,
         query,
+        resolved_calendar,
         dependencies.csrf_token,
-        noticeMessage(request.target),
+        noticeMessage(parsed.notice),
         dependencies.report_timeout_ms,
     ) catch |err| {
         if (err == error.ReportTimeout) {
             try writeError(output, .{
                 .status = 503,
                 .title = "Report timed out",
-                .message = "The report exceeded its server deadline. Narrow the UTC date range and retry.",
+                .message = "The report exceeded its server deadline. Narrow the selected date range and retry.",
                 .return_url = request.target,
             });
         } else if (err == error.SiteNotFound or err == error.GoalNotFound or
@@ -343,7 +447,7 @@ fn getPage(
             try writeError(output, .{
                 .status = 400,
                 .title = "Invalid report request",
-                .message = "Check the site, UTC date range, report, sort, and page values.",
+                .message = "Check the site, local date range, comparison, report, sort, and page values.",
             });
         } else {
             return err;
@@ -423,7 +527,7 @@ fn postAction(
         });
         return;
     };
-    const date_range = controller.formDateRange(form) catch {
+    const form_context = controller.formContext(form) catch {
         try writeError(output, .{
             .status = 400,
             .title = "Invalid form",
@@ -514,8 +618,8 @@ fn postAction(
     };
     try redirectToCanonical(dependencies.allocator, output, destination, .{
         .site = site,
-        .start_date = date_range.start,
-        .end_date = date_range.end,
+        .range = form_context.range,
+        .comparison = form_context.comparison,
         .kind = kind,
     }, switch (action) {
         .add_goal => "goal-added",
@@ -534,7 +638,7 @@ fn formErrorPage(
     form: controller.Form,
     action: Action,
 ) !void {
-    const range = controller.formDateRange(form) catch {
+    const form_context = controller.formContext(form) catch {
         try writeError(output, .{
             .status = 400,
             .title = "Invalid form",
@@ -545,13 +649,21 @@ fn formErrorPage(
     const site = form.required("site") catch "";
     const query = model.Query{
         .site = site,
-        .start_date = range.start,
-        .end_date = range.end,
+        .range = form_context.range,
+        .comparison = form_context.comparison,
         .kind = switch (action) {
             .add_goal, .delete_goal => .goal,
             .add_funnel, .delete_funnel => .funnel,
             .add_excluded_network, .delete_excluded_network, .update_traffic_policy => .overview,
         },
+    };
+    const resolved_calendar = resolvePageCalendar(dependencies, query) catch {
+        try writeError(output, .{
+            .status = 503,
+            .title = "Site calendar unavailable",
+            .message = "The form was not retried because the selected site's validated timezone is unavailable. Restore the site policy or restart the service, then reload.",
+        });
+        return;
     };
     var page = controller.loadPage(
         dependencies.allocator,
@@ -562,6 +674,7 @@ fn formErrorPage(
             .add_excluded_network, .delete_excluded_network, .update_traffic_policy => .settings,
         },
         query,
+        resolved_calendar,
         dependencies.csrf_token,
         "",
         dependencies.report_timeout_ms,
@@ -663,22 +776,20 @@ fn validFormContentType(value: ?[]const u8) bool {
     return std.ascii.eqlIgnoreCase(base, "application/x-www-form-urlencoded");
 }
 
-const Range = struct {
-    start: [10]u8,
-    end: [10]u8,
-};
-
-fn currentRange() !Range {
+fn currentSeconds() !i64 {
     var timestamp: std.os.linux.timespec = undefined;
     const result = std.os.linux.clock_gettime(.REALTIME, &timestamp);
-    if (std.os.linux.errno(result) != .SUCCESS or
-        timestamp.sec < 29 * std.time.s_per_day)
-    {
+    if (std.os.linux.errno(result) != .SUCCESS or timestamp.sec < 0) {
         return error.ClockUnavailable;
     }
+    return timestamp.sec;
+}
+
+fn currentUtcRange(now_seconds: i64) !calendar.Range {
+    if (now_seconds < 29 * std.time.s_per_day) return error.ClockUnavailable;
     return .{
-        .start = try dateForSeconds(timestamp.sec - 29 * std.time.s_per_day),
-        .end = try dateForSeconds(timestamp.sec),
+        .start = try dateForSeconds(now_seconds - 29 * std.time.s_per_day),
+        .end = try dateForSeconds(now_seconds),
     };
 }
 
@@ -708,47 +819,48 @@ fn dateForSeconds(seconds: i64) ![10]u8 {
     return date;
 }
 
-fn noticeMessage(target: []const u8) []const u8 {
-    if (std.mem.indexOf(u8, target, "notice=goal-added") != null) {
+fn noticeMessage(code: []const u8) []const u8 {
+    if (std.mem.eql(u8, code, "goal-added")) {
         return "Goal added.";
     }
-    if (std.mem.indexOf(u8, target, "notice=goal-deleted") != null) {
+    if (std.mem.eql(u8, code, "goal-deleted")) {
         return "Goal deleted.";
     }
-    if (std.mem.indexOf(u8, target, "notice=funnel-added") != null) {
+    if (std.mem.eql(u8, code, "funnel-added")) {
         return "Funnel added.";
     }
-    if (std.mem.indexOf(u8, target, "notice=funnel-deleted") != null) {
+    if (std.mem.eql(u8, code, "funnel-deleted")) {
         return "Funnel deleted.";
     }
-    if (std.mem.indexOf(u8, target, "notice=network-exclusion-added") != null) {
+    if (std.mem.eql(u8, code, "network-exclusion-added")) {
         return "Network exclusion added and collection policy refreshed.";
     }
-    if (std.mem.indexOf(u8, target, "notice=network-exclusion-deleted") != null) {
+    if (std.mem.eql(u8, code, "network-exclusion-deleted")) {
         return "Network exclusion deleted and collection policy refreshed.";
     }
-    if (std.mem.indexOf(u8, target, "notice=traffic-policy-updated") != null) {
+    if (std.mem.eql(u8, code, "traffic-policy-updated")) {
         return "Traffic policy updated and collection policy refreshed.";
     }
     return "";
 }
 
-fn noticeCode(target: []const u8) []const u8 {
-    inline for (.{
-        "goal-added",
-        "goal-deleted",
-        "funnel-added",
-        "funnel-deleted",
-        "network-exclusion-added",
-        "network-exclusion-deleted",
-        "traffic-policy-updated",
-    }) |code| {
-        var needle_buffer: [64]u8 = undefined;
-        const needle = std.fmt.bufPrint(&needle_buffer, "notice={s}", .{code}) catch
-            unreachable;
-        if (std.mem.indexOf(u8, target, needle) != null) return code;
-    }
-    return "";
+fn resolvePageCalendar(
+    dependencies: Dependencies,
+    query: model.Query,
+) !calendar.Context {
+    const sites = try dependencies.metadata.listSites(dependencies.allocator);
+    const selected = try controller.resolveSite(sites, query.site);
+    const lookup = dependencies.site_calendar orelse
+        return error.SiteCalendarUnavailable;
+    const selected_calendar = lookup.find(selected.id) orelse
+        return error.SiteCalendarUnavailable;
+    return calendar.resolve(
+        selected_calendar.zone,
+        selected_calendar.timezone_name,
+        try currentSeconds(),
+        query.range,
+        query.comparison,
+    );
 }
 
 fn redirectToCanonical(
@@ -778,6 +890,46 @@ fn redirectToCanonical(
     );
 }
 
+fn isCanonicalTarget(
+    allocator: std.mem.Allocator,
+    target: []const u8,
+    destination: model.Destination,
+    query: model.Query,
+    notice: []const u8,
+) !bool {
+    var expected = std.Io.Writer.Allocating.init(allocator);
+    try canonicalUrl(&expected.writer, destination, query);
+    if (notice.len != 0) {
+        try expected.writer.writeAll("&notice=");
+        try urlComponent(&expected.writer, notice);
+    }
+    return std.mem.eql(u8, target, expected.written());
+}
+
+fn invalidQueryPage(
+    allocator: std.mem.Allocator,
+    output: *std.Io.Writer,
+    destination: model.Destination,
+    default_query: model.Query,
+) !void {
+    var reset = std.Io.Writer.Allocating.init(allocator);
+    try canonicalUrl(&reset.writer, destination, default_query);
+    try writeError(output, .{
+        .status = 400,
+        .title = "Invalid calendar or report state",
+        .message = "The URL has an invalid, duplicate, incomplete, or unsupported field. Reset to the site's default calendar and try again.",
+        .return_url = reset.written(),
+    });
+}
+
+fn calendarUnavailable(output: *std.Io.Writer) !void {
+    try writeError(output, .{
+        .status = 503,
+        .title = "Site calendar unavailable",
+        .message = "The report was not run because the selected site's validated timezone is unavailable. Restore the site policy or restart the service, then retry.",
+    });
+}
+
 fn canonicalUrl(
     output: *std.Io.Writer,
     destination: model.Destination,
@@ -796,10 +948,12 @@ fn canonicalUrl(
         .live => "/live",
         .settings => "/settings/general",
     });
-    try output.writeAll("?start=");
-    try urlComponent(output, query.start_date);
-    try output.writeAll("&end=");
-    try urlComponent(output, query.end_date);
+    try output.writeAll("?from=");
+    try urlComponent(output, query.range.start);
+    try output.writeAll("&to=");
+    try urlComponent(output, query.range.end);
+    try output.writeAll("&compare=");
+    try urlComponent(output, query.comparison.name());
     switch (destination) {
         .analyze => {
             try output.writeAll("&report=");
@@ -895,6 +1049,22 @@ fn urlComponent(output: *std.Io.Writer, value: []const u8) !void {
             try output.writeByte(hex[byte & 0x0f]);
         }
     }
+}
+
+test "canonical dashboard URL orders explicit calendar state" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    try canonicalUrl(&output.writer, .analyze, .{
+        .site = "example",
+        .range = .{ .start = "2024-02-01", .end = "2024-02-29" },
+        .comparison = .previous_year,
+        .kind = .campaigns,
+        .campaign_dimension = .source,
+    });
+    try std.testing.expectEqualStrings(
+        "/admin/sites/example/analyze?from=2024-02-01&to=2024-02-29&compare=previous-year&report=campaigns&campaign=source&sort=count&limit=25&page=1",
+        output.written(),
+    );
 }
 
 fn acceptsEncoding(value: []const u8, expected: []const u8) bool {

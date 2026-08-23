@@ -57,6 +57,17 @@ only translates known shipped report state and redirects; it is not a second
 application state model. Shell-only destinations do not run an analytics query
 merely to render navigation and context.
 
+Shared calendar state is likewise server-owned. Raw bounded GET fields are
+parsed before site selection; the controller then finalizes missing defaults
+against the selected site's startup-validated timezone and one server clock
+sample. A pure calendar module resolves presets, comparison dates, current-day
+incompleteness, and D27 half-open UTC bounds. The server passes the already
+loaded site timezone through one narrow lookup; renderers receive only the
+resolved typed view model and perform no clock, database, or filesystem work.
+Preset links and custom/comparison forms target the same canonical routes, so
+HTMX history enhances ordinary browser history instead of creating another
+calendar state.
+
 An interface is introduced only when a second real implementation or a
 deterministic test seam needs the same semantics. Until then, functions accept
 the concrete store or a narrow function pointer owned by the caller.
@@ -264,7 +275,10 @@ The shipped metric-v1 reports continue to convert UTC dates directly. The D27
 range resolver converts inclusive local dates into half-open UTC instants with
 defined gap/overlap behavior, and metric-v2 report work consumes that resolver
 and the stored site-local date/offset while retaining UTC timestamps. Loading
-the resolver does not silently reinterpret metric-v1 totals.
+the resolver does not silently reinterpret metric-v1 totals. Until a page's
+issue-backed metric-v2 conversion lands, any such dashboard result remains
+explicitly labeled as UTC compatibility data beside, but semantically separate
+from, the shared site-local calendar context.
 
 No report accepts arbitrary SQL, column names, sort expressions, or templates
 from the request. Enumerated sorts select a compiled query template.

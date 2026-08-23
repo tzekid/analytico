@@ -1,4 +1,6 @@
 const std = @import("std");
+const analysis = @import("../analysis.zig");
+const calendar = @import("../calendar.zig");
 const domain = @import("../domain.zig");
 const report = @import("../report.zig");
 const events = @import("../store/events.zig");
@@ -53,44 +55,63 @@ pub const Field = struct {
     value: []const u8,
 };
 
-pub const DateRange = struct {
-    start: []const u8,
-    end: []const u8,
+pub const FormContext = struct {
+    range: analysis.LocalDateRange,
+    comparison: analysis.Comparison,
 };
 
-pub fn formDateRange(form: Form) !DateRange {
-    const start = try form.required("start");
-    const end = try form.required("end");
-    try domain.validateDate(start);
-    try domain.validateDate(end);
-    const start_day = try report.dateDay(start);
-    const end_day = try report.dateDay(end);
-    if (end_day < start_day or end_day - start_day + 1 > report.maximum_range_days) {
-        return error.InvalidReportRange;
-    }
-    return .{ .start = start, .end = end };
+pub fn formContext(form: Form) !FormContext {
+    const range = analysis.LocalDateRange{
+        .start = try form.required("from"),
+        .end = try form.required("to"),
+    };
+    try range.validate();
+    return .{
+        .range = range,
+        .comparison = try analysis.Comparison.parse(try form.required("compare")),
+    };
 }
+
+pub const ParsedQuery = struct {
+    site: []const u8 = "",
+    from: ?[]const u8 = null,
+    to: ?[]const u8 = null,
+    comparison: ?analysis.Comparison = null,
+    legacy_from_name: bool = false,
+    legacy_to_name: bool = false,
+    notice: []const u8 = "",
+    kind: report.Kind,
+    subject: []const u8 = "",
+    campaign_dimension: report.CampaignDimension = .all,
+    sort: report.Sort = .count,
+    limit: u16 = report.default_limit,
+    page: u32 = 1,
+};
 
 pub fn parseQuery(
     allocator: std.mem.Allocator,
     target: []const u8,
-    default_start: []const u8,
-    default_end: []const u8,
     default_kind: report.Kind,
-) !model.Query {
-    var query = model.Query{
-        .start_date = default_start,
-        .end_date = default_end,
+) !ParsedQuery {
+    var query = ParsedQuery{
         .kind = default_kind,
     };
     const marker = std.mem.findScalar(u8, target, '?') orelse return query;
     const encoded = target[marker + 1 ..];
-    if (encoded.len > 4096) return error.QueryTooLarge;
+    if (encoded.len > analysis.maximum_url_bytes) return error.QueryTooLarge;
+    var parameter_count: usize = 0;
+    var count_pairs = std.mem.splitScalar(u8, encoded, '&');
+    while (count_pairs.next()) |pair| {
+        if (pair.len == 0) continue;
+        parameter_count += 1;
+        if (parameter_count > analysis.maximum_url_parameters) {
+            return error.TooManyQueryFields;
+        }
+    }
     var seen: std.ArrayList([]const u8) = .empty;
     var pairs = std.mem.splitScalar(u8, encoded, '&');
     while (pairs.next()) |pair| {
         if (pair.len == 0) continue;
-        if (seen.items.len >= 12) return error.TooManyQueryFields;
         const raw_name, const raw_value = std.mem.cutScalar(u8, pair, '=') orelse
             return error.InvalidQuery;
         const name = try decodeComponent(allocator, raw_name);
@@ -101,10 +122,20 @@ pub fn parseQuery(
         try seen.append(allocator, name);
         if (std.mem.eql(u8, name, "site")) {
             query.site = value;
-        } else if (std.mem.eql(u8, name, "start")) {
-            query.start_date = value;
-        } else if (std.mem.eql(u8, name, "end")) {
-            query.end_date = value;
+        } else if (std.mem.eql(u8, name, "from") or
+            std.mem.eql(u8, name, "start"))
+        {
+            if (query.from != null) return error.DuplicateQueryField;
+            query.from = value;
+            query.legacy_from_name = std.mem.eql(u8, name, "start");
+        } else if (std.mem.eql(u8, name, "to") or
+            std.mem.eql(u8, name, "end"))
+        {
+            if (query.to != null) return error.DuplicateQueryField;
+            query.to = value;
+            query.legacy_to_name = std.mem.eql(u8, name, "end");
+        } else if (std.mem.eql(u8, name, "compare")) {
+            query.comparison = try analysis.Comparison.parse(value);
         } else if (std.mem.eql(u8, name, "report")) {
             query.kind = try report.Kind.parse(value);
         } else if (std.mem.eql(u8, name, "subject")) {
@@ -125,10 +156,44 @@ pub fn parseQuery(
             if (query.page == 0 or query.page > 1_000_000) {
                 return error.InvalidReportPage;
             }
-        } else if (!std.mem.eql(u8, name, "notice")) {
+        } else if (std.mem.eql(u8, name, "notice")) {
+            if (!validNotice(value)) return error.InvalidNotice;
+            query.notice = value;
+        } else {
             return error.UnknownQueryField;
         }
     }
+    return query;
+}
+
+pub fn finishQuery(
+    parsed: ParsedQuery,
+    selected_site: []const u8,
+    default_range: *const calendar.Range,
+    default_comparison: analysis.Comparison,
+) !model.Query {
+    if ((parsed.from == null) != (parsed.to == null)) {
+        return error.IncompleteQueryRange;
+    }
+    if (parsed.from != null and parsed.legacy_from_name != parsed.legacy_to_name) {
+        return error.MixedQueryRangeNames;
+    }
+    const range = if (parsed.from) |start|
+        analysis.LocalDateRange{ .start = start, .end = parsed.to.? }
+    else
+        default_range.view();
+    const query = model.Query{
+        .site = selected_site,
+        .range = range,
+        .comparison = parsed.comparison orelse default_comparison,
+        .kind = parsed.kind,
+        .subject = parsed.subject,
+        .campaign_dimension = parsed.campaign_dimension,
+        .sort = parsed.sort,
+        .limit = parsed.limit,
+        .page = parsed.page,
+    };
+    try validateQuery(query);
     return query;
 }
 
@@ -138,6 +203,7 @@ pub fn loadPage(
     event_store: *events.Store,
     destination: model.Destination,
     query_input: model.Query,
+    calendar_context: ?calendar.Context,
     csrf_token: []const u8,
     notice: []const u8,
     report_timeout_ms: u32,
@@ -150,6 +216,8 @@ pub fn loadPage(
             .sites = sites,
             .selected_site = null,
             .query = query,
+            .calendar_context = null,
+            .report_time_basis = .none,
             .result = null,
             .goals = &.{},
             .funnels = &.{},
@@ -191,10 +259,10 @@ pub fn loadPage(
     const request = report.Request{
         .directory = "",
         .site_slug = selected.slug,
-        .start_date = query.start_date,
-        .end_date = query.end_date,
-        .start_day = try report.dateDay(query.start_date),
-        .end_day = try report.dateDay(query.end_date),
+        .start_date = query.range.start,
+        .end_date = query.range.end,
+        .start_day = try report.dateDay(query.range.start),
+        .end_day = try report.dateDay(query.range.end),
         .kind = query.kind,
         .subject = query.subject,
         .campaign_dimension = query.campaign_dimension,
@@ -245,6 +313,8 @@ pub fn loadPage(
         .sites = sites,
         .selected_site = selected,
         .query = query,
+        .calendar_context = calendar_context,
+        .report_time_basis = if (result != null) .metric_v1_utc else .none,
         .result = result,
         .overview_quality = overview_quality,
         .goals = goals,
@@ -399,13 +469,7 @@ pub fn verifyCsrf(form: Form, expected: []const u8) !void {
 
 pub fn validateQuery(query: model.Query) !void {
     try domain.validateSlug(query.site);
-    try domain.validateDate(query.start_date);
-    try domain.validateDate(query.end_date);
-    const start_day = try report.dateDay(query.start_date);
-    const end_day = try report.dateDay(query.end_date);
-    if (end_day < start_day or end_day - start_day + 1 > report.maximum_range_days) {
-        return error.InvalidReportRange;
-    }
+    query.range.validate() catch return error.InvalidReportRange;
     if (!query.kind.isPaginated() and
         (query.sort != .count or query.limit != report.default_limit or
             query.page != 1))
@@ -420,6 +484,21 @@ pub fn validateQuery(query: model.Query) !void {
     } else if (query.subject.len != 0) {
         return error.ReportSubjectNotApplicable;
     }
+}
+
+fn validNotice(value: []const u8) bool {
+    inline for (.{
+        "goal-added",
+        "goal-deleted",
+        "funnel-added",
+        "funnel-deleted",
+        "network-exclusion-added",
+        "network-exclusion-deleted",
+        "traffic-policy-updated",
+    }) |notice| {
+        if (std.mem.eql(u8, value, notice)) return true;
+    }
+    return false;
 }
 
 fn firstActive(sites: []const meta.Site) ?meta.Site {
@@ -469,4 +548,147 @@ fn decodeComponent(
         return error.InvalidUrlEncoding;
     }
     return decoded[0..output];
+}
+
+test "calendar query parsing finalizes canonical state and known aliases" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const default_range = calendar.Range{
+        .start = "2025-01-01".*,
+        .end = "2025-01-30".*,
+    };
+
+    const canonical = try parseQuery(
+        allocator,
+        "/admin/sites/example/overview?from=2024-02-01&to=2024-02-29&compare=previous-year&notice=goal-added",
+        .overview,
+    );
+    const query = try finishQuery(canonical, "example", &default_range, .previous);
+    try std.testing.expectEqualStrings("2024-02-01", query.range.start);
+    try std.testing.expectEqualStrings("2024-02-29", query.range.end);
+    try std.testing.expectEqual(analysis.Comparison.previous_year, query.comparison);
+    try std.testing.expectEqualStrings("goal-added", canonical.notice);
+    try std.testing.expect(!canonical.legacy_from_name);
+    try std.testing.expect(!canonical.legacy_to_name);
+
+    const legacy = try parseQuery(
+        allocator,
+        "/admin/sites/example/overview?start=2025-01-01&end=2025-01-02",
+        .overview,
+    );
+    const legacy_query = try finishQuery(legacy, "example", &default_range, .previous);
+    try std.testing.expect(legacy.legacy_from_name);
+    try std.testing.expect(legacy.legacy_to_name);
+    try std.testing.expectEqualStrings("2025-01-01", legacy_query.range.start);
+    try std.testing.expectEqual(analysis.Comparison.previous, legacy_query.comparison);
+
+    const defaults = try finishQuery(
+        try parseQuery(allocator, "/admin/sites/example/overview", .overview),
+        "example",
+        &default_range,
+        .previous,
+    );
+    try std.testing.expectEqualStrings("2025-01-01", defaults.range.start);
+    try std.testing.expectEqual(analysis.Comparison.previous, defaults.comparison);
+}
+
+test "calendar query parsing rejects ambiguity partial ranges and unknown state" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const default_range = calendar.Range{
+        .start = "2025-01-01".*,
+        .end = "2025-01-30".*,
+    };
+    try std.testing.expectError(
+        error.DuplicateQueryField,
+        parseQuery(
+            allocator,
+            "/admin?from=2025-01-01&start=2025-01-01&to=2025-01-02",
+            .overview,
+        ),
+    );
+    try std.testing.expectError(
+        error.IncompleteQueryRange,
+        finishQuery(
+            try parseQuery(allocator, "/admin?from=2025-01-01", .overview),
+            "example",
+            &default_range,
+            .previous,
+        ),
+    );
+    try std.testing.expectError(
+        error.MixedQueryRangeNames,
+        finishQuery(
+            try parseQuery(
+                allocator,
+                "/admin?start=2025-01-01&to=2025-01-02",
+                .overview,
+            ),
+            "example",
+            &default_range,
+            .previous,
+        ),
+    );
+    try std.testing.expectError(
+        error.MixedQueryRangeNames,
+        finishQuery(
+            try parseQuery(
+                allocator,
+                "/admin?from=2025-01-01&end=2025-01-02",
+                .overview,
+            ),
+            "example",
+            &default_range,
+            .previous,
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidAnalysisComparison,
+        parseQuery(allocator, "/admin?compare=year-ish", .overview),
+    );
+    try std.testing.expectError(
+        error.InvalidNotice,
+        parseQuery(allocator, "/admin?notice=made-up", .overview),
+    );
+    try std.testing.expectError(
+        error.UnknownQueryField,
+        parseQuery(allocator, "/admin?timezone=server-local", .overview),
+    );
+
+    var oversized: [analysis.maximum_url_bytes + 2]u8 = @splat('a');
+    oversized[0] = '?';
+    try std.testing.expectError(
+        error.QueryTooLarge,
+        parseQuery(allocator, &oversized, .overview),
+    );
+    var parameters = std.Io.Writer.Allocating.init(allocator);
+    for (0..analysis.maximum_url_parameters + 1) |index| {
+        try parameters.writer.print("{s}x{d}=1", .{
+            if (index == 0) "?" else "&",
+            index,
+        });
+    }
+    try std.testing.expectError(
+        error.TooManyQueryFields,
+        parseQuery(allocator, parameters.written(), .overview),
+    );
+}
+
+test "modifying form requires and preserves typed calendar context" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const parsed = try Form.parse(
+        arena.allocator(),
+        "from=2024-02-01&to=2024-02-29&compare=previous-year",
+    );
+    const context = try formContext(parsed);
+    try std.testing.expectEqualStrings("2024-02-01", context.range.start);
+    try std.testing.expectEqualStrings("2024-02-29", context.range.end);
+    try std.testing.expectEqual(analysis.Comparison.previous_year, context.comparison);
+    try std.testing.expectError(
+        error.MissingFormField,
+        formContext(try Form.parse(arena.allocator(), "from=2024-02-01&to=2024-02-29")),
+    );
 }

@@ -146,7 +146,7 @@ jq -e '
 page="$fixture/admin.html"
 cookie="analytico_session=$session_token"
 curl --silent --fail --cookie "$cookie" \
-    "$dashboard/admin/sites/self/settings/general?start=$today&end=$today" >"$page"
+    "$dashboard/admin/sites/self/settings/general?from=$today&to=$today&compare=previous" >"$page"
 csrf=$(grep -Eo 'name="csrf" value="[A-Za-z0-9_-]{43}"' "$page" |
     head -1 | cut -d '"' -f 4)
 test "${#csrf}" = 43
@@ -156,7 +156,8 @@ status=$(curl --silent --output "$fixture/network-add.txt" \
     -H "Origin: $dashboard" \
     -H 'Content-Type: application/x-www-form-urlencoded' \
     --data-urlencode "csrf=$csrf" --data-urlencode 'site=self' \
-    --data-urlencode "start=$today" --data-urlencode "end=$today" \
+    --data-urlencode "from=$today" --data-urlencode "to=$today" \
+    --data-urlencode 'compare=previous' \
     --data-urlencode 'network=203.0.113.9')
 test "$status" = 303
 
@@ -211,7 +212,8 @@ status=$(curl --silent --output "$fixture/network-delete.txt" \
     -H "Origin: $dashboard" \
     -H 'Content-Type: application/x-www-form-urlencoded' \
     --data-urlencode "csrf=$csrf" --data-urlencode 'site=self' \
-    --data-urlencode "start=$today" --data-urlencode "end=$today" \
+    --data-urlencode "from=$today" --data-urlencode "to=$today" \
+    --data-urlencode 'compare=previous' \
     --data-urlencode 'network=203.0.113.0/24')
 test "$status" = 303
 identify_event='00000000-0000-4000-8000-000000000680'

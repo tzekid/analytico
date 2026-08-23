@@ -12,10 +12,17 @@ if (!origin || !sessionToken) {
   );
 }
 
-const dates = "start=2025-01-01&end=2025-01-02";
+const dates = "from=2025-01-01&to=2025-01-02&compare=previous";
 
 function route(site, destination, query = "") {
-  return `${origin}/admin/sites/${site}/${destination}?${dates}${query}`;
+  let state = query;
+  if (destination === "analyze") {
+    if (!state.includes("report=")) state += "&report=pages";
+    if (!state.includes("sort=")) state += "&sort=count";
+    if (!state.includes("limit=")) state += "&limit=25";
+    if (!state.includes("page=")) state += "&page=1";
+  }
+  return `${origin}/admin/sites/${site}/${destination}?${dates}${state}`;
 }
 
 async function launch() {
@@ -71,6 +78,63 @@ async function normal() {
     assert.equal(
       startup.filter((kind) => kind === "fetch" || kind === "xhr").length,
       0,
+    );
+
+    const fixedCalendarUrl = page.url();
+    const presetDisclosure = page.locator(".desktop-context details.date-presets");
+    await presetDisclosure.locator(":scope > summary").click();
+    let calendarBefore = enhanced.length;
+    await presetDisclosure.getByRole("link", { name: "Last 7 days", exact: true }).click();
+    await page.waitForFunction(() =>
+      document.querySelector(".desktop-context details.date-presets > summary")?.textContent ===
+      "Last 7 days",
+    );
+    const presetUrl = page.url();
+    assert.match(presetUrl, /from=\d{4}-\d{2}-\d{2}&to=\d{4}-\d{2}-\d{2}&compare=previous/);
+    assert.ok(enhanced.length > calendarBefore);
+    assert.equal(await page.locator(".desktop-context .context-state div", { hasText: "Range status" }).locator("dd").textContent(), "Today is incomplete");
+    await page.goBack();
+    await page.waitForURL(fixedCalendarUrl);
+    await page.waitForFunction(() =>
+      document.querySelector(".desktop-context details.date-presets > summary")?.textContent ===
+      "Custom",
+    );
+    assert.equal(await page.locator(".desktop-context details.date-presets > summary").textContent(), "Custom");
+    await page.goForward();
+    await page.waitForURL(presetUrl);
+    await page.waitForFunction(() =>
+      document.querySelector(".desktop-context details.date-presets > summary")?.textContent ===
+      "Last 7 days",
+    );
+    assert.equal(await page.locator(".desktop-context details.date-presets > summary").textContent(), "Last 7 days");
+    await page.goBack();
+    await page.waitForURL(fixedCalendarUrl);
+    await page.waitForFunction(() =>
+      document.querySelector(".desktop-context details.date-presets > summary")?.textContent ===
+      "Custom",
+    );
+
+    const calendarForm = page.locator(".desktop-context form.range-filter");
+    await calendarForm.locator('input[name="from"]').fill("2024-02-01");
+    await calendarForm.locator('input[name="to"]').fill("2024-02-29");
+    await calendarForm.locator('select[name="compare"]').selectOption("previous-year");
+    calendarBefore = enhanced.length;
+    await calendarForm.getByRole("button", { name: "Update context" }).click();
+    await page.waitForURL(/from=2024-02-01&to=2024-02-29&compare=previous-year/);
+    assert.ok(enhanced.length > calendarBefore);
+    assert.equal(
+      await page.locator(".desktop-context .context-state div", { hasText: "Comparison period" }).locator("dd").textContent(),
+      "2023-02-01 – 2023-02-28",
+    );
+    await page.goBack();
+    await page.waitForURL(fixedCalendarUrl);
+    await page.waitForFunction(() =>
+      document.querySelector(".desktop-context details.date-presets > summary")?.textContent ===
+      "Custom",
+    );
+    await page.waitForFunction(() =>
+      document.querySelector('.desktop-context input[name="from"]')?.value ===
+      "2025-01-01",
     );
 
     let enhancedBefore = enhanced.length;
@@ -263,6 +327,9 @@ async function normal() {
       htmx: "4.0.0-beta6",
       enhanced_navigation: true,
       history: "back-forward",
+      calendar_presets: "canonical-local-dates",
+      calendar_custom_comparison: "previous-year",
+      calendar_history: "back-forward-restored-server-state",
       loading_state: "visible",
       html5_validation: "native",
       server_validation: "swapped-422",
@@ -317,7 +384,7 @@ async function timeout() {
     await page.waitForFunction(() => window.htmx !== undefined);
     assert.equal(
       await page.locator('[role="alert"]').textContent(),
-      "The report exceeded its server deadline. Narrow the UTC date range and retry.",
+      "The report exceeded its server deadline. Narrow the selected date range and retry.",
     );
     response = await Promise.all([
       page.waitForResponse(
@@ -333,7 +400,7 @@ async function timeout() {
         "report exceeded",
       ),
     );
-    assert.match(page.url(), /start=2025-01-01/);
+    assert.match(page.url(), /from=2025-01-01/);
     await context.close();
   } finally {
     await browser.close();

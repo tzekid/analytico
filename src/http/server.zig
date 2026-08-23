@@ -377,6 +377,10 @@ fn handle(context: *Context, stream: std.Io.net.Stream) !void {
             .csrf_token = session.csrf_token,
             .origin = policy.origin,
             .report_timeout_ms = context.report_timeout_ms,
+            .site_calendar = .{
+                .context = context,
+                .get = dashboardSiteCalendar,
+            },
             .policy_refresh = .{
                 .context = context,
                 .apply = refreshCollectionPolicies,
@@ -1194,6 +1198,15 @@ fn findPolicy(
         if (std.mem.eql(u8, policy.metadata.id, id)) return policy;
     }
     return null;
+}
+
+fn dashboardSiteCalendar(value: *anyopaque, site_id: []const u8) ?dashboard.SiteCalendar {
+    const context: *Context = @ptrCast(@alignCast(value));
+    const policy = findPolicy(context.policies, site_id) orelse return null;
+    return .{
+        .timezone_name = policy.metadata.timezone_name,
+        .zone = policy.timezone,
+    };
 }
 
 fn methodNotAllowed(output: *std.Io.Writer, allow: []const u8) !void {

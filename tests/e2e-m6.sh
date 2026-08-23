@@ -48,7 +48,7 @@ data="$fixture/data"
 "$binary" site add "$data" example Example https://example.com \
     --timezone UTC >/dev/null
 "$binary" site add "$data" second "Second Site" https://second.example \
-    --timezone UTC >/dev/null
+    --timezone Europe/Berlin >/dev/null
 site_id=$("$binary" site list "$data" |
     awk -F '\t' '$1 == "example" { print $2 }')
 "$binary" goal add "$data" example Signup event signup >/dev/null
@@ -120,7 +120,8 @@ session_cookie=$(<"$cookie_file")
 cookie="analytico_session=$session_cookie"
 
 range='site=example&start=2025-01-01&end=2025-01-02&report=overview'
-overview="$dashboard/admin/sites/example/overview?start=2025-01-01&end=2025-01-02"
+dates='from=2025-01-01&to=2025-01-02&compare=previous'
+overview="$dashboard/admin/sites/example/overview?$dates"
 test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
     --cookie "$cookie" "$dashboard/admin?$range")" = 303
 test "$(curl --silent --output /dev/null --write-out '%{redirect_url}' \
@@ -130,38 +131,54 @@ curl --silent --fail --cookie "$cookie" \
 curl --silent --fail --cookie "$cookie" \
     "$overview" >"$fixture/page-two.html"
 cmp "$fixture/page-one.html" "$fixture/page-two.html"
-while IFS='|' read -r path label; do
+while IFS='|' read -r path label extra; do
     route_page="$fixture/route-${label,,}.html"
     curl --silent --fail --cookie "$cookie" \
-        "$dashboard/admin/sites/example/$path?start=2025-01-01&end=2025-01-02" \
+        "$dashboard/admin/sites/example/$path?$dates$extra" \
         >"$route_page"
     grep -Fq "<h1>$label</h1>" "$route_page"
     grep -Fq 'class="primary-navigation" aria-label="Primary"' "$route_page"
     grep -Fq "<span class=\"nav-label\">$label</span>" "$route_page"
 done <<'ROUTES'
-overview|Overview
-analyze|Analyze
-journeys/goals|Journeys
-sessions|Sessions
-live|Live
-settings/general|Settings
+overview|Overview|
+analyze|Analyze|&report=pages&sort=count&limit=25&page=1
+journeys/goals|Journeys|
+sessions|Sessions|
+live|Live|
+settings/general|Settings|
 ROUTES
 test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
     --cookie "$cookie" "$dashboard/admin/sites/example/not-a-destination")" = 404
 test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
     --cookie "$cookie" "$overview&site=second")" = 400
+test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+    --cookie "$cookie" \
+    "$dashboard/admin/sites/example/overview?start=2025-01-01&end=2025-01-02")" = 303
+test "$(curl --silent --output /dev/null --write-out '%{redirect_url}' \
+    --cookie "$cookie" \
+    "$dashboard/admin/sites/example/overview?start=2025-01-01&end=2025-01-02")" = "$overview"
+default_location=$(curl --silent --output /dev/null --write-out '%{redirect_url}' \
+    --cookie "$cookie" "$dashboard/admin/sites/example/overview")
+[[ "$default_location" == "$dashboard/admin/sites/example/overview?from="* ]]
+[[ "$default_location" == *'&to='*'&compare=previous' ]]
+status=$(curl --silent --output "$fixture/invalid-calendar.html" \
+    --write-out '%{http_code}' --cookie "$cookie" \
+    "$dashboard/admin/sites/example/overview?from=2025-01-01")
+test "$status" = 400
+grep -Fq 'Invalid calendar or report state' "$fixture/invalid-calendar.html"
+grep -Fq 'Reset to the site' "$fixture/invalid-calendar.html"
 test "$(curl --silent --output /dev/null --write-out '%{redirect_url}' \
     --cookie "$cookie" \
     "$dashboard/admin?site=example&start=2025-01-01&end=2025-01-02&report=pages")" = \
-    "$dashboard/admin/sites/example/analyze?start=2025-01-01&end=2025-01-02&report=pages&sort=count&limit=25&page=1"
+    "$dashboard/admin/sites/example/analyze?$dates&report=pages&sort=count&limit=25&page=1"
 test "$(curl --silent --output /dev/null --write-out '%{redirect_url}' \
     --cookie "$cookie" \
     "$dashboard/admin?site=example&start=2025-01-01&end=2025-01-02&report=goal&subject=Signup")" = \
-    "$dashboard/admin/sites/example/journeys/goals?start=2025-01-01&end=2025-01-02&subject=Signup"
+    "$dashboard/admin/sites/example/journeys/goals?$dates&subject=Signup"
 test "$(curl --silent --output /dev/null --write-out '%{redirect_url}' \
     --cookie "$cookie" \
     "$dashboard/admin?site=example&start=2025-01-01&end=2025-01-02&report=traffic-quality")" = \
-    "$dashboard/admin/sites/example/live?start=2025-01-01&end=2025-01-02"
+    "$dashboard/admin/sites/example/live?$dates"
 curl --silent --fail --cookie "$cookie" \
     --dump-header "$fixture/page.headers" --output /dev/null \
     "$overview"
@@ -222,8 +239,8 @@ status=$(curl --silent --output "$fixture/timeout.html" \
     "$overview")
 test "$status" = 503
 grep -Fq 'Report timed out' "$fixture/timeout.html"
-grep -Fq 'Narrow the UTC date range and retry' "$fixture/timeout.html"
-grep -Fq 'start=2025-01-01' "$fixture/timeout.html"
+grep -Fq 'Narrow the selected date range and retry' "$fixture/timeout.html"
+grep -Fq 'from=2025-01-01' "$fixture/timeout.html"
 test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
     --cookie "$cookie" "$dashboard$css_path")" = 200
 

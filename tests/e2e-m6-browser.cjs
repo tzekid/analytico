@@ -11,10 +11,17 @@ if (!origin || !sessionToken) {
   );
 }
 
-const dates = "start=2025-01-01&end=2025-01-02";
+const dates = "from=2025-01-01&to=2025-01-02&compare=previous";
 
 function route(site, destination, query = "") {
-  return `${origin}/admin/sites/${site}/${destination}?${dates}${query}`;
+  let state = query;
+  if (destination === "analyze") {
+    if (!state.includes("report=")) state += "&report=pages";
+    if (!state.includes("sort=")) state += "&sort=count";
+    if (!state.includes("limit=")) state += "&limit=25";
+    if (!state.includes("page=")) state += "&page=1";
+  }
+  return `${origin}/admin/sites/${site}/${destination}?${dates}${state}`;
 }
 
 async function main() {
@@ -86,6 +93,9 @@ async function main() {
     assert.equal((await page.locator("body").innerText()).includes(
       "Stored classes plus reversible query-classifier v1 diagnostics",
     ), true);
+    assert.equal((await page.locator("body").innerText()).includes(
+      "Compatibility report: the values below still use UTC calendar dates.",
+    ), true);
     await assertVisualTheme(page, "light", "44px");
     if (process.env.ANALYTICO_MOBILE_SCREENSHOT_PATH) {
       await page.screenshot({
@@ -108,10 +118,28 @@ async function main() {
     assert.deepEqual(failures, []);
     await assertMobileNavigation(page);
     const mobileContext = page.locator(".mobile-context");
-    await mobileContext.locator("summary").click();
+    const mobileCalendarUrl = page.url();
+    await mobileContext.locator(":scope > summary").click();
     assert.equal(await mobileContext.locator("form.site-switcher").isVisible(), true);
     assert.equal(await mobileContext.getByText("All visitors", { exact: true }).isVisible(), true);
-    await mobileContext.locator("summary").click();
+    await assertMobileContext(page);
+    if (process.env.ANALYTICO_MOBILE_CONTEXT_SCREENSHOT_PATH) {
+      await page.screenshot({
+        path: process.env.ANALYTICO_MOBILE_CONTEXT_SCREENSHOT_PATH,
+        fullPage: true,
+      });
+    }
+    response = await Promise.all([
+      page.waitForNavigation({ waitUntil: "load" }),
+      mobileContext.getByRole("link", { name: "Yesterday", exact: true }).click(),
+    ]).then(([navigation]) => navigation);
+    assert.equal(response.status(), 200);
+    assert.equal(
+      await page.locator(".mobile-context details.date-presets > summary").textContent(),
+      "Yesterday",
+    );
+    await page.goBack({ waitUntil: "load" });
+    assert.equal(page.url(), mobileCalendarUrl);
     response = await page.goto(
       route("example", "analyze", "&report=pages"),
       { waitUntil: "load" },
@@ -182,6 +210,32 @@ async function main() {
         fullPage: true,
       });
     }
+    const fixedCalendarUrl = page.url();
+    const presetDisclosure = page.locator(".desktop-context details.date-presets");
+    const presetSummary = presetDisclosure.locator(":scope > summary");
+    await presetSummary.focus();
+    await page.keyboard.press("Enter");
+    assert.equal(await presetDisclosure.getAttribute("open"), "");
+    await page.keyboard.press("Enter");
+    assert.equal(await presetDisclosure.getAttribute("open"), null);
+    await presetSummary.click();
+    response = await Promise.all([
+      page.waitForNavigation({ waitUntil: "load" }),
+      presetDisclosure.getByRole("link", { name: "Today", exact: true }).click(),
+    ]).then(([navigation]) => navigation);
+    assert.equal(response.status(), 200);
+    assert.match(page.url(), /from=\d{4}-\d{2}-\d{2}&to=\d{4}-\d{2}-\d{2}&compare=previous/);
+    assert.equal(
+      await page.locator(".desktop-context details.date-presets > summary").textContent(),
+      "Today",
+    );
+    assert.equal(
+      await page.locator(".desktop-context .context-state div", { hasText: "Range status" }).locator("dd").textContent(),
+      "Today is incomplete",
+    );
+    await page.goBack({ waitUntil: "load" });
+    assert.equal(page.url(), fixedCalendarUrl);
+
     await page.keyboard.press("Tab");
     assert.equal(await page.evaluate(() => document.activeElement?.className), "skip-link");
     await page.keyboard.press("Enter");
@@ -202,19 +256,37 @@ async function main() {
       await page.locator('.desktop-context select[name="site"]').inputValue(),
       "second",
     );
+    assert.equal(
+      await page.locator(".desktop-context .context-state div", { hasText: "Timezone" }).locator("dd").textContent(),
+      "Europe/Berlin",
+    );
     await assertMetric(page, "Page views", "2");
     await page.locator('.primary-navigation a:has-text("Analyze")').click();
     assert.match(page.url(), /\/admin\/sites\/second\/analyze/);
     assert.match(page.url(), /report=pages/);
+
+    response = await page.goto(
+      `${origin}/admin/sites/second/overview?from=1970-01-01&to=1970-01-01&compare=previous`,
+      { waitUntil: "load" },
+    );
+    assert.equal(response.status(), 200);
+    assert.equal(
+      await page.locator(".desktop-context .context-state div", { hasText: "Comparison period" }).locator("dd").textContent(),
+      "Previous period unavailable before 1970",
+    );
+    await page.goto(route("second", "analyze"), { waitUntil: "load" });
     const rangeForm = page.locator(".desktop-context form.range-filter");
-    await rangeForm.locator('input[name="start"]').fill("2025-01-02");
+    await rangeForm.locator('input[name="from"]').fill("2025-01-02");
+    await rangeForm.locator('select[name="compare"]').selectOption("previous-year");
     response = await Promise.all([
       page.waitForNavigation({ waitUntil: "load" }),
-      rangeForm.getByRole("button", { name: "Update dates" }).click(),
+      rangeForm.getByRole("button", { name: "Update context" }).click(),
     ]).then(([navigation]) => navigation);
     assert.equal(response.status(), 200);
+    assert.equal(response.request().redirectedFrom(), null);
     assert.match(page.url(), /\/admin\/sites\/second\/analyze/);
-    assert.match(page.url(), /start=2025-01-02/);
+    assert.match(page.url(), /from=2025-01-02/);
+    assert.match(page.url(), /compare=previous-year/);
     assert.match(page.url(), /report=pages/);
 
     await page.goto(
@@ -379,8 +451,9 @@ async function main() {
       await page.locator('.notice[role="status"]').textContent(),
       "Goal added.",
     );
-    assert.match(page.url(), /start=2025-01-01/);
-    assert.match(page.url(), /end=2025-01-02/);
+    assert.match(page.url(), /from=2025-01-01/);
+    assert.match(page.url(), /to=2025-01-02/);
+    assert.match(page.url(), /compare=previous/);
 
     const purchaseItem = page.locator("li", { hasText: "Purchase" });
     response = await Promise.all([
@@ -513,8 +586,16 @@ async function main() {
       startup_api_requests: 0,
       persistent_storage_entries: 0,
       canonical_destinations: 6,
+      calendar_presets: 6,
+      custom_comparison: "previous-year",
+      unavailable_comparison: "explicit-not-zero",
+      timezone_context: "UTC-and-Europe/Berlin",
+      native_calendar_history: "back",
       keyboard_skip_link: "main",
+      keyboard_preset_disclosure: "native-details",
       mobile_primary_navigation: "unclipped",
+      mobile_calendar_controls: "unclipped-44px-targets",
+      mobile_preset_navigation: "native-history",
       mobile_record_table: "stacked-labeled-records",
       funnel_figure: "svg-plus-exact-table",
       form_error_focus: "summary",
@@ -557,6 +638,45 @@ async function assertMobileNavigation(page) {
     assert.ok(bound.height >= 44);
     assert.equal(bound.clipped, false);
   }
+}
+
+async function assertMobileContext(page) {
+  const presets = page.locator(".mobile-context details.date-presets");
+  await presets.locator(":scope > summary").click();
+  assert.equal(await presets.getAttribute("open"), "");
+  assert.equal(await presets.locator(".preset-list a").count(), 6);
+  const controls = page.locator(
+    ".mobile-context input:not([type=hidden]), .mobile-context select, " +
+      ".mobile-context button, " +
+      ".mobile-context details.date-presets > summary, " +
+      ".mobile-context .preset-list a",
+  );
+  const bounds = await controls.evaluateAll((elements) => elements.map((element) => {
+    const rect = element.getBoundingClientRect();
+    return {
+      tag: element.tagName,
+      left: rect.left,
+      right: rect.right,
+      height: rect.height,
+      viewport: document.documentElement.clientWidth,
+      clipped: element.scrollWidth > element.clientWidth + 1,
+    };
+  }));
+  assert.ok(bounds.length >= 14);
+  for (const bound of bounds) {
+    assert.ok(bound.left >= 0, `${bound.tag} starts outside the viewport`);
+    assert.ok(
+      bound.right <= bound.viewport + 0.5,
+      `${bound.tag} ends outside the viewport`,
+    );
+    assert.ok(bound.height >= 44, `${bound.tag} is shorter than 44px`);
+    assert.equal(bound.clipped, false, `${bound.tag} clips its contents`);
+  }
+  assert.equal(
+    await page.evaluate(() =>
+      document.documentElement.scrollWidth > document.documentElement.clientWidth + 1),
+    false,
+  );
 }
 
 async function assertDestinations(page) {

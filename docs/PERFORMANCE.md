@@ -369,6 +369,22 @@ The corresponding final Debug run measured 2,416 bytes, 4,934 bytes, and
 Both real Chromium runs used JavaScript-off first navigation, exercised the
 native mutation/error paths, and passed the same response/request ceilings.
 
+### Site-local calendar confirmation
+
+Issue #25 keeps the M6/M7 request, response, and process ceilings unchanged.
+The accepted ReleaseSafe real-Caddy/on-disk-store/Chromium run measured 2,759
+bytes gzip for the complete authenticated Overview HTML, 5,014 bytes gzip for
+the versioned v6 CSS, and 5,040 KiB RSS growth after 100 authenticated views.
+The expanded server-rendered context adds no startup API/JSON request, script,
+dependency, or client state. Its native preset and custom/comparison GET paths
+passed at 360 px with JavaScript disabled; the same canonical state passed HTMX
+back/forward restoration.
+
+One Debug observation crossed the 8,192 KiB growth gate at 10,372 KiB. The
+unchanged binary did not reproduce it in isolated reruns (2,904, 6,588, 2,864,
+7,620, 5,016, and 8,056 KiB), and the final ReleaseSafe observation above
+passed. The gate and regression policy were not weakened.
+
 ## 8. Regression policy
 
 For a stable benchmark environment:

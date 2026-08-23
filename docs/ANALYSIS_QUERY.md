@@ -32,6 +32,46 @@ history; the compiler never consults process time or timezone files.
 Comparison belongs to Trend in 1.0; Breakdown rejects comparison state before
 database preparation.
 
+### Calendar and comparison resolution
+
+The server samples the clock once for a request and converts that instant with
+the selected site's already validated D27 timezone. Calendar resolution is a
+pure operation over that instant, the bounded timezone, and validated local
+dates. It never reads the process timezone, contacts a network service, or
+lets the browser resolve reporting dates.
+
+The shared presets resolve to explicit inclusive local dates:
+
+- Today: the current site-local date;
+- Yesterday: the preceding local date;
+- Last 7, Last 30, and Last 90 days: respectively 7, 30, and 90 local dates,
+  including today;
+- Month to date: the first local date of today's month through today;
+- Custom: the submitted inclusive `from` and `to`, capped at 400 dates.
+
+When a site-scoped route omits calendar state, it resolves Last 30 days with
+Previous period and redirects to the resulting explicit canonical dates. A
+site switch preserves those explicit local dates; it does not silently
+reinterpret an old bookmark as a moving preset in the new timezone.
+
+`previous` is the adjacent range immediately before `from` and contains the
+same number of local dates as the current range. `previous-year` maps both
+endpoints to the same month and day in the preceding calendar year, clamping
+February 29 to February 28. It is calendar-aligned rather than duration-based,
+so a leap-year range may intentionally contain a different number of dates.
+If a requested comparison cannot be represented inside the supported calendar,
+the current range remains valid and comparison is explicitly unavailable; it
+never becomes a zero-valued period.
+
+Every current and available comparison range also carries the D27 half-open
+UTC bounds. A range containing the current site-local date is marked
+incomplete. Canonical shared query state is ordered `from`, `to`, `compare`
+with explicit values. The previously shipped `start`/`end` spelling is accepted
+only as an equivalent input and redirected to that canonical representation.
+Preset identity is not stored in the URL: bookmarks retain exact dates, and a
+range is labeled as a preset only while it still matches that preset for the
+selected site's current local date.
+
 ## 2. Closed model
 
 An `AnalysisQuery` contains:
@@ -263,6 +303,12 @@ CLI/report renderer and its UTC visitor-day/session semantics stay unchanged
 until an explicit compatibility-removal issue. Funnel, path, retention,
 session/profile, and Live queries reuse closed FilterSet/EventSelector helpers
 where appropriate but retain specialized query/result types.
+
+While those metric-v1 dashboard results remain, the shared shell may carry the
+new local calendar context only when the result is visibly identified as UTC
+compatibility data. It must not relabel or partially convert a metric-v1 total.
+Issue-backed metric-v2 consumers replace that disclosure only when every value
+on the affected view uses the resolved site-local range together.
 
 D30 adds one explicitly versioned `traffic-quality` diagnostic bundle on the
 existing report transport. It is not an ordinary `AnalysisQuery` product

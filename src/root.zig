@@ -5,6 +5,7 @@ comptime {
     _ = @import("property.zig");
     _ = @import("version.zig");
     _ = @import("timezone.zig");
+    _ = @import("calendar.zig");
     _ = @import("report.zig");
     _ = @import("analysis.zig");
     _ = @import("analysis_probe.zig");
@@ -26,6 +27,8 @@ comptime {
     _ = @import("auth/http.zig");
     _ = @import("web/components.zig");
     _ = @import("web/charts.zig");
+    _ = @import("web/controller.zig");
+    _ = @import("web/dashboard.zig");
     _ = @import("http/request.zig");
     _ = @import("http/response.zig");
     _ = @import("http/rate_limit.zig");
