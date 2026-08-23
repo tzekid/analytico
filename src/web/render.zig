@@ -3,7 +3,7 @@ const report = @import("../report.zig");
 const model = @import("model.zig");
 
 pub const stylesheet = @embedFile("style.css");
-pub const stylesheet_path = "/admin/app.v2.css";
+pub const stylesheet_path = "/admin/app.v3.css";
 pub const htmx = @embedFile("htmx_js");
 pub const htmx_gzip = @embedFile("htmx_gzip");
 pub const htmx_path = "/admin/htmx.28fae7bb.js";
@@ -520,4 +520,120 @@ fn reportTitle(kind: report.Kind) []const u8 {
         .goal => "Conversion goal",
         .funnel => "Funnel",
     };
+}
+
+fn designGroup(root: std.json.ObjectMap, name: []const u8) !std.json.ObjectMap {
+    const value = root.get(name) orelse return error.MissingDesignTokenGroup;
+    return switch (value) {
+        .object => |object| object,
+        else => error.InvalidDesignTokenGroup,
+    };
+}
+
+fn designString(group: std.json.ObjectMap, name: []const u8) ![]const u8 {
+    const value = group.get(name) orelse return error.MissingDesignToken;
+    return switch (value) {
+        .string => |string| string,
+        else => error.InvalidDesignToken,
+    };
+}
+
+fn expectTokenGroup(prefix: []const u8, group: std.json.ObjectMap) !void {
+    var iterator = group.iterator();
+    while (iterator.next()) |entry| {
+        const value = switch (entry.value_ptr.*) {
+            .string => |string| string,
+            else => return error.InvalidDesignToken,
+        };
+        const declaration = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "--{s}-{s}: {s};",
+            .{ prefix, entry.key_ptr.*, value },
+        );
+        defer std.testing.allocator.free(declaration);
+        try std.testing.expect(std.mem.indexOf(u8, stylesheet, declaration) != null);
+    }
+}
+
+fn relativeLuminance(value: []const u8) !f64 {
+    if (value.len != 7 or value[0] != '#') return error.InvalidDesignColor;
+    var channels: [3]f64 = undefined;
+    for (&channels, 0..) |*channel, index| {
+        const byte = try std.fmt.parseInt(
+            u8,
+            value[1 + index * 2 .. 3 + index * 2],
+            16,
+        );
+        const encoded: f64 = @as(f64, @floatFromInt(byte)) / 255.0;
+        channel.* = if (encoded <= 0.04045)
+            encoded / 12.92
+        else
+            std.math.pow(f64, (encoded + 0.055) / 1.055, 2.4);
+    }
+    return 0.2126 * channels[0] + 0.7152 * channels[1] +
+        0.0722 * channels[2];
+}
+
+fn expectContrast(
+    foreground: []const u8,
+    background: []const u8,
+    minimum: f64,
+) !void {
+    const first = try relativeLuminance(foreground);
+    const second = try relativeLuminance(background);
+    const lighter = @max(first, second);
+    const darker = @min(first, second);
+    try std.testing.expect((lighter + 0.05) / (darker + 0.05) >= minimum);
+}
+
+test "production stylesheet mirrors the approved accessible design tokens" {
+    const source = @embedFile("../../docs/design-tokens.json");
+    const parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        std.testing.allocator,
+        source,
+        .{},
+    );
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |object| object,
+        else => return error.InvalidDesignTokenDocument,
+    };
+    try std.testing.expectEqualStrings(
+        "analytico.design-tokens.v1",
+        try designString(root, "$schema"),
+    );
+    const light = try designGroup(root, "light");
+    const dark = try designGroup(root, "dark");
+    try expectTokenGroup("color", light);
+    try expectTokenGroup("color", dark);
+    try expectTokenGroup("space", try designGroup(root, "space"));
+    try expectTokenGroup("radius", try designGroup(root, "radius"));
+    try expectTokenGroup("font", try designGroup(root, "font"));
+    try expectTokenGroup("layout", try designGroup(root, "layout"));
+
+    try expectContrast(try designString(light, "ink"), try designString(light, "canvas"), 4.5);
+    try expectContrast(try designString(light, "inkSoft"), try designString(light, "canvas"), 4.5);
+    try expectContrast(try designString(light, "inkMuted"), try designString(light, "canvas"), 4.5);
+    try expectContrast(try designString(light, "brandStrong"), try designString(light, "canvas"), 4.5);
+    try expectContrast(try designString(light, "brandHover"), try designString(light, "canvas"), 4.5);
+    try expectContrast(try designString(light, "focus"), try designString(light, "canvas"), 3.0);
+    try expectContrast(try designString(light, "positive"), try designString(light, "positiveWash"), 4.5);
+    try expectContrast(try designString(light, "ink"), try designString(light, "warningWash"), 4.5);
+    try expectContrast(try designString(light, "warning"), try designString(light, "warningWash"), 3.0);
+    try expectContrast(try designString(light, "danger"), try designString(light, "dangerWash"), 4.5);
+    try expectContrast(try designString(dark, "ink"), try designString(dark, "canvas"), 4.5);
+    try expectContrast(try designString(dark, "inkSoft"), try designString(dark, "canvas"), 4.5);
+    try expectContrast(try designString(dark, "inkMuted"), try designString(dark, "canvas"), 4.5);
+    try expectContrast(try designString(dark, "brand"), try designString(dark, "canvas"), 4.5);
+    try expectContrast(try designString(dark, "brandHover"), try designString(dark, "canvas"), 4.5);
+    try expectContrast(try designString(dark, "focus"), try designString(dark, "canvas"), 3.0);
+    try expectContrast(try designString(dark, "positive"), try designString(dark, "positiveWash"), 4.5);
+    try expectContrast(try designString(dark, "ink"), try designString(dark, "warningWash"), 4.5);
+    try expectContrast(try designString(dark, "warning"), try designString(dark, "warningWash"), 3.0);
+    try expectContrast(try designString(dark, "danger"), try designString(dark, "dangerWash"), 4.5);
+
+    try std.testing.expect(std.mem.indexOf(u8, stylesheet, "@import") == null);
+    try std.testing.expect(std.mem.indexOf(u8, stylesheet, "url(") == null);
+    try std.testing.expectEqualStrings("/admin/app.v3.css", stylesheet_path);
 }

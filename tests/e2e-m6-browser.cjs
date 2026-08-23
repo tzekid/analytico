@@ -30,14 +30,9 @@ async function main() {
   try {
     const context = await browser.newContext({
       javaScriptEnabled: false,
+      colorScheme: "light",
     });
-    await context.addCookies([{
-      name: "analytico_session",
-      value: sessionToken,
-      url: origin,
-      httpOnly: true,
-      sameSite: "Strict",
-    }]);
+    await addSession(context);
     const page = await context.newPage();
     await page.setViewportSize({ width: 360, height: 640 });
     const cdp = await context.newCDPSession(page);
@@ -75,6 +70,13 @@ async function main() {
     await assertMetric(page, "Daily visitors", "4");
     await assertMetric(page, "Sessions", "5");
     await assertMetric(page, "Custom events", "5");
+    await assertVisualTheme(page, "light", "44px");
+    if (process.env.ANALYTICO_MOBILE_SCREENSHOT_PATH) {
+      await page.screenshot({
+        path: process.env.ANALYTICO_MOBILE_SCREENSHOT_PATH,
+        fullPage: true,
+      });
+    }
     assert.deepEqual(
       [...new Set(firstViewRequests)].sort(),
       ["document", "stylesheet"],
@@ -300,6 +302,28 @@ async function main() {
     );
 
     await context.close();
+
+    const darkContext = await browser.newContext({
+      javaScriptEnabled: false,
+      colorScheme: "dark",
+    });
+    await addSession(darkContext);
+    const darkPage = await darkContext.newPage();
+    await darkPage.setViewportSize({ width: 1440, height: 900 });
+    response = await darkPage.goto(
+      `${origin}/admin?${range}&report=overview`,
+      { waitUntil: "load" },
+    );
+    assert.equal(response.status(), 200);
+    await assertMetric(darkPage, "Page views", "8");
+    await assertVisualTheme(darkPage, "dark", "40px");
+    if (process.env.ANALYTICO_DARK_SCREENSHOT_PATH) {
+      await darkPage.screenshot({
+        path: process.env.ANALYTICO_DARK_SCREENSHOT_PATH,
+        fullPage: true,
+      });
+    }
+    await darkContext.close();
   } finally {
     await browser.close();
   }
@@ -312,13 +336,111 @@ async function main() {
       startup_api_requests: 0,
       persistent_storage_entries: 0,
       first_view: "useful-over-64KiBps-link",
+      visual_themes: ["light", "dark"],
+      contrast: "wcag-aa",
     }) + "\n",
   );
+}
+
+async function addSession(context) {
+  await context.addCookies([{
+    name: "analytico_session",
+    value: sessionToken,
+    url: origin,
+    httpOnly: true,
+    sameSite: "Strict",
+  }]);
 }
 
 async function assertMetric(page, label, expected) {
   const item = page.locator(".metrics li", { hasText: label });
   assert.equal(await item.locator("strong").textContent(), expected);
+}
+
+async function assertVisualTheme(page, theme, expectedControlHeight) {
+  const actual = await page.evaluate(() => {
+    const root = getComputedStyle(document.documentElement);
+    const styles = (selector) => getComputedStyle(document.querySelector(selector));
+    const link = styles(".account-nav > a");
+    const action = styles(".range-filter button");
+    const active = styles('.report-tabs a[aria-current="page"]');
+    const metric = styles(".metrics strong");
+    const metricLabel = styles(".metrics span");
+    const brand = styles(".brand");
+    const input = styles('.range-filter input[type="date"]');
+    return {
+      bodyColor: root.color,
+      bodyBackground: root.backgroundColor,
+      linkColor: link.color,
+      actionColor: action.color,
+      actionBackground: action.backgroundColor,
+      activeColor: active.color,
+      activeBackground: active.backgroundColor,
+      metricVariant: metric.fontVariantNumeric,
+      metricLabelColor: metricLabel.color,
+      metricSurface: styles(".metrics li").backgroundColor,
+      brandFamily: brand.fontFamily,
+      controlHeight: input.minHeight,
+      controlBorder: input.borderColor,
+      controlSurface: input.backgroundColor,
+    };
+  });
+  const expected = theme === "light" ? {
+    bodyColor: "rgb(33, 31, 29)",
+    bodyBackground: "rgb(251, 250, 248)",
+    linkColor: "rgb(169, 50, 38)",
+    actionColor: "rgb(251, 250, 248)",
+    actionBackground: "rgb(169, 50, 38)",
+    metricLabelColor: "rgb(117, 110, 104)",
+    metricSurface: "rgb(255, 255, 255)",
+    controlBorder: "rgb(117, 110, 104)",
+    controlSurface: "rgb(255, 255, 255)",
+  } : {
+    bodyColor: "rgb(240, 238, 238)",
+    bodyBackground: "rgb(21, 21, 21)",
+    linkColor: "rgb(255, 111, 97)",
+    actionColor: "rgb(21, 21, 21)",
+    actionBackground: "rgb(255, 111, 97)",
+    metricLabelColor: "rgb(167, 160, 155)",
+    metricSurface: "rgb(29, 29, 29)",
+    controlBorder: "rgb(167, 160, 155)",
+    controlSurface: "rgb(29, 29, 29)",
+  };
+  assert.equal(actual.bodyColor, expected.bodyColor);
+  assert.equal(actual.bodyBackground, expected.bodyBackground);
+  assert.equal(actual.linkColor, expected.linkColor);
+  assert.equal(actual.actionColor, expected.actionColor);
+  assert.equal(actual.actionBackground, expected.actionBackground);
+  assert.equal(actual.activeColor, expected.actionColor);
+  assert.equal(actual.activeBackground, expected.actionBackground);
+  assert.equal(actual.metricLabelColor, expected.metricLabelColor);
+  assert.equal(actual.metricSurface, expected.metricSurface);
+  assert.equal(actual.controlBorder, expected.controlBorder);
+  assert.equal(actual.controlSurface, expected.controlSurface);
+  assert.match(actual.metricVariant, /tabular-nums/);
+  assert.match(actual.metricVariant, /lining-nums/);
+  assert.match(actual.brandFamily, /Georgia/);
+  assert.equal(actual.controlHeight, expectedControlHeight);
+  assert.ok(contrast(actual.bodyColor, actual.bodyBackground) >= 4.5);
+  assert.ok(contrast(actual.linkColor, actual.bodyBackground) >= 4.5);
+  assert.ok(contrast(actual.actionColor, actual.actionBackground) >= 4.5);
+  assert.ok(contrast(actual.activeColor, actual.activeBackground) >= 4.5);
+  assert.ok(contrast(actual.metricLabelColor, actual.metricSurface) >= 4.5);
+  assert.ok(contrast(actual.controlBorder, actual.controlSurface) >= 3);
+}
+
+function contrast(first, second) {
+  const luminances = [first, second].map((value) => {
+    const channels = value.match(/[\d.]+/g).slice(0, 3).map((channel) => {
+      const encoded = Number(channel) / 255;
+      return encoded <= 0.04045
+        ? encoded / 12.92
+        : ((encoded + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * channels[0] + 0.7152 * channels[1] +
+      0.0722 * channels[2];
+  }).sort((a, b) => b - a);
+  return (luminances[0] + 0.05) / (luminances[1] + 0.05);
 }
 
 main().catch((error) => {
