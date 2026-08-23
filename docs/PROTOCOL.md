@@ -5,7 +5,8 @@
 > Protocol-v2 tracker anonymous identity, `identify()`, `reset()`, 30-minute
 > client session rotation, explicit site timezone bucketing, and typed property
 > storage/query primitives, SPA navigation, engagement/scroll, exact tracker
-> value handling, and opt-in automatic events are implemented. Exact legacy
+> value handling, opt-in automatic events, and D32's schema-5 traffic classifier
+> are implemented. Exact legacy
 > migration and mixed-data coverage are implemented by issue #13; later
 > product queries remain separately issue-backed.
 
@@ -41,6 +42,7 @@ Limits are checked before dynamic allocation where possible:
 | Request target | 4,096 bytes |
 | Header count | 32 |
 | Total header bytes | 16 KiB |
+| User-Agent header | 1,024 bytes |
 | Protocol-v1 POST body | 8 KiB |
 | Protocol-v2 POST body | 16 KiB |
 | Site UUID text | 36 bytes |
@@ -170,13 +172,14 @@ server also derives stable `site_local_date` and `site_utc_offset_minutes`
 from the loaded site TZif policy. `identity_quality` is exactly `persistent`
 or `ephemeral`. `self_excluded` is an optional boolean common to all four event
 types; absent and false mean no tracker self-flag, while true sets the tracker
-bit in the stored exclusion source.
+input to the first-receipt permanent exclusion rule.
 
 The canonical protocol-v2 payload digest adds a component when
 `self_excluded=true`. Absent and false preserve the pre-D31 digest so unchanged
 events remain idempotent across migration; changing an existing event to true
-conflicts. Network-prefix classification comes from the first receipt context:
-a later idempotent replay does not rewrite the stored exclusion source.
+conflicts. UA and network classification come from the first receipt context:
+a later idempotent replay does not rewrite the stored traffic class, version,
+rule, or legacy verdict. The request context is not added to the payload digest.
 
 Event-specific fields are closed:
 
@@ -382,10 +385,31 @@ the short-cache `/tracker.js` alias alone advances to the current tracker.
 
 After site and origin validation, the collector compares only the transient
 normalized IPv4 `/24` or IPv6 `/48` prefix with at most 16 explicit per-site
-network exclusions. Raw IP input is neither stored nor logged. A match sets the
-network bit in the stored event's temporary `exclusion_source`; it never drops
-the event. Dashboard mutations refresh the bounded in-memory site-policy
-snapshot before returning success.
+network exclusions. Raw IP input is neither stored nor logged. A tracker or
+network exclusion takes precedence and stores permanent
+`traffic_class=excluded` with the bounded rule `exclude.tracker`,
+`exclude.network`, or `exclude.both`.
+
+The collector evaluates the optional, at-most-1,024-byte User-Agent through
+`UA_CLASSIFIER_V1.md` before insertion. It stores only traffic class,
+classifier version, rule identifier, and—during the one-release D32
+comparison—the exact old six-substring boolean. An exclusion overrides the new
+UA class/rule, stores the legacy boolean as false, and removes that row from
+disagreement cells. The header, a normalized copy, and a hash are neither
+persisted nor logged. Classification performs no
+allocation, file read, network request, regex, or fingerprinting. Browser, OS,
+and device dimensions are derived independently and never carry a bot category.
+
+Every otherwise accepted event is inserted. There is no self-opt-out
+collection suppression or bot drop-at-ingest setting. Dashboard exclusion
+mutations refresh the bounded in-memory site-policy snapshot before returning
+success.
+
+For newly inserted nonexcluded rows, the serving process increments fixed
+old-positive/new-positive and four-cell shadow counters. Duplicates, conflicts,
+rejections, write failures, and exclusions do not enter them. They are emitted
+at `serve_stopped` without UA or rule strings; durable traffic-quality v3
+retains the same verdict comparison by report date.
 
 The site identifier is public and appears in browser markup. It is not an
 authorization credential.

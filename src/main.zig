@@ -59,6 +59,13 @@ pub fn main(init: std.process.Init) !void {
     }
     if (args.len == 5 and
         std.mem.eql(u8, args[1], "m2") and
+        std.mem.eql(u8, args[2], "schema4-fixture"))
+    {
+        try m2_probe.schema4Fixture(allocator, output, args[3], args[4]);
+        return;
+    }
+    if (args.len == 5 and
+        std.mem.eql(u8, args[1], "m2") and
         std.mem.eql(u8, args[2], "time-buckets"))
     {
         try m2_probe.timeBuckets(allocator, output, args[3], args[4]);

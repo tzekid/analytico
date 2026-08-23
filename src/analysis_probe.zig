@@ -47,9 +47,10 @@ pub fn seedTrafficQuality(
         \\  '/excluded-tracker' AS path, 'Excluded tracker' AS page_title,
         \\  CAST('00000000-0000-4000-8000-0000000000e1' AS UUID) AS anonymous_id,
         \\  CAST('00000000-0000-4000-8000-0000000000d1' AS UUID) AS session_id,
-        \\  TRUE AS visitor_day_start, TRUE AS session_start,
+        \\  FALSE AS visitor_day_start, FALSE AS session_start,
         \\  repeat('1', 64) AS event_payload_digest,
-        \\  1 AS exclusion_source
+        \\  4 AS traffic_class, 1 AS classifier_version,
+        \\  'exclude.tracker' AS bot_rule, FALSE AS legacy_bot_verdict
         \\) FROM events
         \\WHERE event_id = CAST('00000000-0000-4000-8000-000000000107' AS UUID);
         \\INSERT INTO events SELECT * REPLACE (
@@ -59,9 +60,10 @@ pub fn seedTrafficQuality(
         \\  '/excluded-network' AS path, 'Excluded network' AS page_title,
         \\  CAST('00000000-0000-4000-8000-0000000000e2' AS UUID) AS anonymous_id,
         \\  CAST('00000000-0000-4000-8000-0000000000d2' AS UUID) AS session_id,
-        \\  TRUE AS visitor_day_start, TRUE AS session_start,
+        \\  FALSE AS visitor_day_start, FALSE AS session_start,
         \\  repeat('2', 64) AS event_payload_digest,
-        \\  2 AS exclusion_source
+        \\  4 AS traffic_class, 1 AS classifier_version,
+        \\  'exclude.network' AS bot_rule, FALSE AS legacy_bot_verdict
         \\) FROM events
         \\WHERE event_id = CAST('00000000-0000-4000-8000-000000000107' AS UUID);
         \\INSERT INTO events SELECT * REPLACE (
@@ -71,9 +73,10 @@ pub fn seedTrafficQuality(
         \\  '/excluded-both' AS path, 'Excluded both' AS page_title,
         \\  CAST('00000000-0000-4000-8000-0000000000e3' AS UUID) AS anonymous_id,
         \\  CAST('00000000-0000-4000-8000-0000000000d3' AS UUID) AS session_id,
-        \\  TRUE AS visitor_day_start, TRUE AS session_start,
+        \\  FALSE AS visitor_day_start, FALSE AS session_start,
         \\  repeat('3', 64) AS event_payload_digest,
-        \\  3 AS exclusion_source
+        \\  4 AS traffic_class, 1 AS classifier_version,
+        \\  'exclude.both' AS bot_rule, FALSE AS legacy_bot_verdict
         \\) FROM events
         \\WHERE event_id = CAST('00000000-0000-4000-8000-000000000107' AS UUID);
     );

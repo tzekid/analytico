@@ -65,7 +65,7 @@ pub fn discover(
         \\    AND occurred_at_utc_micros >= ?
         \\    AND occurred_at_utc_micros < ?
         \\    AND kind = {d}
-        \\    AND exclusion_source = 0
+        \\    AND traffic_class != 4 AND NOT legacy_bot_verdict
         \\    {s}
         \\), expanded AS (
         \\  SELECT document, UNNEST(json_keys(document)) AS property_name
@@ -189,7 +189,7 @@ pub fn countMatching(
         \\  AND occurred_at_utc_micros >= ?
         \\  AND occurred_at_utc_micros < ?
         \\  AND kind = {d}
-        \\  AND exclusion_source = 0
+        \\  AND traffic_class != 4 AND NOT legacy_bot_verdict
         \\  {s}
         \\  AND {s}
     ,
@@ -250,7 +250,7 @@ pub fn breakdown(
         \\    AND occurred_at_utc_micros >= ?
         \\    AND occurred_at_utc_micros < ?
         \\    AND kind = {d}
-        \\    AND exclusion_source = 0
+        \\    AND traffic_class != 4 AND NOT legacy_bot_verdict
         \\    {s}
         \\), typed AS (
         \\  SELECT json_type(json_value) AS json_kind,

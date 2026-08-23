@@ -26,7 +26,10 @@
   turn visitor-days into people or claim the later product routes and views are
   complete. D31 and issue #67 advance stored events to schema 4 for explicit
   self-exclusion, close prerender and ephemeral-identity inflation, and retain
-  every observed self-excluded row for diagnostics.
+  every observed self-excluded row for diagnostics. D32 and issue #68 advance
+  to schema 5, consume every temporary marker into permanent traffic class,
+  separate device from traffic classification, and retain one release of
+  visible old/new classifier shadow evidence without storing raw UAs.
 - The current server-rendered `/admin` dashboard and optional HTMX enhancement
   shipped after M4. HTML, native navigation, and ordinary forms remain the
   application baseline.

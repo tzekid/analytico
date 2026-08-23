@@ -248,12 +248,21 @@ jq -e '
       {"source":"both","events":1}
     ]
 ' <<<"$self_quality" >/dev/null
-test "$("$binary" m2 v2-inspect "$data" "$self_site" "$network_event" |
-    jq -r .exclusion_source)" = 2
-test "$("$binary" m2 v2-inspect "$data" "$self_site" "$both_event" |
-    jq -r .exclusion_source)" = 3
-test "$("$binary" m2 v2-inspect "$data" "$self_site" "$included_event" |
-    jq -r .exclusion_source)" = 0
+network_row=$("$binary" m2 v2-inspect "$data" "$self_site" "$network_event")
+jq -e '
+    .traffic_class == 4 and .classifier_version == 1 and
+    .bot_rule == "exclude.network" and .legacy_bot_verdict == false
+' <<<"$network_row" >/dev/null
+both_row=$("$binary" m2 v2-inspect "$data" "$self_site" "$both_event")
+jq -e '
+    .traffic_class == 4 and .classifier_version == 1 and
+    .bot_rule == "exclude.both" and .legacy_bot_verdict == false
+' <<<"$both_row" >/dev/null
+included_row=$("$binary" m2 v2-inspect "$data" "$self_site" "$included_event")
+jq -e '
+    .traffic_class == 1 and .classifier_version == 1 and
+    .bot_rule == "" and .legacy_bot_verdict == false
+' <<<"$included_row" >/dev/null
 test "$("$binary" m2 identity-links "$data")" = 0
 person=$("$binary" m2 person-inspect "$data" "$self_site" "$identify_anon")
 jq -e --arg key "a:$identify_anon" '
@@ -266,7 +275,7 @@ if grep -aF '203.0.113.9' "$data/meta.db" "$data/events.duckdb" \
     exit 1
 fi
 test "$("$binary" doctor "$data")" = \
-    "ok metadata=v4 events=v4 sites=4 goals=0 funnels=0 stored_events=12 key=ok"
+    "ok metadata=v4 events=v5 sites=4 goals=0 funnels=0 stored_events=12 key=ok"
 grep -Fq '"accepted":12' "$fixture/server.stderr"
 grep -Fq '"excluded":6' "$fixture/server.stderr"
 

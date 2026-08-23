@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "evaluated_at_utc": "2026-07-31",
+  "evaluated_at_utc": "2026-08-23",
   "analytico": {
     "version": "0.3.0",
     "release_target": "linux-x86_64",
@@ -78,6 +78,16 @@
     "firefox": "153.0",
     "webkit": "26.5",
     "scope": "acceptance-test tooling only; not shipped or required at runtime"
+  },
+  "ua_classifier_v1_source": {
+    "repository": "https://github.com/monperrus/crawler-user-agents",
+    "commit": "7baee040e86208bfaf24b2815fd8f322318bd2fa",
+    "data_file": "crawler-user-agents.json",
+    "data_sha256": "c36c67f2527f1a5340858d540c732ebbc3ec866cfc0c5717de82b22a1f8dc537",
+    "data_bytes": 542944,
+    "license": "MIT",
+    "runtime_data_file": false,
+    "status": "reviewed source for the accepted curated compile-time classifier-v1 table"
   },
   "htmx": {
     "version": "4.0.0-beta6",

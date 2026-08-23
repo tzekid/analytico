@@ -610,17 +610,24 @@ fn eventCommand(
             try event_store.latestNamed(allocator, args[4])
         else
             try event_store.latest(allocator);
-        try output.print("{s}\t{s}\t{s}\t{s}\t{s}\t{s}\t{s}\t{s}\t{s}\n", .{
-            event.event_name,
-            event.path,
-            event.referrer_host,
-            event.country_code,
-            event.browser_family,
-            event.os_family,
-            event.device_category,
-            event.utm_source,
-            event.properties_json,
-        });
+        try output.print(
+            "{s}\t{s}\t{s}\t{s}\t{s}\t{s}\t{s}\t{s}\t{s}\t{d}\t{d}\t{s}\t{s}\n",
+            .{
+                event.event_name,
+                event.path,
+                event.referrer_host,
+                event.country_code,
+                event.browser_family,
+                event.os_family,
+                event.device_category,
+                event.utm_source,
+                event.properties_json,
+                event.traffic_class,
+                event.classifier_version,
+                event.bot_rule,
+                if (event.legacy_bot_verdict) "true" else "false",
+            },
+        );
         return;
     }
     if (!std.mem.eql(u8, args[2], "add") or

@@ -1,4 +1,5 @@
 const std = @import("std");
+const domain = @import("../domain.zig");
 const property = @import("../property.zig");
 const rate_limit = @import("../http/rate_limit.zig");
 const duckdb = @import("../store/duckdb.zig");
@@ -28,6 +29,81 @@ pub fn rateTable(output: *std.Io.Writer) !void {
         "{{\"attempted\":100000,\"capacity\":{d},\"accepted\":{d},\"rejected\":{d}}}\n",
         .{ rate_limit.max_buckets, accepted, rejected },
     );
+}
+
+pub fn schema4Fixture(
+    allocator: std.mem.Allocator,
+    output: *std.Io.Writer,
+    directory: []const u8,
+    site_id: []const u8,
+) !void {
+    try domain.validateUuid(site_id);
+    const path = try std.fs.path.join(allocator, &.{ directory, "events.duckdb" });
+    var store = try events.Store.open(allocator, path);
+    defer store.deinit();
+    try store.migrateFixtureV4();
+    if (try store.eventCount() != 0) return error.Schema4FixtureRequiresEmptyStore;
+    var statement = try store.database.prepare(
+        \\INSERT INTO events
+        \\SELECT
+        \\  4, 2, 2, CAST(v.event_id AS UUID), p.site_id,
+        \\  1787184000000000 + v.position * 1000000,
+        \\  1787184000000000 + v.position * 1000000,
+        \\  DATE '2026-08-20', DATE '2026-08-20', 0,
+        \\  1, 'page_view', v.path, v.label, 'migration.example',
+        \\  CAST(v.anonymous_id AS UUID), 1, v.user_id,
+        \\  CAST(v.session_id AS UUID), 0, v.exclusion_source_value = 0,
+        \\  '', 'DE', 'en', v.browser, 'Linux', v.device,
+        \\  '', '', '', '', '', '{}', '{}', CAST(NULL AS DECIMAL(18,6)), '',
+        \\  0, 0, CAST(v.event_id AS BLOB), v.exclusion_source_value = 0,
+        \\  repeat(substr(v.event_id, 36, 1), 64), v.exclusion_source_value
+        \\FROM (VALUES
+        \\  (1, '00000000-0000-4000-8000-000000000401',
+        \\      '00000000-0000-4000-8000-000000000501',
+        \\      '00000000-0000-4000-8000-000000000601',
+        \\      '/human', 'Human', 'user-a', 'Chrome', 'desktop', 0),
+        \\  (2, '00000000-0000-4000-8000-000000000402',
+        \\      '00000000-0000-4000-8000-000000000502',
+        \\      '00000000-0000-4000-8000-000000000602',
+        \\      '/legacy-bot', 'Legacy bot', '', 'Other', 'bot', 0),
+        \\  (3, '00000000-0000-4000-8000-000000000403',
+        \\      '00000000-0000-4000-8000-000000000503',
+        \\      '00000000-0000-4000-8000-000000000603',
+        \\      '/tracker', 'Tracker exclusion', '', 'Chrome', 'desktop', 1),
+        \\  (4, '00000000-0000-4000-8000-000000000404',
+        \\      '00000000-0000-4000-8000-000000000504',
+        \\      '00000000-0000-4000-8000-000000000604',
+        \\      '/network', 'Network exclusion', '', 'Chrome', 'desktop', 2),
+        \\  (5, '00000000-0000-4000-8000-000000000405',
+        \\      '00000000-0000-4000-8000-000000000505',
+        \\      '00000000-0000-4000-8000-000000000605',
+        \\      '/both', 'Both exclusion', '', 'Chrome', 'desktop', 3),
+        \\  (6, '00000000-0000-4000-8000-000000000406',
+        \\      '00000000-0000-4000-8000-000000000506',
+        \\      '00000000-0000-4000-8000-000000000606',
+        \\      '/excluded-legacy-bot', 'Excluded legacy bot', '',
+        \\      'Other', 'bot', 1)
+        \\) v(position, event_id, anonymous_id, session_id, path, label,
+        \\    user_id, browser, device, exclusion_source_value)
+        \\CROSS JOIN (SELECT ?::VARCHAR AS site_id) p
+    );
+    defer statement.deinit();
+    try statement.bindText(1, site_id);
+    var result = try statement.execute();
+    result.deinit();
+    var link = try store.database.prepare(
+        \\INSERT INTO identity_links VALUES (
+        \\  ?, CAST('00000000-0000-4000-8000-000000000501' AS UUID),
+        \\  'user-a', 1787184000000000,
+        \\  CAST('00000000-0000-4000-8000-000000000401' AS UUID)
+        \\)
+    );
+    defer link.deinit();
+    try link.bindText(1, site_id);
+    var link_result = try link.execute();
+    link_result.deinit();
+    try store.checkpoint();
+    try output.writeAll("schema4 classifier fixture committed events=6 links=1\n");
 }
 
 pub fn inspectV2(
@@ -272,10 +348,11 @@ pub fn propertyMillion(
         \\  utm_campaign, utm_term, utm_content, properties_json,
         \\  user_traits_json, value_amount, value_currency, engagement_ms,
         \\  max_scroll_depth, visitor_day_id, visitor_day_start,
-        \\  event_payload_digest, exclusion_source
+        \\  event_payload_digest, traffic_class, classifier_version, bot_rule,
+        \\  legacy_bot_verdict
         \\)
         \\SELECT
-        \\  4, 2, 2,
+        \\  5, 2, 2,
         \\  CAST('00000000-0000-4000-8000-000000000f11' AS UUID),
         \\  '00000000-0000-4000-8000-000000000f10',
         \\  1767225600000000 + i * 1000,
@@ -309,7 +386,7 @@ pub fn propertyMillion(
         \\  END || '"' ||
         \\  ',"region":"r' || CAST(i % 8 AS VARCHAR) || '"}',
         \\  '{}', CAST(NULL AS DECIMAL(18,6)), '', 0, 0,
-        \\  CAST('benchmark' AS BLOB), i = 0, '', 0
+        \\  CAST('benchmark' AS BLOB), i = 0, '', 1, 1, '', FALSE
         \\FROM range(1000000) rows(i);
     );
     try store.checkpoint();

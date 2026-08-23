@@ -10,7 +10,8 @@ dashboard, removable HTMX enhancement, and the optional Cloudio boundary. The
 executable owns the exact embedded
 stores, numbered schemas, validated sites/origins and v1 property allowlists,
 goals/funnels, a private visitor key, dual bounded collector protocols, event
-schema 4, stored self-exclusion, daily-identity compatibility, direct durable event insertion, a tiny
+schema 5, permanent traffic classes, a versioned local UA classifier, stored
+self-exclusion, daily-identity compatibility, direct durable event insertion, a tiny
 self-hosted v1 tracker plus a v2 identity tracker, a JavaScript-free pixel, complete typed CLI reports,
 verified lifecycle commands, a hardened single-service deployment, and
 checksummed release packaging.
@@ -65,6 +66,7 @@ That target is a plan, not a claim that the capabilities are already shipped.
 - [Analytico 1.0 scope contract](docs/SCOPE_1.0.md)
 - [Analytico 1.0 release contract](docs/RELEASE_CONTRACT_1.0.md)
 - [Bot detection and traffic-quality plan](docs/BOT_DETECTION_1.0.md)
+- [User-Agent traffic classifier v1](docs/UA_CLASSIFIER_V1.md)
 - [Analytico 1.0 requirement traceability](docs/REQUIREMENT_TRACEABILITY_1.0.csv)
 - [Product specification](docs/SPEC.md)
 - [Architecture](docs/ARCHITECTURE.md)

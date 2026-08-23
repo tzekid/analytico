@@ -1,10 +1,10 @@
 # Data model and metric semantics
 
 > **Status:** Sections 1–9 define the shipped analytics-metadata subset in
-> Turso, DuckDB event schema 4, and metric semantics v1. Authentication storage
+> Turso, DuckDB event schema 5, and metric semantics v1. Authentication storage
 > remains governed by its own specification. The daily-pseudonym and UTC-day
 > rules remain the compatibility contract for existing rows and current
-> reports. Section 10 records the remaining 1.0 transition; event schema 4 does
+> reports. Section 10 records the remaining 1.0 transition; event schema 5 does
 > not by itself claim that metric v2 or site-local reporting is shipped.
 
 This document is the contract for durable fields and reported numbers. SQL
@@ -27,7 +27,8 @@ VisitorDayId         16 opaque bytes
 CountryCode          ISO-like two-letter code or ZZ
 BrowserFamily        closed enum with Other and Unknown
 OsFamily             closed enum with Other and Unknown
-DeviceCategory       desktop | mobile | tablet | bot | other | unknown
+DeviceCategory       desktop | mobile | tablet | other | unknown
+TrafficClass         human-presumed | declared-bot | automation | excluded | suspected
 ReportRange          inclusive start date, exclusive end instant
 ```
 
@@ -195,7 +196,7 @@ CREATE TABLE event_migrations (
 );
 ```
 
-### `events` — event schema migration 4
+### `events` — event schema migration 5
 
 ```sql
 CREATE TABLE events (
@@ -241,8 +242,12 @@ CREATE TABLE events (
     visitor_day_id BLOB NOT NULL,
     visitor_day_start BOOLEAN NOT NULL,
     event_payload_digest VARCHAR NOT NULL,
-    exclusion_source UTINYINT NOT NULL,
-    CHECK (exclusion_source BETWEEN 0 AND 3)
+    traffic_class UTINYINT NOT NULL,
+    classifier_version USMALLINT NOT NULL,
+    bot_rule VARCHAR NOT NULL,
+    legacy_bot_verdict BOOLEAN NOT NULL,
+    CHECK (traffic_class BETWEEN 1 AND 5),
+    CHECK (length(bot_rule) <= 64)
 );
 
 CREATE TABLE identity_links (
@@ -260,14 +265,23 @@ Conventions:
 - `kind` values 1–4 are page view, custom event, engagement, and identify.
 - `identity_quality` values 1–3 are persistent, ephemeral, and migrated
   legacy daily identity.
-- `event_schema_version=4`; protocol/tracker versions are 1 for compatibility
+- `event_schema_version=5`; protocol/tracker versions are 1 for compatibility
   events and 2 for v2 envelopes.
-- `exclusion_source` is the temporary D31 closed bitset: 0 none, 1 tracker
-  self-flag, 2 configured network prefix, and 3 both. Product queries require
-  zero; diagnostics include every value. Event migration 4 preserves every
-  schema-3 field byte-for-byte, changes only the row schema version, and
-  initializes the marker to zero. #68 migrates nonzero values to permanent
-  `traffic_class=excluded` in event schema 5 and removes this temporary field.
+- `traffic_class` values 1–5 are human-presumed, declared-bot, automation,
+  excluded, and suspected. `classifier_version=1` identifies D32 UA/exclusion
+  classification; zero marks honest historical rows whose discarded UA cannot
+  be reclassified. `bot_rule` is an empty or bounded classifier/exclusion rule
+  ID. `docs/UA_CLASSIFIER_V1.md` governs the permanent classifier.
+- `legacy_bot_verdict` is the exact old six-substring boolean retained for the
+  single #68 comparison release. During that release product queries require
+  `traffic_class <> 4 AND legacy_bot_verdict=false`; diagnostics include every
+  class and compare nonexcluded classifier-v1 rows. #69 owns review of deployed
+  disagreement data, predicate promotion, and removal of this temporary byte.
+- A newly excluded row always stores `legacy_bot_verdict=false`; exclusion
+  precedence removes it from UA shadow evidence even when the discarded header
+  would have matched the old predicate.
+- `device_category` is again only a device dimension. Traffic classification
+  never overloads it with `bot`.
 - Absent optional strings are empty rather than `NULL` to simplify bounded
   grouping and decoding; only absent exact value amount is `NULL`.
 - `properties_json` and `user_traits_json` are canonical bounded flat JSON.
@@ -325,6 +339,26 @@ has row schema 4 and `exclusion_source=0`. The streaming check stays inside the
 fixed DuckDB memory budget even for the million-event gate. The migration
 neither reclassifies historical traffic nor changes identity, session, time,
 property, value, or metric-v1 compatibility facts.
+
+Migration 5 performs another transactional create/backfill/swap and removes
+`exclusion_source`. Nonzero sources map exactly to class excluded,
+classifier version 1, legacy false, and rules `exclude.tracker`,
+`exclude.network`, or `exclude.both`. Every old device `bot` value becomes
+`unknown`, including excluded rows, because the lost UA cannot reconstruct the
+device. Source-zero rows formerly marked with device `bot` map to class
+declared-bot, classifier version 0, rule
+`legacy-device-bot`, legacy true, and device `unknown`. Every other source-zero
+row maps to class human-presumed, classifier version 0, empty rule, and legacy
+false. No historical row is presented as classifier-v1 coverage.
+
+Before swap, the streaming verifier checks source and target row counts plus
+XOR, sum, minimum, and maximum aggregate fingerprints for all preserved
+fields. The only permitted preserved-field exception is the documented legacy
+device `bot` to `unknown` rewrite; a separate mapping check proves it exactly.
+It also proves identity links unchanged, every row at schema 5, all closed
+class/version/rule/legacy mappings, and absence of the temporary source column.
+The million-row, interrupted, and repeated-upgrade gates stay inside the fixed
+DuckDB limits. Rollback restores the verified pre-schema-5 database pair.
 
 ## 4. Normalization
 
@@ -463,10 +497,12 @@ Count accepted `kind = 1` rows in the requested range.
 
 ### Daily unique visitors
 
-Count non-bot `visitor_day_start` rows. This is equivalent to counting distinct
-daily pseudonyms because the one writer sets exactly one start for each
-site/date/pseudonym. For a multi-day headline, sum those daily counts. The value
-is a visitor-day total, not a cross-day person count.
+Count product-eligible `visitor_day_start` rows. During D32's one-release shadow
+this means `traffic_class <> 4 AND legacy_bot_verdict=false`. This is
+equivalent to counting distinct daily pseudonyms because the one writer sets
+exactly one eligible start for each site/date/pseudonym. For a multi-day
+headline, sum those daily counts. The value is a visitor-day total, not a
+cross-day person count.
 
 ### Popular pages
 
@@ -496,9 +532,10 @@ from campaign reports.
 
 ### Country, browser, OS, and device
 
-Use the first non-bot event in each session as the session dimension. Return
-session count and distinct daily pseudonyms. Unknown is a visible category.
-Bots are excluded from product reports and counted separately in diagnostics.
+Use the first product-eligible event in each session as the session dimension.
+Return session count and distinct daily pseudonyms. Unknown is a visible
+category. Traffic class is reported separately in diagnostics and never
+appears as a device value.
 
 ### Custom events
 
@@ -528,7 +565,7 @@ bounded by the report contract.
 
 ## 8. Time ranges — metric v1
 
-- Metric-v1 compatibility reports over event schemas 3 and 4 use UTC only.
+- Metric-v1 compatibility reports over event schemas 3, 4, and 5 use UTC only.
 - CLI date input is `[start_date, end_date]`, converted to the half-open instant
   range `[start 00:00:00Z, day_after_end 00:00:00Z)`.
 - Maximum interactive range is 400 days.
@@ -566,7 +603,9 @@ legacy migration, mixed-data coverage, and rollback evidence. Issue #12
 provides the tracker SPA, engagement/scroll, exact value, and opt-in automatic
 event producers for those schema-3 fields. D31 and issue #67 advance the table
 to schema 4 with a temporary stored self-exclusion source while preserving the
-schema-3 facts.
+schema-3 facts. D32 and issue #68 consume every temporary source into schema 5,
+separate the permanent traffic class from device, and retain one deployed
+release of observable old/new classifier shadow evidence.
 
 ### Identity and sessions
 
@@ -639,8 +678,9 @@ explicit session/person filter scopes, and exact value/currency groups. They do
 not add a projection, EAV table, rollup, cache table, or migration. Existing
 metric-v1 queries continue to read their UTC visitor-day compatibility columns.
 
-`METRIC_SEMANTICS_V2.md` and D30 define the additive #66 traffic-quality
-diagnostic bridge. It reads schema-3 facts without a migration and aligns its
-canonical-person selection to the current received-UTC Overview range so the
-person and visitor-day values are comparable. It never reinterprets legacy
-daily identities as persistent people and does not classify or drop events.
+`METRIC_SEMANTICS_V2.md` and D30 define the additive traffic-quality diagnostic
+bridge. D31 version 2 adds explicit stored exclusions. D32 version 3 reports
+schema-5 classes, classifier coverage, bounded rule totals, and the one-release
+legacy/new disagreement cells while retaining the same received-UTC Overview
+range. It never reinterprets legacy daily identities as persistent people and
+no accepted event is dropped.

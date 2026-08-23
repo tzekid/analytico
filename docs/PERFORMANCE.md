@@ -11,6 +11,8 @@
 > key and measures `identify()`; issue #12 adds measured SPA, engagement,
 > scroll, value, and opt-in automatic behavior. D31 adds one bounded
 > self-exclusion key; the current tracker remains below the 5 KiB Brotli budget.
+> D32 adds a compile-time UA rule table only; it adds no tracker bytes or
+> runtime data load.
 
 The numbers in this file are budgets, not claims. M0 records the first measured
 baseline on the target VPS. A release passes both the absolute budget and the
@@ -68,6 +70,7 @@ documented rather than silently changed.
 | --- | ---: |
 | Dynamic request-body bytes | 8 KiB maximum |
 | Headers | 32 / 16 KiB maximum |
+| User-Agent classification input | 1,024 bytes maximum |
 | Per-request temporary allocation retained after response | 0 bytes |
 | Database statements for a valid event | 1 insert transaction |
 | Collector response body | 0 bytes for POST; fixed GIF for pixel |
@@ -77,6 +80,15 @@ documented rather than silently changed.
 The rate-limit table, site-policy snapshot, and connection count are fixed or
 configuration-bounded. An attacker cannot increase them without limit by
 varying request input.
+
+UA classifier v1 contains at most 64 compile-time rule entries. Matching is one
+bounded pass over the at-most-1,024-byte header per rule, with no allocation,
+regex, runtime file, or network request. Only the closed class, numeric version,
+at-most-64-byte rule ID, and one comparison boolean reach the event row. A
+future measured collection-latency regression must first reduce or reorganize
+the concrete table; it does not justify a service or downloaded corpus.
+The D32 process shadow adds exactly six `u64` counters. No per-rule map,
+input-derived counter name, or retained UA is permitted.
 
 ## 4. Report work bounds
 
@@ -89,6 +101,8 @@ varying request input.
 - Query deadline: 2 seconds.
 - Result rows decoded before pagination: query-specific and covered by `LIMIT`;
   never a full unbounded collection in Zig memory.
+- Traffic-quality version 3 returns at most 100 daily rows and 64 class/rule
+  rows from one static bound statement under the same deadline.
 - JSON/CSV export uses streaming output and a separate offline command.
 
 Report SQL must begin with site and time predicates. Query plans and timings for
@@ -169,6 +183,21 @@ eight-step ordered funnel. After one warmup, ten full CLI-process samples
 measured overview p50/p95/p99 at 86/111/111 ms and the funnel at
 920/982/982 ms. The DuckDB file was 15,740,928 bytes. Full environment and
 fixture details are in `bench/results/m3-reports-release-safe.json`.
+
+### Traffic classifier and traffic-quality v3 confirmation
+
+Issue #68's same-host ReleaseSafe collection runs measured durable-insert p95
+at 15.362 ms and 17.504 ms (p99 21.734 ms and 18.811 ms). The deployed
+schema-4 artifact measured 11.169 ms p95 in the same harness. The relative
+increase remains below the absolute 25 ms p95 and 100 ms p99 budgets, so it
+does not cross the regression policy's combined blocking condition.
+
+The schema-5 million-event report fixture now includes ten traffic-quality v3
+samples in `bench-m3`. Narrow required-column materialization plus one combined
+traffic summary pass measured p50/p95/p99 at 1,146/1,262/1,262 ms, below the
+canonical two-second interactive deadline. The same run measured Overview p95
+94 ms and the eight-step funnel p95 900 ms. The gate fails if any sampled
+traffic-quality run exceeds the deadline.
 
 ### Analytico 1.0 property-query gate
 

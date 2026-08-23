@@ -3,7 +3,8 @@
 This plan corrects inflated visitor counts and establishes layered bot
 detection. It is sequenced so each phase delivers value alone and every
 detection change is measurable before it affects product metrics. Tracked in
-GitHub issues #66–#70; execute in that order.
+GitHub issues #66–#70; execute in that order. Phases 0–2 describe the shipped
+#68 candidate, while phases 3–4 remain planned work.
 
 ## Motivation
 
@@ -12,11 +13,11 @@ GitHub issues #66–#70; execute in that order.
 - Before phase 1, the tracker fired during Chrome prerendering;
   ephemeral-storage visitors minted a fresh visitor-day per page load; owner
   self-visits counted.
-- The UA classifier is six case-sensitive substrings: it misses HTTP
-  libraries, HeadlessChrome, and tokenless named bots, and can false-positive
-  on real devices ("Cubot" phones). Raw UAs are discarded at ingest, so
-  misclassified history is unrecoverable — the classifier must be corrected
-  and versioned before 1.0 baselines freeze.
+- Before phase 2, the UA classifier was six case-sensitive substrings: it
+  missed HTTP libraries, HeadlessChrome, and tokenless named bots, and could
+  false-positive on real devices ("Cubot" phones). Raw UAs are discarded at
+  ingest, so misclassified history is unrecoverable and cannot be replayed
+  through the corrected versioned classifier.
 
 ## Doctrine
 
@@ -63,9 +64,13 @@ Schema 5 adds `traffic_class`
 `classifier_version`, and matched `bot_rule` per event; `device_category`
 returns to a pure device dimension. Vendored, versioned, compile-time UA rule
 list with case-insensitive word-boundary matching and false-positive traps in
-fixtures. Empty UA classifies as declared-bot. Per-site bot policy
-(store-and-exclude default, optional drop-at-ingest). One release of shadow
-mode comparing old and new verdicts.
+fixtures. Empty UA classifies as declared-bot. Every otherwise accepted event
+is stored; there is no self-opt-out or bot drop-at-ingest policy. One release
+stores the exact old verdict beside the permanent class and exposes bounded
+old/new disagreement diagnostics plus fixed restart-scoped serve counters
+before #69 may promote the product predicate.
+The accepted mechanism and pinned rule provenance are D32 and
+`UA_CLASSIFIER_V1.md`.
 
 ### Phase 3 — Bounded signals (#69, P1)
 
