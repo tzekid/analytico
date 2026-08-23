@@ -12,10 +12,15 @@ case "$previous" in /*) ;; *) previous="$PWD/$previous" ;; esac
 
 fixture=$(mktemp -d)
 server_pid=
+migration_pid=
 cleanup() {
     if [[ -n "$server_pid" ]] && kill -0 "$server_pid" 2>/dev/null; then
         kill -TERM "$server_pid" 2>/dev/null || true
         wait "$server_pid" 2>/dev/null || true
+    fi
+    if [[ -n "$migration_pid" ]]; then
+        kill -KILL "$migration_pid" 2>/dev/null || true
+        wait "$migration_pid" 2>/dev/null || true
     fi
     rm -rf -- "$fixture"
 }
@@ -105,4 +110,76 @@ test "$("$previous" doctor "$rolled_back")" = \
 test "$("$previous" report "$rolled_back" migration "$today" "$today" \
     overview --format json)" = "$before"
 
-echo "schema-6 to metadata-5/event-7 migration and rollback passed"
+million="$fixture/million"
+"$previous" init "$million" >/dev/null
+"$previous" site add "$million" million Million https://million.example \
+    --timezone UTC >/dev/null
+million_site_id=$("$previous" site list "$million" |
+    awk -F '\t' '$1 == "million" { print $2 }')
+"$previous" m3 million "$million" "$million_site_id" >/dev/null
+test "$("$previous" doctor "$million")" = \
+    "ok metadata=v4 events=v6 sites=1 goals=0 funnels=0 stored_events=1000000 key=ok"
+million_before_evidence=$("$current" m3 legacy-evidence "$million")
+test "$(jq -r .event_migration_version <<<"$million_before_evidence")" = 6
+test "$(jq -r .rows <<<"$million_before_evidence")" = 1000000
+million_before=$("$previous" report "$million" million \
+    2025-01-01 2025-01-12 overview --format json)
+million_backup="$fixture/million-schema6-backup"
+test "$("$current" backup "$million" "$million_backup")" = \
+    "backup complete destination=$million_backup metadata=v4 events=v6"
+"$current" migrate "$million" "$million_backup" \
+    >"$fixture/million-migrate.stdout" \
+    2>"$fixture/million-migrate.stderr" &
+migration_pid=$!
+opened_at_ticks=
+for _ in {1..500}; do
+    if ! kill -0 "$migration_pid" 2>/dev/null; then
+        echo "schema-7 million-row migration completed before interruption" >&2
+        wait "$migration_pid" || true
+        exit 1
+    fi
+    for fd in /proc/"$migration_pid"/fd/*; do
+        if [[ "$(readlink "$fd" 2>/dev/null || true)" == \
+            "$million/events.duckdb"* ]]; then
+            ticks=$(awk '{ print $14 + $15 }' /proc/"$migration_pid"/stat)
+            if [[ -z "$opened_at_ticks" ]]; then
+                opened_at_ticks=$ticks
+            elif (( ticks >= opened_at_ticks + 2 )); then
+                break 2
+            fi
+        fi
+    done
+    sleep 0.01
+done
+if [[ -z "$opened_at_ticks" ]] ||
+    (( $(awk '{ print $14 + $15 }' /proc/"$migration_pid"/stat) < opened_at_ticks + 2 )); then
+    echo "schema-7 million-row migration never became active on the event database" >&2
+    exit 1
+fi
+kill -KILL "$migration_pid"
+if wait "$migration_pid" 2>/dev/null; then
+    echo "interrupted schema-7 migration unexpectedly exited successfully" >&2
+    exit 1
+fi
+migration_pid=
+test "$("$current" migrate "$million" "$million_backup")" = \
+    "migrated metadata=v5 events=v7"
+test "$("$current" doctor "$million")" = \
+    "ok metadata=v5 events=v7 sites=1 goals=0 funnels=0 stored_events=1000000 key=ok"
+million_after_evidence=$("$current" m3 legacy-evidence "$million")
+test "$(jq -r .event_migration_version <<<"$million_after_evidence")" = 7
+test "$(jq -r .rows <<<"$million_after_evidence")" = 1000000
+test "$(jq -r .preserved_fingerprint <<<"$million_after_evidence")" = \
+    "$(jq -r .preserved_fingerprint <<<"$million_before_evidence")"
+test "$("$current" report "$million" million \
+    2025-01-01 2025-01-12 overview --format json)" = "$million_before"
+test "$("$current" migrate "$million" "$million_backup")" = \
+    "migrated metadata=v5 events=v7"
+million_rollback="$fixture/million-rollback"
+"$previous" restore "$million_backup" "$million_rollback" --verify >/dev/null
+test "$("$previous" doctor "$million_rollback")" = \
+    "ok metadata=v4 events=v6 sites=1 goals=0 funnels=0 stored_events=1000000 key=ok"
+test "$("$previous" report "$million_rollback" million \
+    2025-01-01 2025-01-12 overview --format json)" = "$million_before"
+
+echo "schema-6 to metadata-5/event-7 one-row and interrupted million-row migration, retry, repeat, restore, and rollback passed"
