@@ -17,7 +17,7 @@ pub fn seed(
     var store = try events.Store.open(allocator, event_path);
     defer store.deinit();
     try store.migrate();
-    try store.database.exec("DELETE FROM events");
+    try store.database.exec("DELETE FROM identity_links; DELETE FROM events");
 
     const visitor_a: [16]u8 = @splat(0x0a);
     const visitor_a_day_two: [16]u8 = @splat(0x1a);
@@ -235,52 +235,80 @@ pub fn million(
     var store = try events.Store.open(allocator, event_path);
     defer store.deinit();
     try store.migrate();
-    try store.database.exec("DELETE FROM events");
+    try store.database.exec("DELETE FROM identity_links; DELETE FROM events");
     var statement = try store.database.prepare(
-        \\INSERT INTO events
-        \\SELECT
-        \\  1,
-        \\  CAST(
-        \\    '00000000-0000-4000-8000-' || lpad(i::VARCHAR, 12, '0')
-        \\    AS UUID
-        \\  ),
-        \\  ?,
-        \\  1735689600000000 + i * 1000000,
-        \\  DATE '2025-01-01' + ((i // 86400)::INTEGER),
-        \\  CASE WHEN i % 10 >= 8 THEN 2 ELSE 1 END,
-        \\  CASE
-        \\    WHEN i % 10 = 8 THEN 'signup'
-        \\    WHEN i % 10 = 9 THEN 'purchase'
-        \\    ELSE 'pageview'
-        \\  END,
-        \\  CASE
-        \\    WHEN i % 10 = 0 THEN '/'
-        \\    WHEN i % 10 = 1 THEN '/pricing'
-        \\    WHEN i % 10 = 2 THEN '/docs'
-        \\    WHEN i % 10 = 3 THEN '/features'
-        \\    WHEN i % 10 = 4 THEN '/download'
-        \\    WHEN i % 10 = 5 THEN '/install'
-        \\    WHEN i % 10 = 6 THEN '/account'
-        \\    WHEN i % 10 = 7 THEN '/checkout'
-        \\    WHEN i % 10 = 8 THEN '/welcome'
-        \\    ELSE '/receipt'
-        \\  END,
-        \\  CAST(lpad(((i // 10) % 5000)::VARCHAR, 16, '0') AS BLOB),
-        \\  CAST(lpad((i // 10)::VARCHAR, 32, '0') AS UUID),
-        \\  visitor_day_start,
-        \\  i % 10 = 0,
-        \\  '', 'US', 'Chrome', 'Linux', 'desktop',
-        \\  '', '', '', '', '', '{}'
-        \\FROM (
-        \\  SELECT i,
-        \\    row_number() OVER (
-        \\      PARTITION BY
-        \\        DATE '2025-01-01' + ((i // 86400)::INTEGER),
-        \\        (i // 10) % 5000
-        \\      ORDER BY i
-        \\    ) = 1 AS visitor_day_start
+        \\INSERT INTO events (
+        \\  event_schema_version, protocol_version, tracker_version,
+        \\  event_id, site_id, received_at_utc_micros,
+        \\  occurred_at_utc_micros, received_date_utc, site_local_date,
+        \\  site_utc_offset_minutes, kind, event_name, path, page_title,
+        \\  hostname, anonymous_id, identity_quality, user_id, session_id,
+        \\  sequence, session_start, referrer_host, country_code, language,
+        \\  browser_family, os_family, device_category, utm_source,
+        \\  utm_medium, utm_campaign, utm_term, utm_content,
+        \\  properties_json, user_traits_json, value_amount, value_currency,
+        \\  engagement_ms, max_scroll_depth, visitor_day_id,
+        \\  visitor_day_start, event_payload_digest
+        \\)
+        \\WITH generated AS (
+        \\  SELECT
+        \\    i,
+        \\    params.site_id,
+        \\    CAST(
+        \\      '00000000-0000-4000-8000-' || lpad(i::VARCHAR, 12, '0')
+        \\      AS UUID
+        \\    ) AS event_id,
+        \\    1735689600000000 + i * 1000000 AS received_at,
+        \\    DATE '2025-01-01' + ((i // 86400)::INTEGER) AS received_date,
+        \\    CAST(lpad(((i // 10) % 5000)::VARCHAR, 16, '0') AS BLOB)
+        \\      AS visitor_day_id,
+        \\    CAST(lpad((i // 10)::VARCHAR, 32, '0') AS UUID) AS session_id,
+        \\    CASE WHEN i % 10 >= 8 THEN 2 ELSE 1 END AS kind,
+        \\    CASE
+        \\      WHEN i % 10 = 8 THEN 'signup'
+        \\      WHEN i % 10 = 9 THEN 'purchase'
+        \\      ELSE 'pageview'
+        \\    END AS event_name,
+        \\    CASE
+        \\      WHEN i % 10 = 0 THEN '/'
+        \\      WHEN i % 10 = 1 THEN '/pricing'
+        \\      WHEN i % 10 = 2 THEN '/docs'
+        \\      WHEN i % 10 = 3 THEN '/features'
+        \\      WHEN i % 10 = 4 THEN '/download'
+        \\      WHEN i % 10 = 5 THEN '/install'
+        \\      WHEN i % 10 = 6 THEN '/account'
+        \\      WHEN i % 10 = 7 THEN '/checkout'
+        \\      WHEN i % 10 = 8 THEN '/welcome'
+        \\      ELSE '/receipt'
+        \\    END AS path
         \\  FROM range(1000000) source(i)
-        \\) rows
+        \\  CROSS JOIN (SELECT ?::VARCHAR AS site_id) params
+        \\), sequenced AS (
+        \\  SELECT *,
+        \\    md5(
+        \\      'analytico/legacy-daily/v1|' || site_id || '|' ||
+        \\      CAST(received_date AS VARCHAR) || '|' || hex(visitor_day_id)
+        \\    ) AS identity_hash,
+        \\    row_number() OVER (
+        \\      PARTITION BY received_date, visitor_day_id ORDER BY i
+        \\    ) = 1 AS visitor_day_start
+        \\  FROM generated
+        \\)
+        \\SELECT
+        \\  3, 1, 1, event_id, site_id,
+        \\  received_at, received_at, received_date, received_date, 0,
+        \\  kind, event_name, path, '', '', CAST(
+        \\    substr(identity_hash, 1, 8) || '-' ||
+        \\    substr(identity_hash, 9, 4) || '-5' ||
+        \\    substr(identity_hash, 14, 3) || '-a' ||
+        \\    substr(identity_hash, 18, 3) || '-' ||
+        \\    substr(identity_hash, 21, 12) AS UUID
+        \\  ),
+        \\  3, '', session_id, CAST(i % 10 AS UINTEGER), i % 10 = 0,
+        \\  '', 'US', '', 'Chrome', 'Linux', 'desktop',
+        \\  '', '', '', '', '', '{}', '{}', CAST(NULL AS DECIMAL(18,6)), '',
+        \\  0, 0, visitor_day_id, visitor_day_start, ''
+        \\FROM sequenced
     );
     defer statement.deinit();
     try statement.bindText(1, site_id);
