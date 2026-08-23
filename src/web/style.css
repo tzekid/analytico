@@ -242,10 +242,13 @@ textarea { min-height: 7rem; resize: vertical; }
   box-shadow: var(--shadow-panel);
 }
 .metrics span { color: var(--color-inkMuted); font-size: var(--font-sm); }
-.metrics strong { display: block; margin-top: var(--space-1); font-size: var(--font-xxl); font-variant-numeric: tabular-nums lining-nums; line-height: 1.15; }
+.metrics strong { display: block; margin-top: var(--space-1); overflow-wrap: anywhere; font-size: var(--font-xxl); font-variant-numeric: tabular-nums lining-nums; line-height: 1.15; }
+.kpi-drill { display: block; color: inherit; text-decoration: none; }
+.kpi-drill:hover span, .kpi-drill:focus-visible span { color: var(--color-link); text-decoration: underline; }
 .kpi-detail { display: block; margin-top: var(--space-2); color: var(--color-inkMuted); font-weight: 700; }
 .kpi-positive { color: var(--color-positive); }
 .kpi-negative { color: var(--color-danger); }
+.kpi-definition, .coverage-note { margin: var(--space-2) 0 0; color: var(--color-inkMuted); font-size: var(--font-xs); line-height: 1.45; }
 
 .notice, .warning, .error { border-radius: var(--radius-md); padding: var(--space-3) var(--space-4); }
 .notice { border-left: var(--space-1) solid var(--color-positive); background: var(--color-positiveWash); color: var(--color-positive); }

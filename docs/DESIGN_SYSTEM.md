@@ -110,7 +110,7 @@ Notices use restrained status semantics, errors use alerts, and loading is
 limited to the region whose existing native navigation or form is in flight.
 None of these enhancement states may replace the JavaScript-free baseline.
 
-The component stylesheet is self-hosted at a versioned `/admin/app.v6.css` path.
+The component stylesheet is self-hosted at a versioned `/admin/app.v7.css` path.
 Changing its bytes requires another path revision because existing responses
 may be cached privately for 24 hours.
 

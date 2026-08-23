@@ -5,6 +5,7 @@ const domain = @import("../domain.zig");
 const report = @import("../report.zig");
 const events = @import("../store/events.zig");
 const meta = @import("../store/meta.zig");
+const analysis_store = @import("../store/analysis.zig");
 const reports = @import("../store/reports.zig");
 const model = @import("model.zig");
 
@@ -270,7 +271,8 @@ pub fn loadPage(
         .limit = query.limit,
         .page = query.page,
     };
-    const result: ?report.Result = if (destination.runsReport() and has_subject)
+    const result: ?report.Result = if (destination.runsReport() and
+        destination != .overview and has_subject)
         try reports.runWithTimeout(
             allocator,
             event_store,
@@ -288,6 +290,34 @@ pub fn loadPage(
         )
     else
         null;
+    const overview_kpis: ?model.OverviewKpis = if (destination == .overview) value: {
+        const context = calendar_context orelse return error.MissingCalendarContext;
+        const resolved_goals = try resolveAnalysisGoals(allocator, goals);
+        const overview = analysis_store.executeOverview(
+            allocator,
+            event_store,
+            .{
+                .site_id = selected.id,
+                .range = query.range,
+                .comparison_range = if (context.comparison_range) |*range|
+                    range.view()
+                else
+                    null,
+                .active_goals = resolved_goals,
+                .strict_traffic_mode = collection_policy.strict_mode,
+                .timeout_ms = report_timeout_ms,
+            },
+        ) catch |err| {
+            if (err == error.AnalysisTimeout) return error.ReportTimeout;
+            return err;
+        };
+        break :value try buildOverviewKpis(
+            allocator,
+            overview,
+            query.comparison,
+            context.includes_incomplete_today,
+        );
+    } else null;
     var quality_request = request;
     quality_request.kind = .traffic_quality;
     quality_request.limit = report.maximum_limit;
@@ -316,6 +346,7 @@ pub fn loadPage(
         .calendar_context = calendar_context,
         .report_time_basis = if (result != null) .metric_v1_utc else .none,
         .result = result,
+        .overview_kpis = overview_kpis,
         .overview_quality = overview_quality,
         .goals = goals,
         .funnels = funnels,
@@ -326,6 +357,353 @@ pub fn loadPage(
         .csrf_token = csrf_token,
         .notice = notice,
     };
+}
+
+fn resolveAnalysisGoals(
+    allocator: std.mem.Allocator,
+    goals: []const meta.Goal,
+) ![]const analysis.ResolvedGoal {
+    const resolved = try allocator.alloc(analysis.ResolvedGoal, goals.len);
+    for (resolved, goals) |*target, goal| {
+        target.* = .{
+            .id = goal.id,
+            .selector = .{
+                .kind = switch (goal.match_kind) {
+                    .event => .exact_event,
+                    .path => .exact_page,
+                    .prefix => .page_prefix,
+                },
+                .value = goal.match_value,
+            },
+        };
+    }
+    return resolved;
+}
+
+fn buildOverviewKpis(
+    allocator: std.mem.Allocator,
+    overview: analysis.OverviewResult,
+    comparison_mode: analysis.Comparison,
+    includes_incomplete_today: bool,
+) !model.OverviewKpis {
+    var cards: std.ArrayList(model.OverviewKpi) = .empty;
+    const unavailable = if (comparison_mode == .none)
+        "No comparison selected"
+    else
+        "Comparison unavailable";
+    try cards.append(allocator, try countKpi(
+        allocator,
+        "Visitors",
+        overview.visitors,
+        unavailable,
+        "Distinct modeled people with a page view or custom event in this site-local range.",
+        .analyze,
+    ));
+    try cards.append(allocator, try countKpi(
+        allocator,
+        "Sessions",
+        overview.sessions,
+        unavailable,
+        "Distinct sessions with meaningful activity in this site-local range.",
+        .analyze,
+    ));
+    try cards.append(allocator, try countKpi(
+        allocator,
+        "Page views",
+        overview.page_views,
+        unavailable,
+        "Accepted page-view events in this site-local range.",
+        .analyze,
+    ));
+    try cards.append(allocator, try ratioKpiModel(
+        allocator,
+        "Engagement rate",
+        overview.engagement_rate,
+        unavailable,
+        "Sessions with 10 seconds of active engagement, two page views, or an active-goal match, divided by sessions.",
+        .analyze,
+    ));
+    try cards.append(allocator, try countKpi(
+        allocator,
+        "Conversions",
+        overview.conversions,
+        unavailable,
+        "Matches across all active goals; one event can match more than one distinct goal.",
+        .goals,
+    ));
+    try cards.append(allocator, try ratioKpiModel(
+        allocator,
+        "Conversion rate",
+        overview.conversion_rate,
+        unavailable,
+        "Distinct visitors with any active-goal match divided by all visitors in the same range.",
+        .goals,
+    ));
+    for (overview.revenue) |revenue| {
+        const label = try std.fmt.allocPrint(
+            allocator,
+            "Revenue ({s})",
+            .{revenue.currency},
+        );
+        const value = try std.fmt.allocPrint(
+            allocator,
+            "{s} {s}",
+            .{ revenue.currency, revenue.current.decimal },
+        );
+        const delta = if (revenue.comparison) |prior|
+            try amountDelta(
+                allocator,
+                revenue.current.decimal,
+                prior.decimal,
+            )
+        else
+            Delta{ .text = unavailable };
+        try cards.append(allocator, .{
+            .label = label,
+            .value = value,
+            .comparison = delta.text,
+            .direction = delta.direction,
+            .definition = "Exact accepted value total for this currency; currencies are never combined or converted.",
+            .target = .analyze,
+        });
+    }
+    return .{
+        .cards = try cards.toOwnedSlice(allocator),
+        .coverage = try coverageText(allocator, overview.completeness, "Current"),
+        .comparison_coverage = if (overview.comparison_completeness) |coverage|
+            try coverageText(allocator, coverage, "Comparison")
+        else
+            null,
+        .includes_incomplete_today = includes_incomplete_today,
+    };
+}
+
+const Delta = struct {
+    text: []const u8,
+    direction: model.KpiDirection = .neutral,
+};
+
+fn countKpi(
+    allocator: std.mem.Allocator,
+    label: []const u8,
+    count: analysis.ComparedCount,
+    unavailable: []const u8,
+    definition: []const u8,
+    target: model.KpiTarget,
+) !model.OverviewKpi {
+    if (count.current < 0) return error.InvalidOverviewCount;
+    const delta = if (count.comparison) |prior|
+        try countDelta(allocator, count.current, prior)
+    else
+        Delta{ .text = unavailable };
+    return .{
+        .label = label,
+        .value = try std.fmt.allocPrint(allocator, "{d}", .{count.current}),
+        .comparison = delta.text,
+        .direction = delta.direction,
+        .definition = definition,
+        .target = target,
+    };
+}
+
+fn ratioKpiModel(
+    allocator: std.mem.Allocator,
+    label: []const u8,
+    ratio: analysis.ComparedRatio,
+    unavailable: []const u8,
+    definition: []const u8,
+    target: model.KpiTarget,
+) !model.OverviewKpi {
+    try validateRatio(ratio.current);
+    const current_available = ratio.current.denominator != 0;
+    const current_basis_points = if (current_available)
+        ratioBasisPoints(ratio.current)
+    else
+        0;
+    const delta = if (!current_available)
+        Delta{ .text = "Current rate unavailable" }
+    else if (ratio.comparison) |prior| value: {
+        try validateRatio(prior);
+        if (prior.denominator == 0) {
+            break :value Delta{ .text = "Comparison unavailable" };
+        }
+        break :value try rateDelta(
+            allocator,
+            @as(i32, current_basis_points) - ratioBasisPoints(prior),
+        );
+    } else Delta{ .text = unavailable };
+    return .{
+        .label = label,
+        .value = if (current_available)
+            try basisPointsText(allocator, current_basis_points, "%")
+        else
+            "Unavailable",
+        .comparison = delta.text,
+        .direction = delta.direction,
+        .definition = definition,
+        .target = target,
+    };
+}
+
+fn countDelta(allocator: std.mem.Allocator, current: i64, prior: i64) !Delta {
+    if (current < 0 or prior < 0) return error.InvalidOverviewCount;
+    const difference = @as(i128, current) - @as(i128, prior);
+    if (difference == 0) return .{ .text = "No change" };
+    const direction: model.KpiDirection = if (difference > 0) .positive else .negative;
+    const word = if (difference > 0) "Up" else "Down";
+    if (prior == 0) return .{
+        .text = try std.fmt.allocPrint(
+            allocator,
+            "{s} {d} · new",
+            .{ word, try magnitude(difference) },
+        ),
+        .direction = direction,
+    };
+    const tenths = @divTrunc(
+        (try magnitude(difference)) * 1_000,
+        @as(u128, @intCast(prior)),
+    );
+    return .{
+        .text = try std.fmt.allocPrint(
+            allocator,
+            "{s} {d}.{d}%",
+            .{ word, tenths / 10, tenths % 10 },
+        ),
+        .direction = direction,
+    };
+}
+
+fn rateDelta(allocator: std.mem.Allocator, basis_points: i32) !Delta {
+    if (basis_points == 0) return .{ .text = "No change" };
+    const direction: model.KpiDirection = if (basis_points > 0) .positive else .negative;
+    const word = if (basis_points > 0) "Up" else "Down";
+    const absolute: u32 = @intCast(@abs(basis_points));
+    return .{
+        .text = try std.fmt.allocPrint(
+            allocator,
+            "{s} {d}.{d:0>2} pp",
+            .{ word, absolute / 100, absolute % 100 },
+        ),
+        .direction = direction,
+    };
+}
+
+fn amountDelta(
+    allocator: std.mem.Allocator,
+    current_text: []const u8,
+    prior_text: []const u8,
+) !Delta {
+    const current = try decimalMicros(current_text);
+    const prior = try decimalMicros(prior_text);
+    const difference = std.math.sub(i128, current, prior) catch
+        return error.InvalidOverviewAmount;
+    if (difference == 0) return .{ .text = "No change" };
+    const direction: model.KpiDirection = if (difference > 0) .positive else .negative;
+    const word = if (difference > 0) "Up" else "Down";
+    if (prior == 0) return .{
+        .text = try std.fmt.allocPrint(
+            allocator,
+            "{s} {s} · new",
+            .{ word, if (current_text[0] == '-') current_text[1..] else current_text },
+        ),
+        .direction = direction,
+    };
+    const tenths = @divTrunc(
+        std.math.mul(u128, try magnitude(difference), 1_000) catch
+            return error.InvalidOverviewAmount,
+        try magnitude(prior),
+    );
+    return .{
+        .text = try std.fmt.allocPrint(
+            allocator,
+            "{s} {d}.{d}%",
+            .{ word, tenths / 10, tenths % 10 },
+        ),
+        .direction = direction,
+    };
+}
+
+fn magnitude(value: i128) !u128 {
+    if (value >= 0) return @intCast(value);
+    return @as(u128, @intCast(-(value + 1))) + 1;
+}
+
+fn decimalMicros(value: []const u8) !i128 {
+    if (value.len == 0) return error.InvalidOverviewAmount;
+    const negative = value[0] == '-';
+    const unsigned = if (negative) value[1..] else value;
+    const whole, const fraction = std.mem.cutScalar(u8, unsigned, '.') orelse
+        return error.InvalidOverviewAmount;
+    if (whole.len == 0 or fraction.len != 6) return error.InvalidOverviewAmount;
+    const whole_value = std.fmt.parseInt(i128, whole, 10) catch
+        return error.InvalidOverviewAmount;
+    const fraction_value = std.fmt.parseInt(i128, fraction, 10) catch
+        return error.InvalidOverviewAmount;
+    const scaled = std.math.add(
+        i128,
+        std.math.mul(i128, whole_value, 1_000_000) catch
+            return error.InvalidOverviewAmount,
+        fraction_value,
+    ) catch return error.InvalidOverviewAmount;
+    return if (negative) -scaled else scaled;
+}
+
+fn validateRatio(ratio: analysis.Ratio) !void {
+    if (ratio.numerator < 0 or ratio.denominator < 0 or
+        ratio.numerator > ratio.denominator)
+    {
+        return error.InvalidOverviewRate;
+    }
+}
+
+fn ratioBasisPoints(ratio: analysis.Ratio) u16 {
+    std.debug.assert(ratio.denominator > 0);
+    return @intCast(@divTrunc(
+        @as(u128, @intCast(ratio.numerator)) * 10_000,
+        @as(u128, @intCast(ratio.denominator)),
+    ));
+}
+
+fn basisPointsText(
+    allocator: std.mem.Allocator,
+    basis_points: u16,
+    suffix: []const u8,
+) ![]const u8 {
+    if (basis_points > 10_000) return error.InvalidOverviewRate;
+    return std.fmt.allocPrint(allocator, "{d}.{d:0>2}{s}", .{
+        basis_points / 100,
+        basis_points % 100,
+        suffix,
+    });
+}
+
+fn coverageText(
+    allocator: std.mem.Allocator,
+    coverage: analysis.Completeness,
+    label: []const u8,
+) ![]const u8 {
+    if (coverage.total_people < 0 or coverage.persistent_people < 0 or
+        coverage.ephemeral_people < 0 or coverage.legacy_people < 0 or
+        coverage.persistent_basis_points > 10_000)
+    {
+        return error.InvalidOverviewCoverage;
+    }
+    const percent = try basisPointsText(
+        allocator,
+        coverage.persistent_basis_points,
+        "%",
+    );
+    return std.fmt.allocPrint(
+        allocator,
+        "{s} identity coverage: {s} persistent ({d} persistent, {d} ephemeral, {d} legacy daily).",
+        .{
+            label,
+            percent,
+            coverage.persistent_people,
+            coverage.ephemeral_people,
+            coverage.legacy_people,
+        },
+    );
 }
 
 pub fn addGoal(
@@ -691,4 +1069,109 @@ test "modifying form requires and preserves typed calendar context" {
         error.MissingFormField,
         formContext(try Form.parse(arena.allocator(), "from=2024-02-01&to=2024-02-29")),
     );
+}
+
+test "Overview KPI view model formats exact deltas coverage and currencies" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const revenue = [_]analysis.ComparedAmount{
+        .{
+            .currency = "EUR",
+            .current = .{ .decimal = "10.000000", .currency = "EUR", .value_count = 2 },
+            .comparison = .{ .decimal = "5.000000", .currency = "EUR", .value_count = 1 },
+        },
+        .{
+            .currency = "USD",
+            .current = .{ .decimal = "-5.250000", .currency = "USD", .value_count = 1 },
+            .comparison = .{ .decimal = "0.000000", .currency = "USD", .value_count = 0 },
+        },
+    };
+    const coverage = analysis.Completeness{
+        .total_people = 4,
+        .persistent_people = 2,
+        .ephemeral_people = 1,
+        .legacy_people = 1,
+        .persistent_basis_points = 5_000,
+        .persistent_since_local_date = "2026-01-01",
+    };
+    const view = try buildOverviewKpis(
+        arena.allocator(),
+        .{
+            .visitors = .{ .current = 4, .comparison = 1 },
+            .sessions = .{ .current = 0, .comparison = 0 },
+            .page_views = .{ .current = 0, .comparison = 5 },
+            .engagement_rate = .{
+                .current = .{ .numerator = 1, .denominator = 4 },
+                .comparison = .{ .numerator = 3, .denominator = 4 },
+            },
+            .conversions = .{ .current = 2, .comparison = 0 },
+            .conversion_rate = .{
+                .current = .{ .numerator = 1, .denominator = 4 },
+                .comparison = .{ .numerator = 0, .denominator = 4 },
+            },
+            .revenue = &revenue,
+            .completeness = coverage,
+            .comparison_completeness = coverage,
+        },
+        .previous,
+        false,
+    );
+    try std.testing.expectEqual(@as(usize, 8), view.cards.len);
+    try std.testing.expectEqualStrings("Up 300.0%", view.cards[0].comparison);
+    try std.testing.expectEqualStrings("No change", view.cards[1].comparison);
+    try std.testing.expectEqualStrings("Down 100.0%", view.cards[2].comparison);
+    try std.testing.expectEqualStrings("25.00%", view.cards[3].value);
+    try std.testing.expectEqualStrings("Down 50.00 pp", view.cards[3].comparison);
+    try std.testing.expectEqualStrings("Up 2 · new", view.cards[4].comparison);
+    try std.testing.expectEqualStrings("Up 25.00 pp", view.cards[5].comparison);
+    try std.testing.expectEqualStrings("Revenue (EUR)", view.cards[6].label);
+    try std.testing.expectEqualStrings("EUR 10.000000", view.cards[6].value);
+    try std.testing.expectEqualStrings("Up 100.0%", view.cards[6].comparison);
+    try std.testing.expectEqualStrings("USD -5.250000", view.cards[7].value);
+    try std.testing.expectEqualStrings("Down 5.250000 · new", view.cards[7].comparison);
+    try std.testing.expectEqualStrings(
+        "Current identity coverage: 50.00% persistent (2 persistent, 1 ephemeral, 1 legacy daily).",
+        view.coverage,
+    );
+
+    const no_comparison = try buildOverviewKpis(
+        arena.allocator(),
+        .{
+            .visitors = .{ .current = 0, .comparison = null },
+            .sessions = .{ .current = 0, .comparison = null },
+            .page_views = .{ .current = 0, .comparison = null },
+            .engagement_rate = .{
+                .current = .{ .numerator = 0, .denominator = 0 },
+                .comparison = null,
+            },
+            .conversions = .{ .current = 0, .comparison = null },
+            .conversion_rate = .{
+                .current = .{ .numerator = 0, .denominator = 0 },
+                .comparison = null,
+            },
+            .revenue = &.{},
+            .completeness = .{
+                .total_people = 0,
+                .persistent_people = 0,
+                .ephemeral_people = 0,
+                .legacy_people = 0,
+                .persistent_basis_points = 0,
+                .persistent_since_local_date = null,
+            },
+            .comparison_completeness = null,
+        },
+        .none,
+        true,
+    );
+    try std.testing.expectEqualStrings("Unavailable", no_comparison.cards[3].value);
+    try std.testing.expectEqualStrings(
+        "Current rate unavailable",
+        no_comparison.cards[3].comparison,
+    );
+    try std.testing.expectEqualStrings(
+        "No comparison selected",
+        no_comparison.cards[0].comparison,
+    );
+    try std.testing.expect(no_comparison.comparison_coverage == null);
+    try std.testing.expect(no_comparison.includes_incomplete_today);
 }

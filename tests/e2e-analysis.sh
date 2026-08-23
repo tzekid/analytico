@@ -28,6 +28,21 @@ jq -e '
     .comparison_points == 1 and
     .comparison_total == 1 and
     .comparison_persistent_people == 1 and
+    .overview_visitors == 4 and
+    .overview_comparison_visitors == 1 and
+    .overview_sessions == 4 and
+    .overview_page_views == 4 and
+    .overview_engaged_sessions == 2 and
+    .overview_conversions == 4 and
+    .overview_converting_visitors == 1 and
+    .overview_revenue_currencies == 3 and
+    .overview_history_only_currency == "GBP" and
+    .overview_no_comparison == true and
+    .overview_empty_revenue_omitted == true and
+    .overview_legacy_local_boundary_exact == true and
+    .overview_ineligible_boundary_later_eligible_exact == true and
+    .overview_non_page_boundary_excluded == true and
+    .overview_nonmeaningful_goal_not_engaged == true and
     .delayed_event_delay_micros == 3600000000 and
     .delayed_event_offset_minutes == 60 and
     .delayed_event_hour == "2026-01-03T01:00" and

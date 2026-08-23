@@ -150,7 +150,9 @@ async function normal() {
     assert.equal(enhanced.at(-1).method, "GET");
     assert.match(page.url(), /\/admin\/sites\/second\/overview/);
     assert.equal(
-      await page.locator(".metrics li", { hasText: "Page views" }).locator("strong").textContent(),
+      await page.locator(".metrics li").filter({
+        has: page.getByText("Page views", { exact: true }),
+      }).locator("strong").textContent(),
       "2",
     );
 

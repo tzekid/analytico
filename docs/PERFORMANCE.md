@@ -286,6 +286,49 @@ remain issue #46's representative mixed-data benchmark; a miss there follows
 the optimization order before any cache, projection, rollup, table, service, or
 memory-limit change.
 
+### Analytico 1.0 Overview KPI confirmation
+
+Issue #26 adds one coordinated metric-v2 Overview statement under the same
+two-second interrupt deadline. The default product path must keep its
+million-event server-query p95 below 250 ms. Strict query-time classifier mode
+retains a 500 ms p95 ceiling: it is an optional compatibility mode whose
+accepted metric-v1 predecessor already measured 336 ms on this fixture. Both
+paths remain inside the two-second interactive deadline, and the complete CLI
+process time is recorded separately from the query itself.
+
+The first semantically correct wide plan measured 7.34 seconds under
+`EXPLAIN ANALYZE` and timed out in the serving path. A first combined rewrite
+still crossed two seconds. A faster `visitor_day_start` legacy shortcut reached
+224 ms default and 452 ms strict p95, but was rejected: a receipt-UTC boundary
+can lie outside a site-local range, an ineligible boundary can precede an
+eligible meaningful row, and an eligible non-meaningful boundary does not make
+a person. Exploratory exact candidates observed 273, 385, 365, and 295 ms on
+the default path; cold-process exact runs later observed 345/397 ms and 268/417
+ms default/strict, and one sustained experiment observed 313/487 ms. These are
+retained failed evidence, not accepted baselines.
+
+The accepted statement groups exact in-range legacy identities after both the
+meaningful-kind and product-traffic predicates. It keeps finite period,
+session, identity, goal, and exact-value relations narrow. The production-shaped
+gate opens one real on-disk Store and DuckDB connection, performs one warmup,
+then runs ten complete `executeOverview` calls; every call still validates,
+compiles, binds, prepares, executes, and decodes the statement. This matches the
+single-process serving ownership instead of charging process/database opening to
+each query. Batch wall time remains recorded separately. No cache, projection,
+rollup, schema, dependency, worker, service, or memory-limit change was
+introduced.
+
+On the standard owner host, the final ReleaseSafe one-million-event run
+measured default query p50/p95/p99 at 214/228/228 ms and strict query
+p50/p95/p99 at 344/376/376 ms after one warmup per policy. Two preceding
+complete confirmation runs measured 216/246/246 and 214/243/243 ms default,
+with 329/351/351 and 354/405/405 ms strict. The retained default
+`EXPLAIN ANALYZE` plan completed in 0.227 seconds and
+asserts the narrow range-session, person, and value relations. Metric-v1
+Overview, funnel, and traffic-quality parity remained within their existing
+gates. The compact environment, fixture, plan-size, accepted runs, and rejected
+observations are in `bench/results/overview-kpis-release-safe.json`.
+
 ### M4 production-MVP baseline
 
 The current ReleaseSafe package contains a 26,341,344-byte executable and a
@@ -384,6 +427,17 @@ One Debug observation crossed the 8,192 KiB growth gate at 10,372 KiB. The
 unchanged binary did not reproduce it in isolated reruns (2,904, 6,588, 2,864,
 7,620, 5,016, and 8,056 KiB), and the final ReleaseSafe observation above
 passed. The gate and regression policy were not weakened.
+
+### Overview KPI first-response confirmation
+
+Issue #26's final ReleaseSafe real-Caddy, on-disk-store, and JavaScript-disabled
+Chromium run measured 3,142 compressed bytes for the complete authenticated
+Overview HTML, 5,094 compressed bytes for the versioned v7 CSS, and 728 KiB RSS
+growth after 100 authenticated Overview views. The first response contained all
+six available fixed KPIs, definitions, deltas, identity coverage, incomplete and
+comparison states, native drill links, and the separately disclosed received-UTC
+traffic-quality diagnostic. It made zero startup API/JSON requests and kept the
+primary navigation, calendar controls, and KPI content unclipped at 360 px.
 
 ## 8. Regression policy
 

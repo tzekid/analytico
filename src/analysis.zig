@@ -589,6 +589,34 @@ pub const TrendResult = struct {
     completeness: Completeness,
 };
 
+pub const ComparedCount = struct {
+    current: i64,
+    comparison: ?i64,
+};
+
+pub const ComparedRatio = struct {
+    current: Ratio,
+    comparison: ?Ratio,
+};
+
+pub const ComparedAmount = struct {
+    currency: []const u8,
+    current: ExactAmount,
+    comparison: ?ExactAmount,
+};
+
+pub const OverviewResult = struct {
+    visitors: ComparedCount,
+    sessions: ComparedCount,
+    page_views: ComparedCount,
+    engagement_rate: ComparedRatio,
+    conversions: ComparedCount,
+    conversion_rate: ComparedRatio,
+    revenue: []const ComparedAmount,
+    completeness: Completeness,
+    comparison_completeness: ?Completeness,
+};
+
 pub const BreakdownLabel = struct {
     value: []const u8,
     scalar_type: ?ScalarType = null,
@@ -709,23 +737,10 @@ pub const Execution = struct {
                 return error.HourIntervalRangeTooLarge;
             }
         }
-        if (self.active_goals.len > maximum_active_goals) {
-            return error.TooManyActiveGoals;
-        }
         if (self.query.segment_id != null and !self.segment_resolved) {
             return error.UnresolvedAnalysisSegment;
         }
-        for (self.active_goals, 0..) |goal, index| {
-            try goal.validate();
-            if (self.strict_traffic_mode and goal.selector.predicates.len != 0) {
-                return error.UnsupportedStrictGoalPredicate;
-            }
-            for (self.active_goals[0..index]) |prior| {
-                if (std.mem.eql(u8, goal.id, prior.id)) {
-                    return error.DuplicateResolvedGoal;
-                }
-            }
-        }
+        try validateActiveGoals(self.active_goals, self.strict_traffic_mode);
         if (try resolvedSelector(self.query.metric.selector, self.active_goals)) |resolved| {
             if (resolved.selector.predicates.len +
                 resolved.additional_predicates.len > maximum_selector_predicates)
@@ -735,6 +750,43 @@ pub const Execution = struct {
         }
     }
 };
+
+pub const OverviewExecution = struct {
+    site_id: []const u8,
+    range: LocalDateRange,
+    comparison_range: ?LocalDateRange = null,
+    active_goals: []const ResolvedGoal = &.{},
+    strict_traffic_mode: bool = false,
+    timeout_ms: u32 = maximum_timeout_ms,
+
+    pub fn validate(self: OverviewExecution) !void {
+        try domain.validateUuid(self.site_id);
+        try self.range.validate();
+        if (self.comparison_range) |range| try range.validate();
+        if (self.timeout_ms == 0 or self.timeout_ms > maximum_timeout_ms) {
+            return error.InvalidAnalysisTimeout;
+        }
+        try validateActiveGoals(self.active_goals, self.strict_traffic_mode);
+    }
+};
+
+fn validateActiveGoals(
+    goals: []const ResolvedGoal,
+    strict_traffic_mode: bool,
+) !void {
+    if (goals.len > maximum_active_goals) return error.TooManyActiveGoals;
+    for (goals, 0..) |goal, index| {
+        try goal.validate();
+        if (strict_traffic_mode and goal.selector.predicates.len != 0) {
+            return error.UnsupportedStrictGoalPredicate;
+        }
+        for (goals[0..index]) |prior| {
+            if (std.mem.eql(u8, goal.id, prior.id)) {
+                return error.DuplicateResolvedGoal;
+            }
+        }
+    }
+}
 
 pub const Preset = enum {
     overview_visitors,

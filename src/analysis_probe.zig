@@ -144,6 +144,16 @@ pub fn seedHeuristics(
         \\  v.hint AS client_hint_consistency,
         \\  v.language_present AS accept_language_present,
         \\  v.engagement_ms AS engagement_ms, v.scroll AS max_scroll_depth,
+        \\  CASE v.event_id
+        \\    WHEN '00000000-0000-4000-8000-000000000201'
+        \\      THEN CAST('9.000000' AS DECIMAL(18, 6))
+        \\    WHEN '00000000-0000-4000-8000-000000000202'
+        \\      THEN CAST('4.000000' AS DECIMAL(18, 6))
+        \\    ELSE NULL END AS value_amount,
+        \\  CASE WHEN v.event_id IN (
+        \\    '00000000-0000-4000-8000-000000000201',
+        \\    '00000000-0000-4000-8000-000000000202')
+        \\    THEN 'EUR' ELSE '' END AS value_currency,
         \\  from_hex('22222222222222222222222222222222') AS network_day_id
         \\) FROM events template CROSS JOIN (VALUES
         \\ ('00000000-0000-4000-8000-000000000201',1777161600000000,1,'pageview','/candidate','00000000-0000-4000-8000-000000000201','00000000-0000-4000-8000-000000000301',0,1,2,'',1,FALSE,0,FALSE,4,1,3,FALSE,0,0),
@@ -225,8 +235,33 @@ pub fn checkHeuristics(
             .strict_traffic_mode = true,
         },
     )).trend;
+    const default_overview = try analysis_store.executeOverview(
+        allocator,
+        &event_store,
+        .{
+            .site_id = site,
+            .range = .{ .start = "2026-08-23", .end = "2026-08-23" },
+            .active_goals = &goals,
+        },
+    );
+    const strict_overview = try analysis_store.executeOverview(
+        allocator,
+        &event_store,
+        .{
+            .site_id = site,
+            .range = .{ .start = "2026-08-23", .end = "2026-08-23" },
+            .active_goals = &goals,
+            .strict_traffic_mode = true,
+        },
+    );
+    const default_eur = overviewRevenue(default_overview.revenue, "EUR") orelse
+        return error.InvalidHeuristicsAnalysisResult;
+    const strict_eur = overviewRevenue(strict_overview.revenue, "EUR") orelse
+        return error.InvalidHeuristicsAnalysisResult;
     if (default_result.total.len != 1 or strict_result.total.len != 1 or
-        default_result.total[0] != .count or strict_result.total[0] != .count)
+        default_result.total[0] != .count or strict_result.total[0] != .count or
+        !std.mem.eql(u8, default_eur.current.decimal, "13.000000") or
+        !std.mem.eql(u8, strict_eur.current.decimal, "4.000000"))
     {
         return error.InvalidHeuristicsAnalysisResult;
     }
@@ -250,6 +285,177 @@ pub fn run(
     try store.migrate();
     if (try store.eventCount() != 0) return error.AnalysisProbeRequiresEmptyStore;
     try analysis_store.seedSemanticFixture(&store.database);
+    try store.database.exec(
+        \\INSERT INTO events SELECT * REPLACE (
+        \\  1 AS protocol_version, 1 AS tracker_version,
+        \\  CAST('00000000-0000-4000-8000-000000000116' AS UUID) AS event_id,
+        \\  '00000000-0000-4000-8000-000000000026' AS site_id,
+        \\  1767393000000000 AS received_at_utc_micros,
+        \\  1767393000000000 AS occurred_at_utc_micros,
+        \\  CAST('2026-01-02' AS DATE) AS received_date_utc,
+        \\  CAST('2026-01-02' AS DATE) AS site_local_date,
+        \\  60 AS site_utc_offset_minutes,
+        \\  1 AS kind, 'pageview' AS event_name, '/before-local-midnight' AS path,
+        \\  CAST('00000000-0000-4000-8000-0000000000a6' AS UUID) AS anonymous_id,
+        \\  3 AS identity_quality, '' AS user_id,
+        \\  CAST('00000000-0000-4000-8000-0000000000b6' AS UUID) AS session_id,
+        \\  0 AS sequence, TRUE AS session_start,
+        \\  from_hex('26262626262626262626262626262626') AS visitor_day_id,
+        \\  TRUE AS visitor_day_start, repeat('6', 64) AS event_payload_digest,
+        \\  1 AS traffic_class, 0 AS classifier_version, '' AS bot_rule,
+        \\  0 AS signal_version, FALSE AS navigator_webdriver,
+        \\  0 AS trusted_interactions, FALSE AS was_visible,
+        \\  FALSE AS was_prerendered, 0 AS viewport_bucket,
+        \\  0 AS beacon_timing_bucket, 0 AS client_hint_consistency,
+        \\  FALSE AS accept_language_present
+        \\) FROM events WHERE event_id =
+        \\  CAST('00000000-0000-4000-8000-000000000107' AS UUID);
+        \\INSERT INTO events SELECT * REPLACE (
+        \\  1 AS protocol_version, 1 AS tracker_version,
+        \\  CAST('00000000-0000-4000-8000-000000000117' AS UUID) AS event_id,
+        \\  '00000000-0000-4000-8000-000000000026' AS site_id,
+        \\  1767396600000000 AS received_at_utc_micros,
+        \\  1767396600000000 AS occurred_at_utc_micros,
+        \\  CAST('2026-01-02' AS DATE) AS received_date_utc,
+        \\  CAST('2026-01-03' AS DATE) AS site_local_date,
+        \\  60 AS site_utc_offset_minutes,
+        \\  1 AS kind, 'pageview' AS event_name, '/after-local-midnight' AS path,
+        \\  CAST('00000000-0000-4000-8000-0000000000a6' AS UUID) AS anonymous_id,
+        \\  3 AS identity_quality, '' AS user_id,
+        \\  CAST('00000000-0000-4000-8000-0000000000b6' AS UUID) AS session_id,
+        \\  1 AS sequence, FALSE AS session_start,
+        \\  from_hex('26262626262626262626262626262626') AS visitor_day_id,
+        \\  FALSE AS visitor_day_start, repeat('7', 64) AS event_payload_digest,
+        \\  1 AS traffic_class, 0 AS classifier_version, '' AS bot_rule,
+        \\  0 AS signal_version, FALSE AS navigator_webdriver,
+        \\  0 AS trusted_interactions, FALSE AS was_visible,
+        \\  FALSE AS was_prerendered, 0 AS viewport_bucket,
+        \\  0 AS beacon_timing_bucket, 0 AS client_hint_consistency,
+        \\  FALSE AS accept_language_present
+        \\) FROM events WHERE event_id =
+        \\  CAST('00000000-0000-4000-8000-000000000107' AS UUID);
+        \\INSERT INTO events SELECT * REPLACE (
+        \\  1 AS protocol_version, 1 AS tracker_version,
+        \\  CAST('00000000-0000-4000-8000-000000000118' AS UUID) AS event_id,
+        \\  '00000000-0000-4000-8000-000000000027' AS site_id,
+        \\  1767400200000000 AS received_at_utc_micros,
+        \\  1767400200000000 AS occurred_at_utc_micros,
+        \\  CAST('2026-01-03' AS DATE) AS received_date_utc,
+        \\  CAST('2026-01-03' AS DATE) AS site_local_date,
+        \\  0 AS site_utc_offset_minutes,
+        \\  1 AS kind, 'pageview' AS event_name, '/ineligible-boundary' AS path,
+        \\  CAST('00000000-0000-4000-8000-0000000000a7' AS UUID) AS anonymous_id,
+        \\  3 AS identity_quality, '' AS user_id,
+        \\  CAST('00000000-0000-4000-8000-0000000000b7' AS UUID) AS session_id,
+        \\  0 AS sequence, TRUE AS session_start,
+        \\  from_hex('27272727272727272727272727272727') AS visitor_day_id,
+        \\  TRUE AS visitor_day_start, repeat('8', 64) AS event_payload_digest,
+        \\  2 AS traffic_class, 1 AS classifier_version,
+        \\  'crawler.fixture' AS bot_rule,
+        \\  0 AS signal_version, FALSE AS navigator_webdriver,
+        \\  0 AS trusted_interactions, FALSE AS was_visible,
+        \\  FALSE AS was_prerendered, 0 AS viewport_bucket,
+        \\  0 AS beacon_timing_bucket, 0 AS client_hint_consistency,
+        \\  FALSE AS accept_language_present
+        \\) FROM events WHERE event_id =
+        \\  CAST('00000000-0000-4000-8000-000000000107' AS UUID);
+        \\INSERT INTO events SELECT * REPLACE (
+        \\  1 AS protocol_version, 1 AS tracker_version,
+        \\  CAST('00000000-0000-4000-8000-000000000119' AS UUID) AS event_id,
+        \\  '00000000-0000-4000-8000-000000000027' AS site_id,
+        \\  1767403800000000 AS received_at_utc_micros,
+        \\  1767403800000000 AS occurred_at_utc_micros,
+        \\  CAST('2026-01-03' AS DATE) AS received_date_utc,
+        \\  CAST('2026-01-03' AS DATE) AS site_local_date,
+        \\  0 AS site_utc_offset_minutes,
+        \\  1 AS kind, 'pageview' AS event_name, '/eligible-later' AS path,
+        \\  CAST('00000000-0000-4000-8000-0000000000a7' AS UUID) AS anonymous_id,
+        \\  3 AS identity_quality, '' AS user_id,
+        \\  CAST('00000000-0000-4000-8000-0000000000b7' AS UUID) AS session_id,
+        \\  1 AS sequence, FALSE AS session_start,
+        \\  from_hex('27272727272727272727272727272727') AS visitor_day_id,
+        \\  FALSE AS visitor_day_start, repeat('9', 64) AS event_payload_digest,
+        \\  1 AS traffic_class, 1 AS classifier_version, '' AS bot_rule,
+        \\  0 AS signal_version, FALSE AS navigator_webdriver,
+        \\  0 AS trusted_interactions, FALSE AS was_visible,
+        \\  FALSE AS was_prerendered, 0 AS viewport_bucket,
+        \\  0 AS beacon_timing_bucket, 0 AS client_hint_consistency,
+        \\  FALSE AS accept_language_present
+        \\) FROM events WHERE event_id =
+        \\  CAST('00000000-0000-4000-8000-000000000107' AS UUID);
+        \\INSERT INTO events SELECT * REPLACE (
+        \\  1 AS protocol_version, 1 AS tracker_version,
+        \\  CAST('00000000-0000-4000-8000-000000000120' AS UUID) AS event_id,
+        \\  '00000000-0000-4000-8000-000000000028' AS site_id,
+        \\  1767400200000000 AS received_at_utc_micros,
+        \\  1767400200000000 AS occurred_at_utc_micros,
+        \\  CAST('2026-01-03' AS DATE) AS received_date_utc,
+        \\  CAST('2026-01-03' AS DATE) AS site_local_date,
+        \\  0 AS site_utc_offset_minutes,
+        \\  3 AS kind, 'engagement' AS event_name, '/non-page-boundary' AS path,
+        \\  CAST('00000000-0000-4000-8000-0000000000a8' AS UUID) AS anonymous_id,
+        \\  3 AS identity_quality, '' AS user_id,
+        \\  CAST('00000000-0000-4000-8000-0000000000b8' AS UUID) AS session_id,
+        \\  0 AS sequence, TRUE AS session_start,
+        \\  from_hex('28282828282828282828282828282828') AS visitor_day_id,
+        \\  TRUE AS visitor_day_start, repeat('a', 64) AS event_payload_digest,
+        \\  1 AS traffic_class, 1 AS classifier_version, '' AS bot_rule,
+        \\  0 AS signal_version, FALSE AS navigator_webdriver,
+        \\  0 AS trusted_interactions, FALSE AS was_visible,
+        \\  FALSE AS was_prerendered, 0 AS viewport_bucket,
+        \\  0 AS beacon_timing_bucket, 0 AS client_hint_consistency,
+        \\  FALSE AS accept_language_present
+        \\) FROM events WHERE event_id =
+        \\  CAST('00000000-0000-4000-8000-000000000107' AS UUID);
+        \\INSERT INTO events SELECT * REPLACE (
+        \\  1 AS protocol_version, 1 AS tracker_version,
+        \\  CAST('00000000-0000-4000-8000-000000000121' AS UUID) AS event_id,
+        \\  '00000000-0000-4000-8000-000000000029' AS site_id,
+        \\  1767400200000000 AS received_at_utc_micros,
+        \\  1767400200000000 AS occurred_at_utc_micros,
+        \\  CAST('2026-01-03' AS DATE) AS received_date_utc,
+        \\  CAST('2026-01-03' AS DATE) AS site_local_date,
+        \\  0 AS site_utc_offset_minutes,
+        \\  1 AS kind, 'pageview' AS event_name, '/plain' AS path,
+        \\  CAST('00000000-0000-4000-8000-0000000000a9' AS UUID) AS anonymous_id,
+        \\  1 AS identity_quality, '' AS user_id,
+        \\  CAST('00000000-0000-4000-8000-0000000000b9' AS UUID) AS session_id,
+        \\  0 AS sequence, TRUE AS session_start,
+        \\  from_hex('29292929292929292929292929292929') AS visitor_day_id,
+        \\  TRUE AS visitor_day_start, repeat('b', 64) AS event_payload_digest,
+        \\  1 AS traffic_class, 1 AS classifier_version, '' AS bot_rule,
+        \\  0 AS engagement_ms, 0 AS signal_version,
+        \\  FALSE AS navigator_webdriver, 0 AS trusted_interactions,
+        \\  FALSE AS was_visible, FALSE AS was_prerendered,
+        \\  0 AS viewport_bucket, 0 AS beacon_timing_bucket,
+        \\  0 AS client_hint_consistency, FALSE AS accept_language_present
+        \\) FROM events WHERE event_id =
+        \\  CAST('00000000-0000-4000-8000-000000000107' AS UUID);
+        \\INSERT INTO events SELECT * REPLACE (
+        \\  1 AS protocol_version, 1 AS tracker_version,
+        \\  CAST('00000000-0000-4000-8000-000000000122' AS UUID) AS event_id,
+        \\  '00000000-0000-4000-8000-000000000029' AS site_id,
+        \\  1767403800000000 AS received_at_utc_micros,
+        \\  1767403800000000 AS occurred_at_utc_micros,
+        \\  CAST('2026-01-03' AS DATE) AS received_date_utc,
+        \\  CAST('2026-01-03' AS DATE) AS site_local_date,
+        \\  0 AS site_utc_offset_minutes,
+        \\  3 AS kind, 'engagement' AS event_name, '/goal-only' AS path,
+        \\  CAST('00000000-0000-4000-8000-0000000000a9' AS UUID) AS anonymous_id,
+        \\  1 AS identity_quality, '' AS user_id,
+        \\  CAST('00000000-0000-4000-8000-0000000000b9' AS UUID) AS session_id,
+        \\  1 AS sequence, FALSE AS session_start,
+        \\  from_hex('29292929292929292929292929292929') AS visitor_day_id,
+        \\  FALSE AS visitor_day_start, repeat('c', 64) AS event_payload_digest,
+        \\  1 AS traffic_class, 1 AS classifier_version, '' AS bot_rule,
+        \\  0 AS engagement_ms, 0 AS signal_version,
+        \\  FALSE AS navigator_webdriver, 0 AS trusted_interactions,
+        \\  FALSE AS was_visible, FALSE AS was_prerendered,
+        \\  0 AS viewport_bucket, 0 AS beacon_timing_bucket,
+        \\  0 AS client_hint_consistency, FALSE AS accept_language_present
+        \\) FROM events WHERE event_id =
+        \\  CAST('00000000-0000-4000-8000-000000000107' AS UUID)
+    );
     const delayed_evidence = evidence: {
         var statement = try store.database.prepare(
             "SELECT received_at_utc_micros, occurred_at_utc_micros, " ++
@@ -407,6 +613,112 @@ pub fn run(
         },
         .comparison_range = .{ .start = "2026-01-02", .end = "2026-01-02" },
     })).trend;
+    const overview_goals = [_]analysis.ResolvedGoal{
+        .{
+            .id = "00000000-0000-4000-8000-000000000071",
+            .selector = .{ .kind = .exact_event, .value = "purchase" },
+        },
+        .{
+            .id = "00000000-0000-4000-8000-000000000072",
+            .selector = .{ .kind = .exact_event, .value = "purchase" },
+        },
+    };
+    const overview_result = try analysis_store.executeOverview(
+        allocator,
+        &store,
+        .{
+            .site_id = site,
+            .range = .{ .start = "2026-01-03", .end = "2026-01-03" },
+            .comparison_range = .{
+                .start = "2026-01-02",
+                .end = "2026-01-02",
+            },
+            .active_goals = &overview_goals,
+        },
+    );
+    const overview_without_comparison = try analysis_store.executeOverview(
+        allocator,
+        &store,
+        .{
+            .site_id = site,
+            .range = .{ .start = "2026-01-03", .end = "2026-01-03" },
+            .active_goals = &overview_goals,
+        },
+    );
+    const empty_overview = try analysis_store.executeOverview(
+        allocator,
+        &store,
+        .{
+            .site_id = "00000000-0000-4000-8000-000000000025",
+            .range = .{ .start = "2026-01-03", .end = "2026-01-03" },
+            .comparison_range = .{
+                .start = "2026-01-02",
+                .end = "2026-01-02",
+            },
+        },
+    );
+    const boundary_exact = (try analysis_store.execute(allocator, &store, .{
+        .query = trendQueryForSite(
+            "00000000-0000-4000-8000-000000000026",
+            .{ .start = "2026-01-03", .end = "2026-01-03" },
+            .visitors,
+        ),
+    })).trend;
+    const boundary_overview = try analysis_store.executeOverview(
+        allocator,
+        &store,
+        .{
+            .site_id = "00000000-0000-4000-8000-000000000026",
+            .range = .{ .start = "2026-01-03", .end = "2026-01-03" },
+        },
+    );
+    const ineligible_boundary_exact = (try analysis_store.execute(
+        allocator,
+        &store,
+        .{ .query = trendQueryForSite(
+            "00000000-0000-4000-8000-000000000027",
+            .{ .start = "2026-01-03", .end = "2026-01-03" },
+            .visitors,
+        ) },
+    )).trend;
+    const ineligible_boundary_overview = try analysis_store.executeOverview(
+        allocator,
+        &store,
+        .{
+            .site_id = "00000000-0000-4000-8000-000000000027",
+            .range = .{ .start = "2026-01-03", .end = "2026-01-03" },
+        },
+    );
+    const non_page_boundary_exact = (try analysis_store.execute(
+        allocator,
+        &store,
+        .{ .query = trendQueryForSite(
+            "00000000-0000-4000-8000-000000000028",
+            .{ .start = "2026-01-03", .end = "2026-01-03" },
+            .visitors,
+        ) },
+    )).trend;
+    const non_page_boundary_overview = try analysis_store.executeOverview(
+        allocator,
+        &store,
+        .{
+            .site_id = "00000000-0000-4000-8000-000000000028",
+            .range = .{ .start = "2026-01-03", .end = "2026-01-03" },
+        },
+    );
+    const meaningful_goal = [_]analysis.ResolvedGoal{.{
+        .id = "00000000-0000-4000-8000-000000000073",
+        .selector = .{ .kind = .exact_page, .value = "/goal-only" },
+    }};
+    const nonmeaningful_goal_overview = try analysis_store.executeOverview(
+        allocator,
+        &store,
+        .{
+            .site_id = "00000000-0000-4000-8000-000000000029",
+            .range = .{ .start = "2026-01-03", .end = "2026-01-03" },
+            .active_goals = &meaningful_goal,
+        },
+    );
     const landing_result = (try analysis_store.execute(allocator, &store, .{
         .query = .{
             .site_id = site,
@@ -463,6 +775,72 @@ pub fn run(
     {
         return error.InvalidReceiptHourBucket;
     }
+    const eur = overviewRevenue(overview_result.revenue, "EUR") orelse
+        return error.InvalidOverviewSemanticEvidence;
+    const gbp = overviewRevenue(overview_result.revenue, "GBP") orelse
+        return error.InvalidOverviewSemanticEvidence;
+    const usd = overviewRevenue(overview_result.revenue, "USD") orelse
+        return error.InvalidOverviewSemanticEvidence;
+    if (overview_result.visitors.current != 4 or
+        overview_result.visitors.comparison.? != 1 or
+        overview_result.sessions.current != 4 or
+        overview_result.sessions.comparison.? != 1 or
+        overview_result.page_views.current != 4 or
+        overview_result.page_views.comparison.? != 1 or
+        overview_result.engagement_rate.current.numerator != 2 or
+        overview_result.engagement_rate.current.denominator != 4 or
+        overview_result.engagement_rate.comparison.?.numerator != 1 or
+        overview_result.engagement_rate.comparison.?.denominator != 1 or
+        overview_result.conversions.current != 4 or
+        overview_result.conversions.comparison.? != 0 or
+        overview_result.conversion_rate.current.numerator != 1 or
+        overview_result.conversion_rate.current.denominator != 4 or
+        overview_result.conversion_rate.comparison.?.numerator != 0 or
+        overview_result.conversion_rate.comparison.?.denominator != 1 or
+        overview_result.completeness.persistent_people != 2 or
+        overview_result.completeness.ephemeral_people != 1 or
+        overview_result.completeness.legacy_people != 1 or
+        overview_result.comparison_completeness.?.persistent_people != 1 or
+        overview_result.revenue.len != 3 or
+        !std.mem.eql(u8, eur.current.decimal, "12.500000") or
+        !std.mem.eql(u8, eur.comparison.?.decimal, "0.000000") or
+        !std.mem.eql(u8, gbp.current.decimal, "0.000000") or
+        !std.mem.eql(u8, gbp.comparison.?.decimal, "0.000000") or
+        !std.mem.eql(u8, usd.current.decimal, "7.500000") or
+        !std.mem.eql(u8, usd.comparison.?.decimal, "0.000000") or
+        overview_without_comparison.visitors.comparison != null or
+        overview_without_comparison.engagement_rate.comparison != null or
+        empty_overview.visitors.current != 0 or
+        empty_overview.visitors.comparison.? != 0 or
+        empty_overview.engagement_rate.current.denominator != 0 or
+        empty_overview.conversion_rate.current.denominator != 0 or
+        empty_overview.revenue.len != 0 or
+        boundary_exact.total.len != 1 or
+        boundary_exact.total[0] != .count or
+        boundary_exact.total[0].count != 1 or
+        boundary_exact.completeness.legacy_people != 1 or
+        boundary_overview.visitors.current != 1 or
+        boundary_overview.completeness.legacy_people != 1 or
+        ineligible_boundary_exact.total.len != 1 or
+        ineligible_boundary_exact.total[0] != .count or
+        ineligible_boundary_exact.total[0].count != 1 or
+        ineligible_boundary_exact.completeness.legacy_people != 1 or
+        ineligible_boundary_overview.visitors.current != 1 or
+        ineligible_boundary_overview.completeness.legacy_people != 1 or
+        non_page_boundary_exact.total.len != 1 or
+        non_page_boundary_exact.total[0] != .count or
+        non_page_boundary_exact.total[0].count != 0 or
+        non_page_boundary_exact.completeness.legacy_people != 0 or
+        non_page_boundary_overview.visitors.current != 0 or
+        non_page_boundary_overview.completeness.legacy_people != 0 or
+        nonmeaningful_goal_overview.sessions.current != 1 or
+        nonmeaningful_goal_overview.engagement_rate.current.numerator != 0 or
+        nonmeaningful_goal_overview.engagement_rate.current.denominator != 1 or
+        nonmeaningful_goal_overview.conversions.current != 0 or
+        nonmeaningful_goal_overview.conversion_rate.current.numerator != 0)
+    {
+        return error.InvalidOverviewSemanticEvidence;
+    }
     try analysis_store.timeoutProbe(&store);
     try std.json.Stringify.value(.{
         .metric_version = analysis.metric_version,
@@ -481,6 +859,21 @@ pub fn run(
         .comparison_points = comparison_result.comparison_points.?.len,
         .comparison_total = comparison_result.comparison_total.?[0].count,
         .comparison_persistent_people = comparison_result.comparison_completeness.?.persistent_people,
+        .overview_visitors = overview_result.visitors.current,
+        .overview_comparison_visitors = overview_result.visitors.comparison.?,
+        .overview_sessions = overview_result.sessions.current,
+        .overview_page_views = overview_result.page_views.current,
+        .overview_engaged_sessions = overview_result.engagement_rate.current.numerator,
+        .overview_conversions = overview_result.conversions.current,
+        .overview_converting_visitors = overview_result.conversion_rate.current.numerator,
+        .overview_revenue_currencies = overview_result.revenue.len,
+        .overview_history_only_currency = gbp.currency,
+        .overview_no_comparison = overview_without_comparison.visitors.comparison == null,
+        .overview_empty_revenue_omitted = empty_overview.revenue.len == 0,
+        .overview_legacy_local_boundary_exact = boundary_overview.visitors.current == boundary_exact.total[0].count,
+        .overview_ineligible_boundary_later_eligible_exact = ineligible_boundary_overview.visitors.current == ineligible_boundary_exact.total[0].count,
+        .overview_non_page_boundary_excluded = non_page_boundary_overview.visitors.current == non_page_boundary_exact.total[0].count,
+        .overview_nonmeaningful_goal_not_engaged = nonmeaningful_goal_overview.engagement_rate.current.numerator == 0,
         .delayed_event_delay_micros = delayed_evidence.received_at - delayed_evidence.occurred_at,
         .delayed_event_offset_minutes = delayed_evidence.offset_minutes,
         .delayed_event_hour = delayed_result.points[0].bucket,
@@ -490,6 +883,26 @@ pub fn run(
         .timeout_interrupted_and_reused = true,
     }, .{}, output);
     try output.writeByte('\n');
+}
+
+fn overviewRevenue(
+    rows: []const analysis.ComparedAmount,
+    currency: []const u8,
+) ?analysis.ComparedAmount {
+    for (rows) |row| {
+        if (std.mem.eql(u8, row.currency, currency)) return row;
+    }
+    return null;
+}
+
+fn trendQueryForSite(
+    site_id: []const u8,
+    range: analysis.LocalDateRange,
+    kind: analysis.MetricKind,
+) analysis.Query {
+    var query = trendQuery(range, kind);
+    query.site_id = site_id;
+    return query;
 }
 
 fn hasCount(

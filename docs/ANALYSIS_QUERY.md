@@ -296,27 +296,42 @@ date. This lets consumers distinguish incompatible prior identity data from a
 real zero. Timeout, unsupported/stale state, incompatible prior data, and high
 cardinality are distinct outcomes; none become zero.
 
-Current ordinary report concepts have typed presets. Overview is an explicit
-bundle of visitor, session, page-view, and custom-event query presets; its bot
-diagnostic remains outside metric-v2 product metrics. The existing metric-v1
-CLI/report renderer and its UTC visitor-day/session semantics stay unchanged
-until an explicit compatibility-removal issue. Funnel, path, retention,
-session/profile, and Live queries reuse closed FilterSet/EventSelector helpers
-where appropriate but retain specialized query/result types.
+Current ordinary report concepts have typed presets. The fixed Overview is a
+specialized closed metric-v2 result for Visitors, Sessions, Page views,
+Engagement rate, all-active-goal Conversions, visitor Conversion rate, exact
+per-currency Revenue, and identity coverage. It reuses the same canonical
+person, full-session, active-goal, product-traffic, local-date, comparison, and
+deadline contracts as ordinary queries, but compiles the fixed aggregates into
+one statement instead of issuing one `AnalysisQuery` per card. Its received-UTC
+traffic-quality diagnostic remains outside metric-v2 product metrics. The
+existing metric-v1 CLI/report renderer and its UTC visitor-day/session
+semantics stay unchanged until an explicit compatibility-removal issue. Funnel,
+path, retention, session/profile, and Live queries reuse closed
+FilterSet/EventSelector helpers where appropriate but retain specialized
+query/result types.
 
-While those metric-v1 dashboard results remain, the shared shell may carry the
-new local calendar context only when the result is visibly identified as UTC
-compatibility data. It must not relabel or partially convert a metric-v1 total.
-Issue-backed metric-v2 consumers replace that disclosure only when every value
-on the affected view uses the resolved site-local range together.
+Legacy Overview visitors and legacy coverage are the exact distinct legacy
+anonymous identities with at least one product-eligible page-view or custom
+event inside each site-local period. Stored `visitor_day_start` is a metric-v1
+receipt-UTC compatibility boundary, not a metric-v2 person shortcut: its row may
+fall outside the local period, be product-ineligible, or be a non-meaningful
+event while a different same-identity row determines metric-v2 eligibility.
+
+While metric-v1 dashboard results remain on other report routes, the shared
+shell may carry the new local calendar context only when the result is visibly
+identified as UTC compatibility data. It must not relabel or partially convert
+a metric-v1 total. Issue #26 moves every Overview headline value together to
+the resolved site-local range. The separate traffic-quality section keeps a
+local received-UTC disclosure rather than applying a false page-wide warning.
 
 D30 adds one explicitly versioned `traffic-quality` diagnostic bundle on the
 existing report transport. It is not an ordinary `AnalysisQuery` product
 metric: it deliberately uses the current received-UTC report range so its
 canonical-person count is comparable to the frozen visitor-day headline. It
-does not change any existing metric-v1 output. A later site-local Overview
-migration must move both headline values together rather than mixing date
-contexts.
+does not change any existing metric-v1 output. Issue #26 completes the required
+site-local Overview migration by removing both compatibility values from the
+headline together; the diagnostic bundle remains received-UTC and explicitly
+labeled.
 
 ## 8. Acceptance evidence
 

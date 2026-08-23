@@ -162,6 +162,42 @@ pub fn main(init: std.process.Init) !void {
         );
         return;
     }
+    if (args.len == 9 and
+        std.mem.eql(u8, args[1], "m3") and
+        std.mem.eql(u8, args[2], "overview-v2-series"))
+    {
+        try m3_probe.overviewV2(
+            allocator,
+            init.io,
+            output,
+            args[3],
+            args[4],
+            args[5],
+            args[6],
+            args[7],
+            args[8],
+            false,
+        );
+        return;
+    }
+    if (args.len == 9 and
+        std.mem.eql(u8, args[1], "m3") and
+        std.mem.eql(u8, args[2], "overview-v2-profile"))
+    {
+        try m3_probe.overviewV2(
+            allocator,
+            init.io,
+            output,
+            args[3],
+            args[4],
+            args[5],
+            args[6],
+            args[7],
+            args[8],
+            true,
+        );
+        return;
+    }
     if (args.len == 4 and
         std.mem.eql(u8, args[1], "m4") and
         std.mem.eql(u8, args[2], "legacy-million"))

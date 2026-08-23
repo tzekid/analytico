@@ -211,6 +211,587 @@ pub fn execute(
     };
 }
 
+pub fn compileOverview(
+    allocator: std.mem.Allocator,
+    execution: analysis.OverviewExecution,
+) !StatementPlan {
+    try execution.validate();
+    var builder = Builder.init(allocator);
+    if (execution.strict_traffic_mode) {
+        var goals: [analysis.maximum_active_goals]traffic.Goal = undefined;
+        for (execution.active_goals, 0..) |goal, index| goals[index] = .{
+            .kind = switch (goal.selector.kind) {
+                .exact_event => .event,
+                .exact_page => .path,
+                .page_prefix => .prefix,
+                .saved_goal => return error.UnresolvedGoalSelector,
+            },
+            .value = goal.selector.value,
+        };
+        try builder.write("WITH ");
+        try builder.appendTraffic(try traffic.classifierFragment(
+            allocator,
+            execution.site_id,
+            goals[0..execution.active_goals.len],
+            true,
+        ));
+        try builder.write(", ");
+    } else try builder.write("WITH ");
+    try builder.write(
+        "periods(period, start_date, end_date) AS (VALUES" ++
+            " (1::UTINYINT, CAST(",
+    );
+    try builder.bindText(execution.range.start);
+    try builder.write(" AS DATE), CAST(");
+    try builder.bindText(execution.range.end);
+    try builder.write(" AS DATE))");
+    if (execution.comparison_range) |range| {
+        try builder.write(", (2::UTINYINT, CAST(");
+        try builder.bindText(range.start);
+        try builder.write(" AS DATE), CAST(");
+        try builder.bindText(range.end);
+        try builder.write(" AS DATE))");
+    }
+    try builder.write(
+        "), range_events AS NOT MATERIALIZED (SELECT p.period, e.session_id," ++
+            " e.kind, ",
+    );
+    try writeGoalMatchCount(&builder, execution.active_goals, "e");
+    try builder.write(
+        " AS goal_matches FROM events e JOIN periods p" ++
+            " ON e.site_local_date BETWEEN p.start_date AND p.end_date" ++
+            " WHERE e.site_id = ",
+    );
+    try builder.bindText(execution.site_id);
+    try builder.write(
+        " AND e.kind IN (1, 2) AND e.traffic_class IN (1, 5))," ++
+            " qualified AS NOT MATERIALIZED (SELECT * FROM range_events WHERE TRUE",
+    );
+    if (execution.strict_traffic_mode) try builder.write(
+        " AND session_id NOT IN (SELECT session_id" ++
+            " FROM d34_current_suspected_sessions)",
+    );
+    try builder.write(
+        "), range_sessions AS MATERIALIZED (SELECT period, session_id," ++
+            " count(*) FILTER (WHERE kind = 1)::BIGINT AS range_page_views," ++
+            " sum(goal_matches)::BIGINT AS conversions" ++
+            " FROM qualified GROUP BY period, session_id)," ++
+            " session_events AS (SELECT e.session_id, e.kind," ++
+            " e.engagement_ms, ",
+    );
+    try writeAnyGoalMatch(&builder, execution.active_goals, "e");
+    try builder.write(
+        " AS goal_match FROM events e SEMI JOIN range_sessions rs" ++
+            " ON rs.session_id = e.session_id WHERE e.site_id = ",
+    );
+    try builder.bindText(execution.site_id);
+    try builder.write(
+        " AND e.traffic_class IN (1, 5))," ++
+            " session_stats AS MATERIALIZED (SELECT session_id," ++
+            " count(*) FILTER (WHERE kind = 1)::BIGINT AS page_views," ++
+            " sum(engagement_ms)::BIGINT AS engagement_ms," ++
+            " bool_or(goal_match) AS goal_match" ++
+            " FROM session_events GROUP BY session_id)," ++
+            " event_summary AS (SELECT period, count(*)::BIGINT AS sessions," ++
+            " sum(range_page_views)::BIGINT AS page_views," ++
+            " sum(conversions)::BIGINT AS conversions" ++
+            " FROM range_sessions GROUP BY period),",
+    );
+    try builder.write(
+        " legacy_events AS NOT MATERIALIZED (SELECT p.period," ++
+            " e.anonymous_id, ",
+    );
+    try writeAnyGoalMatch(&builder, execution.active_goals, "e");
+    try builder.write(
+        " AS goal_match FROM events e JOIN periods p" ++
+            " ON e.site_local_date BETWEEN p.start_date AND p.end_date" ++
+            " WHERE e.site_id = ",
+    );
+    try builder.bindText(execution.site_id);
+    try builder.write(
+        " AND e.identity_quality = 3 AND e.kind IN (1, 2)" ++
+            " AND e.traffic_class IN (1, 5)",
+    );
+    if (execution.strict_traffic_mode) try builder.write(
+        " AND e.session_id NOT IN (SELECT session_id" ++
+            " FROM d34_current_suspected_sessions)",
+    );
+    try builder.write(
+        "), legacy_people AS MATERIALIZED (SELECT period, anonymous_id," ++
+            " bool_or(goal_match) AS converted FROM legacy_events" ++
+            " GROUP BY period, anonymous_id)," ++
+            " legacy_summary AS MATERIALIZED (SELECT period," ++
+            " count(*)::BIGINT AS legacy_people," ++
+            " count(*) FILTER (WHERE converted)::BIGINT" ++
+            " AS converting_visitors FROM legacy_people GROUP BY period),",
+    );
+    try builder.write(
+        " session_summary AS (SELECT rs.period," ++
+            " count(*) FILTER (WHERE s.engagement_ms >= 10000" ++
+            " OR s.page_views >= 2 OR s.goal_match)::BIGINT AS engaged_sessions" ++
+            " FROM range_sessions rs JOIN session_stats s USING (session_id)" ++
+            " GROUP BY rs.period)," ++
+            " person_events AS (SELECT p.period, e.identity_quality," ++
+            " CASE WHEN e.identity_quality = 1" ++
+            " AND COALESCE(l.user_id, e.user_id, '') <> ''" ++
+            " THEN COALESCE(l.user_id, e.user_id) ELSE '' END" ++
+            " AS canonical_user_id," ++
+            " CASE WHEN e.identity_quality = 1" ++
+            " AND COALESCE(l.user_id, e.user_id, '') <> ''" ++
+            " THEN NULL ELSE e.anonymous_id END AS canonical_anonymous_id, ",
+    );
+    try writeAnyGoalMatch(&builder, execution.active_goals, "e");
+    try builder.write(
+        " AS goal_match FROM events e JOIN periods p" ++
+            " ON e.site_local_date BETWEEN p.start_date AND p.end_date" ++
+            " LEFT JOIN identity_links l ON l.site_id = e.site_id" ++
+            " AND l.anonymous_id = e.anonymous_id" ++
+            " WHERE e.site_id = ",
+    );
+    try builder.bindText(execution.site_id);
+    try builder.write(
+        " AND e.kind IN (1, 2) AND e.traffic_class IN (1, 5)",
+    );
+    if (execution.strict_traffic_mode) try builder.write(
+        " AND e.session_id NOT IN (SELECT session_id" ++
+            " FROM d34_current_suspected_sessions)",
+    );
+    try builder.write(" AND e.identity_quality IN (1, 2)");
+    try builder.write(
+        "), people AS MATERIALIZED (SELECT period, identity_quality," ++
+            " bool_or(goal_match) AS converted FROM person_events",
+    );
+    try builder.write(
+        " GROUP BY period, identity_quality, canonical_user_id," ++
+            " canonical_anonymous_id)," ++
+            " people_summary AS (SELECT period," ++
+            " count(*) FILTER (WHERE identity_quality = 1)::BIGINT" ++
+            " AS persistent," ++
+            " count(*) FILTER (WHERE identity_quality = 2)::BIGINT" ++
+            " AS ephemeral," ++
+            " count(*) FILTER (WHERE converted)::BIGINT AS converting_visitors" ++
+            " FROM people GROUP BY period)," ++
+            " overview_summary AS MATERIALIZED (SELECT p.period," ++
+            " COALESCE(e.sessions, 0)::BIGINT AS sessions," ++
+            " COALESCE(e.page_views, 0)::BIGINT AS page_views," ++
+            " COALESCE(s.engaged_sessions, 0)::BIGINT AS engaged_sessions," ++
+            " COALESCE(e.conversions, 0)::BIGINT AS conversions,",
+    );
+    try builder.write(
+        " COALESCE(pp.persistent, 0) + COALESCE(pp.ephemeral, 0)" ++
+            " + COALESCE(ls.legacy_people, 0) AS visitors,",
+    );
+    try builder.write(
+        " COALESCE(pp.persistent, 0)::BIGINT AS persistent," ++
+            " COALESCE(pp.ephemeral, 0)::BIGINT AS ephemeral,",
+    );
+    try builder.write(" COALESCE(ls.legacy_people, 0)::BIGINT AS legacy,");
+    try builder.write(
+        " (COALESCE(pp.converting_visitors, 0)" ++
+            " + COALESCE(ls.converting_visitors, 0))::BIGINT" ++
+            " AS converting_visitors FROM periods p" ++
+            " LEFT JOIN event_summary e USING (period)" ++
+            " LEFT JOIN legacy_summary ls USING (period)" ++
+            " LEFT JOIN session_summary s USING (period)" ++
+            " LEFT JOIN people_summary pp USING (period))," ++
+            " value_events AS MATERIALIZED (SELECT site_local_date," ++
+            " value_amount, value_currency FROM events WHERE site_id = ",
+    );
+    try builder.bindText(execution.site_id);
+    try builder.write(
+        " AND kind IN (1, 2) AND traffic_class IN (1, 5)" ++
+            " AND value_amount IS NOT NULL AND value_currency <> ''",
+    );
+    if (execution.strict_traffic_mode) try builder.write(
+        " AND session_id NOT IN (SELECT session_id" ++
+            " FROM d34_current_suspected_sessions)",
+    );
+    try builder.write(
+        "), overview_revenue AS (SELECT p.period," ++
+            " e.value_currency AS currency," ++
+            " CAST(sum(e.value_amount) AS VARCHAR) AS amount," ++
+            " count(*)::BIGINT AS value_count," ++
+            " row_number() OVER (PARTITION BY p.period" ++
+            " ORDER BY e.value_currency) AS position" ++
+            " FROM value_events e JOIN periods p ON e.site_local_date" ++
+            " BETWEEN p.start_date AND p.end_date" ++
+            " GROUP BY p.period, e.value_currency)" ++
+            " SELECT CASE o.period WHEN 1 THEN 'current' ELSE 'comparison' END" ++
+            " AS period, v.metric, v.numerator::BIGINT," ++
+            " v.denominator::BIGINT, CAST(NULL AS VARCHAR) AS amount," ++
+            " '' AS currency, 0::BIGINT AS value_count," ++
+            " o.persistent, o.ephemeral, o.legacy," ++
+            " CAST(NULL AS VARCHAR) AS text_value" ++
+            " FROM overview_summary o CROSS JOIN LATERAL (VALUES" ++
+            " ('visitors', o.visitors, 0)," ++
+            " ('sessions', o.sessions, 0)," ++
+            " ('page-views', o.page_views, 0)," ++
+            " ('engagement-rate', o.engaged_sessions, o.sessions)," ++
+            " ('conversions', o.conversions, 0)," ++
+            " ('conversion-rate', o.converting_visitors, o.visitors)" ++
+            ") v(metric, numerator, denominator)" ++
+            " UNION ALL SELECT CASE r.period WHEN 1 THEN 'current'" ++
+            " ELSE 'comparison' END AS period, 'revenue' AS metric," ++
+            " 0::BIGINT AS numerator, 0::BIGINT AS denominator," ++
+            " r.amount, r.currency, r.value_count," ++
+            " o.persistent, o.ephemeral, o.legacy," ++
+            " CAST(NULL AS VARCHAR) AS text_value" ++
+            " FROM overview_revenue r JOIN overview_summary o USING (period)" ++
+            " WHERE r.position <= ",
+    );
+    try builder.bindInteger(@as(i64, analysis.maximum_currency_series) + 1);
+    try builder.write(
+        " UNION ALL SELECT * FROM (SELECT 'history' AS period," ++
+            " 'revenue' AS metric, 0::BIGINT AS numerator," ++
+            " 0::BIGINT AS denominator, CAST(NULL AS VARCHAR) AS amount," ++
+            " value_currency AS currency, 0::BIGINT AS value_count," ++
+            " 0::BIGINT AS persistent, 0::BIGINT AS ephemeral," ++
+            " 0::BIGINT AS legacy, CAST(NULL AS VARCHAR) AS text_value" ++
+            " FROM value_events GROUP BY value_currency" ++
+            " ORDER BY value_currency LIMIT ",
+    );
+    try builder.bindInteger(@as(i64, analysis.maximum_currency_series) + 1);
+    try builder.write(") AS observed_currency_rows");
+    return builder.finish();
+}
+
+pub fn executeOverview(
+    allocator: std.mem.Allocator,
+    event_store: *events.Store,
+    execution: analysis.OverviewExecution,
+) !analysis.OverviewResult {
+    const plan = try compileOverview(allocator, execution);
+    var budget = deadline.Budget.init(execution.timeout_ms);
+    var result = try executePlan(&event_store.database, plan, &budget);
+    defer result.deinit();
+    if (result.columnCount() != 11 or result.rowCount() > 64) {
+        return error.InvalidOverviewResult;
+    }
+
+    var current = OverviewPeriodState{};
+    var comparison = OverviewPeriodState{};
+    var revenues: std.ArrayList(MutableRevenue) = .empty;
+    defer revenues.deinit(allocator);
+
+    for (0..result.rowCount()) |row| {
+        const period = try result.text(allocator, 0, row);
+        const metric = try result.text(allocator, 1, row);
+        if (std.mem.eql(u8, period, "history")) {
+            if (std.mem.eql(u8, metric, "revenue")) {
+                const currency = try result.text(allocator, 5, row);
+                _ = try revenueForCurrency(allocator, &revenues, currency);
+            } else return error.InvalidOverviewResult;
+            continue;
+        }
+
+        const state = if (std.mem.eql(u8, period, "current"))
+            &current
+        else if (std.mem.eql(u8, period, "comparison"))
+            &comparison
+        else
+            return error.InvalidOverviewResult;
+        try state.setCoverage(
+            result.int64(7, row),
+            result.int64(8, row),
+            result.int64(9, row),
+        );
+        const numerator = result.int64(2, row);
+        const denominator = result.int64(3, row);
+        if (std.mem.eql(u8, metric, "visitors")) {
+            try setCount(&state.visitors, numerator, denominator);
+        } else if (std.mem.eql(u8, metric, "sessions")) {
+            try setCount(&state.sessions, numerator, denominator);
+        } else if (std.mem.eql(u8, metric, "page-views")) {
+            try setCount(&state.page_views, numerator, denominator);
+        } else if (std.mem.eql(u8, metric, "engagement-rate")) {
+            try setRatio(&state.engagement_rate, numerator, denominator);
+        } else if (std.mem.eql(u8, metric, "conversions")) {
+            try setCount(&state.conversions, numerator, denominator);
+        } else if (std.mem.eql(u8, metric, "conversion-rate")) {
+            try setRatio(&state.conversion_rate, numerator, denominator);
+        } else if (std.mem.eql(u8, metric, "revenue")) {
+            if (result.isNull(4, row)) return error.InvalidOverviewResult;
+            const amount = try result.text(allocator, 4, row);
+            const currency = try result.text(allocator, 5, row);
+            const value_count = result.int64(6, row);
+            if (currency.len != 3 or value_count <= 0) {
+                return error.InvalidOverviewResult;
+            }
+            const revenue = try revenueForCurrency(allocator, &revenues, currency);
+            if (std.mem.eql(u8, period, "current")) {
+                if (revenue.current != null) return error.InvalidOverviewResult;
+                revenue.current = .{
+                    .decimal = amount,
+                    .currency = revenue.currency,
+                    .value_count = value_count,
+                };
+            } else {
+                if (revenue.comparison != null) return error.InvalidOverviewResult;
+                revenue.comparison = .{
+                    .decimal = amount,
+                    .currency = revenue.currency,
+                    .value_count = value_count,
+                };
+            }
+        } else return error.InvalidOverviewResult;
+    }
+
+    try current.validate();
+    if (execution.comparison_range != null) {
+        try comparison.validate();
+    } else if (comparison.hasAny()) return error.InvalidOverviewResult;
+    if (current.coverage.?.total_people != current.visitors.?) {
+        return error.InvalidOverviewResult;
+    }
+    if (execution.comparison_range != null and
+        comparison.coverage.?.total_people != comparison.visitors.?)
+    {
+        return error.InvalidOverviewResult;
+    }
+
+    std.mem.sort(MutableRevenue, revenues.items, {}, MutableRevenue.lessThan);
+    const decoded_revenue = try allocator.alloc(
+        analysis.ComparedAmount,
+        revenues.items.len,
+    );
+    for (decoded_revenue, revenues.items) |*decoded, source| {
+        decoded.* = .{
+            .currency = source.currency,
+            .current = source.current orelse .{
+                .decimal = "0.000000",
+                .currency = source.currency,
+                .value_count = 0,
+            },
+            .comparison = if (execution.comparison_range != null)
+                source.comparison orelse .{
+                    .decimal = "0.000000",
+                    .currency = source.currency,
+                    .value_count = 0,
+                }
+            else
+                null,
+        };
+    }
+    var current_coverage = current.coverage.?;
+    current_coverage.persistent_since_local_date = null;
+    const comparison_coverage = if (execution.comparison_range != null) value: {
+        var coverage = comparison.coverage.?;
+        coverage.persistent_since_local_date = null;
+        break :value coverage;
+    } else null;
+    return .{
+        .visitors = .{
+            .current = current.visitors.?,
+            .comparison = if (execution.comparison_range != null)
+                comparison.visitors.?
+            else
+                null,
+        },
+        .sessions = .{
+            .current = current.sessions.?,
+            .comparison = if (execution.comparison_range != null)
+                comparison.sessions.?
+            else
+                null,
+        },
+        .page_views = .{
+            .current = current.page_views.?,
+            .comparison = if (execution.comparison_range != null)
+                comparison.page_views.?
+            else
+                null,
+        },
+        .engagement_rate = .{
+            .current = current.engagement_rate.?,
+            .comparison = if (execution.comparison_range != null)
+                comparison.engagement_rate.?
+            else
+                null,
+        },
+        .conversions = .{
+            .current = current.conversions.?,
+            .comparison = if (execution.comparison_range != null)
+                comparison.conversions.?
+            else
+                null,
+        },
+        .conversion_rate = .{
+            .current = current.conversion_rate.?,
+            .comparison = if (execution.comparison_range != null)
+                comparison.conversion_rate.?
+            else
+                null,
+        },
+        .revenue = decoded_revenue,
+        .completeness = current_coverage,
+        .comparison_completeness = comparison_coverage,
+    };
+}
+
+pub fn profileOverview(
+    allocator: std.mem.Allocator,
+    event_store: *events.Store,
+    execution: analysis.OverviewExecution,
+) ![]u8 {
+    const plan = try compileOverview(allocator, execution);
+    var sql = std.Io.Writer.Allocating.init(allocator);
+    try sql.writer.writeAll("EXPLAIN ANALYZE ");
+    try sql.writer.writeAll(plan.sql);
+    const sql_z = try sql.toOwnedSliceSentinel(0);
+    var statement = try event_store.database.prepare(sql_z);
+    defer statement.deinit();
+    for (plan.bindings, 1..) |binding, index| switch (binding) {
+        .text => |value| try statement.bindText(index, value),
+        .integer => |value| try statement.bindInt64(index, value),
+    };
+    var result = try statement.execute();
+    defer result.deinit();
+    if (result.columnCount() != 2 or result.rowCount() == 0) {
+        return error.InvalidOverviewProfile;
+    }
+    var output = std.Io.Writer.Allocating.init(allocator);
+    for (0..result.rowCount()) |row| {
+        try output.writer.writeAll(try result.text(allocator, 1, row));
+        try output.writer.writeByte('\n');
+    }
+    return output.toOwnedSlice();
+}
+
+const OverviewPeriodState = struct {
+    visitors: ?i64 = null,
+    sessions: ?i64 = null,
+    page_views: ?i64 = null,
+    engagement_rate: ?analysis.Ratio = null,
+    conversions: ?i64 = null,
+    conversion_rate: ?analysis.Ratio = null,
+    coverage: ?analysis.Completeness = null,
+
+    fn setCoverage(self: *OverviewPeriodState, persistent: i64, ephemeral: i64, legacy: i64) !void {
+        if (persistent < 0 or ephemeral < 0 or legacy < 0) {
+            return error.InvalidOverviewResult;
+        }
+        const total = std.math.add(
+            i64,
+            std.math.add(i64, persistent, ephemeral) catch
+                return error.InvalidOverviewResult,
+            legacy,
+        ) catch return error.InvalidOverviewResult;
+        const coverage = analysis.Completeness{
+            .total_people = total,
+            .persistent_people = persistent,
+            .ephemeral_people = ephemeral,
+            .legacy_people = legacy,
+            .persistent_basis_points = if (total == 0)
+                0
+            else
+                @intCast(@divTrunc(
+                    std.math.mul(i64, persistent, 10_000) catch
+                        return error.InvalidOverviewResult,
+                    total,
+                )),
+            .persistent_since_local_date = null,
+        };
+        if (self.coverage) |prior| {
+            if (prior.total_people != coverage.total_people or
+                prior.persistent_people != persistent or
+                prior.ephemeral_people != ephemeral or
+                prior.legacy_people != legacy)
+            {
+                return error.InvalidOverviewResult;
+            }
+        } else self.coverage = coverage;
+    }
+
+    fn validate(self: OverviewPeriodState) !void {
+        if (self.coverage == null or self.visitors == null or
+            self.sessions == null or
+            self.page_views == null or self.engagement_rate == null or
+            self.conversions == null or self.conversion_rate == null)
+        {
+            return error.InvalidOverviewResult;
+        }
+    }
+
+    fn hasAny(self: OverviewPeriodState) bool {
+        return self.coverage != null or self.visitors != null or
+            self.sessions != null or self.page_views != null or
+            self.engagement_rate != null or self.conversions != null or
+            self.conversion_rate != null;
+    }
+};
+
+const MutableRevenue = struct {
+    currency: []const u8,
+    current: ?analysis.ExactAmount = null,
+    comparison: ?analysis.ExactAmount = null,
+
+    fn lessThan(_: void, left: MutableRevenue, right: MutableRevenue) bool {
+        return std.mem.lessThan(u8, left.currency, right.currency);
+    }
+};
+
+fn revenueForCurrency(
+    allocator: std.mem.Allocator,
+    revenues: *std.ArrayList(MutableRevenue),
+    currency: []const u8,
+) !*MutableRevenue {
+    if (currency.len != 3) return error.InvalidOverviewResult;
+    for (revenues.items) |*revenue| {
+        if (std.mem.eql(u8, revenue.currency, currency)) return revenue;
+    }
+    if (revenues.items.len >= analysis.maximum_currency_series) {
+        return error.TooManyAnalysisCurrencies;
+    }
+    try revenues.append(allocator, .{ .currency = currency });
+    return &revenues.items[revenues.items.len - 1];
+}
+
+fn setCount(slot: *?i64, numerator: i64, denominator: i64) !void {
+    if (slot.* != null or numerator < 0 or denominator != 0) {
+        return error.InvalidOverviewResult;
+    }
+    slot.* = numerator;
+}
+
+fn setRatio(slot: *?analysis.Ratio, numerator: i64, denominator: i64) !void {
+    if (slot.* != null or numerator < 0 or denominator < 0 or
+        numerator > denominator)
+    {
+        return error.InvalidOverviewResult;
+    }
+    slot.* = .{ .numerator = numerator, .denominator = denominator };
+}
+
+fn writeGoalMatchCount(
+    builder: *Builder,
+    goals: []const analysis.ResolvedGoal,
+    event_alias: []const u8,
+) !void {
+    if (goals.len == 0) return builder.write("0::BIGINT");
+    try builder.write("(");
+    for (goals, 0..) |goal, index| {
+        if (index != 0) try builder.write(" + ");
+        try builder.write("CASE WHEN ");
+        try writeSelector(builder, goal.selector, event_alias);
+        try builder.write(" THEN 1 ELSE 0 END");
+    }
+    try builder.write(")::BIGINT");
+}
+
+fn writeAnyGoalMatch(
+    builder: *Builder,
+    goals: []const analysis.ResolvedGoal,
+    event_alias: []const u8,
+) !void {
+    if (goals.len == 0) return builder.write("FALSE");
+    try builder.write("(");
+    for (goals, 0..) |goal, index| {
+        if (index != 0) try builder.write(" OR ");
+        try writeSelector(builder, goal.selector, event_alias);
+    }
+    try builder.write(")");
+}
+
 fn executeRows(
     allocator: std.mem.Allocator,
     database: *duckdb.Database,
@@ -1801,7 +2382,7 @@ pub fn seedSemanticFixture(database: *duckdb.Database) !void {
         \\  0, FALSE, 0, FALSE, FALSE, 0, 0, 0, FALSE,
         \\  from_hex('00000000000000000000000000000000')
         \\FROM (VALUES
-        \\ ('00000000-0000-4000-8000-000000000101',1767139200000000,'2025-12-31',0,1,'pageview','/old','Old','example.test','00000000-0000-4000-8000-0000000000a1',1,'user-a','00000000-0000-4000-8000-0000000000b0',0,'','DE','en','Chrome','Linux','desktop','','','','{}','{}','','',0,0),
+        \\ ('00000000-0000-4000-8000-000000000101',1767139200000000,'2025-12-31',0,1,'pageview','/old','Old','example.test','00000000-0000-4000-8000-0000000000a1',1,'user-a','00000000-0000-4000-8000-0000000000b0',0,'','DE','en','Chrome','Linux','desktop','','','','{}','{}','5.000000','GBP',0,0),
         \\ ('00000000-0000-4000-8000-000000000102',1767312000000000,'2026-01-02',60,1,'pageview','/landing','Landing','example.test','00000000-0000-4000-8000-0000000000a1',1,'user-a','00000000-0000-4000-8000-0000000000b1',0,'search.example','DE','en','Chrome','Linux','desktop','google','cpc','winter','{"plan":"pro"}','{}','','',0,0),
         \\ ('00000000-0000-4000-8000-000000000103',1767398400000000,'2026-01-03',60,1,'pageview','/pricing','Pricing','example.test','00000000-0000-4000-8000-0000000000a1',1,'user-a','00000000-0000-4000-8000-0000000000b1',1,'','DE','en','Chrome','Linux','desktop','','','','{"plan":"pro"}','{}','','',0,0),
         \\ ('00000000-0000-4000-8000-000000000104',1767398401000000,'2026-01-03',60,2,'purchase','/pricing','Pricing','example.test','00000000-0000-4000-8000-0000000000a1',1,'user-a','00000000-0000-4000-8000-0000000000b1',2,'','DE','en','Chrome','Linux','desktop','','','','{"plan":"pro","amount":14.25}','{}','12.500000','EUR',0,0),
