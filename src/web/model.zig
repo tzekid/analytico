@@ -34,6 +34,8 @@ pub const Page = struct {
     funnels: []const meta.Funnel,
     self_exclusion_origins: []const []u8,
     excluded_networks: []const []u8,
+    strict_mode: bool = false,
+    daily_event_ceiling: i64 = meta.default_daily_event_ceiling,
     csrf_token: []const u8,
     notice: []const u8 = "",
     form_error: []const u8 = "",

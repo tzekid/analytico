@@ -234,8 +234,27 @@ async function main() {
     assert.equal(response.status(), 200);
     assert.equal(await noScriptPage.locator("#report").count(), 1);
     await noScriptPage.locator(
-      'details.management:has(form[action="/admin/goals"]) > summary',
+      'details.management:has(form[action="/admin/traffic-policy"]) > summary',
     ).click();
+    const trafficForm = noScriptPage.locator('form[action="/admin/traffic-policy"]');
+    await trafficForm.locator('input[name="strict"]').check();
+    await trafficForm.locator('input[name="daily_event_ceiling"]').fill("100001");
+    await trafficForm.locator('button[type="submit"]').click();
+    await noScriptPage.waitForURL(/notice=traffic-policy-updated/);
+    assert.equal(
+      await noScriptPage.locator('form[action="/admin/traffic-policy"] input[name="strict"]').isChecked(),
+      true
+    );
+    assert.equal(
+      await noScriptPage.locator('form[action="/admin/traffic-policy"] input[name="daily_event_ceiling"]').inputValue(),
+      "100001"
+    );
+    const definitions = noScriptPage.locator(
+      'details.management:has(form[action="/admin/goals"])',
+    );
+    if (!(await definitions.evaluate((element) => element.open))) {
+      await definitions.locator(':scope > summary').click();
+    }
     const goalForm = noScriptPage.locator('form[action="/admin/goals"]');
     await goalForm.locator('input[name="name"]').fill("Signup");
     await goalForm.locator('select[name="kind"]').selectOption("event");
@@ -284,6 +303,7 @@ async function main() {
     other_sessions: "revoked",
     logout: "revoked",
     no_javascript_dashboard: "ok",
+    native_traffic_policy: "ok",
     csrf_origin: "enforced",
     return_path: "bounded",
     virtual_authenticator: "ctap2",

@@ -5,8 +5,108 @@ const duckdb = @import("duckdb.zig");
 const deadline = @import("deadline.zig");
 const events = @import("events.zig");
 const meta = @import("meta.zig");
+const traffic = @import("traffic.zig");
 
 const deadline_milliseconds: u32 = 2_000;
+
+pub const TrafficContext = struct {
+    strict_mode: bool = false,
+    daily_event_ceiling: i64 = meta.default_daily_event_ceiling,
+    active_goals: []const meta.Goal = &.{},
+    heuristic_available: bool = true,
+
+    pub fn validate(self: TrafficContext) !void {
+        if (self.daily_event_ceiling < 1 or
+            self.daily_event_ceiling > meta.maximum_daily_event_ceiling)
+        {
+            return error.InvalidDailyEventCeiling;
+        }
+        if (self.heuristic_available and
+            self.active_goals.len > meta.maximum_active_goals)
+        {
+            return error.TooManyActiveGoals;
+        }
+        if (self.strict_mode and !self.heuristic_available) {
+            return error.StrictTrafficHeuristicsUnavailable;
+        }
+    }
+};
+
+const PreparedReport = struct {
+    statement: duckdb.Statement,
+    next_binding: usize,
+};
+
+fn prepareClassified(
+    allocator: std.mem.Allocator,
+    event_store: *events.Store,
+    tail: []const u8,
+    site_id: []const u8,
+    context: TrafficContext,
+) !PreparedReport {
+    try context.validate();
+    var goals: [meta.maximum_active_goals]traffic.Goal = undefined;
+    const goal_count = if (context.heuristic_available) context.active_goals.len else 0;
+    for (context.active_goals[0..goal_count], 0..) |goal, index| {
+        goals[index] = .{ .kind = goal.match_kind, .value = goal.match_value };
+    }
+    const fragment = try traffic.classifierFragment(
+        allocator,
+        site_id,
+        goals[0..goal_count],
+        context.heuristic_available,
+    );
+    var sql = std.Io.Writer.Allocating.init(allocator);
+    try sql.writer.writeAll("WITH ");
+    try sql.writer.writeAll(fragment.sql);
+    try sql.writer.writeAll(", ");
+    try sql.writer.writeAll(tail);
+    const sql_z = try sql.toOwnedSliceSentinel(0);
+    var statement = try event_store.database.prepare(sql_z);
+    errdefer statement.deinit();
+    var binding: usize = 1;
+    for (fragment.bindings) |value| {
+        switch (value) {
+            .text => |text| try statement.bindText(binding, text),
+            .integer => |integer| try statement.bindInt64(binding, integer),
+        }
+        binding += 1;
+    }
+    return .{ .statement = statement, .next_binding = binding };
+}
+
+fn prepareProduct(
+    allocator: std.mem.Allocator,
+    event_store: *events.Store,
+    default_sql: [:0]const u8,
+    site_id: []const u8,
+    context: TrafficContext,
+) !PreparedReport {
+    try context.validate();
+    if (context.strict_mode) {
+        if (!std.mem.startsWith(u8, default_sql, "WITH ")) {
+            return error.InvalidProductSql;
+        }
+        var tail = std.Io.Writer.Allocating.init(allocator);
+        try tail.writer.writeAll(
+            "events AS (SELECT * EXCLUDE (d34_person_key)" ++
+                " FROM site_product_events WHERE session_id NOT IN" ++
+                " (SELECT session_id FROM d34_current_suspected_sessions)), ",
+        );
+        try tail.writer.writeAll(default_sql[5..]);
+        return prepareClassified(
+            allocator,
+            event_store,
+            tail.written(),
+            site_id,
+            context,
+        );
+    }
+    return .{
+        .statement = try event_store.database.prepare(default_sql),
+        .next_binding = 1,
+    };
+}
 
 pub const IdentityCoverage = struct {
     total_people: i64,
@@ -120,17 +220,40 @@ const overview_sql: [:0]const u8 =
     \\  AND received_date_utc BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
 ;
 
-const traffic_quality_sql: [:0]const u8 =
-    \\WITH params AS (
+const strict_overview_sql_tail =
+    \\range_product AS (
+    \\  SELECT e.* FROM site_product_events e
+    \\  WHERE e.site_id = ?
+    \\    AND e.received_date_utc BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
+    \\    AND e.session_id NOT IN (
+    \\      SELECT session_id FROM d34_current_suspected_sessions
+    \\    )
+    \\)
+    \\SELECT
+    \\  count(*) FILTER (WHERE kind = 1),
+    \\  count(DISTINCT (received_date_utc, visitor_day_id)),
+    \\  count(DISTINCT session_id),
+    \\  count(*) FILTER (WHERE kind = 2),
+    \\  (SELECT count(*) FROM events
+    \\   WHERE site_id = ?
+    \\     AND received_date_utc BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
+    \\     AND traffic_class IN (2, 3))
+    \\FROM range_product
+;
+
+const traffic_quality_sql_tail =
+    \\params AS (
     \\  SELECT ?::VARCHAR AS site_id, CAST(? AS DATE) AS start_date,
-    \\         CAST(? AS DATE) AS end_date
+    \\         CAST(? AS DATE) AS end_date, ?::BOOLEAN AS strict_mode,
+    \\         ?::BIGINT AS daily_event_ceiling, ?::BOOLEAN AS heuristic_available
     \\), range_events AS (
-    \\  SELECT e.site_id, e.received_date_utc, e.kind, e.anonymous_id,
+    \\  SELECT e.site_id, e.received_date_utc, e.site_local_date, e.kind,
+    \\    e.anonymous_id,
     \\    e.identity_quality, e.session_id, e.visitor_day_start,
     \\    e.traffic_class, e.classifier_version, e.bot_rule,
     \\    e.signal_version, e.navigator_webdriver,
     \\    e.trusted_interactions, e.was_visible, e.was_prerendered,
-    \\    e.client_hint_consistency, e.accept_language_present
+    \\    e.client_hint_consistency, e.accept_language_present, e.network_day_id
     \\  FROM events e, params p
     \\  WHERE e.site_id = p.site_id
     \\    AND e.received_date_utc BETWEEN p.start_date AND p.end_date
@@ -226,13 +349,46 @@ const traffic_quality_sql: [:0]const u8 =
     \\    WHERE e.traffic_class IN (1, 5)
     \\    GROUP BY e.session_id
     \\  ) sessions
+    \\), anonymous_ranked AS (
+    \\  SELECT e.anonymous_id, e.received_date_utc, e.network_day_id,
+    \\    row_number() OVER (PARTITION BY e.anonymous_id
+    \\      ORDER BY e.received_at_utc_micros, e.event_id) AS position
+    \\  FROM site_product_events e
+    \\  WHERE e.kind IN (1, 2) AND e.identity_quality IN (1, 2)
     \\), anonymous_first AS (
-    \\  SELECT e.anonymous_id, min(e.received_date_utc) AS first_date
-    \\  FROM events e, params p
-    \\  WHERE e.site_id = p.site_id AND e.kind IN (1, 2)
-    \\    AND e.traffic_class IN (1, 5)
-    \\    AND e.identity_quality IN (1, 2)
-    \\  GROUP BY e.anonymous_id
+    \\  SELECT anonymous_id, received_date_utc AS first_date, network_day_id
+    \\  FROM anonymous_ranked WHERE position = 1
+    \\), mint_group_counts AS (
+    \\  SELECT first_date, network_day_id, count(*) AS minted_identities
+    \\  FROM anonymous_first
+    \\  WHERE network_day_id != from_hex('00000000000000000000000000000000')
+    \\  GROUP BY first_date, network_day_id
+    \\), heuristic_summary AS (
+    \\  SELECT
+    \\    count(*) AS raw_candidates,
+    \\    count(*) FILTER (WHERE NOT v.contradicted) AS current_suspected,
+    \\    count(*) FILTER (WHERE v.contradicted) AS contradicted
+    \\  FROM d34_raw_candidates c
+    \\  JOIN d34_candidate_verdicts v USING (session_id), params p
+    \\  WHERE c.received_date_utc BETWEEN p.start_date AND p.end_date
+    \\), health_summary AS (
+    \\  SELECT
+    \\    (SELECT count(*) FROM range_events) AS accepted_events,
+    \\    (SELECT count(*) FROM (
+    \\      SELECT e.site_local_date
+    \\      FROM events e, params p
+    \\      WHERE e.site_id = p.site_id
+    \\        AND e.site_local_date BETWEEN p.start_date AND p.end_date
+    \\      GROUP BY e.site_local_date, p.daily_event_ceiling
+    \\      HAVING count(*) >= p.daily_event_ceiling
+    \\    ) reached) AS ceiling_reached_days,
+    \\    (SELECT count(*) FROM mint_group_counts m, params p
+    \\      WHERE m.first_date BETWEEN p.start_date AND p.end_date
+    \\        AND m.minted_identities > 64) AS mint_anomaly_groups,
+    \\    (SELECT COALESCE(max(m.minted_identities), 0)
+    \\      FROM mint_group_counts m, params p
+    \\      WHERE m.first_date BETWEEN p.start_date AND p.end_date)
+    \\      AS maximum_minted_identities
     \\), dates AS (
     \\  SELECT p.start_date + CAST(day AS INTEGER) AS date
     \\  FROM params p,
@@ -244,7 +400,20 @@ const traffic_quality_sql: [:0]const u8 =
     \\    (SELECT count(*) FROM range_events e
     \\      WHERE e.received_date_utc = d.date
     \\        AND e.traffic_class IN (2, 3))
-    \\      AS bot_events
+    \\      AS bot_events,
+    \\    (SELECT count(*) FROM d34_raw_candidates c
+    \\      JOIN d34_candidate_verdicts v USING (session_id)
+    \\      WHERE c.received_date_utc = d.date AND NOT v.contradicted)
+    \\      AS suspected_sessions,
+    \\    (SELECT count(*) FROM events e, params p
+    \\      WHERE e.site_id = p.site_id AND e.site_local_date = d.date)
+    \\      AS accepted_events,
+    \\    (SELECT count(*) FROM mint_group_counts m
+    \\      WHERE m.first_date = d.date AND m.minted_identities > 64)
+    \\      AS mint_anomaly_groups,
+    \\    (SELECT COALESCE(max(m.minted_identities), 0)
+    \\      FROM mint_group_counts m WHERE m.first_date = d.date)
+    \\      AS maximum_minted_identities
     \\  FROM dates d
     \\), daily_page AS (
     \\  SELECT * FROM daily ORDER BY date
@@ -271,15 +440,36 @@ const traffic_quality_sql: [:0]const u8 =
     \\  t.trusted_interaction_events, t.visible_events, t.prerendered_events,
     \\  t.client_hint_mismatch_events, t.client_hint_absent_expected_events,
     \\  t.accept_language_present_events,
+    \\  p2.heuristic_available, 1 AS heuristic_version,
+    \\  h.raw_candidates, h.current_suspected, h.contradicted,
+    \\  p2.strict_mode, p2.daily_event_ceiling, hs.accepted_events,
+    \\  hs.ceiling_reached_days, hs.mint_anomaly_groups,
+    \\  hs.maximum_minted_identities,
+    \\  d.suspected_sessions, d.accepted_events, d.mint_anomaly_groups,
+    \\  d.maximum_minted_identities,
+    \\  d.accepted_events >= p2.daily_event_ceiling AS ceiling_reached,
     \\  0 AS rule_class, 0 AS rule_version, '' AS rule_id, 0 AS rule_events
     \\FROM daily_page d
     \\CROSS JOIN person_summary p
     \\CROSS JOIN identity_summary i
     \\CROSS JOIN session_quality s
     \\CROSS JOIN traffic_summary t
+    \\CROSS JOIN heuristic_summary h
+    \\CROSS JOIN health_summary hs
+    \\CROSS JOIN params p2
     \\UNION ALL
-    \\SELECT 1, '', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    \\  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    \\SELECT 1, '',
+    \\  0, 0,
+    \\  0, 0, 0, 0,
+    \\  0, 0,
+    \\  0, 0, 0, 0, 0, 0,
+    \\  0, 0, 0,
+    \\  0, 0, 0, 0, 0,
+    \\  0, 0, 0, 0, 0, 0, 0, 0,
+    \\  FALSE, 0,
+    \\  0, 0, 0,
+    \\  FALSE, 0, 0, 0, 0, 0,
+    \\  0, 0, 0, 0, FALSE,
     \\  r.traffic_class, r.classifier_version, r.bot_rule, r.events
     \\FROM rule_counts r
     \\ORDER BY row_kind, date, rule_class, rule_version, rule_id
@@ -319,7 +509,6 @@ const pages_body = session_cte ++
     \\WHERE kind = 1
     \\GROUP BY path
 ;
-
 fn pagePositionBody(comptime position: []const u8) []const u8 {
     return page_position_cte ++
         \\SELECT path AS label,
@@ -342,7 +531,6 @@ const sources_body = page_position_cte ++
     \\WHERE first_position = 1
     \\GROUP BY label
 ;
-
 fn campaignBody(comptime expression: []const u8) []const u8 {
     return page_position_cte ++
         \\SELECT
@@ -380,7 +568,6 @@ const events_body = session_cte ++
     \\WHERE kind = 2
     \\GROUP BY event_name
 ;
-
 const campaign_all_expression =
     \\concat(
     \\  'source=', utm_source,
@@ -399,9 +586,8 @@ const goal_event_sql: [:0]const u8 = session_cte ++
     \\SELECT
     \\  (SELECT count(*) FROM matching),
     \\  (SELECT count(DISTINCT session_id) FROM matching),
-    \\  (SELECT count(*) FROM sessioned WHERE session_start)
+    \\  (SELECT count(DISTINCT session_id) FROM sessioned)
 ;
-
 const goal_path_sql: [:0]const u8 = session_cte ++
     \\,
     \\matching AS (
@@ -410,9 +596,8 @@ const goal_path_sql: [:0]const u8 = session_cte ++
     \\SELECT
     \\  (SELECT count(*) FROM matching),
     \\  (SELECT count(DISTINCT session_id) FROM matching),
-    \\  (SELECT count(*) FROM sessioned WHERE session_start)
+    \\  (SELECT count(DISTINCT session_id) FROM sessioned)
 ;
-
 const goal_prefix_sql: [:0]const u8 = session_cte ++
     \\,
     \\matching AS (
@@ -421,9 +606,8 @@ const goal_prefix_sql: [:0]const u8 = session_cte ++
     \\SELECT
     \\  (SELECT count(*) FROM matching),
     \\  (SELECT count(DISTINCT session_id) FROM matching),
-    \\  (SELECT count(*) FROM sessioned WHERE session_start)
+    \\  (SELECT count(DISTINCT session_id) FROM sessioned)
 ;
-
 const funnel_sql: [:0]const u8 =
     \\WITH step_defs(step_index, match_kind, match_value) AS (
     \\  VALUES
@@ -534,7 +718,7 @@ const funnel_sql: [:0]const u8 =
     \\  UNION ALL SELECT 7, count(*) FROM step_7
     \\),
     \\eligible AS (
-    \\  SELECT count(*) AS sessions FROM sessioned WHERE session_start
+    \\  SELECT count(DISTINCT session_id) AS sessions FROM sessioned
     \\)
     \\SELECT s.step_index, p.sessions, eligible.sessions
     \\FROM active_steps s
@@ -550,6 +734,7 @@ pub fn run(
     site_id: []const u8,
     goal: ?meta.Goal,
     funnel_steps: ?[]const meta.FunnelStep,
+    traffic_context: TrafficContext,
 ) !report.Result {
     return runWithTimeout(
         allocator,
@@ -558,6 +743,7 @@ pub fn run(
         site_id,
         goal,
         funnel_steps,
+        traffic_context,
         deadline_milliseconds,
     );
 }
@@ -568,6 +754,7 @@ pub fn identityCoverage(
     site_id: []const u8,
     start_local_date: []const u8,
     end_local_date: []const u8,
+    traffic_context: TrafficContext,
     timeout_ms: u32,
 ) !IdentityCoverage {
     try domain.validateUuid(site_id);
@@ -581,12 +768,20 @@ pub fn identityCoverage(
     {
         return error.InvalidIdentityCoverageRange;
     }
-    var statement = try event_store.database.prepare(identity_coverage_sql);
+    const prepared = try prepareProduct(
+        allocator,
+        event_store,
+        identity_coverage_sql,
+        site_id,
+        traffic_context,
+    );
+    var statement = prepared.statement;
     defer statement.deinit();
-    try statement.bindText(1, site_id);
-    try statement.bindText(2, start_local_date);
-    try statement.bindText(3, end_local_date);
-    try statement.bindText(4, site_id);
+    const binding = prepared.next_binding;
+    try statement.bindText(binding, site_id);
+    try statement.bindText(binding + 1, start_local_date);
+    try statement.bindText(binding + 2, end_local_date);
+    try statement.bindText(binding + 3, site_id);
     var result = try deadline.execute(&event_store.database, &statement, timeout_ms);
     defer result.deinit();
     if (result.rowCount() != 1 or result.columnCount() != 5) {
@@ -629,6 +824,7 @@ pub fn runWithTimeout(
     site_id: []const u8,
     goal: ?meta.Goal,
     funnel_steps: ?[]const meta.FunnelStep,
+    traffic_context: TrafficContext,
     timeout_ms: u32,
 ) !report.Result {
     if (timeout_ms == 0 or timeout_ms > deadline_milliseconds) {
@@ -637,9 +833,11 @@ pub fn runWithTimeout(
     try domain.validateUuid(site_id);
     return switch (request.kind) {
         .overview => .{ .overview = try overview(
+            allocator,
             event_store,
             request,
             site_id,
+            traffic_context,
             timeout_ms,
         ) },
         .traffic_quality => .{ .traffic_quality = try trafficQuality(
@@ -647,6 +845,7 @@ pub fn runWithTimeout(
             event_store,
             request,
             site_id,
+            traffic_context,
             timeout_ms,
         ) },
         .pages => .{ .list = try list(
@@ -658,6 +857,7 @@ pub fn runWithTimeout(
             "path",
             "page_views",
             "visitor_days",
+            traffic_context,
             timeout_ms,
         ) },
         .entries => .{ .list = try list(
@@ -669,6 +869,7 @@ pub fn runWithTimeout(
             "path",
             "sessions",
             "visitor_days",
+            traffic_context,
             timeout_ms,
         ) },
         .exits => .{ .list = try list(
@@ -680,6 +881,7 @@ pub fn runWithTimeout(
             "path",
             "sessions",
             "visitor_days",
+            traffic_context,
             timeout_ms,
         ) },
         .sources => .{ .list = try list(
@@ -691,6 +893,7 @@ pub fn runWithTimeout(
             "source",
             "sessions",
             "visitor_days",
+            traffic_context,
             timeout_ms,
         ) },
         .campaigns => .{ .list = try campaignList(
@@ -698,6 +901,7 @@ pub fn runWithTimeout(
             event_store,
             request,
             site_id,
+            traffic_context,
             timeout_ms,
         ) },
         .countries => .{ .list = try dimensionList(
@@ -706,6 +910,7 @@ pub fn runWithTimeout(
             request,
             site_id,
             .country,
+            traffic_context,
             timeout_ms,
         ) },
         .browsers => .{ .list = try dimensionList(
@@ -714,6 +919,7 @@ pub fn runWithTimeout(
             request,
             site_id,
             .browser,
+            traffic_context,
             timeout_ms,
         ) },
         .operating_systems => .{ .list = try dimensionList(
@@ -722,6 +928,7 @@ pub fn runWithTimeout(
             request,
             site_id,
             .operating_system,
+            traffic_context,
             timeout_ms,
         ) },
         .devices => .{ .list = try dimensionList(
@@ -730,6 +937,7 @@ pub fn runWithTimeout(
             request,
             site_id,
             .device,
+            traffic_context,
             timeout_ms,
         ) },
         .events => .{ .list = try list(
@@ -741,13 +949,16 @@ pub fn runWithTimeout(
             "event",
             "event_count",
             "sessions",
+            traffic_context,
             timeout_ms,
         ) },
         .goal => .{ .goal = try goalReport(
+            allocator,
             event_store,
             request,
             site_id,
             goal orelse return error.GoalNotFound,
+            traffic_context,
             timeout_ms,
         ) },
         .funnel => .{ .funnel = try funnelReport(
@@ -756,20 +967,44 @@ pub fn runWithTimeout(
             request,
             site_id,
             funnel_steps orelse return error.FunnelNotFound,
+            traffic_context,
             timeout_ms,
         ) },
     };
 }
 
 fn overview(
+    allocator: std.mem.Allocator,
     event_store: *events.Store,
     request: report.Request,
     site_id: []const u8,
+    traffic_context: TrafficContext,
     timeout_ms: u32,
 ) !report.Overview {
-    var statement = try event_store.database.prepare(overview_sql);
+    const prepared = if (traffic_context.strict_mode)
+        try prepareClassified(
+            allocator,
+            event_store,
+            strict_overview_sql_tail,
+            site_id,
+            traffic_context,
+        )
+    else
+        PreparedReport{
+            .statement = try event_store.database.prepare(overview_sql),
+            .next_binding = 1,
+        };
+    var statement = prepared.statement;
     defer statement.deinit();
-    try bindRange(&statement, site_id, request);
+    const binding = prepared.next_binding;
+    try statement.bindText(binding, site_id);
+    try statement.bindText(binding + 1, request.start_date);
+    try statement.bindText(binding + 2, request.end_date);
+    if (traffic_context.strict_mode) {
+        try statement.bindText(binding + 3, site_id);
+        try statement.bindText(binding + 4, request.start_date);
+        try statement.bindText(binding + 5, request.end_date);
+    }
     var result = try deadline.execute(&event_store.database, &statement, timeout_ms);
     defer result.deinit();
     if (result.rowCount() != 1 or result.columnCount() != 5) {
@@ -789,19 +1024,36 @@ pub fn trafficQuality(
     event_store: *events.Store,
     request: report.Request,
     site_id: []const u8,
+    traffic_context: TrafficContext,
     timeout_ms: u32,
 ) !report.TrafficQuality {
-    var statement = try event_store.database.prepare(traffic_quality_sql);
+    const prepared = try prepareClassified(
+        allocator,
+        event_store,
+        traffic_quality_sql_tail,
+        site_id,
+        traffic_context,
+    );
+    var statement = prepared.statement;
     defer statement.deinit();
-    try bindRange(&statement, site_id, request);
-    try statement.bindInt64(4, @as(i64, request.limit) + 1);
+    const binding = prepared.next_binding;
+    try statement.bindText(binding, site_id);
+    try statement.bindText(binding + 1, request.start_date);
+    try statement.bindText(binding + 2, request.end_date);
+    try statement.bindInt64(binding + 3, @intFromBool(traffic_context.strict_mode));
+    try statement.bindInt64(binding + 4, traffic_context.daily_event_ceiling);
+    try statement.bindInt64(
+        binding + 5,
+        @intFromBool(traffic_context.heuristic_available),
+    );
+    try statement.bindInt64(binding + 6, @as(i64, request.limit) + 1);
     const offset = try request.offset();
     const range_days = @as(i64, request.end_day - request.start_day + 1);
     if (offset >= range_days) return error.InvalidReportPage;
-    try statement.bindInt64(5, offset);
+    try statement.bindInt64(binding + 7, offset);
     var result = try deadline.execute(&event_store.database, &statement, timeout_ms);
     defer result.deinit();
-    if (result.columnCount() != 36) {
+    if (result.columnCount() != 52) {
         return error.InvalidReportResult;
     }
     var daily_returned: usize = 0;
@@ -864,13 +1116,31 @@ pub fn trafficQuality(
         .client_hint_absent_expected_events = result.int64(30, 0),
         .accept_language_present_events = result.int64(31, 0),
     };
+    const heuristic_available = result.int64(32, 0) != 0;
+    const heuristic_version = result.int64(33, 0);
+    const raw_candidates = result.int64(34, 0);
+    const current_suspected = result.int64(35, 0);
+    const contradicted = result.int64(36, 0);
+    const strict_mode = result.int64(37, 0) != 0;
+    const daily_event_ceiling = result.int64(38, 0);
+    const accepted_events = result.int64(39, 0);
+    const ceiling_reached_days = result.int64(40, 0);
+    const mint_anomaly_groups = result.int64(41, 0);
+    const maximum_minted_identities = result.int64(42, 0);
     if (total < 0 or persistent < 0 or ephemeral < 0 or legacy < 0 or
         visitor_days < 0 or zero_sessions < 0 or
         persistent + ephemeral + legacy != total or
         identity_quality[0].visitor_days + identity_quality[1].visitor_days +
             identity_quality[2].visitor_days != visitor_days or
         exclusion_sources[0].events < 0 or exclusion_sources[1].events < 0 or
-        exclusion_sources[2].events < 0)
+        exclusion_sources[2].events < 0 or heuristic_version != 1 or
+        raw_candidates < 0 or current_suspected < 0 or contradicted < 0 or
+        current_suspected + contradicted != raw_candidates or
+        daily_event_ceiling < 1 or accepted_events < 0 or
+        ceiling_reached_days < 0 or mint_anomaly_groups < 0 or
+        maximum_minted_identities < 0 or
+        strict_mode != traffic_context.strict_mode or
+        heuristic_available != traffic_context.heuristic_available)
     {
         return error.InvalidReportResult;
     }
@@ -907,7 +1177,13 @@ pub fn trafficQuality(
         if (result.int64(0, index) != 0) return error.InvalidReportResult;
         const new_identities = result.int64(2, index);
         const bot_events = result.int64(3, index);
+        const day_suspected = result.int64(43, index);
+        const day_accepted = result.int64(44, index);
+        const day_mint_groups = result.int64(45, index);
+        const day_maximum_minted = result.int64(46, index);
         if (new_identities < 0 or bot_events < 0 or
+            day_suspected < 0 or day_accepted < 0 or day_mint_groups < 0 or
+            day_maximum_minted < 0 or
             result.int64(4, index) != total or
             result.int64(8, index) != visitor_days or
             result.int64(24, index) != signals.client_signal_v1_events)
@@ -918,6 +1194,11 @@ pub fn trafficQuality(
             .date = try result.text(allocator, 1, index),
             .new_anonymous_identities = new_identities,
             .bot_events = bot_events,
+            .suspected_sessions = day_suspected,
+            .accepted_events = day_accepted,
+            .mint_anomaly_groups = day_mint_groups,
+            .maximum_minted_identities = day_maximum_minted,
+            .ceiling_reached = result.int64(47, index) != 0,
         };
     }
     const rules = try allocator.alloc(report.TrafficRuleRow, rule_count);
@@ -925,15 +1206,15 @@ pub fn trafficQuality(
     var rule_total: i64 = 0;
     for (daily_returned..result.rowCount()) |index| {
         if (result.int64(0, index) != 1) return error.InvalidReportResult;
-        const class_value = result.int64(32, index);
-        const version_value = result.int64(33, index);
-        const rule_events = result.int64(35, index);
+        const class_value = result.int64(48, index);
+        const version_value = result.int64(49, index);
+        const rule_events = result.int64(51, index);
         if (class_value < 1 or class_value > 5 or version_value < 0 or
             version_value > std.math.maxInt(u16) or rule_events < 0)
         {
             return error.InvalidReportResult;
         }
-        const rule = try result.text(allocator, 34, index);
+        const rule = try result.text(allocator, 50, index);
         if (rule.len > 64) return error.InvalidReportResult;
         rules[rule_index] = .{
             .class = @fromBackingInt(@intCast(@as(u8, @intCast(class_value)))),
@@ -956,6 +1237,14 @@ pub fn trafficQuality(
                 return error.InvalidReportResult,
             total,
         ));
+    const contradiction_basis_points: u16 = if (raw_candidates == 0)
+        0
+    else
+        @intCast(@divTrunc(
+            std.math.mul(i64, contradicted, 10_000) catch
+                return error.InvalidReportResult,
+            raw_candidates,
+        ));
     return .{
         .distinct_people = total,
         .persistent_people = persistent,
@@ -964,6 +1253,18 @@ pub fn trafficQuality(
         .persistent_basis_points = basis_points,
         .visitor_days = visitor_days,
         .zero_engagement_single_event_sessions = zero_sessions,
+        .heuristic_available = heuristic_available,
+        .heuristic_version = @intCast(heuristic_version),
+        .raw_candidates = raw_candidates,
+        .current_suspected_sessions = current_suspected,
+        .contradicted_candidates = contradicted,
+        .contradiction_basis_points = contradiction_basis_points,
+        .strict_mode = strict_mode,
+        .daily_event_ceiling = daily_event_ceiling,
+        .accepted_events = accepted_events,
+        .ceiling_reached_days = ceiling_reached_days,
+        .mint_anomaly_groups = mint_anomaly_groups,
+        .maximum_minted_identities = maximum_minted_identities,
         .identity_quality = identity_quality,
         .exclusion_sources = exclusion_sources,
         .traffic_classes = traffic_classes,
@@ -983,13 +1284,24 @@ fn list(
     label_name: []const u8,
     primary_name: []const u8,
     secondary_name: []const u8,
+    traffic_context: TrafficContext,
     timeout_ms: u32,
 ) !report.List {
-    var statement = try event_store.database.prepare(sql);
+    const prepared = try prepareProduct(
+        allocator,
+        event_store,
+        sql,
+        site_id,
+        traffic_context,
+    );
+    var statement = prepared.statement;
     defer statement.deinit();
-    try bindRange(&statement, site_id, request);
-    try statement.bindInt64(4, @as(i64, request.limit) + 1);
-    try statement.bindInt64(5, try request.offset());
+    const binding = prepared.next_binding;
+    try statement.bindText(binding, site_id);
+    try statement.bindText(binding + 1, request.start_date);
+    try statement.bindText(binding + 2, request.end_date);
+    try statement.bindInt64(binding + 3, @as(i64, request.limit) + 1);
+    try statement.bindInt64(binding + 4, try request.offset());
     var result = try deadline.execute(&event_store.database, &statement, timeout_ms);
     defer result.deinit();
     if (result.columnCount() != 3) return error.InvalidReportResult;
@@ -1017,6 +1329,7 @@ fn campaignList(
     event_store: *events.Store,
     request: report.Request,
     site_id: []const u8,
+    traffic_context: TrafficContext,
     timeout_ms: u32,
 ) !report.List {
     const sql = switch (request.campaign_dimension) {
@@ -1061,6 +1374,7 @@ fn campaignList(
         },
         "sessions",
         "visitor_days",
+        traffic_context,
         timeout_ms,
     );
 }
@@ -1078,6 +1392,7 @@ fn dimensionList(
     request: report.Request,
     site_id: []const u8,
     dimension: Dimension,
+    traffic_context: TrafficContext,
     timeout_ms: u32,
 ) !report.List {
     const sql = switch (dimension) {
@@ -1114,15 +1429,18 @@ fn dimensionList(
         },
         "sessions",
         "visitor_days",
+        traffic_context,
         timeout_ms,
     );
 }
 
 fn goalReport(
+    allocator: std.mem.Allocator,
     event_store: *events.Store,
     request: report.Request,
     site_id: []const u8,
     goal: meta.Goal,
+    traffic_context: TrafficContext,
     timeout_ms: u32,
 ) !report.Goal {
     const sql = switch (goal.match_kind) {
@@ -1130,10 +1448,20 @@ fn goalReport(
         .path => goal_path_sql,
         .prefix => goal_prefix_sql,
     };
-    var statement = try event_store.database.prepare(sql);
+    const prepared = try prepareProduct(
+        allocator,
+        event_store,
+        sql,
+        site_id,
+        traffic_context,
+    );
+    var statement = prepared.statement;
     defer statement.deinit();
-    try bindRange(&statement, site_id, request);
-    try statement.bindText(4, goal.match_value);
+    const binding = prepared.next_binding;
+    try statement.bindText(binding, site_id);
+    try statement.bindText(binding + 1, request.start_date);
+    try statement.bindText(binding + 2, request.end_date);
+    try statement.bindText(binding + 3, goal.match_value);
     var result = try deadline.execute(&event_store.database, &statement, timeout_ms);
     defer result.deinit();
     if (result.rowCount() != 1 or result.columnCount() != 3) {
@@ -1153,15 +1481,23 @@ fn funnelReport(
     request: report.Request,
     site_id: []const u8,
     steps: []const meta.FunnelStep,
+    traffic_context: TrafficContext,
     timeout_ms: u32,
 ) !report.Funnel {
     if (steps.len < 2 or steps.len > 8) return error.InvalidFunnelLength;
     for (steps, 0..) |step, index| {
         if (step.index != index) return error.InvalidFunnelDefinition;
     }
-    var statement = try event_store.database.prepare(funnel_sql);
+    const prepared = try prepareProduct(
+        allocator,
+        event_store,
+        funnel_sql,
+        site_id,
+        traffic_context,
+    );
+    var statement = prepared.statement;
     defer statement.deinit();
-    var parameter: usize = 1;
+    var parameter = prepared.next_binding;
     for (0..8) |index| {
         if (index < steps.len) {
             try statement.bindInt64(parameter, @backingInt(steps[index].match_kind));
@@ -1172,10 +1508,10 @@ fn funnelReport(
         }
         parameter += 2;
     }
-    try statement.bindInt64(17, @intCast(steps.len));
-    try statement.bindText(18, site_id);
-    try statement.bindText(19, request.start_date);
-    try statement.bindText(20, request.end_date);
+    try statement.bindInt64(parameter, @intCast(steps.len));
+    try statement.bindText(parameter + 1, site_id);
+    try statement.bindText(parameter + 2, request.start_date);
+    try statement.bindText(parameter + 3, request.end_date);
     var result = try deadline.execute(&event_store.database, &statement, timeout_ms);
     defer result.deinit();
     if (result.columnCount() != 3 or result.rowCount() != steps.len) {

@@ -28,12 +28,14 @@ across days and are never linked into a persistent person.
 
 ### Visitor-days
 
-A visitor-day counts a product-eligible daily identity once per date. Under
-D33, eligibility is `traffic_class IN (human-presumed, suspected)`. It is not
-a person count: one person present on three dates contributes three
-visitor-days. The metric-v1 compatibility value counts product-eligible
-`visitor_day_start` rows over receipt UTC dates under the versioned D33
-predicate. It must be labeled
+A visitor-day counts a product-eligible daily identity once per date. With D34
+strict mode off, eligibility retains `traffic_class IN (human-presumed,
+suspected)` and includes derived query-time suspects. Strict mode additionally
+excludes current query-classifier-v1 suspect sessions. It is not a person
+count: one person present on three dates contributes three visitor-days. The
+default metric-v1 compatibility value retains stored `visitor_day_start` rows;
+strict reports derive distinct eligible daily identities so a suspect first
+row cannot hide later human activity. It must be labeled
 `visitor-days`, never `daily visitors` or `people`.
 
 The #66 Overview diagnostic is intentionally a compatibility bridge: both its
@@ -64,12 +66,14 @@ session crossing a range boundary is included when activity occurs in range.
 
 Page views divided by sessions, with zero-safe formatting.
 
-## Traffic-quality diagnostics version 4
+## Traffic-quality diagnostics version 5
 
 The bounded `traffic-quality` report makes no network or runtime-data-file
 request. Version 1 was measure-only, version 2 added D31 exclusion accounting,
-and version 3 carried D32's one-release classifier shadow. Version 4 ends that
-shadow and reports D33's permanent class plus bounded browser/receipt evidence.
+version 3 carried D32's one-release classifier shadow, and version 4 replaced
+it with D33's permanent class plus bounded signal evidence. Version 5 retains
+those stored facts and adds D34's reversible query classifier, site policy, and
+fixed data-health fields.
 
 The product-eligible base predicate is exactly:
 
@@ -78,10 +82,18 @@ traffic_class IN (human-presumed, suspected)
 ```
 
 Declared bots, automation, and excluded rows are outside every product metric.
-This promotion deliberately includes corrected human-presumed rows and omits
-classifier-only automation that version 3 kept compatible while measuring.
-The schema-6 migration preserves stored classes; it does not reconstruct
-discarded UA or client evidence.
+Default-off reports also include D34 query-time suspected sessions. Strict-on
+reports omit only current suspects after the complete human-evidence veto. The
+schema-7 migration preserves stored classes and maps network-day evidence to
+unknown; it reconstructs neither discarded inputs nor soft verdicts.
+
+Query classifier version 1 evaluates the first meaningful signal-v1
+human-presumed event in a session. At least two of fast beacon, narrow
+viewport, never visible, expected hint absent, and language absent create a raw
+candidate. A current suspect additionally has exactly one meaningful event and
+no trusted interaction, engagement, scroll, active-goal conversion, second page
+view, or persistent return. Prerendering and unknown evidence never count.
+The raw cohort remains visible; later veto evidence records a contradiction.
 
 For the inclusive received-UTC report range, it exposes:
 
@@ -104,7 +116,15 @@ For the inclusive received-UTC report range, it exposes:
   interaction, ever-visible, prerendered, client-hint mismatch,
   client-hint absent-when-expected, and Accept-Language presence; and
 - grouped class/version/rule totals, ordered deterministically and capped at 64
-  rows.
+  rows;
+- heuristic availability/version, raw candidates, current low-quality sessions,
+  contradicted candidates, contradiction basis points, and the current-suspect
+  versus declared-bot shadow counts;
+- strict mode, the configured daily accepted-event ceiling, total accepted
+  events, and days whose site-local accepted count reached the ceiling; and
+- for each received-UTC day, the number of keyed network-prefix groups over 64
+  fresh persistent/ephemeral anonymous identities and the maximum group count.
+  The prefix pseudonym is never returned.
 
 It continues to report stored exclusions by the permanent rules
 `exclude.tracker`, `exclude.network`, and `exclude.both`. Excluded rows remain
@@ -118,13 +138,14 @@ or client session. An excluded identify row does not create an identity link,
 so later eligible traffic cannot inherit product identity from an excluded
 observation.
 
-Every date in the requested range appears, including zero days. The daily page
-and the bounded rule groups are branches of one static bound DuckDB statement
-under one deadline. The request is limited to 400 dates; CLI and dashboard
-results page daily rows at no more than 100. Positive engagement or scroll
-evidence necessarily removes a session from the zero-engagement observation.
-No viewport, timing, missing-language, absent-hint, or missing-interaction fact
-classifies in #69. Issue #70 owns any visible, reversible soft combination.
+Every date in the requested range appears, including zero days. Daily rows
+include accepted events, declared bots, current suspects, identity-mint anomaly
+groups/maxima, and ceiling state. The daily page and bounded rule groups remain
+one bound query plan under one deadline. The request is limited to 400 dates;
+CLI and dashboard results page daily rows at no more than 100. Diagnostics are
+independent of strict mode so the owner can compare the shadow before enabling
+filtering. A goal overflow reports unavailable heuristics and produces zero
+suspects rather than partially evaluating the conversion veto.
 
 ## Engagement
 
@@ -140,11 +161,12 @@ combined and no foreign-exchange conversion occurs.
 
 ## Bots
 
-Traffic classification is versioned by D32, D33, and
+Traffic classification is versioned by D32, D33, D34, and
 `UA_CLASSIFIER_V1.md`. Historical source-zero rows use classifier version zero
 because their discarded UAs cannot be recovered. Classifier version 1 is the
 D32 UA boundary; version 2 adds D33 hard browser/receipt evidence. Exclusions
 retain their explicit version-1 rules and take precedence. The permanent
-product predicate above supersedes the completed D32 shadow. Every otherwise
-accepted event remains stored. Future soft-signal classification remains
-query-time and human-evidence-vetoed under #70.
+product predicate above supersedes the completed D32 shadow. D34's soft result
+exists only in versioned query SQL and is human-evidence-vetoed. Every
+successfully accepted event remains stored. A new event beyond the explicit
+daily operator ceiling receives 429 and is never falsely acknowledged.

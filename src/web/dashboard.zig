@@ -121,6 +121,7 @@ const Action = enum {
     delete_funnel,
     add_excluded_network,
     delete_excluded_network,
+    update_traffic_policy,
 };
 
 fn actionFor(path: []const u8) ?Action {
@@ -133,6 +134,9 @@ fn actionFor(path: []const u8) ?Action {
     }
     if (std.mem.eql(u8, path, "/admin/exclusions/networks/delete")) {
         return .delete_excluded_network;
+    }
+    if (std.mem.eql(u8, path, "/admin/traffic-policy")) {
+        return .update_traffic_policy;
     }
     return null;
 }
@@ -294,13 +298,22 @@ fn postAction(
             dependencies.metadata,
             form,
         ),
+        .update_traffic_policy => controller.updateTrafficPolicy(
+            dependencies.allocator,
+            dependencies.metadata,
+            form,
+            now,
+        ),
     };
     operation catch |err| {
         if (!isFormError(err)) return err;
         try formErrorPage(dependencies, output, form, action);
         return;
     };
-    if (action == .add_excluded_network or action == .delete_excluded_network) {
+    if (action == .add_excluded_network or
+        action == .delete_excluded_network or
+        action == .update_traffic_policy)
+    {
         if (dependencies.policy_refresh) |refresh| {
             refresh.run() catch {
                 try writeError(output, .{
@@ -328,6 +341,7 @@ fn postAction(
         .delete_funnel => "funnel-deleted",
         .add_excluded_network => "network-exclusion-added",
         .delete_excluded_network => "network-exclusion-deleted",
+        .update_traffic_policy => "traffic-policy-updated",
     });
     var headers = std.Io.Writer.Allocating.init(dependencies.allocator);
     try headers.writer.print(
@@ -379,7 +393,9 @@ fn formErrorPage(
         });
         return;
     };
-    page.form_error = if (action == .add_excluded_network or
+    page.form_error = if (action == .update_traffic_policy)
+        "The traffic policy was not saved. Use a ceiling from 1 to 10,000,000; strict mode also requires at most 32 goals."
+    else if (action == .add_excluded_network or
         action == .delete_excluded_network)
         "The network exclusion was not saved. Enter an IPv4 address or /24, or an IPv6 address or /48."
     else
@@ -516,6 +532,9 @@ fn noticeMessage(target: []const u8) []const u8 {
     if (std.mem.indexOf(u8, target, "notice=network-exclusion-deleted") != null) {
         return "Network exclusion deleted and collection policy refreshed.";
     }
+    if (std.mem.indexOf(u8, target, "notice=traffic-policy-updated") != null) {
+        return "Traffic policy updated and collection policy refreshed.";
+    }
     return "";
 }
 
@@ -549,6 +568,9 @@ fn isFormError(err: anyerror) bool {
         error.InvalidNetworkPrefix,
         error.TooManyNetworkExclusions,
         error.NetworkExclusionNotFound,
+        error.InvalidDailyEventCeiling,
+        error.InvalidStrictMode,
+        error.TooManyActiveGoals,
         error.Constraint,
         => true,
         else => std.mem.indexOf(u8, @errorName(err), "Constraint") != null,

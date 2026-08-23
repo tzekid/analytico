@@ -16,6 +16,7 @@ comptime {
     _ = @import("store/meta.zig");
     _ = @import("store/properties.zig");
     _ = @import("store/reports.zig");
+    _ = @import("store/traffic.zig");
     _ = @import("store/analysis.zig");
     _ = @import("auth/passkeys.zig");
     _ = @import("auth/store.zig");

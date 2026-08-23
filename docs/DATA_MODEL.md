@@ -1,10 +1,10 @@
 # Data model and metric semantics
 
 > **Status:** Sections 1–9 define the shipped analytics-metadata subset in
-> Turso, DuckDB event schema 6, and metric semantics v1. Authentication storage
+> Turso metadata schema 5, DuckDB event schema 7, and metric semantics v1. Authentication storage
 > remains governed by its own specification. The daily-pseudonym and UTC-day
 > rules remain the compatibility contract for existing rows and current
-> reports. Section 10 records the remaining 1.0 transition; event schema 6 does
+> reports. Section 10 records the remaining 1.0 transition; event schema 7 does
 > not by itself claim that metric v2 or site-local reporting is shipped.
 
 This document is the contract for durable fields and reported numbers. SQL
@@ -29,6 +29,7 @@ BrowserFamily        closed enum with Other and Unknown
 OsFamily             closed enum with Other and Unknown
 DeviceCategory       desktop | mobile | tablet | other | unknown
 TrafficClass         human-presumed | declared-bot | automation | excluded | suspected
+NetworkDayId         16 opaque site/receipt-UTC-day keyed prefix bytes; zero is unknown
 ReportRange          inclusive start date, exclusive end instant
 ```
 
@@ -121,6 +122,26 @@ rows. The application canonicalizes operator input to an IPv4 `/24` or IPv6
 addresses and hashes are never persisted. Successful authenticated changes
 refresh the collector's in-memory policy without restart.
 
+### `site_traffic_policy`
+
+```sql
+CREATE TABLE site_traffic_policy (
+    site_id TEXT PRIMARY KEY,
+    strict_mode INTEGER NOT NULL,
+    daily_event_ceiling INTEGER NOT NULL,
+    updated_at_utc_micros INTEGER NOT NULL,
+    FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE CASCADE,
+    CHECK (strict_mode IN (0, 1)),
+    CHECK (daily_event_ceiling BETWEEN 1 AND 10000000)
+);
+```
+
+Metadata migration 5 backfills every site with strict mode off and a daily
+accepted-event ceiling of 100,000; new sites receive the same row. The
+authenticated native settings form may change only those closed values and
+refreshes the in-memory collector policy before its 303 response. Missing or
+invalid policy fails closed. No diagnostic or migration enables strict mode.
+
 ### `site_event_properties`
 
 ```sql
@@ -157,6 +178,10 @@ Closed `match_kind` values:
 3. page-path prefix.
 
 Regexes and property predicates are not in the MVP.
+At most 32 active goals may be created for one site, matching the bounded
+active-goal execution context. A pre-migration overflow is preserved but makes
+D34 heuristic diagnostics unavailable and strict enablement invalid until the
+operator brings the site back within the bound.
 
 ### `funnels` and `funnel_steps`
 
@@ -196,7 +221,7 @@ CREATE TABLE event_migrations (
 );
 ```
 
-### `events` — event schema migration 6
+### `events` — event schema migration 7
 
 ```sql
 CREATE TABLE events (
@@ -254,12 +279,14 @@ CREATE TABLE events (
     beacon_timing_bucket UTINYINT NOT NULL,
     client_hint_consistency UTINYINT NOT NULL,
     accept_language_present BOOLEAN NOT NULL,
+    network_day_id BLOB NOT NULL,
     CHECK (traffic_class BETWEEN 1 AND 5),
     CHECK (signal_version BETWEEN 0 AND 1),
     CHECK (trusted_interactions BETWEEN 0 AND 15),
     CHECK (viewport_bucket BETWEEN 0 AND 4),
     CHECK (beacon_timing_bucket BETWEEN 0 AND 4),
     CHECK (client_hint_consistency BETWEEN 0 AND 3),
+    CHECK (octet_length(network_day_id) = 16),
     CHECK (length(bot_rule) <= 64)
 );
 
@@ -278,7 +305,7 @@ Conventions:
 - `kind` values 1–4 are page view, custom event, engagement, and identify.
 - `identity_quality` values 1–3 are persistent, ephemeral, and migrated
   legacy daily identity.
-- `event_schema_version=6`; protocol/tracker versions are 1 for compatibility
+- `event_schema_version=7`; protocol/tracker versions are 1 for compatibility
   events and 2 for v2 envelopes.
 - `traffic_class` values 1–5 are human-presumed, declared-bot, automation,
   excluded, and suspected. Classifier version zero marks honest historical
@@ -295,8 +322,15 @@ Conventions:
   applicable, 2 mismatch, or 3 absent when expected. Only presence of a
   nonempty `Accept-Language` is stored. Raw hints, language, viewport, precise
   timing, and their hashes are never stored.
-- Product queries require `traffic_class IN (1, 5)`. Exclusion remains
-  diagnostic-only, and declared bots/automation are outside product metrics.
+- `network_day_id` is secret-keyed and scoped to site plus receipt UTC date and
+  normalized /24 or /48. Sixteen zero bytes mean historical unknown. Raw
+  prefix, network-day bytes, and the rate limiter's unkeyed hash are never
+  logged, rendered, or exported.
+- Default-off product queries require stored `traffic_class IN (1, 5)` and keep
+  D34 query-time suspects compatible. Strict mode additionally excludes only
+  current query-classifier-v1 suspected sessions after every human-evidence
+  veto. Exclusion remains diagnostic-only, and declared bots/automation are
+  outside product metrics.
 - `device_category` is again only a device dimension. Traffic classification
   never overloads it with `bot`.
 - Absent optional strings are empty rather than `NULL` to simplify bounded
@@ -393,6 +427,22 @@ mapping, unchanged identity-link count/hash, and absence of
 repeat, matched backup, isolated restore, and old-binary rollback gates use the
 exact schema-5 release. Product-query changes after migration are the explicit
 D33 permanent-class promotion, not evidence loss or migration drift.
+
+Migration 7 performs the same transactional create/backfill/swap from the
+exact deployed schema-6 predecessor. It preserves every schema-6 field and
+identity link, advances each row to schema 7, and adds a 16-byte all-zero
+`network_day_id`. Zero means unavailable historical receipt evidence and is
+never treated as a real prefix group. The verifier proves count plus XOR, sum,
+minimum, and maximum preserved-field fingerprints, complete zero mapping,
+unchanged links, and the target column length before swap.
+
+Metadata migration 5 is separately append-only and backfills one default-off
+traffic policy per site without modifying site, origin, timezone, exclusion,
+auth, goal, or funnel facts. The exact metadata-4/event-6 upgrade gate kills
+and retries the million-row event migration, verifies fresh/repeated upgrades,
+backs up and independently restores the pair, and opens the restored pair with
+the exact old binary. Rollback restores both old stores; neither database may
+be rolled back alone.
 
 ## 4. Normalization
 
@@ -642,6 +692,9 @@ separate the permanent traffic class from device, and retain one deployed
 release of observable old/new classifier shadow evidence.
 D33 and issue #69 advance to schema 6 with bounded browser/receipt evidence,
 end the completed shadow, and promote permanent-class product eligibility.
+D34 and issue #70 advance to event schema 7 and metadata 5, add only keyed
+daily-prefix evidence plus explicit site safeguards, and keep soft verdicts in
+the reversible query layer.
 
 ### Identity and sessions
 
@@ -721,3 +774,7 @@ legacy/new disagreement cells while retaining the same received-UTC Overview
 range. D33 version 4 replaces that completed shadow with permanent class/rule
 totals plus fixed bounded signal-evidence counts. It never reinterprets legacy
 daily identities as persistent people and no accepted event is dropped.
+D34 version 5 adds query candidate/current-suspect/contradiction evidence,
+strict state, accepted-ceiling health, and keyed identity-mint anomaly counts.
+The operational ceiling returns an explicit 429 for a new over-cap request;
+every successfully accepted event remains stored and visible.

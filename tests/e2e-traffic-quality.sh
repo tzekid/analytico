@@ -20,7 +20,31 @@ quality_json=$(
         traffic-quality --format json
 )
 expected_json='{"metric_version":2,"traffic_quality_version":4,"site":"quality","start_date":"2025-12-31","end_date":"2026-01-03","report":"traffic-quality","page":1,"limit":25,"next_page":null,"distinct_people":3,"visitor_days":5,"persistent_people":1,"ephemeral_people":1,"legacy_people":1,"persistent_basis_points":3333,"zero_engagement_single_event_sessions":3,"identity_quality":[{"quality":"persistent","events":9,"visitor_days":3},{"quality":"ephemeral","events":1,"visitor_days":1},{"quality":"legacy_daily","events":1,"visitor_days":1}],"exclusion_sources":[{"source":"tracker","events":1},{"source":"network","events":1},{"source":"both","events":1}],"traffic_classes":[{"class":"human-presumed","events":11},{"class":"declared-bot","events":1},{"class":"automation","events":0},{"class":"excluded","events":3},{"class":"suspected","events":0}],"signal_evidence":{"client_signal_v1_events":0,"webdriver_events":0,"trusted_interaction_events":0,"visible_events":0,"prerendered_events":0,"client_hint_mismatch_events":0,"client_hint_absent_expected_events":0,"accept_language_present_events":0},"classifier_rules":[{"class":"human-presumed","classifier_version":0,"rule":"","events":11},{"class":"declared-bot","classifier_version":0,"rule":"legacy-device-bot","events":1},{"class":"excluded","classifier_version":1,"rule":"exclude.both","events":1},{"class":"excluded","classifier_version":1,"rule":"exclude.network","events":1},{"class":"excluded","classifier_version":1,"rule":"exclude.tracker","events":1}],"days":[{"date":"2025-12-31","new_anonymous_identities":1,"bot_events":0},{"date":"2026-01-01","new_anonymous_identities":0,"bot_events":0},{"date":"2026-01-02","new_anonymous_identities":0,"bot_events":0},{"date":"2026-01-03","new_anonymous_identities":2,"bot_events":1}]}'
-test "$quality_json" = "$expected_json"
+legacy_shape=$(jq -c '
+    .traffic_quality_version = 4 |
+    del(.heuristic_available, .heuristic_version, .raw_candidates,
+        .current_suspected_sessions, .contradicted_candidates,
+        .contradiction_basis_points, .strict_mode, .daily_event_ceiling,
+        .accepted_events, .ceiling_reached_days, .mint_anomaly_groups,
+        .maximum_minted_identities) |
+    .days |= map(del(.suspected_sessions, .accepted_events,
+        .mint_anomaly_groups, .maximum_minted_identities, .ceiling_reached))
+' <<<"$quality_json")
+test "$legacy_shape" = "$expected_json"
+jq -e '
+    .traffic_quality_version == 5 and
+    .heuristic_available == true and .heuristic_version == 1 and
+    .raw_candidates == 0 and .current_suspected_sessions == 0 and
+    .contradicted_candidates == 0 and .contradiction_basis_points == 0 and
+    .strict_mode == false and .daily_event_ceiling == 100000 and
+    .accepted_events == 15 and .ceiling_reached_days == 0 and
+    .mint_anomaly_groups == 0 and .maximum_minted_identities == 0 and
+    ([.days[] | .suspected_sessions] | all(. == 0)) and
+    ([.days[].accepted_events] == [1,0,1,13]) and
+    ([.days[] | .mint_anomaly_groups, .maximum_minted_identities] |
+        all(. == 0)) and
+    ([.days[].ceiling_reached] | all(. == false))
+' <<<"$quality_json" >/dev/null
 
 boundary_json=$(
     "$binary" report "$fixture_dir" quality 2026-01-02 2026-01-02 \
@@ -30,31 +54,38 @@ jq -e '
     .distinct_people == 1 and
     .visitor_days == 1 and
     .zero_engagement_single_event_sessions == 0 and
-    .days == [{"date":"2026-01-02","new_anonymous_identities":0,"bot_events":0}]
+    .days == [{"date":"2026-01-02","new_anonymous_identities":0,
+        "bot_events":0,"suspected_sessions":0,"accepted_events":1,
+        "mint_anomaly_groups":0,"maximum_minted_identities":0,
+        "ceiling_reached":false}]
 ' <<<"$boundary_json" >/dev/null
 
 quality_table=$(
     "$binary" report "$fixture_dir" quality 2025-12-31 2026-01-03 \
         traffic-quality --format table
 )
-[[ "$quality_table" == *$'metric_version=2\ttraffic_quality_version=4\tsite=quality\tutc_range=2025-12-31..2026-01-03\treport=traffic-quality'* ]]
-[[ "$quality_table" == *$'distinct_people\tvisitor_days\tpersistent_people\tephemeral_people\tlegacy_people\tpersistent_basis_points\tzero_engagement_single_event_sessions\n3\t5\t1\t1\t1\t3333\t3'* ]]
+[[ "$quality_table" == *$'metric_version=2\ttraffic_quality_version=5\tsite=quality\tutc_range=2025-12-31..2026-01-03\treport=traffic-quality'* ]]
+[[ "$quality_table" == *$'distinct_people\tvisitor_days\tpersistent_people\tephemeral_people\tlegacy_people\tpersistent_basis_points\tzero_engagement_single_event_sessions\theuristic_available\theuristic_version\traw_candidates\tcurrent_suspected_sessions\tcontradicted_candidates\tcontradiction_basis_points\tstrict_mode\tdaily_event_ceiling\taccepted_events\tceiling_reached_days\tmint_anomaly_groups\tmaximum_minted_identities\n3\t5\t1\t1\t1\t3333\t3\ttrue\t1\t0\t0\t0\t0\tfalse\t100000\t15\t0\t0\t0'* ]]
 [[ "$quality_table" == *$'persistent\t9\t3\nephemeral\t1\t1\nlegacy_daily\t1\t1'* ]]
 [[ "$quality_table" == *$'exclusion_source\tevents\ntracker\t1\nnetwork\t1\nboth\t1'* ]]
 [[ "$quality_table" == *$'traffic_class\tevents\nhuman-presumed\t11\ndeclared-bot\t1\nautomation\t0\nexcluded\t3\nsuspected\t0'* ]]
 [[ "$quality_table" == *$'signal_evidence\tevents\nclient_signal_v1\t0\nwebdriver\t0\ntrusted_interaction\t0\nvisible\t0\nprerendered\t0\nclient_hint_mismatch\t0\nclient_hint_absent_expected\t0\naccept_language_present\t0'* ]]
 [[ "$quality_table" == *$'classifier_rule\ttraffic_class\tclassifier_version\tevents\n(none)\thuman-presumed\t0\t11'* ]]
-[[ "$quality_table" == *$'2025-12-31\t1\t0\n2026-01-01\t0\t0\n2026-01-02\t0\t0\n2026-01-03\t2\t1'* ]]
+[[ "$quality_table" == *$'2025-12-31\t1\t0\t0\t1\t0\t0\tfalse\n2026-01-01\t0\t0\t0\t0\t0\t0\tfalse\n2026-01-02\t0\t0\t0\t1\t0\t0\tfalse\n2026-01-03\t2\t1\t0\t13\t0\t0\tfalse'* ]]
 
 quality_csv=$(
     "$binary" report "$fixture_dir" quality 2025-12-31 2026-01-03 \
         traffic-quality --format csv
 )
-[[ "$quality_csv" == *'2,4,summary,all,,,,,3,1,1,1,3333,3,,,'* ]]
-[[ "$quality_csv" == *'2,4,traffic_class,human-presumed,11'* ]]
-[[ "$quality_csv" == *'2,4,signal_evidence,client_signal_v1,0'* ]]
-[[ "$quality_csv" == *'2,4,classifier_rule,legacy-device-bot,1'* ]]
-[[ "$quality_csv" == *'2,4,day,2026-01-03,,,2,1'* ]]
+[[ "$quality_csv" == *'2,5,summary,all,,,,,3,1,1,1,3333,3,,,'* ]]
+[[ "$quality_csv" == *'2,5,traffic_class,human-presumed,11'* ]]
+[[ "$quality_csv" == *'2,5,signal_evidence,client_signal_v1,0'* ]]
+[[ "$quality_csv" == *'2,5,classifier_rule,legacy-device-bot,1'* ]]
+[[ "$quality_csv" == *'2,5,day,2026-01-03,,,2,1'* ]]
+[[ "$quality_csv" == *'2,5,health,daily_event_ceiling,100000'* ]]
+[[ "$quality_csv" == *'2,5,health,accepted_events,15'* ]]
+[[ "$quality_csv" == *'2,5,day_health,2026-01-03:accepted_events,13'* ]]
+[[ "$quality_csv" == *'2,5,day_health,2026-01-03:ceiling_reached,0'* ]]
 awk -F, 'NF != 17 { exit 1 }' <<<"$quality_csv"
 
 empty_json=$(

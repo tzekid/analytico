@@ -3,7 +3,7 @@ const domain = @import("../domain.zig");
 const duckdb = @import("duckdb.zig");
 const timezone = @import("../timezone.zig");
 
-pub const schema_version: i64 = 6;
+pub const schema_version: i64 = 7;
 
 pub const InsertV2Outcome = enum {
     inserted,
@@ -154,6 +154,10 @@ pub const Store = struct {
         try self.migrateThrough(5);
     }
 
+    pub fn migrateFixtureV6(self: *Store) !void {
+        try self.migrateThrough(6);
+    }
+
     fn migrateThrough(self: *Store, target: i64) !void {
         if (target < 1 or target > schema_version) return error.InvalidEventSchema;
         try self.database.exec(
@@ -283,6 +287,9 @@ pub const Store = struct {
         }
         if (current < 6 and target >= 6) {
             try self.migrateV6();
+        }
+        if (current < 7 and target >= 7) {
+            try self.migrateV7();
         }
         try self.database.checkpoint();
     }
@@ -938,7 +945,182 @@ pub const Store = struct {
         try self.database.exec("COMMIT");
     }
 
+    fn migrateV7(self: *Store) !void {
+        const links_before = try self.scalar("SELECT count(*) FROM identity_links");
+        const links_hash_before = try self.scalar(
+            \\SELECT CAST(COALESCE(bit_xor(
+            \\  hash(site_id, anonymous_id, user_id, linked_at_utc_micros, event_id)
+            \\  & 9223372036854775807
+            \\), 0) AS BIGINT) FROM identity_links
+        );
+        try self.database.exec("BEGIN TRANSACTION");
+        errdefer self.database.exec("ROLLBACK") catch {};
+        try self.database.exec(
+            \\CREATE TABLE events_v7 (
+            \\  event_schema_version UTINYINT NOT NULL,
+            \\  protocol_version UTINYINT NOT NULL,
+            \\  tracker_version UTINYINT NOT NULL,
+            \\  event_id UUID NOT NULL,
+            \\  site_id VARCHAR NOT NULL,
+            \\  received_at_utc_micros BIGINT NOT NULL,
+            \\  occurred_at_utc_micros BIGINT NOT NULL,
+            \\  received_date_utc DATE NOT NULL,
+            \\  site_local_date DATE NOT NULL,
+            \\  site_utc_offset_minutes SMALLINT NOT NULL,
+            \\  kind UTINYINT NOT NULL,
+            \\  event_name VARCHAR NOT NULL,
+            \\  path VARCHAR NOT NULL,
+            \\  page_title VARCHAR NOT NULL,
+            \\  hostname VARCHAR NOT NULL,
+            \\  anonymous_id UUID NOT NULL,
+            \\  identity_quality UTINYINT NOT NULL,
+            \\  user_id VARCHAR NOT NULL,
+            \\  session_id UUID NOT NULL,
+            \\  sequence UINTEGER NOT NULL,
+            \\  session_start BOOLEAN NOT NULL,
+            \\  referrer_host VARCHAR NOT NULL,
+            \\  country_code VARCHAR NOT NULL,
+            \\  language VARCHAR NOT NULL,
+            \\  browser_family VARCHAR NOT NULL,
+            \\  os_family VARCHAR NOT NULL,
+            \\  device_category VARCHAR NOT NULL,
+            \\  utm_source VARCHAR NOT NULL,
+            \\  utm_medium VARCHAR NOT NULL,
+            \\  utm_campaign VARCHAR NOT NULL,
+            \\  utm_term VARCHAR NOT NULL,
+            \\  utm_content VARCHAR NOT NULL,
+            \\  properties_json VARCHAR NOT NULL,
+            \\  user_traits_json VARCHAR NOT NULL,
+            \\  value_amount DECIMAL(18,6),
+            \\  value_currency VARCHAR NOT NULL,
+            \\  engagement_ms UINTEGER NOT NULL,
+            \\  max_scroll_depth UTINYINT NOT NULL,
+            \\  visitor_day_id BLOB NOT NULL,
+            \\  visitor_day_start BOOLEAN NOT NULL,
+            \\  event_payload_digest VARCHAR NOT NULL,
+            \\  traffic_class UTINYINT NOT NULL,
+            \\  classifier_version USMALLINT NOT NULL,
+            \\  bot_rule VARCHAR NOT NULL,
+            \\  signal_version UTINYINT NOT NULL,
+            \\  navigator_webdriver BOOLEAN NOT NULL,
+            \\  trusted_interactions UTINYINT NOT NULL,
+            \\  was_visible BOOLEAN NOT NULL,
+            \\  was_prerendered BOOLEAN NOT NULL,
+            \\  viewport_bucket UTINYINT NOT NULL,
+            \\  beacon_timing_bucket UTINYINT NOT NULL,
+            \\  client_hint_consistency UTINYINT NOT NULL,
+            \\  accept_language_present BOOLEAN NOT NULL,
+            \\  network_day_id BLOB NOT NULL,
+            \\  CHECK (traffic_class BETWEEN 1 AND 5),
+            \\  CHECK (length(bot_rule) <= 64),
+            \\  CHECK (signal_version BETWEEN 0 AND 1),
+            \\  CHECK (trusted_interactions BETWEEN 0 AND 15),
+            \\  CHECK (viewport_bucket BETWEEN 0 AND 4),
+            \\  CHECK (beacon_timing_bucket BETWEEN 0 AND 4),
+            \\  CHECK (client_hint_consistency BETWEEN 0 AND 3),
+            \\  CHECK (octet_length(network_day_id) = 16)
+            \\);
+            \\INSERT INTO events_v7 SELECT
+            \\  7, protocol_version, tracker_version, event_id, site_id,
+            \\  received_at_utc_micros, occurred_at_utc_micros,
+            \\  received_date_utc, site_local_date, site_utc_offset_minutes,
+            \\  kind, event_name, path, page_title, hostname, anonymous_id,
+            \\  identity_quality, user_id, session_id, sequence, session_start,
+            \\  referrer_host, country_code, language, browser_family, os_family,
+            \\  device_category, utm_source, utm_medium, utm_campaign, utm_term,
+            \\  utm_content, properties_json, user_traits_json, value_amount,
+            \\  value_currency, engagement_ms, max_scroll_depth, visitor_day_id,
+            \\  visitor_day_start, event_payload_digest, traffic_class,
+            \\  classifier_version, bot_rule, signal_version, navigator_webdriver,
+            \\  trusted_interactions, was_visible, was_prerendered,
+            \\  viewport_bucket, beacon_timing_bucket, client_hint_consistency,
+            \\  accept_language_present,
+            \\  from_hex('00000000000000000000000000000000')
+            \\FROM events;
+        );
+        const preserved_mismatches = try self.scalar(
+            \\WITH source_rows AS (
+            \\  SELECT hash(protocol_version, tracker_version, event_id, site_id,
+            \\    received_at_utc_micros, occurred_at_utc_micros,
+            \\    received_date_utc, site_local_date, site_utc_offset_minutes,
+            \\    kind, event_name, path, page_title, hostname, anonymous_id,
+            \\    identity_quality, user_id, session_id, sequence, session_start,
+            \\    referrer_host, country_code, language, browser_family, os_family,
+            \\    device_category, utm_source, utm_medium, utm_campaign, utm_term,
+            \\    utm_content, properties_json, user_traits_json, value_amount,
+            \\    value_currency, engagement_ms, max_scroll_depth, visitor_day_id,
+            \\    visitor_day_start, event_payload_digest, traffic_class,
+            \\    classifier_version, bot_rule, signal_version, navigator_webdriver,
+            \\    trusted_interactions, was_visible, was_prerendered,
+            \\    viewport_bucket, beacon_timing_bucket, client_hint_consistency,
+            \\    accept_language_present) AS row_hash FROM events
+            \\), target_rows AS (
+            \\  SELECT hash(protocol_version, tracker_version, event_id, site_id,
+            \\    received_at_utc_micros, occurred_at_utc_micros,
+            \\    received_date_utc, site_local_date, site_utc_offset_minutes,
+            \\    kind, event_name, path, page_title, hostname, anonymous_id,
+            \\    identity_quality, user_id, session_id, sequence, session_start,
+            \\    referrer_host, country_code, language, browser_family, os_family,
+            \\    device_category, utm_source, utm_medium, utm_campaign, utm_term,
+            \\    utm_content, properties_json, user_traits_json, value_amount,
+            \\    value_currency, engagement_ms, max_scroll_depth, visitor_day_id,
+            \\    visitor_day_start, event_payload_digest, traffic_class,
+            \\    classifier_version, bot_rule, signal_version, navigator_webdriver,
+            \\    trusted_interactions, was_visible, was_prerendered,
+            \\    viewport_bucket, beacon_timing_bucket, client_hint_consistency,
+            \\    accept_language_present) AS row_hash FROM events_v7
+            \\), source AS (
+            \\  SELECT count(*) AS row_count, bit_xor(row_hash) AS xor_hash,
+            \\    sum(CAST(row_hash AS UHUGEINT)) sum_hash,
+            \\    min(row_hash) min_hash, max(row_hash) max_hash FROM source_rows
+            \\), target AS (
+            \\  SELECT count(*) AS row_count, bit_xor(row_hash) AS xor_hash,
+            \\    sum(CAST(row_hash AS UHUGEINT)) sum_hash,
+            \\    min(row_hash) min_hash, max(row_hash) max_hash FROM target_rows
+            \\)
+            \\SELECT count(*) FROM source s, target t
+            \\WHERE s.row_count != t.row_count OR s.xor_hash IS DISTINCT FROM t.xor_hash
+            \\  OR s.sum_hash IS DISTINCT FROM t.sum_hash
+            \\  OR s.min_hash IS DISTINCT FROM t.min_hash
+            \\  OR s.max_hash IS DISTINCT FROM t.max_hash
+        );
+        const mapping_mismatches = try self.scalar(
+            \\SELECT count(*) FROM events_v7
+            \\WHERE event_schema_version != 7 OR
+            \\  network_day_id != from_hex('00000000000000000000000000000000') OR
+            \\  octet_length(network_day_id) != 16
+        );
+        const links_after = try self.scalar("SELECT count(*) FROM identity_links");
+        const links_hash_after = try self.scalar(
+            \\SELECT CAST(COALESCE(bit_xor(
+            \\  hash(site_id, anonymous_id, user_id, linked_at_utc_micros, event_id)
+            \\  & 9223372036854775807
+            \\), 0) AS BIGINT) FROM identity_links
+        );
+        if (preserved_mismatches != 0 or mapping_mismatches != 0 or
+            links_before != links_after or links_hash_before != links_hash_after)
+        {
+            return error.NetworkDayMigrationValidationFailed;
+        }
+        try self.database.exec(
+            \\DROP TABLE events;
+            \\ALTER TABLE events_v7 RENAME TO events;
+            \\INSERT INTO event_migrations VALUES (
+            \\  7, 'keyed-network-day-evidence', 0
+            \\)
+        );
+        try self.database.exec("COMMIT");
+    }
+
     pub fn insert(self: *Store, event: domain.Event) !void {
+        return self.insertWithCeiling(event, 10_000_000);
+    }
+
+    pub fn insertWithCeiling(
+        self: *Store,
+        event: domain.Event,
+        daily_event_ceiling: i64,
+    ) !void {
         try domain.validateUuid(event.event_id);
         try domain.validateUuid(event.site_id);
         try domain.validateDate(event.received_date_utc);
@@ -956,6 +1138,14 @@ pub const Store = struct {
             return error.InvalidDeviceCategory;
         }
 
+        try self.database.exec("BEGIN TRANSACTION");
+        errdefer self.database.exec("ROLLBACK") catch {};
+        try self.enforceDailyCeiling(
+            event.site_id,
+            event.site_local_date,
+            daily_event_ceiling,
+        );
+
         var statement = try self.database.prepare(
             \\INSERT INTO events
             \\WITH incoming (
@@ -968,11 +1158,11 @@ pub const Store = struct {
             \\  signal_version, navigator_webdriver, trusted_interactions,
             \\  was_visible, was_prerendered, viewport_bucket,
             \\  beacon_timing_bucket, client_hint_consistency,
-            \\  accept_language_present
+            \\  accept_language_present, network_day_id
             \\) AS (
             \\  SELECT ?, ?, ?, CAST(? AS DATE), CAST(? AS DATE), ?,
             \\         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-            \\         ?, ?, ?, ?, ?, ?, ?, ?, ?
+            \\         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             \\),
             \\resolved AS (
             \\  SELECT i.*, p.session_id AS prior_session_id,
@@ -1002,7 +1192,7 @@ pub const Store = struct {
             \\  ) a ON true
             \\)
             \\SELECT
-            \\  6, 1, 1, CAST(i.event_id AS UUID), i.site_id,
+            \\  7, 1, 1, CAST(i.event_id AS UUID), i.site_id,
             \\  i.received_at_utc_micros, i.received_at_utc_micros,
             \\  i.received_date_utc, i.site_local_date,
             \\  i.site_utc_offset_minutes,
@@ -1032,7 +1222,8 @@ pub const Store = struct {
             \\  i.signal_version, i.navigator_webdriver,
             \\  i.trusted_interactions, i.was_visible, i.was_prerendered,
             \\  i.viewport_bucket, i.beacon_timing_bucket,
-            \\  i.client_hint_consistency, i.accept_language_present
+            \\  i.client_hint_consistency, i.accept_language_present,
+            \\  i.network_day_id
             \\FROM resolved i
         );
         defer statement.deinit();
@@ -1069,14 +1260,25 @@ pub const Store = struct {
         try statement.bindInt64(31, event.signals.beacon_timing_bucket);
         try statement.bindInt64(32, @backingInt(event.client_hint_consistency));
         try statement.bindInt64(33, @intFromBool(event.accept_language_present));
+        try statement.bindBlob(34, &event.network_day_id);
         var result = try statement.execute();
         result.deinit();
+        try self.database.exec("COMMIT");
     }
 
     pub fn insertV2(
         self: *Store,
         allocator: std.mem.Allocator,
         event: domain.EventV2,
+    ) !InsertV2Outcome {
+        return self.insertV2WithCeiling(allocator, event, 10_000_000);
+    }
+
+    pub fn insertV2WithCeiling(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        event: domain.EventV2,
+        daily_event_ceiling: i64,
     ) !InsertV2Outcome {
         try domain.validateUuid(event.event_id);
         try domain.validateUuid(event.site_id);
@@ -1138,6 +1340,11 @@ pub const Store = struct {
 
         try self.database.exec("BEGIN TRANSACTION");
         errdefer self.database.exec("ROLLBACK") catch {};
+        try self.enforceDailyCeiling(
+            event.site_id,
+            event.site_local_date,
+            daily_event_ceiling,
+        );
         if (event.identify_user_id.len != 0 and linked_user == null and
             event.traffic_class.productEligible())
         {
@@ -1173,15 +1380,15 @@ pub const Store = struct {
             \\  signal_version, navigator_webdriver, trusted_interactions,
             \\  was_visible, was_prerendered, viewport_bucket,
             \\  beacon_timing_bucket, client_hint_consistency,
-            \\  accept_language_present
+            \\  accept_language_present, network_day_id
             \\) AS (
             \\  SELECT ?, ?, ?, ?, CAST(? AS DATE), CAST(? AS DATE), ?,
             \\         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             \\         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-            \\         ?, ?, ?, ?, ?, ?, ?
+            \\         ?, ?, ?, ?, ?, ?, ?, ?
             \\)
             \\SELECT
-            \\  6, 2, 2, CAST(i.event_id AS UUID), i.site_id,
+            \\  7, 2, 2, CAST(i.event_id AS UUID), i.site_id,
             \\  i.received_at, i.occurred_at, i.received_date,
             \\  i.site_local_date, i.site_utc_offset_minutes,
             \\  i.kind, i.event_name, i.path,
@@ -1218,7 +1425,8 @@ pub const Store = struct {
             \\  i.bot_rule, i.signal_version, i.navigator_webdriver,
             \\  i.trusted_interactions, i.was_visible, i.was_prerendered,
             \\  i.viewport_bucket, i.beacon_timing_bucket,
-            \\  i.client_hint_consistency, i.accept_language_present
+            \\  i.client_hint_consistency, i.accept_language_present,
+            \\  i.network_day_id
             \\FROM incoming i
         );
         defer statement.deinit();
@@ -1270,10 +1478,37 @@ pub const Store = struct {
         try statement.bindInt64(46, event.signals.beacon_timing_bucket);
         try statement.bindInt64(47, @backingInt(event.client_hint_consistency));
         try statement.bindInt64(48, @intFromBool(event.accept_language_present));
+        try statement.bindBlob(49, &event.network_day_id);
         var result = try statement.execute();
         result.deinit();
         try self.database.exec("COMMIT");
         return .inserted;
+    }
+
+    fn enforceDailyCeiling(
+        self: *Store,
+        site_id: []const u8,
+        site_local_date: []const u8,
+        daily_event_ceiling: i64,
+    ) !void {
+        if (daily_event_ceiling < 1 or daily_event_ceiling > 10_000_000) {
+            return error.InvalidDailyEventCeiling;
+        }
+        var statement = try self.database.prepare(
+            \\SELECT count(*) FROM events
+            \\WHERE site_id = ? AND site_local_date = CAST(? AS DATE)
+        );
+        defer statement.deinit();
+        try statement.bindText(1, site_id);
+        try statement.bindText(2, site_local_date);
+        var result = try statement.execute();
+        defer result.deinit();
+        if (result.rowCount() != 1 or result.columnCount() != 1) {
+            return error.InvalidDailyEventCount;
+        }
+        const count = result.int64(0, 0);
+        if (count < 0) return error.InvalidDailyEventCount;
+        if (count >= daily_event_ceiling) return error.DailyEventCeilingReached;
     }
 
     pub fn requireCurrent(self: *Store) !void {
@@ -1309,7 +1544,7 @@ pub const Store = struct {
         ;
         var result = try self.database.query(switch (current) {
             2 => source_sql,
-            3, 4, 5, 6 => migrated_sql,
+            3, 4, 5, 6, 7 => migrated_sql,
             else => return error.UnsupportedLegacyEvidenceSchema,
         });
         defer result.deinit();

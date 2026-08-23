@@ -34,7 +34,7 @@ port=$((49000 + ($$ % 500)))
 origin="http://localhost:$port"
 data="$fixture/data"
 "$binary" init "$data" >"$fixture/init.txt"
-grep -Fq 'metadata=v4' "$fixture/init.txt"
+grep -Fq 'metadata=v5' "$fixture/init.txt"
 "$binary" site add "$data" example Example https://example.com \
     --timezone UTC >/dev/null
 
@@ -55,7 +55,7 @@ SQL
 legacy_backup="$fixture/legacy-backup"
 "$binary" backup "$legacy" "$legacy_backup" >/dev/null
 "$binary" migrate "$legacy" "$legacy_backup" >"$fixture/upgrade.txt"
-grep -Fq 'metadata=v4 events=v6' "$fixture/upgrade.txt"
+grep -Fq 'metadata=v5 events=v7' "$fixture/upgrade.txt"
 "$binary" site timezone-set "$legacy" preserved UTC >/dev/null
 "$binary" site list "$legacy" | grep -Fq $'preserved\t'
 

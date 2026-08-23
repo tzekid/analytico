@@ -73,6 +73,7 @@ pub fn page(output: *std.Io.Writer, value: model.Page) !void {
     }
     try output.writeAll("</section>");
     try definitions(output, value);
+    try trafficPolicy(output, value);
     try selfExclusions(output, value);
     try output.writeAll("</main>");
     try foot(output);
@@ -330,8 +331,12 @@ fn renderTrafficQuality(
     }
     try output.writeAll(
         "<section aria-labelledby=\"traffic-quality-heading\"><h3 id=\"traffic-quality-heading\">Traffic quality</h3>" ++
-            "<p class=\"muted\">Stored diagnostics. Bot and explicit self-exclusion are visible separately; self-excluded events stay stored but do not enter product metrics.</p>" ++
+            "<p class=\"muted\">Stored classes plus reversible query-classifier v1 diagnostics. Bot and explicit self-exclusion remain separate; strict mode excludes only current low-quality sessions.</p>" ++
             "<ul class=\"metrics\">",
+    );
+    if (quality.ceiling_reached_days != 0) try output.print(
+        "<p role=\"status\" class=\"notice\">The daily accepted-event ceiling was reached on {d} site-local day(s) in this range. New events received after the cap returned 429.</p>",
+        .{quality.ceiling_reached_days},
     );
     try metric(output, "Persistent people", quality.persistent_people);
     try metric(output, "Ephemeral people", quality.ephemeral_people);
@@ -344,6 +349,17 @@ fn renderTrafficQuality(
         "Zero-engagement single-event sessions",
         quality.zero_engagement_single_event_sessions,
     );
+    try metric(output, "Query candidates", quality.raw_candidates);
+    try metric(output, "Current low-quality sessions", quality.current_suspected_sessions);
+    try metric(output, "Contradicted candidates", quality.contradicted_candidates);
+    try output.writeAll("<li><span>Contradiction rate</span><strong>");
+    try output.print("{d}.{d:0>2}%", .{
+        quality.contradiction_basis_points / 100,
+        quality.contradiction_basis_points % 100,
+    });
+    try output.writeAll("</strong></li>");
+    try metric(output, "Accepted events", quality.accepted_events);
+    try metric(output, "Prefix anomaly groups", quality.mint_anomaly_groups);
     try output.writeAll(
         "</ul><h4>Identity quality</h4><div class=\"table-scroll\"><table><thead><tr>" ++
             "<th>Identity quality</th><th>Events</th><th>Visitor-days</th>" ++
@@ -422,13 +438,21 @@ fn renderTrafficQuality(
         "<h4>Daily diagnostics</h4>" ++
             "<div class=\"table-scroll\"><table><thead><tr><th>Date (UTC)</th>" ++
             "<th>New anonymous identities</th><th>Bot events</th>" ++
+            "<th>Current low-quality sessions</th><th>Accepted (site-local date)</th>" ++
+            "<th>Prefix anomaly groups</th><th>Largest identity mint</th><th>Ceiling</th>" ++
             "</tr></thead><tbody>",
     );
     for (quality.days) |day| {
         try output.writeAll("<tr><td>");
         try text(output, day.date);
-        try output.print("</td><td>{d}</td><td>{d}</td></tr>", .{
-            day.new_anonymous_identities, day.bot_events,
+        try output.print("</td><td>{d}</td><td>{d}</td><td>{d}</td><td>{d}</td><td>{d}</td><td>{d}</td><td>{s}</td></tr>", .{
+            day.new_anonymous_identities,
+            day.bot_events,
+            day.suspected_sessions,
+            day.accepted_events,
+            day.mint_anomaly_groups,
+            day.maximum_minted_identities,
+            if (day.ceiling_reached) "reached" else "below",
         });
     }
     try output.writeAll("</tbody></table></div><nav aria-label=\"Traffic-quality pagination\">");
@@ -606,6 +630,29 @@ fn selfExclusions(output: *std.Io.Writer, value: model.Page) !void {
         "\"></label><button type=\"submit\">Add network exclusion</button></form>" ++
             "</section></div></details>",
     );
+}
+
+fn trafficPolicy(output: *std.Io.Writer, value: model.Page) !void {
+    if (value.selected_site == null) return;
+    try output.writeAll(
+        "<details class=\"management\"><summary><span>Traffic safeguards</span><span class=\"muted\">",
+    );
+    try output.writeAll(if (value.strict_mode) "Strict on" else "Strict off");
+    try output.print(" · ceiling {d}</span></summary>", .{value.daily_event_ceiling});
+    try output.writeAll(
+        "<section class=\"panel\"><h2>Traffic safeguards</h2>" ++
+            "<p>Strict mode is off by default and excludes only current query-time low-quality sessions. The daily ceiling counts every stored class and returns 429 instead of silently dropping data.</p>" ++
+            "<form method=\"post\" action=\"/admin/traffic-policy\" hx-boost=\"true\" hx-sync=\"this:drop\">",
+    );
+    try formCommon(output, value);
+    try output.writeAll("<label><input type=\"checkbox\" name=\"strict\" value=\"on\"");
+    if (value.strict_mode) try output.writeAll(" checked");
+    try output.writeAll("> Exclude current low-quality sessions from product metrics</label>");
+    try output.print(
+        "<label>Daily accepted-event ceiling<input type=\"number\" name=\"daily_event_ceiling\" min=\"1\" max=\"10000000\" required value=\"{d}\"></label>",
+        .{value.daily_event_ceiling},
+    );
+    try output.writeAll("<button type=\"submit\">Save traffic safeguards</button></form></section></details>");
 }
 
 fn deleteForm(

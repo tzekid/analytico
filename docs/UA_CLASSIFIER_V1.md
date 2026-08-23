@@ -136,3 +136,9 @@ the UA-v1 rule table and its historical classifier-version values remain.
   and the matching bounded `serve_stopped` counters before classifier v1 was
   released. D33 fixtures preserve every UA classification while composing hard
   signals and removing only the completed shadow.
+
+D34 does not change this table or emit a new stored UA class. Its query
+classifier derives a separate reversible session verdict from schema-7 closed
+evidence; stored declared-bot/automation results remain hard exclusions and
+stored human-presumed rows remain unchanged. See D34 and
+[`METRIC_SEMANTICS_V2.md`](METRIC_SEMANTICS_V2.md) for that relation.

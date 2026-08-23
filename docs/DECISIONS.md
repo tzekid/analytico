@@ -1529,3 +1529,158 @@ stored schema-6 fields without raw inputs, permanent product filtering and
 diagnostics, exact schema-5 million-row interrupted/repeated migration,
 backup/restore/rollback, immutable old/new tracker paths, collection/report
 budgets, extracted-release execution, and Debug plus ReleaseSafe gates.
+
+## D34 — Query-time suspected traffic, explicit site safeguards, and keyed daily network evidence
+
+**Status:** Accepted
+
+**Date:** 2026-08-23
+
+**Issue:** #70
+
+### Context
+
+D33 deliberately stored only closed evidence and left soft classification to a
+later reversible query. The deployed schema-6 sample proves the diagnostic
+path but is too small to justify default filtering. Issue #70 also requires a
+per-site accepted-event ceiling and a network-prefix identity-mint warning.
+Schema 6 cannot group a prefix without either retaining raw network data or
+adding one privacy-bounded receipt fact.
+
+D32 rejected a per-site drop mode. This decision supersedes that sentence only
+for the explicit operational ceiling below. It does not authorize bot drops,
+self-opt-out suppression, a silent success response, deletion, or arbitrary
+collection policy.
+
+### Mechanism candidates
+
+| Candidate | Advantages | Costs and risks |
+| --- | --- | --- |
+| Persist `traffic_class=suspected` and later correct rows | Simple report predicate | Stale/mutable classification, rewrites history, and contradicts query-time reversibility |
+| Keep scoring and prefix counts only in process memory | No migrations | Restart/date-range evidence is dishonest and strict results cannot be reproduced |
+| Compute a versioned query relation; persist only keyed daily prefix evidence and small site policy | Reversible verdicts, durable bounded diagnostics, explicit operator control | Requires metadata 5, event schema 7, goal snapshots, and exact pair migration evidence |
+
+Select the third candidate. There is no new process, worker, queue, service,
+runtime corpus, configuration fetch, cache table, or rollup.
+
+### Query classifier version 1
+
+Stored event class/version/rule remain immutable first-receipt evidence. The
+query classifier derives a separate session-level low-quality band. Its raw
+candidate is the earliest product-compatible meaningful event in a session and
+requires all of:
+
+- stored class `human-presumed` and `signal_version=1`;
+- no trusted-interaction bit, engagement, or scroll evidence on that event; and
+- at least two soft observations: beacon timing under 100 ms, viewport under
+  480 CSS pixels, never visible, Chromium client hint absent when expected, or
+  Accept-Language absent.
+
+Prerendering is never negative evidence. Missing historical bundles,
+`signal_version=0`, unknown buckets, and one soft observation cannot trigger.
+UA, webdriver, and client-hint mismatch remain hard stored classifications and
+are never cleared by positive evidence.
+
+A raw candidate is currently suspected only while the complete stored session
+has exactly one meaningful page-view/custom event and no trusted interaction,
+engagement, scroll, second page view, active-goal conversion, or persistent
+person observed in another session. The application loads at most 32 active
+goal selectors from Turso and binds their closed event/path/prefix values into
+DuckDB; neither database reaches into the other. A pre-existing site with more
+than 32 goals retains every goal, reports heuristic unavailability, and cannot
+enable strict mode. New goal creation stops at 32.
+
+The candidate cohort remains diagnostic after a later veto. A contradicted
+candidate is one that now has later/more meaningful activity, interaction,
+engagement, scroll, an active-goal match, or a persistent return. The standing
+contradiction rate is contradicted candidates divided by raw candidates. This
+measures false-positive pressure without freezing a verdict that human evidence
+has already cleared.
+
+### Strict mode and product predicates
+
+Metadata schema 5 adds one `site_traffic_policy` row per site with:
+
+- `strict_mode`, default false; and
+- `daily_event_ceiling`, default 100,000 and explicitly bounded from 1 through
+  10,000,000.
+
+No migration or diagnostic automatically enables strict mode. Default-off
+queries retain D33 eligibility and include the derived suspected band. Strict
+mode excludes only currently suspected sessions in addition to stored
+declared-bot, automation, and exclusion classes. It never changes stored rows,
+exports, diagnostic class totals, or backups.
+
+Strict visitor-day and session totals derive distinct eligible daily identity
+and session facts from the query relation. They do not count only persisted
+`visitor_day_start` or `session_start` flags: a candidate first row may have
+consumed a boundary before later human activity cleared or replaced its
+eligibility. Goal, funnel, list, Overview, and metric-v2 queries use the same
+versioned relation and goal snapshot.
+
+### Keyed network-day evidence and anomaly threshold
+
+Event schema 7 adds a 16-byte `network_day_id`. For new collection receipts it
+is the first 16 bytes of keyed BLAKE3 over a domain-separated key, site ID,
+receipt UTC date, and normalized IPv4 /24 or IPv6 /48. The master key remains
+the existing private visitor key. The value cannot link sites or UTC dates.
+Raw prefixes, the existing unkeyed rate-limit hash, network-day bytes, and
+input-derived group keys are never logged, rendered, or exported.
+
+Schema-6 history maps to sixteen zero bytes, meaning unknown. It is not
+reconstructed. Traffic-quality ignores unknown values and reports only fixed
+counts: daily prefixes over the threshold and the maximum fresh identities for
+one prefix. More than 64 first-seen persistent/ephemeral anonymous identities
+for one site/receipt-UTC-day prefix is an anomaly warning. It does not classify
+or filter any event.
+
+### Daily accepted-event ceiling
+
+The ceiling counts every durably stored event for the receipt-derived
+site-local date, including bots and explicit exclusions. Duplicate v2 IDs that
+already committed retain their idempotent result. Before a new identity link
+or event is committed, the single DuckDB writer checks the count inside the
+transaction. At the configured count, a new event is rejected with HTTP 429,
+increments one fixed `daily_ceiling_rejected` process counter, and never
+returns a false 204. No row below the cap is discarded or deleted.
+
+Traffic-quality version 5 and Overview report the configured cap, accepted
+rows, reached days, and a visible data-health warning. This is an explicit
+operator safety bound, not a bot verdict. The existing per-prefix rate limiter
+remains independent.
+
+### Migrations, failure behavior, and rollback
+
+Metadata migration 5 backfills every existing site with strict off and the
+100,000 default and makes new-site creation populate the same row. Event
+migration 7 transactionally preserves every schema-6 event and identity link,
+adds only the zero/unknown network-day value, and verifies count plus XOR, sum,
+minimum, and maximum fingerprints before swap.
+
+Collection fails closed if traffic policy is absent/invalid. A ceiling check or
+event write failure never creates an orphan identity link. A goal overflow
+fails human-safe by producing no suspected classification and refusing strict
+enablement while keeping diagnostics explicit. Query deadlines and all
+existing input/result bounds remain.
+
+Deployment stops the sole writer, backs up and independently restores the
+metadata-4/event-6 pair, and proves the exact prior binary can open the restored
+pair and reproduce pre-migration reports. Rollback restores that matched pair
+before starting the prior binary; switching only the executable is forbidden.
+No tracker or Caddy path changes in this decision.
+
+**Affected contracts:** `BOT_DETECTION_1.0.md`, `PROTOCOL.md`,
+`DATA_MODEL.md`, `METRIC_SEMANTICS_V2.md`, `ANALYSIS_QUERY.md`,
+`ARCHITECTURE.md`, `OPERATIONS.md`, `PERFORMANCE.md`, `SPEC.md`, and
+`RELEASE_CONTRACT_1.0.md`.
+
+### Acceptance evidence
+
+Issue #70 must prove candidate/one-soft/history traps; every veto; hard-rule
+precedence; contradiction and declared-bot shadow evidence; exact strict-off
+parity and strict-on scope; distinct boundary repair; keyed prefix site/day
+separation and non-disclosure; >64 mint warning; exact ceiling, duplicate, 429,
+counter, and Overview warning behavior; authenticated native settings; fresh
+and exact metadata-4/event-6 million-row migration, interruption/retry,
+backup/restore/pair rollback; real headless/human journeys; performance budgets;
+extracted-release execution; and Debug plus ReleaseSafe gates.

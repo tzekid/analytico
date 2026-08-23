@@ -130,6 +130,7 @@ pub fn writeUsage(output: *std.Io.Writer) !void {
         \\  analytico site property-add <directory> <slug> <property>
         \\  analytico site install <directory> <slug> <collector-origin>
         \\  analytico site delete <directory> <slug> --confirm <slug>
+        \\  analytico site traffic-policy <directory> <slug> <off|strict> <daily-ceiling>
         \\  analytico goal add <directory> <site> <name> <event|path|prefix> <value>
         \\  analytico goal list <directory> <site>
         \\  analytico goal delete <directory> <site> <name> --confirm <name>
@@ -166,6 +167,8 @@ fn reportCommand(
         try metadata.funnelSteps(allocator, request.site_slug, request.subject)
     else
         null;
+    const active_goals = try metadata.listGoals(allocator, request.site_slug);
+    const collection_policy = try metadata.sitePolicy(allocator, site_id);
 
     var event_store = try events.Store.open(allocator, paths.events);
     defer event_store.deinit();
@@ -177,6 +180,12 @@ fn reportCommand(
         site_id,
         selected_goal,
         selected_funnel,
+        .{
+            .strict_mode = collection_policy.strict_mode,
+            .daily_event_ceiling = collection_policy.daily_event_ceiling,
+            .active_goals = active_goals,
+            .heuristic_available = active_goals.len <= meta.maximum_active_goals,
+        },
     );
     try report.render(output, request, result);
 }
@@ -421,6 +430,29 @@ fn siteCommand(
                 site.name,
             });
         }
+        return;
+    }
+    if (std.mem.eql(u8, args[2], "traffic-policy") and args.len == 7) {
+        const strict_mode = if (std.mem.eql(u8, args[5], "strict"))
+            true
+        else if (std.mem.eql(u8, args[5], "off"))
+            false
+        else
+            return error.InvalidArguments;
+        const ceiling = std.fmt.parseInt(i64, args[6], 10) catch
+            return error.InvalidDailyEventCeiling;
+        try store.updateTrafficPolicy(
+            allocator,
+            args[4],
+            strict_mode,
+            ceiling,
+            try nowMicros(),
+        );
+        try output.print("traffic policy {s} {s} ceiling={d}\n", .{
+            args[4],
+            if (strict_mode) "strict" else "off",
+            ceiling,
+        });
         return;
     }
     if (std.mem.eql(u8, args[2], "disable") and args.len == 5) {
@@ -688,11 +720,17 @@ fn eventCommand(
     );
     const id = try domain.randomUuid(io);
     const local = try site_timezone.localAt(@divFloor(timestamp, 1_000_000));
+    const network_day_id = try domain.deriveNetworkDayId(
+        key,
+        site_id,
+        args[8],
+        args[9],
+    );
 
     var event_store = try events.Store.open(allocator, paths.events);
     defer event_store.deinit();
     try event_store.requireCurrent();
-    try event_store.insert(.{
+    try event_store.insertWithCeiling(.{
         .event_id = &id,
         .site_id = site_id,
         .received_at_utc_micros = timestamp,
@@ -706,7 +744,8 @@ fn eventCommand(
         .browser_family = args[10],
         .os_family = args[11],
         .device_category = args[12],
-    });
+        .network_day_id = network_day_id,
+    }, policy.daily_event_ceiling);
     try event_store.checkpoint();
     try output.print("event committed {s}\n", .{id});
 }

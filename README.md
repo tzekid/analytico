@@ -10,7 +10,7 @@ dashboard, removable HTMX enhancement, and the optional Cloudio boundary. The
 executable owns the exact embedded
 stores, numbered schemas, validated sites/origins and v1 property allowlists,
 goals/funnels, a private visitor key, dual bounded collector protocols, event
-schema 6, permanent traffic classes, a versioned local UA/signal classifier, stored
+schema 7, permanent traffic classes, a versioned local UA/signal/query classifier, stored
 self-exclusion, daily-identity compatibility, direct durable event insertion, a tiny
 self-hosted v1 tracker plus a v2 identity tracker, a JavaScript-free pixel, complete typed CLI reports,
 verified lifecycle commands, a hardened single-service deployment, and

@@ -4,6 +4,7 @@ const property = @import("../property.zig");
 const deadline = @import("deadline.zig");
 const duckdb = @import("duckdb.zig");
 const events = @import("events.zig");
+const traffic = @import("traffic.zig");
 
 pub const maximum_sql_bytes: usize = 128 * 1024;
 pub const maximum_bindings: usize = 8192;
@@ -67,6 +68,24 @@ const Builder = struct {
         return .{
             .sql = try self.output.toOwnedSliceSentinel(0),
             .bindings = try self.bindings.toOwnedSlice(self.allocator),
+        };
+    }
+
+    fn appendTraffic(self: *Builder, fragment: traffic.Fragment) !void {
+        try self.write(fragment.sql);
+        for (fragment.bindings) |binding| switch (binding) {
+            .text => |value| {
+                if (self.bindings.items.len >= maximum_bindings) {
+                    return error.TooManyAnalysisBindings;
+                }
+                try self.bindings.append(self.allocator, .{ .text = value });
+            },
+            .integer => |value| {
+                if (self.bindings.items.len >= maximum_bindings) {
+                    return error.TooManyAnalysisBindings;
+                }
+                try self.bindings.append(self.allocator, .{ .integer = value });
+            },
         };
     }
 };
@@ -458,8 +477,13 @@ fn compileCoverage(
     try builder.bindText(execution.query.site_id);
     try builder.write(
         " AND kind IN (1, 2) AND traffic_class IN (1, 5)" ++
-            " AND identity_quality = 1) FROM qualified",
+            " AND identity_quality = 1",
     );
+    if (execution.strict_traffic_mode) try builder.write(
+        " AND session_id NOT IN (SELECT session_id" ++
+            " FROM d34_current_suspected_sessions)",
+    );
+    try builder.write(") FROM qualified");
     return builder.finish();
 }
 
@@ -468,9 +492,32 @@ fn writeCommon(
     execution: analysis.Execution,
     range: analysis.LocalDateRange,
 ) !void {
+    if (execution.strict_traffic_mode) {
+        var goals: [analysis.maximum_active_goals]traffic.Goal = undefined;
+        for (execution.active_goals, 0..) |goal, index| {
+            goals[index] = .{
+                .kind = switch (goal.selector.kind) {
+                    .exact_event => .event,
+                    .exact_page => .path,
+                    .page_prefix => .prefix,
+                    .saved_goal => return error.UnresolvedGoalSelector,
+                },
+                .value = goal.selector.value,
+            };
+        }
+        try builder.write("WITH ");
+        try builder.appendTraffic(try traffic.classifierFragment(
+            builder.allocator,
+            execution.query.site_id,
+            goals[0..execution.active_goals.len],
+            true,
+        ));
+        try builder.write(", range_events AS (SELECT e.*, CASE");
+    } else {
+        try builder.write("WITH range_events AS (SELECT e.*, CASE");
+    }
     try builder.write(
-        "WITH range_events AS (SELECT e.*, CASE" ++
-            " WHEN e.identity_quality = 1 AND COALESCE(l.user_id, e.user_id, '') <> ''" ++
+        " WHEN e.identity_quality = 1 AND COALESCE(l.user_id, e.user_id, '') <> ''" ++
             " THEN 'u:' || COALESCE(l.user_id, e.user_id)" ++
             " WHEN e.identity_quality = 1 THEN 'a:' || CAST(e.anonymous_id AS VARCHAR)" ++
             " WHEN e.identity_quality = 2 THEN 'e:' || CAST(e.anonymous_id AS VARCHAR)" ++
@@ -556,7 +603,11 @@ fn writeCommon(
             " LEFT JOIN event_ascending fe ON fe.session_id = st.session_id AND fe.position = 1)",
     );
     if (hasUserTraitClause(execution.query.filters.clauses)) {
-        try writePersonTraits(builder, execution.query.site_id);
+        try writePersonTraits(
+            builder,
+            execution.query.site_id,
+            execution.strict_traffic_mode,
+        );
     }
     try builder.write(
         ", qualified AS (SELECT e.* FROM base e JOIN session_facts s USING (session_id) WHERE TRUE",
@@ -565,6 +616,10 @@ fn writeCommon(
         try builder.write(" AND ");
         try writeClause(builder, clause, "e", "s");
     }
+    if (execution.strict_traffic_mode) try builder.write(
+        " AND e.session_id NOT IN (SELECT session_id" ++
+            " FROM d34_current_suspected_sessions)",
+    );
     try builder.write(")");
 }
 
@@ -591,7 +646,11 @@ fn hasUserTraitClause(clauses: []const analysis.Clause) bool {
     return false;
 }
 
-fn writePersonTraits(builder: *Builder, site_id: []const u8) !void {
+fn writePersonTraits(
+    builder: *Builder,
+    site_id: []const u8,
+    strict_traffic_mode: bool,
+) !void {
     try builder.write(
         ", person_trait_events AS (SELECT e.*, CASE" ++
             " WHEN COALESCE(l.user_id, e.user_id, '') <> ''" ++
@@ -604,7 +663,14 @@ fn writePersonTraits(builder: *Builder, site_id: []const u8) !void {
     try builder.bindText(site_id);
     try builder.write(
         " AND e.kind = 4 AND e.identity_quality = 1" ++
-            " AND e.traffic_class IN (1, 5))," ++
+            " AND e.traffic_class IN (1, 5)",
+    );
+    if (strict_traffic_mode) try builder.write(
+        " AND e.session_id NOT IN (SELECT session_id" ++
+            " FROM d34_current_suspected_sessions)",
+    );
+    try builder.write(
+        ")," ++
             " person_traits AS (SELECT * EXCLUDE (position) FROM (SELECT *," ++
             " row_number() OVER (PARTITION BY person_key" ++
             " ORDER BY occurred_at_utc_micros DESC, sequence DESC," ++
@@ -1718,7 +1784,7 @@ pub fn seedSemanticFixture(database: *duckdb.Database) !void {
         \\  CAST('00000000-0000-4000-8000-0000000000f1' AS UUID)
         \\);
         \\INSERT INTO events
-        \\SELECT 6, 2, 2, CAST(event_id AS UUID),
+        \\SELECT 7, 2, 2, CAST(event_id AS UUID),
         \\  '00000000-0000-4000-8000-000000000024',
         \\  occurred + receipt_delay_micros, occurred,
         \\  CAST(local_date AS DATE), CAST(local_date AS DATE), offset_minutes,
@@ -1732,7 +1798,8 @@ pub fn seedSemanticFixture(database: *duckdb.Database) !void {
         \\  currency, engagement_ms, 0, CAST(event_id AS BLOB), sequence = 0,
         \\  repeat('a', 64), CASE WHEN device = 'bot' THEN 2 ELSE 1 END,
         \\  0, CASE WHEN device = 'bot' THEN 'legacy-device-bot' ELSE '' END,
-        \\  0, FALSE, 0, FALSE, FALSE, 0, 0, 0, FALSE
+        \\  0, FALSE, 0, FALSE, FALSE, 0, 0, 0, FALSE,
+        \\  from_hex('00000000000000000000000000000000')
         \\FROM (VALUES
         \\ ('00000000-0000-4000-8000-000000000101',1767139200000000,'2025-12-31',0,1,'pageview','/old','Old','example.test','00000000-0000-4000-8000-0000000000a1',1,'user-a','00000000-0000-4000-8000-0000000000b0',0,'','DE','en','Chrome','Linux','desktop','','','','{}','{}','','',0,0),
         \\ ('00000000-0000-4000-8000-000000000102',1767312000000000,'2026-01-02',60,1,'pageview','/landing','Landing','example.test','00000000-0000-4000-8000-0000000000a1',1,'user-a','00000000-0000-4000-8000-0000000000b1',0,'search.example','DE','en','Chrome','Linux','desktop','google','cpc','winter','{"plan":"pro"}','{}','','',0,0),

@@ -2,8 +2,11 @@ const std = @import("std");
 const turso = @import("turso");
 const domain = @import("../domain.zig");
 
-pub const schema_version: i64 = 4;
+pub const schema_version: i64 = 5;
 pub const maximum_excluded_networks: usize = 16;
+pub const maximum_active_goals: usize = 32;
+pub const default_daily_event_ceiling: i64 = 100_000;
+pub const maximum_daily_event_ceiling: i64 = 10_000_000;
 
 pub const Site = struct {
     id: []u8,
@@ -51,6 +54,8 @@ pub const SitePolicy = struct {
     origins: []const []u8,
     properties: []const []u8,
     excluded_networks: []const []u8,
+    strict_mode: bool,
+    daily_event_ceiling: i64,
 
     pub fn allowsOrigin(self: SitePolicy, origin: []const u8) bool {
         for (self.origins) |allowed| {
@@ -278,6 +283,25 @@ pub const Store = struct {
             std.log.err("metadata migration v4 failed: {s}", .{diagnostics.text()});
             return err;
         };
+        if (current < 5) _ = self.connection.execBatch(
+            \\CREATE TABLE IF NOT EXISTS site_traffic_policy (
+            \\  site_id TEXT PRIMARY KEY,
+            \\  strict_mode INTEGER NOT NULL,
+            \\  daily_event_ceiling INTEGER NOT NULL,
+            \\  updated_at_utc_micros INTEGER NOT NULL,
+            \\  FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE CASCADE,
+            \\  CHECK (strict_mode IN (0, 1)),
+            \\  CHECK (daily_event_ceiling BETWEEN 1 AND 10000000)
+            \\);
+            \\INSERT INTO site_traffic_policy
+            \\  (site_id, strict_mode, daily_event_ceiling, updated_at_utc_micros)
+            \\SELECT id, 0, 100000, 0 FROM sites
+            \\ON CONFLICT(site_id) DO NOTHING;
+            \\INSERT INTO meta_migrations VALUES (5, 'site-traffic-policy', 0);
+        , .{ .diagnostics = &diagnostics }) catch |err| {
+            std.log.err("metadata migration v5 failed: {s}", .{diagnostics.text()});
+            return err;
+        };
     }
 
     pub fn migrateProbe(self: *Store) !void {
@@ -347,6 +371,15 @@ pub const Store = struct {
             .{},
         );
         _ = try self.connection.execParams(
+            \\INSERT INTO site_traffic_policy
+            \\  (site_id, strict_mode, daily_event_ceiling, updated_at_utc_micros)
+            \\VALUES (?1, 0, 100000, 0)
+            \\ON CONFLICT(site_id) DO NOTHING
+        ,
+            .{"00000000-0000-4000-8000-000000000001"},
+            .{},
+        );
+        _ = try self.connection.execParams(
             \\INSERT INTO site_timezones
             \\  (site_id, zone_name, revision, rebucket_pending)
             \\VALUES (?1, 'UTC', 1, 0)
@@ -394,6 +427,14 @@ pub const Store = struct {
             \\VALUES (?1, ?2, 1, 0)
         ,
             .{ id, timezone_name },
+            .{},
+        );
+        _ = try self.connection.execParams(
+            \\INSERT INTO site_traffic_policy
+            \\  (site_id, strict_mode, daily_event_ceiling, updated_at_utc_micros)
+            \\VALUES (?1, 0, 100000, ?2)
+        ,
+            .{ id, created_at },
             .{},
         );
     }
@@ -677,6 +718,18 @@ pub const Store = struct {
         try domain.validateName(name, 120);
         try validateMatch(kind, value);
         const site_id = try self.siteIdBySlug(allocator, site_slug);
+        var count_rows = try self.connection.queryParams(
+            "SELECT count(*) FROM goals WHERE site_id = ?1",
+            .{site_id},
+            .{},
+        );
+        defer count_rows.deinit();
+        const count_row = (try count_rows.next()) orelse return error.MissingCountRow;
+        const count = try count_row.get(i64, 0);
+        try count_rows.finish(null);
+        if (count < 0 or count >= maximum_active_goals) {
+            return error.TooManyActiveGoals;
+        }
         _ = try self.connection.execParams(
             \\INSERT INTO goals
             \\  (id, site_id, name, match_kind, match_value, created_at_utc_micros)
@@ -952,6 +1005,26 @@ pub const Store = struct {
                 return error.InvalidStoredNetworkPrefix;
             }
         }
+        var traffic_rows = try self.connection.queryParams(
+            \\SELECT strict_mode, daily_event_ceiling
+            \\FROM site_traffic_policy WHERE site_id = ?1
+        ,
+            .{id},
+            .{},
+        );
+        defer traffic_rows.deinit();
+        const traffic_row = (try traffic_rows.next()) orelse
+            return error.SiteTrafficPolicyRequired;
+        const strict_value = try traffic_row.get(i64, 0);
+        const daily_event_ceiling = try traffic_row.get(i64, 1);
+        if ((try traffic_rows.next()) != null or
+            (strict_value != 0 and strict_value != 1) or
+            daily_event_ceiling < 1 or
+            daily_event_ceiling > maximum_daily_event_ceiling)
+        {
+            return error.InvalidSiteTrafficPolicy;
+        }
+        try traffic_rows.finish(null);
         return .{
             .id = owned_id,
             .disabled = disabled,
@@ -959,7 +1032,54 @@ pub const Store = struct {
             .origins = origins,
             .properties = properties,
             .excluded_networks = excluded_networks,
+            .strict_mode = strict_value == 1,
+            .daily_event_ceiling = daily_event_ceiling,
         };
+    }
+
+    pub fn updateTrafficPolicy(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        site_slug: []const u8,
+        strict_mode: bool,
+        daily_event_ceiling: i64,
+        updated_at_micros: i64,
+    ) !void {
+        if (daily_event_ceiling < 1 or
+            daily_event_ceiling > maximum_daily_event_ceiling)
+        {
+            return error.InvalidDailyEventCeiling;
+        }
+        const site_id = try self.siteIdBySlug(allocator, site_slug);
+        if (strict_mode) {
+            var rows = try self.connection.queryParams(
+                "SELECT count(*) FROM goals WHERE site_id = ?1",
+                .{site_id},
+                .{},
+            );
+            defer rows.deinit();
+            const row = (try rows.next()) orelse return error.MissingCountRow;
+            const count = try row.get(i64, 0);
+            try rows.finish(null);
+            if (count < 0 or count > maximum_active_goals) {
+                return error.TooManyActiveGoals;
+            }
+        }
+        const changed = try self.connection.execParams(
+            \\UPDATE site_traffic_policy
+            \\SET strict_mode = ?2, daily_event_ceiling = ?3,
+            \\    updated_at_utc_micros = ?4
+            \\WHERE site_id = ?1
+        ,
+            .{
+                site_id,
+                @intFromBool(strict_mode),
+                daily_event_ceiling,
+                updated_at_micros,
+            },
+            .{},
+        );
+        if (changed != 1) return error.SiteTrafficPolicyRequired;
     }
 
     pub fn siteIds(

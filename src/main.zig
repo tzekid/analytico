@@ -37,6 +37,20 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
     if (args.len == 4 and
+        std.mem.eql(u8, args[1], "analysis") and
+        std.mem.eql(u8, args[2], "heuristics-seed"))
+    {
+        try analysis_probe.seedHeuristics(allocator, output, args[3]);
+        return;
+    }
+    if (args.len == 4 and
+        std.mem.eql(u8, args[1], "analysis") and
+        std.mem.eql(u8, args[2], "heuristics-check"))
+    {
+        try analysis_probe.checkHeuristics(allocator, output, args[3]);
+        return;
+    }
+    if (args.len == 4 and
         std.mem.eql(u8, args[1], "m0") and
         std.mem.eql(u8, args[2], "probe"))
     {

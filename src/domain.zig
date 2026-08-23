@@ -133,6 +133,7 @@ pub const Event = struct {
     signals: ClientSignals = .{},
     client_hint_consistency: ClientHintConsistency = .unknown,
     accept_language_present: bool = false,
+    network_day_id: [16]u8 = @splat(0),
 };
 
 pub const EventV2 = struct {
@@ -178,6 +179,7 @@ pub const EventV2 = struct {
     signals: ClientSignals = .{},
     client_hint_consistency: ClientHintConsistency = .unknown,
     accept_language_present: bool = false,
+    network_day_id: [16]u8 = @splat(0),
 };
 
 pub fn canonicalPersonKey(
@@ -388,6 +390,27 @@ pub fn deriveVisitorDayCompatibilityId(
     return output;
 }
 
+pub fn deriveNetworkDayId(
+    master_key: [32]u8,
+    site_id: []const u8,
+    utc_date: []const u8,
+    ip_text: []const u8,
+) ![16]u8 {
+    try validateUuid(site_id);
+    try validateDate(utc_date);
+    const prefix = try networkPrefix(ip_text);
+    var hasher = std.crypto.hash.Blake3.init(.{ .key = master_key });
+    hasher.update("analytico/network-day/v1\x00");
+    hasher.update(site_id);
+    hasher.update("\x00");
+    hasher.update(utc_date);
+    hasher.update("\x00");
+    hasher.update(prefix.bytes[0..prefix.len]);
+    var output: [16]u8 = undefined;
+    hasher.final(&output);
+    return output;
+}
+
 pub fn parseKeyHex(value: []const u8) ![32]u8 {
     if (value.len != 64) return error.InvalidKey;
     var output: [32]u8 = undefined;
@@ -505,4 +528,31 @@ test "network exclusions canonicalize and match only fixed prefixes" {
         error.InvalidNetworkPrefix,
         canonicalNetworkPrefix(&buffer, "203.0.113.0/16"),
     );
+}
+
+test "network day identifiers are keyed and scoped to site and UTC date" {
+    const key: [32]u8 = @splat(0x2a);
+    const site_a = "00000000-0000-4000-8000-000000000001";
+    const site_b = "00000000-0000-4000-8000-000000000002";
+    const base = try deriveNetworkDayId(key, site_a, "2026-08-23", "203.0.113.4");
+    try std.testing.expectEqualSlices(
+        u8,
+        &base,
+        &(try deriveNetworkDayId(key, site_a, "2026-08-23", "203.0.113.240")),
+    );
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &base,
+        &(try deriveNetworkDayId(key, site_a, "2026-08-23", "203.0.114.4")),
+    ));
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &base,
+        &(try deriveNetworkDayId(key, site_a, "2026-08-24", "203.0.113.4")),
+    ));
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &base,
+        &(try deriveNetworkDayId(key, site_b, "2026-08-23", "203.0.113.4")),
+    ));
 }

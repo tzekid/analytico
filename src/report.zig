@@ -3,7 +3,7 @@ const domain = @import("domain.zig");
 
 pub const metric_version: u8 = 1;
 pub const traffic_quality_metric_version: u8 = 2;
-pub const traffic_quality_version: u8 = 4;
+pub const traffic_quality_version: u8 = 5;
 pub const default_limit: u16 = 25;
 pub const maximum_limit: u16 = 100;
 pub const maximum_range_days: u16 = 400;
@@ -278,6 +278,11 @@ pub const TrafficQualityDay = struct {
     date: []u8,
     new_anonymous_identities: i64,
     bot_events: i64,
+    suspected_sessions: i64,
+    accepted_events: i64,
+    mint_anomaly_groups: i64,
+    maximum_minted_identities: i64,
+    ceiling_reached: bool,
 };
 
 pub const TrafficQuality = struct {
@@ -288,6 +293,18 @@ pub const TrafficQuality = struct {
     persistent_basis_points: u16,
     visitor_days: i64,
     zero_engagement_single_event_sessions: i64,
+    heuristic_available: bool,
+    heuristic_version: u8,
+    raw_candidates: i64,
+    current_suspected_sessions: i64,
+    contradicted_candidates: i64,
+    contradiction_basis_points: u16,
+    strict_mode: bool,
+    daily_event_ceiling: i64,
+    accepted_events: i64,
+    ceiling_reached_days: i64,
+    mint_anomaly_groups: i64,
+    maximum_minted_identities: i64,
     identity_quality: [3]IdentityQualityRow,
     exclusion_sources: [3]ExclusionSourceRow,
     traffic_classes: [5]TrafficClassRow,
@@ -393,9 +410,9 @@ fn renderTable(
         },
         .traffic_quality => |quality| {
             try output.writeAll(
-                "distinct_people\tvisitor_days\tpersistent_people\tephemeral_people\tlegacy_people\tpersistent_basis_points\tzero_engagement_single_event_sessions\n",
+                "distinct_people\tvisitor_days\tpersistent_people\tephemeral_people\tlegacy_people\tpersistent_basis_points\tzero_engagement_single_event_sessions\theuristic_available\theuristic_version\traw_candidates\tcurrent_suspected_sessions\tcontradicted_candidates\tcontradiction_basis_points\tstrict_mode\tdaily_event_ceiling\taccepted_events\tceiling_reached_days\tmint_anomaly_groups\tmaximum_minted_identities\n",
             );
-            try output.print("{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\n", .{
+            try output.print("{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{s}\t{d}\t{d}\t{d}\t{d}\t{d}\t{s}\t{d}\t{d}\t{d}\t{d}\t{d}\n", .{
                 quality.distinct_people,
                 quality.visitor_days,
                 quality.persistent_people,
@@ -403,6 +420,18 @@ fn renderTable(
                 quality.legacy_people,
                 quality.persistent_basis_points,
                 quality.zero_engagement_single_event_sessions,
+                if (quality.heuristic_available) "true" else "false",
+                quality.heuristic_version,
+                quality.raw_candidates,
+                quality.current_suspected_sessions,
+                quality.contradicted_candidates,
+                quality.contradiction_basis_points,
+                if (quality.strict_mode) "true" else "false",
+                quality.daily_event_ceiling,
+                quality.accepted_events,
+                quality.ceiling_reached_days,
+                quality.mint_anomaly_groups,
+                quality.maximum_minted_identities,
             });
             try output.writeAll("identity_quality\tevents\tvisitor_days\n");
             for (quality.identity_quality) |row| {
@@ -442,10 +471,17 @@ fn renderTable(
                     row.events,
                 });
             }
-            try output.writeAll("date\tnew_anonymous_identities\tbot_events\n");
+            try output.writeAll("date\tnew_anonymous_identities\tbot_events\tsuspected_sessions\taccepted_events\tmint_anomaly_groups\tmaximum_minted_identities\tceiling_reached\n");
             for (quality.days) |day| {
-                try output.print("{s}\t{d}\t{d}\n", .{
-                    day.date, day.new_anonymous_identities, day.bot_events,
+                try output.print("{s}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{s}\n", .{
+                    day.date,
+                    day.new_anonymous_identities,
+                    day.bot_events,
+                    day.suspected_sessions,
+                    day.accepted_events,
+                    day.mint_anomaly_groups,
+                    day.maximum_minted_identities,
+                    if (day.ceiling_reached) "true" else "false",
                 });
             }
             try output.print("page={d}\tlimit={d}\tnext_page={s}\n", .{
@@ -553,6 +589,12 @@ fn renderJson(
                     "\"persistent_people\":{d},\"ephemeral_people\":{d}," ++
                     "\"legacy_people\":{d},\"persistent_basis_points\":{d}," ++
                     "\"zero_engagement_single_event_sessions\":{d}," ++
+                    "\"heuristic_available\":{s},\"heuristic_version\":{d}," ++
+                    "\"raw_candidates\":{d},\"current_suspected_sessions\":{d}," ++
+                    "\"contradicted_candidates\":{d},\"contradiction_basis_points\":{d}," ++
+                    "\"strict_mode\":{s},\"daily_event_ceiling\":{d}," ++
+                    "\"accepted_events\":{d},\"ceiling_reached_days\":{d}," ++
+                    "\"mint_anomaly_groups\":{d},\"maximum_minted_identities\":{d}," ++
                     "\"identity_quality\":[",
                 .{
                     quality.distinct_people,
@@ -562,6 +604,18 @@ fn renderJson(
                     quality.legacy_people,
                     quality.persistent_basis_points,
                     quality.zero_engagement_single_event_sessions,
+                    if (quality.heuristic_available) "true" else "false",
+                    quality.heuristic_version,
+                    quality.raw_candidates,
+                    quality.current_suspected_sessions,
+                    quality.contradicted_candidates,
+                    quality.contradiction_basis_points,
+                    if (quality.strict_mode) "true" else "false",
+                    quality.daily_event_ceiling,
+                    quality.accepted_events,
+                    quality.ceiling_reached_days,
+                    quality.mint_anomaly_groups,
+                    quality.maximum_minted_identities,
                 },
             );
             for (quality.identity_quality, 0..) |row, index| {
@@ -624,8 +678,19 @@ fn renderJson(
                 try output.writeAll("{\"date\":");
                 try jsonString(output, day.date);
                 try output.print(
-                    ",\"new_anonymous_identities\":{d},\"bot_events\":{d}}}",
-                    .{ day.new_anonymous_identities, day.bot_events },
+                    ",\"new_anonymous_identities\":{d},\"bot_events\":{d}," ++
+                        "\"suspected_sessions\":{d},\"accepted_events\":{d}," ++
+                        "\"mint_anomaly_groups\":{d},\"maximum_minted_identities\":{d}," ++
+                        "\"ceiling_reached\":{s}}}",
+                    .{
+                        day.new_anonymous_identities,
+                        day.bot_events,
+                        day.suspected_sessions,
+                        day.accepted_events,
+                        day.mint_anomaly_groups,
+                        day.maximum_minted_identities,
+                        if (day.ceiling_reached) "true" else "false",
+                    },
                 );
             }
             try output.writeAll("]}\n");
@@ -729,6 +794,29 @@ fn renderCsv(
                 quality.persistent_basis_points,
                 quality.zero_engagement_single_event_sessions,
             });
+            const HealthMetric = struct { label: []const u8, value: i64 };
+            const health_metrics = [_]HealthMetric{
+                .{ .label = "heuristic_available", .value = @intFromBool(quality.heuristic_available) },
+                .{ .label = "heuristic_version", .value = quality.heuristic_version },
+                .{ .label = "raw_candidates", .value = quality.raw_candidates },
+                .{ .label = "current_suspected_sessions", .value = quality.current_suspected_sessions },
+                .{ .label = "contradicted_candidates", .value = quality.contradicted_candidates },
+                .{ .label = "contradiction_basis_points", .value = quality.contradiction_basis_points },
+                .{ .label = "strict_mode", .value = @intFromBool(quality.strict_mode) },
+                .{ .label = "daily_event_ceiling", .value = quality.daily_event_ceiling },
+                .{ .label = "accepted_events", .value = quality.accepted_events },
+                .{ .label = "ceiling_reached_days", .value = quality.ceiling_reached_days },
+                .{ .label = "mint_anomaly_groups", .value = quality.mint_anomaly_groups },
+                .{ .label = "maximum_minted_identities", .value = quality.maximum_minted_identities },
+            };
+            for (health_metrics) |metric| {
+                try output.print("{d},{d},health,{s},{d},,,,,,,,,,,,\n", .{
+                    traffic_quality_metric_version,
+                    traffic_quality_version,
+                    metric.label,
+                    metric.value,
+                });
+            }
             for (quality.identity_quality) |row| {
                 try output.print("{d},{d},identity_quality,{s},{d},{d},,,,,,,,,,,\n", .{
                     traffic_quality_metric_version,
@@ -794,6 +882,22 @@ fn renderCsv(
                     day.new_anonymous_identities,
                     day.bot_events,
                 });
+                const daily_metrics = [_]HealthMetric{
+                    .{ .label = "suspected_sessions", .value = day.suspected_sessions },
+                    .{ .label = "accepted_events", .value = day.accepted_events },
+                    .{ .label = "mint_anomaly_groups", .value = day.mint_anomaly_groups },
+                    .{ .label = "maximum_minted_identities", .value = day.maximum_minted_identities },
+                    .{ .label = "ceiling_reached", .value = @intFromBool(day.ceiling_reached) },
+                };
+                for (daily_metrics) |metric| {
+                    try output.print("{d},{d},day_health,{s}:{s},{d},,,,,,,,,,,,\n", .{
+                        traffic_quality_metric_version,
+                        traffic_quality_version,
+                        day.date,
+                        metric.label,
+                        metric.value,
+                    });
+                }
             }
         },
         .list => |list| {

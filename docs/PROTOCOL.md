@@ -5,8 +5,9 @@
 > Protocol-v2 tracker anonymous identity, `identify()`, `reset()`, 30-minute
 > client session rotation, explicit site timezone bucketing, and typed property
 > storage/query primitives, SPA navigation, engagement/scroll, exact tracker
-> value handling, opt-in automatic events, D32's UA classifier, and D33's
-> schema-6 bounded signal contract are implemented. Exact legacy
+> value handling, opt-in automatic events, D32's UA classifier, D33's
+> schema-6 bounded signal contract, and D34's schema-7 keyed network-day
+> evidence plus explicit site traffic policy are implemented. Exact legacy
 > migration and mixed-data coverage are implemented by issue #13; later
 > product queries remain separately issue-backed.
 
@@ -121,7 +122,7 @@ numbers are rejected. The exact JSON parser behavior is covered by a corpus.
 | `409` | Event-ID reuse or identity link conflicts |
 | `413` | Target, headers, or body exceed limits |
 | `415` | Unsupported content type or encoding |
-| `429` | Bounded rate limit exceeded |
+| `429` | Bounded rate limit or explicit site-local daily event ceiling exceeded |
 | `500` | Durable write failed |
 | `503` | Store unavailable or shutting down |
 
@@ -416,8 +417,10 @@ the short-cache `/tracker.js` alias alone advances to the current tracker.
 
 After site and origin validation, the collector compares only the transient
 normalized IPv4 `/24` or IPv6 `/48` prefix with at most 16 explicit per-site
-network exclusions. Raw IP input is neither stored nor logged. A tracker or
-network exclusion takes precedence and stores permanent
+network exclusions. For a new schema-7 row it also derives the 16-byte,
+secret-keyed `network_day_id` from that prefix, site ID, and receipt UTC date;
+the raw prefix remains absent from storage, logs, reports, and exports. A
+tracker or network exclusion takes precedence and stores permanent
 `traffic_class=excluded` with the bounded rule `exclude.tracker`,
 `exclude.network`, or `exclude.both`.
 
@@ -428,6 +431,10 @@ hard rule first, otherwise `webdriver=true` or a contradictory bounded
 evidence and keeps its exclusion rule. Missing hints/language and coarse
 viewport/timing/visibility/interaction facts do not classify in #69.
 
+D34's soft classifier does not run in collection. Reports derive its reversible
+session verdict from the closed stored evidence, current active-goal snapshot,
+and durable session/person facts. The collector never persists `suspected`.
+
 The collector scans at most 512 bytes of `Sec-CH-UA` and stores only consistency
 (`unknown historical`, `consistent/not applicable`, `mismatch`, or `absent
 when expected`). It stores only whether nonempty `Accept-Language` was present.
@@ -436,15 +443,21 @@ dimensions/timing are neither persisted nor logged. Classification performs no
 allocation, file read, network request, regex, or fingerprinting. Browser, OS,
 and device dimensions are derived independently and never carry a bot category.
 
-Every otherwise accepted event is inserted. There is no self-opt-out
-collection suppression or bot drop-at-ingest setting. Dashboard exclusion
+Every valid event below the explicit site-local daily ceiling is inserted.
+There is no self-opt-out collection suppression or bot drop-at-ingest setting.
+Once the configured ceiling has been reached, a new event fails visibly with
+429 before an identity link is written; a v2 duplicate that already committed
+retains its idempotent success. Dashboard exclusion and traffic-policy
 mutations refresh the bounded in-memory site-policy snapshot before returning
 success.
 
 `serve_stopped.bots` counts permanent declared-bot/automation request attempts.
-The D32 shadow counters ended with schema 6. Durable traffic-quality v4 reports
-permanent class/rule totals and fixed bounded signal-evidence counts without
-UA, hint, language, or input-derived keys.
+The D32 shadow counters ended with schema 6. `serve_stopped` additionally
+reports the fixed `daily_ceiling_rejected` count. Durable traffic-quality v5
+reports permanent class/rule totals, fixed bounded signal evidence, query
+candidate/current/contradiction totals, strict/cap state, and fixed keyed
+identity-mint anomaly counts without UA, hint, language, network-day, or other
+input-derived keys.
 
 The site identifier is public and appears in browser markup. It is not an
 authorization credential.
@@ -463,6 +476,12 @@ M2 begins with:
 Rate limits are deployment defaults and may be changed only within documented
 hard maxima. Caddy may add a coarser outer limit, but correctness does not rely
 on it.
+
+The metadata-5 per-site daily accepted-event ceiling is independent of this
+minute limiter. It counts all durable classes by receipt-derived site-local
+date inside the event transaction, defaults to 100,000, and is bounded from 1
+through 10,000,000. Reaching it returns 429 for new events and never turns a
+discard into a successful response.
 
 ## 9. Caching and CSP
 

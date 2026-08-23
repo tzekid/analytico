@@ -643,7 +643,7 @@ exec 9<&-
 server_pid=
 
 test "$("$binary" doctor "$fixture_dir")" = \
-    "ok metadata=v4 events=v6 sites=2 goals=0 funnels=0 stored_events=45 key=ok"
+    "ok metadata=v5 events=v7 sites=2 goals=0 funnels=0 stored_events=45 key=ok"
 pageview_row=$("$binary" event inspect "$fixture_dir" pageview)
 test "$pageview_row" = $'pageview\t/pricing\tsearch.example\tDE\tFirefox\tLinux\tdesktop\tnewsletter\t{}\t1\t2\t\t0\tfalse\t0\tfalse\tfalse\t0\t0\t1\tfalse'
 custom_row=$("$binary" event inspect "$fixture_dir" signup)
@@ -651,15 +651,23 @@ test "$custom_row" = $'signup\t/welcome\t\tUS\tChrome\tWindows\tdesktop\t\t{\"pl
 
 received_date=$(date --utc --date="@$occurred_seconds" +%F)
 v2_page_row=$("$binary" m2 v2-inspect "$fixture_dir" "$site_id" "$v2_page_id")
+[[ "$v2_page_row" == '{"event_schema_version":7,'* ]]
+v2_page_row=${v2_page_row/\"event_schema_version\":7/\"event_schema_version\":6}
 test "$v2_page_row" = \
     "{\"event_schema_version\":6,\"protocol_version\":2,\"tracker_version\":2,\"event_id\":\"$v2_page_id\",\"occurred_at_utc_micros\":$occurred_micros,\"received_date_utc\":\"$received_date\",\"site_local_date\":\"$received_date\",\"site_utc_offset_minutes\":0,\"kind\":1,\"event_name\":\"page_view\",\"path\":\"/home\",\"page_title\":\"Home\",\"hostname\":\"example.com\",\"anonymous_id\":\"$v2_anonymous\",\"identity_quality\":1,\"user_id\":\"\",\"session_id\":\"$v2_session\",\"sequence\":0,\"session_start\":true,\"referrer_host\":\"search.example\",\"country_code\":\"DE\",\"language\":\"\",\"browser_family\":\"Chrome\",\"os_family\":\"Linux\",\"device_category\":\"desktop\",\"utm_source\":\"newsletter\",\"utm_medium\":\"email\",\"utm_campaign\":\"\",\"utm_term\":\"\",\"utm_content\":\"\",\"properties_json\":\"{}\",\"user_traits_json\":\"{}\",\"value_amount\":null,\"value_currency\":\"\",\"engagement_ms\":0,\"max_scroll_depth\":0,\"linked_user_id\":\"user_123\",\"traffic_class\":1,\"classifier_version\":2,\"bot_rule\":\"\",\"signals\":{\"version\":0,\"navigator_webdriver\":false,\"trusted_interactions\":0,\"was_visible\":false,\"was_prerendered\":false,\"viewport_bucket\":0,\"beacon_timing_bucket\":0},\"client_hint_consistency\":3,\"accept_language_present\":false}"
 v2_custom_row=$("$binary" m2 v2-inspect "$fixture_dir" "$site_id" "$v2_custom_id")
+[[ "$v2_custom_row" == '{"event_schema_version":7,'* ]]
+v2_custom_row=${v2_custom_row/\"event_schema_version\":7/\"event_schema_version\":6}
 test "$v2_custom_row" = \
     "{\"event_schema_version\":6,\"protocol_version\":2,\"tracker_version\":2,\"event_id\":\"$v2_custom_id\",\"occurred_at_utc_micros\":$occurred_micros,\"received_date_utc\":\"$received_date\",\"site_local_date\":\"$received_date\",\"site_utc_offset_minutes\":0,\"kind\":2,\"event_name\":\"purchase\",\"path\":\"/pricing\",\"page_title\":\"Pricing\",\"hostname\":\"example.com\",\"anonymous_id\":\"$v2_anonymous\",\"identity_quality\":1,\"user_id\":\"\",\"session_id\":\"$v2_session\",\"sequence\":1,\"session_start\":false,\"referrer_host\":\"\",\"country_code\":\"DE\",\"language\":\"\",\"browser_family\":\"Chrome\",\"os_family\":\"Linux\",\"device_category\":\"desktop\",\"utm_source\":\"\",\"utm_medium\":\"\",\"utm_campaign\":\"\",\"utm_term\":\"\",\"utm_content\":\"\",\"properties_json\":\"{\\\"plan\\\":\\\"pro\\\",\\\"z\\\":2}\",\"user_traits_json\":\"{}\",\"value_amount\":\"49.000000\",\"value_currency\":\"EUR\",\"engagement_ms\":0,\"max_scroll_depth\":0,\"linked_user_id\":\"user_123\",\"traffic_class\":1,\"classifier_version\":2,\"bot_rule\":\"\",\"signals\":{\"version\":0,\"navigator_webdriver\":false,\"trusted_interactions\":0,\"was_visible\":false,\"was_prerendered\":false,\"viewport_bucket\":0,\"beacon_timing_bucket\":0},\"client_hint_consistency\":3,\"accept_language_present\":false}"
 v2_engagement_row=$("$binary" m2 v2-inspect "$fixture_dir" "$site_id" "$v2_engagement_id")
+[[ "$v2_engagement_row" == '{"event_schema_version":7,'* ]]
+v2_engagement_row=${v2_engagement_row/\"event_schema_version\":7/\"event_schema_version\":6}
 test "$v2_engagement_row" = \
     "{\"event_schema_version\":6,\"protocol_version\":2,\"tracker_version\":2,\"event_id\":\"$v2_engagement_id\",\"occurred_at_utc_micros\":$occurred_micros,\"received_date_utc\":\"$received_date\",\"site_local_date\":\"$received_date\",\"site_utc_offset_minutes\":0,\"kind\":3,\"event_name\":\"engagement\",\"path\":\"/article\",\"page_title\":\"Article\",\"hostname\":\"example.com\",\"anonymous_id\":\"$v2_ephemeral\",\"identity_quality\":2,\"user_id\":\"\",\"session_id\":\"$v2_ephemeral_session\",\"sequence\":0,\"session_start\":true,\"referrer_host\":\"\",\"country_code\":\"US\",\"language\":\"\",\"browser_family\":\"Firefox\",\"os_family\":\"Linux\",\"device_category\":\"desktop\",\"utm_source\":\"\",\"utm_medium\":\"\",\"utm_campaign\":\"\",\"utm_term\":\"\",\"utm_content\":\"\",\"properties_json\":\"{}\",\"user_traits_json\":\"{}\",\"value_amount\":null,\"value_currency\":\"\",\"engagement_ms\":15000,\"max_scroll_depth\":92,\"linked_user_id\":\"\",\"traffic_class\":1,\"classifier_version\":2,\"bot_rule\":\"\",\"signals\":{\"version\":0,\"navigator_webdriver\":false,\"trusted_interactions\":0,\"was_visible\":false,\"was_prerendered\":false,\"viewport_bucket\":0,\"beacon_timing_bucket\":0},\"client_hint_consistency\":1,\"accept_language_present\":false}"
 v2_identify_row=$("$binary" m2 v2-inspect "$fixture_dir" "$site_id" "$v2_identify_id")
+[[ "$v2_identify_row" == '{"event_schema_version":7,'* ]]
+v2_identify_row=${v2_identify_row/\"event_schema_version\":7/\"event_schema_version\":6}
 test "$v2_identify_row" = \
     "{\"event_schema_version\":6,\"protocol_version\":2,\"tracker_version\":2,\"event_id\":\"$v2_identify_id\",\"occurred_at_utc_micros\":$occurred_micros,\"received_date_utc\":\"$received_date\",\"site_local_date\":\"$received_date\",\"site_utc_offset_minutes\":0,\"kind\":4,\"event_name\":\"identify\",\"path\":\"/account\",\"page_title\":\"Account\",\"hostname\":\"example.com\",\"anonymous_id\":\"$v2_anonymous\",\"identity_quality\":1,\"user_id\":\"user_123\",\"session_id\":\"$v2_session\",\"sequence\":2,\"session_start\":false,\"referrer_host\":\"\",\"country_code\":\"DE\",\"language\":\"\",\"browser_family\":\"Chrome\",\"os_family\":\"Linux\",\"device_category\":\"desktop\",\"utm_source\":\"\",\"utm_medium\":\"\",\"utm_campaign\":\"\",\"utm_term\":\"\",\"utm_content\":\"\",\"properties_json\":\"{}\",\"user_traits_json\":\"{\\\"plan\\\":\\\"pro\\\",\\\"tier\\\":2}\",\"value_amount\":null,\"value_currency\":\"\",\"engagement_ms\":0,\"max_scroll_depth\":0,\"linked_user_id\":\"user_123\",\"traffic_class\":1,\"classifier_version\":2,\"bot_rule\":\"\",\"signals\":{\"version\":0,\"navigator_webdriver\":false,\"trusted_interactions\":0,\"was_visible\":false,\"was_prerendered\":false,\"viewport_bucket\":0,\"beacon_timing_bucket\":0},\"client_hint_consistency\":3,\"accept_language_present\":false}"
 test "$("$binary" m2 identity-links "$fixture_dir")" = 1
@@ -758,7 +766,7 @@ kill -TERM "$server_pid"
 wait "$server_pid"
 server_pid=
 test "$("$binary" doctor "$fault_dir")" = \
-    "ok metadata=v4 events=v6 sites=1 goals=0 funnels=0 stored_events=0 key=ok"
+    "ok metadata=v5 events=v7 sites=1 goals=0 funnels=0 stored_events=0 key=ok"
 test "$("$binary" m2 identity-links "$fault_dir")" = 0
 if grep -aE 'fault_user|private-plan' \
     "$fault_dir/server.stdout" "$fault_dir/server.stderr" >/dev/null
