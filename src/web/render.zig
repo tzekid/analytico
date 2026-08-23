@@ -6,7 +6,7 @@ const components = @import("components.zig");
 const model = @import("model.zig");
 
 pub const stylesheet = @embedFile("style.css");
-pub const stylesheet_path = "/admin/app.v6.css";
+pub const stylesheet_path = "/admin/app.v7.css";
 pub const htmx = @embedFile("htmx_js");
 pub const htmx_gzip = @embedFile("htmx_gzip");
 pub const htmx_path = "/admin/htmx.28fae7bb.js";
@@ -64,7 +64,7 @@ pub fn page(output: *std.Io.Writer, value: model.Page) !void {
     try text(output, destinationSummary(value.destination));
     try output.writeAll("</p></div>");
     switch (value.destination) {
-        .overview => try reportSection(output, value),
+        .overview => try overviewSection(output, value),
         .analyze => {
             try reportNavigation(output, value);
             try reportSection(output, value);
@@ -354,10 +354,66 @@ fn reportSection(output: *std.Io.Writer, value: model.Page) !void {
     try text(output, reportTitle(value.query.kind));
     try output.writeAll("</h2>");
     if (value.result) |result| {
-        try renderResult(output, value.query, result, value.overview_quality);
+        try renderResult(output, value.query, result);
     } else {
         try output.writeAll("<p class=\"muted\">Create a definition below to run this report.</p>");
     }
+    try output.writeAll("</section>");
+}
+
+fn overviewSection(output: *std.Io.Writer, value: model.Page) !void {
+    const overview = value.overview_kpis orelse return error.MissingOverviewKpis;
+    const quality = value.overview_quality orelse return error.MissingTrafficQuality;
+    try output.writeAll(
+        "<section id=\"report\" aria-labelledby=\"overview-kpis-heading\">" ++
+            "<h2 id=\"overview-kpis-heading\">Key metrics</h2>",
+    );
+    if (overview.includes_incomplete_today) {
+        try components.feedback(output, .{
+            .kind = .warning,
+            .message = "The selected range includes today; current values are still incomplete.",
+        });
+    }
+    try output.writeAll("<ul class=\"metrics overview-metrics\">");
+    for (overview.cards) |card| {
+        var href_buffer: [analysis.maximum_url_bytes]u8 = undefined;
+        var href = std.Io.Writer.fixed(&href_buffer);
+        var adjusted = value.query;
+        const destination: model.Destination = switch (card.target) {
+            .analyze => .analyze,
+            .goals => target: {
+                adjusted.kind = .goal;
+                adjusted.subject = "";
+                break :target .journeys;
+            },
+        };
+        try canonicalUrlRaw(&href, destination, adjusted, 1);
+        try components.kpi(output, .{
+            .label = card.label,
+            .value = card.value,
+            .detail = card.comparison,
+            .detail_kind = switch (card.direction) {
+                .neutral => .neutral,
+                .positive => .positive,
+                .negative => .negative,
+            },
+            .href = href.buffered(),
+            .definition = card.definition,
+        });
+    }
+    try output.writeAll("</ul><p class=\"coverage-note\">");
+    try text(output, overview.coverage);
+    try output.writeAll("</p>");
+    if (overview.comparison_coverage) |coverage| {
+        try output.writeAll("<p class=\"coverage-note\">");
+        try text(output, coverage);
+        try output.writeAll("</p>");
+    }
+    try components.feedback(output, .{
+        .kind = .warning,
+        .message = "Traffic-quality diagnostics below use received UTC dates and are separate from the site-local KPI range.",
+    });
+    try renderTrafficQuality(output, value.query, quality, false);
     try output.writeAll("</section>");
 }
 
@@ -434,24 +490,9 @@ fn renderResult(
     output: *std.Io.Writer,
     query: model.Query,
     result: report.Result,
-    overview_quality: ?report.TrafficQuality,
 ) !void {
     switch (result) {
-        .overview => |overview| {
-            try output.writeAll("<ul class=\"metrics\">");
-            try metric(output, "Page views", overview.page_views);
-            try metric(output, "Visitor-days", overview.visitor_days);
-            try metric(
-                output,
-                "Distinct people",
-                (overview_quality orelse return error.MissingTrafficQuality).distinct_people,
-            );
-            try metric(output, "Sessions", overview.sessions);
-            try metric(output, "Custom events", overview.custom_events);
-            try metric(output, "Bot events", overview.bot_events);
-            try output.writeAll("</ul>");
-            try renderTrafficQuality(output, query, overview_quality.?, false);
-        },
+        .overview => return error.LegacyOverviewResult,
         .traffic_quality => |quality| try renderTrafficQuality(output, query, quality, true),
         .list => |list| {
             if (query.kind == .campaigns) try campaignTabs(output, query);
@@ -1023,6 +1064,31 @@ fn canonicalUrl(
     query: model.Query,
     page_number: u32,
 ) !void {
+    return canonicalUrlSeparated(
+        output,
+        destination,
+        query,
+        page_number,
+        "&amp;",
+    );
+}
+
+fn canonicalUrlRaw(
+    output: *std.Io.Writer,
+    destination: model.Destination,
+    query: model.Query,
+    page_number: u32,
+) !void {
+    return canonicalUrlSeparated(output, destination, query, page_number, "&");
+}
+
+fn canonicalUrlSeparated(
+    output: *std.Io.Writer,
+    destination: model.Destination,
+    query: model.Query,
+    page_number: u32,
+    separator: []const u8,
+) !void {
     var adjusted = query;
     switch (destination) {
         .overview => {
@@ -1050,34 +1116,40 @@ fn canonicalUrl(
     try canonicalPath(output, destination, adjusted);
     try output.writeAll("?from=");
     try urlComponent(output, adjusted.range.start);
-    try output.writeAll("&amp;to=");
+    try output.writeAll(separator);
+    try output.writeAll("to=");
     try urlComponent(output, adjusted.range.end);
-    try output.writeAll("&amp;compare=");
+    try output.writeAll(separator);
+    try output.writeAll("compare=");
     try urlComponent(output, adjusted.comparison.name());
     switch (destination) {
         .analyze => {
-            try output.writeAll("&amp;report=");
+            try output.writeAll(separator);
+            try output.writeAll("report=");
             try urlComponent(output, adjusted.kind.name());
             if (adjusted.kind == .campaigns) {
-                try output.writeAll("&amp;campaign=");
+                try output.writeAll(separator);
+                try output.writeAll("campaign=");
                 try urlComponent(output, @tagName(adjusted.campaign_dimension));
             }
-            try output.writeAll("&amp;sort=");
+            try output.writeAll(separator);
+            try output.writeAll("sort=");
             try urlComponent(output, @tagName(adjusted.sort));
-            try output.print("&amp;limit={d}&amp;page={d}", .{
-                adjusted.limit,
-                adjusted.page,
-            });
+            try output.writeAll(separator);
+            try output.print("limit={d}", .{adjusted.limit});
+            try output.writeAll(separator);
+            try output.print("page={d}", .{adjusted.page});
         },
         .journeys => if (adjusted.subject.len != 0) {
-            try output.writeAll("&amp;subject=");
+            try output.writeAll(separator);
+            try output.writeAll("subject=");
             try urlComponent(output, adjusted.subject);
         },
         .live => if (adjusted.limit != report.default_limit or adjusted.page != 1) {
-            try output.print("&amp;limit={d}&amp;page={d}", .{
-                adjusted.limit,
-                adjusted.page,
-            });
+            try output.writeAll(separator);
+            try output.print("limit={d}", .{adjusted.limit});
+            try output.writeAll(separator);
+            try output.print("page={d}", .{adjusted.page});
         },
         .overview, .sessions, .settings => {},
     }
@@ -1287,5 +1359,5 @@ test "production stylesheet mirrors the approved accessible design tokens" {
 
     try std.testing.expect(std.mem.indexOf(u8, stylesheet, "@import") == null);
     try std.testing.expect(std.mem.indexOf(u8, stylesheet, "url(") == null);
-    try std.testing.expectEqualStrings("/admin/app.v6.css", stylesheet_path);
+    try std.testing.expectEqualStrings("/admin/app.v7.css", stylesheet_path);
 }

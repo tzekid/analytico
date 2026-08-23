@@ -7,6 +7,8 @@ pub const Kpi = struct {
     value: []const u8,
     detail: []const u8 = "",
     detail_kind: DetailKind = .neutral,
+    href: []const u8 = "",
+    definition: []const u8 = "",
 };
 
 pub const DetailKind = enum {
@@ -37,11 +39,20 @@ pub const EmptyState = struct {
 };
 
 pub fn kpi(output: *std.Io.Writer, value: Kpi) !void {
-    try output.writeAll("<li class=\"kpi\"><span>");
+    try output.writeAll("<li class=\"kpi\">");
+    if (value.href.len != 0) {
+        try output.writeAll("<a class=\"kpi-drill\" href=\"");
+        try attribute(output, value.href);
+        try output.writeAll("\" aria-label=\"Open ");
+        try attribute(output, value.label);
+        try output.writeAll(" details\">");
+    }
+    try output.writeAll("<span>");
     try text(output, value.label);
     try output.writeAll("</span><strong>");
     try text(output, value.value);
     try output.writeAll("</strong>");
+    if (value.href.len != 0) try output.writeAll("</a>");
     if (value.detail.len != 0) {
         try output.writeAll("<small class=\"kpi-detail");
         switch (value.detail_kind) {
@@ -52,6 +63,11 @@ pub fn kpi(output: *std.Io.Writer, value: Kpi) !void {
         try output.writeAll("\">");
         try text(output, value.detail);
         try output.writeAll("</small>");
+    }
+    if (value.definition.len != 0) {
+        try output.writeAll("<p class=\"kpi-definition\">");
+        try text(output, value.definition);
+        try output.writeAll("</p>");
     }
     try output.writeAll("</li>");
 }
@@ -153,6 +169,8 @@ test "components escape every caller-controlled output context" {
         .value = "7<8",
         .detail = "up 'now'",
         .detail_kind = .positive,
+        .href = "/admin?x=\"&",
+        .definition = "Exact <definition>",
     });
     try feedback(&output.writer, .{
         .kind = .error_message,
@@ -166,6 +184,16 @@ test "components escape every caller-controlled output context" {
     try std.testing.expect(std.mem.indexOf(u8, rendered, "&lt;label&gt;&quot;&amp;") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "7&lt;8") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "up &#39;now&#39;") != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        rendered,
+        "href=\"/admin?x=&quot;&amp;\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        rendered,
+        "Exact &lt;definition&gt;",
+    ) != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "id=\"failure-summary\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "tabindex=\"-1\" autofocus") != null);
     try std.testing.expectError(error.InvalidUtf8, text(&output.writer, "\xff"));

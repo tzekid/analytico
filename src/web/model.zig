@@ -58,6 +58,33 @@ pub const ReportTimeBasis = enum {
     metric_v1_utc,
 };
 
+pub const KpiDirection = enum {
+    neutral,
+    positive,
+    negative,
+};
+
+pub const KpiTarget = enum {
+    analyze,
+    goals,
+};
+
+pub const OverviewKpi = struct {
+    label: []const u8,
+    value: []const u8,
+    comparison: []const u8,
+    direction: KpiDirection,
+    definition: []const u8,
+    target: KpiTarget,
+};
+
+pub const OverviewKpis = struct {
+    cards: []const OverviewKpi,
+    coverage: []const u8,
+    comparison_coverage: ?[]const u8,
+    includes_incomplete_today: bool,
+};
+
 pub const GoalDraft = struct {
     name: []const u8 = "",
     match_kind: []const u8 = "event",
@@ -90,6 +117,7 @@ pub const Page = struct {
     calendar_context: ?calendar.Context,
     report_time_basis: ReportTimeBasis,
     result: ?report.Result,
+    overview_kpis: ?OverviewKpis = null,
     overview_quality: ?report.TrafficQuality = null,
     goals: []const meta.Goal,
     funnels: []const meta.Funnel,

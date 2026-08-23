@@ -117,7 +117,9 @@ async function connected(browser) {
     assert.equal(response.status(), 200);
     assert.equal(await page.locator("h1").textContent(), "Overview");
     assert.equal(
-      await page.locator(".metrics li", { hasText: "Page views" }).locator("strong").textContent(),
+      await page.locator(".metrics li").filter({
+        has: page.getByText("Page views", { exact: true }),
+      }).locator("strong").textContent(),
       "8",
     );
     const analyticoResponseStartMs = await page.evaluate(

@@ -38,12 +38,13 @@ strict reports derive distinct eligible daily identities so a suspect first
 row cannot hide later human activity. It must be labeled
 `visitor-days`, never `daily visitors` or `people`.
 
-The #66 Overview diagnostic is intentionally a compatibility bridge: both its
-visitor-day value and its distinct-person selection use the existing received
-UTC report range so they are comparable beside the current Overview headline.
-This additive metric-v2 diagnostic does not change ordinary `AnalysisQuery`
-site-local semantics or any existing metric-v1 output. A later Overview
-migration must move both displayed values to one site-local range together.
+The #66 traffic-quality diagnostic remains an intentional compatibility
+surface: both its visitor-day value and its distinct-person selection use the
+existing received-UTC report range so they are comparable. Issue #26 removes
+those diagnostic values from the Overview headline and replaces the complete
+headline set with one site-local metric-v2 result. The diagnostic remains
+visible below the headline with its received-UTC basis stated locally; it does
+not relabel or change any metric-v1 output.
 
 For new protocol-v2 rows marked `identity_quality=ephemeral`, D31 derives the
 metric-v1 compatibility visitor-day from the same keyed site, receipt-UTC date,
@@ -158,6 +159,40 @@ divided by sessions; bounce rate is its complement.
 Conversions retain explicit event/session/person denominators. Revenue sums
 exact stored decimal values per currency; currencies are never silently
 combined and no foreign-exchange conversion occurs.
+
+The fixed Overview conversion count is the sum of matches across every active
+goal. One accepted meaningful event contributes once for each active goal
+definition it satisfies; two distinct goals with the same selector therefore
+still contribute two conversions. The Overview conversion rate counts distinct
+canonical people
+with at least one active-goal match and divides by all visitors under the same
+site-local range and product-traffic policy. With no active goals, both the
+conversion count and converting-person numerator are zero.
+
+Overview revenue is one exact value per observed three-letter currency. A
+currency observed on eligible value-bearing traffic before the selected range
+remains visible with an exact current zero, while a site that has never received
+eligible value data has no Revenue card. Current and comparison amounts in
+different currencies are never combined. The site-default currency added by
+the site-creation/settings work may later identify the ordinary card without
+changing these exact per-currency rows.
+
+## Overview comparison
+
+The fixed Overview result contains Visitors, Sessions, Page views, Engagement
+rate, Conversions, visitor Conversion rate, conditional Revenue, and current/
+comparison identity coverage. Counts and exact values use signed percentage
+change when the comparison is nonzero and a signed absolute `new` state when it
+is zero. Rates use percentage-point differences only when both denominators are
+nonzero. A rate with no denominator is unavailable, not zero. An unresolved or
+unselected comparison is unavailable rather than a zero period. A resolved
+period with no eligible rows is a valid zero for count and exact-value metrics.
+
+All fixed fields execute through one bounded DuckDB statement and one interrupt
+deadline. Current and comparison ranges each derive full-session engagement
+facts independently, so adjacent or overlapping ranges do not share mutable
+state. The existing maximums of 32 active goals, 16 currency series, 400 local
+dates, one report thread, and a two-second deadline apply.
 
 ## Bots
 

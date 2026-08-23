@@ -1,9 +1,11 @@
 const std = @import("std");
+const analysis = @import("../analysis.zig");
 const domain = @import("../domain.zig");
 const report = @import("../report.zig");
 const events = @import("../store/events.zig");
 const meta = @import("../store/meta.zig");
 const reports = @import("../store/reports.zig");
+const analysis_store = @import("../store/analysis.zig");
 
 const day_one_micros: i64 = 1_735_689_600_000_000;
 const day_two_micros: i64 = day_one_micros + 86_400_000_000;
@@ -396,6 +398,121 @@ pub fn trafficQualityProfile(
         },
     );
     try output.writeAll(profile);
+}
+
+pub fn overviewV2(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    output: *std.Io.Writer,
+    directory: []const u8,
+    site_slug: []const u8,
+    current_start: []const u8,
+    current_end: []const u8,
+    comparison_start: []const u8,
+    comparison_end: []const u8,
+    profile: bool,
+) !void {
+    try domain.validateSlug(site_slug);
+    const current = analysis.LocalDateRange{
+        .start = current_start,
+        .end = current_end,
+    };
+    const comparison = analysis.LocalDateRange{
+        .start = comparison_start,
+        .end = comparison_end,
+    };
+    try current.validate();
+    try comparison.validate();
+    const metadata_path = try std.fs.path.join(allocator, &.{ directory, "meta.db" });
+    var metadata = try meta.Store.open(allocator, metadata_path);
+    defer metadata.deinit();
+    try metadata.requireCurrent();
+    const site_id = try metadata.siteIdBySlug(allocator, site_slug);
+    const goals = try metadata.listGoals(allocator, site_slug);
+    const policy = try metadata.sitePolicy(allocator, site_id);
+    const resolved = try allocator.alloc(analysis.ResolvedGoal, goals.len);
+    for (resolved, goals) |*target, goal| target.* = .{
+        .id = goal.id,
+        .selector = .{
+            .kind = switch (goal.match_kind) {
+                .event => .exact_event,
+                .path => .exact_page,
+                .prefix => .page_prefix,
+            },
+            .value = goal.match_value,
+        },
+    };
+    const event_path = try std.fs.path.join(allocator, &.{ directory, "events.duckdb" });
+    var store = try events.Store.open(allocator, event_path);
+    defer store.deinit();
+    try store.requireCurrent();
+    const execution = analysis.OverviewExecution{
+        .site_id = site_id,
+        .range = current,
+        .comparison_range = comparison,
+        .active_goals = resolved,
+        .strict_traffic_mode = policy.strict_mode,
+    };
+    if (profile) {
+        try output.writeAll(try analysis_store.profileOverview(
+            allocator,
+            &store,
+            execution,
+        ));
+        return;
+    }
+    _ = try analysis_store.executeOverview(allocator, &store, execution);
+    var durations: [10]i64 = undefined;
+    var last: analysis.OverviewResult = undefined;
+    for (&durations) |*duration| {
+        const started = std.Io.Clock.awake.now(io).nanoseconds;
+        last = try analysis_store.executeOverview(allocator, &store, execution);
+        duration.* = @intCast(@divTrunc(
+            std.Io.Clock.awake.now(io).nanoseconds - started,
+            std.time.ns_per_us,
+        ));
+    }
+    std.mem.sort(i64, &durations, {}, std.sort.asc(i64));
+    try writeOverviewEvidence(
+        output,
+        policy.strict_mode,
+        last,
+        durations[4],
+        durations[9],
+        durations[9],
+        durations.len,
+    );
+}
+
+fn writeOverviewEvidence(
+    output: *std.Io.Writer,
+    strict_mode: bool,
+    result: analysis.OverviewResult,
+    p50_micros: i64,
+    p95_micros: i64,
+    p99_micros: i64,
+    samples: usize,
+) !void {
+    try std.json.Stringify.value(.{
+        .metric_version = analysis.metric_version,
+        .strict_mode = strict_mode,
+        .visitors = result.visitors.current,
+        .comparison_visitors = result.visitors.comparison.?,
+        .sessions = result.sessions.current,
+        .comparison_sessions = result.sessions.comparison.?,
+        .page_views = result.page_views.current,
+        .engaged_sessions = result.engagement_rate.current.numerator,
+        .conversion_matches = result.conversions.current,
+        .converting_visitors = result.conversion_rate.current.numerator,
+        .revenue_currencies = result.revenue.len,
+        .legacy_people = result.completeness.legacy_people,
+        .query_elapsed_micros = p95_micros,
+        .query_samples = samples,
+        .query_p50_micros = p50_micros,
+        .query_p95_micros = p95_micros,
+        .query_p99_micros = p99_micros,
+    }, .{}, output);
+    try output.writeByte('\n');
 }
 
 pub fn legacyCreate(

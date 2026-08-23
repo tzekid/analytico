@@ -80,12 +80,59 @@ async function main() {
       await page.locator('.primary-navigation a[aria-current="page"] .nav-label').textContent(),
       "Overview",
     );
-    await assertMetric(page, "Page views", "8");
-    await assertMetric(page, "Visitor-days", "4");
-    await assertMetric(page, "Distinct people", "4");
+    await assertMetric(page, "Visitors", "4");
     await assertMetric(page, "Sessions", "5");
-    await assertMetric(page, "Custom events", "5");
+    await assertMetric(page, "Page views", "8");
+    await assertMetric(page, "Engagement rate", "80.00%");
+    await assertMetric(page, "Conversions", "4");
+    await assertMetric(page, "Conversion rate", "75.00%");
     await assertMetric(page, "Persistent coverage", "0.00%");
+    assert.equal(
+      await page.locator(".overview-metrics .kpi").count(),
+      6,
+    );
+    assert.equal(
+      await overviewKpi(page, "Visitors")
+        .locator(".kpi-detail").textContent(),
+      "Up 4 · new",
+    );
+    assert.equal(
+      await overviewKpi(page, "Engagement rate")
+        .locator(".kpi-detail").textContent(),
+      "Comparison unavailable",
+    );
+    assert.equal(
+      await overviewKpi(page, "Conversion rate")
+        .locator(".kpi-detail").textContent(),
+      "Comparison unavailable",
+    );
+    assert.equal(
+      await page.locator(".overview-metrics .kpi-definition").count(),
+      6,
+    );
+    assert.equal(
+      await overviewKpi(page, "Page views")
+        .locator("a.kpi-drill").getAttribute("href"),
+      "/admin/sites/example/analyze?from=2025-01-01&to=2025-01-02&compare=previous&report=pages&sort=count&limit=25&page=1",
+    );
+    assert.equal(
+      await overviewKpi(page, "Conversions")
+        .locator("a.kpi-drill").getAttribute("href"),
+      "/admin/sites/example/journeys/goals?from=2025-01-01&to=2025-01-02&compare=previous",
+    );
+    assert.equal(
+      (await page.locator("#report").innerText()).includes(
+        "Current identity coverage: 0.00% persistent (0 persistent, 0 ephemeral, 4 legacy daily).",
+      ),
+      true,
+    );
+    assert.equal(
+      (await page.locator("#report").innerText()).includes(
+        "Comparison identity coverage: 0.00% persistent (0 persistent, 0 ephemeral, 0 legacy daily).",
+      ),
+      true,
+    );
+    assert.equal(await page.getByText(/^Revenue \(/).count(), 0);
     assert.equal(
       await page.getByRole("heading", { name: "Traffic quality" }).count(),
       1,
@@ -95,6 +142,9 @@ async function main() {
     ), true);
     assert.equal((await page.locator("body").innerText()).includes(
       "Compatibility report: the values below still use UTC calendar dates.",
+    ), false);
+    assert.equal((await page.locator("body").innerText()).includes(
+      "Traffic-quality diagnostics below use received UTC dates",
     ), true);
     await assertVisualTheme(page, "light", "44px");
     if (process.env.ANALYTICO_MOBILE_SCREENSHOT_PATH) {
@@ -233,6 +283,13 @@ async function main() {
       await page.locator(".desktop-context .context-state div", { hasText: "Range status" }).locator("dd").textContent(),
       "Today is incomplete",
     );
+    assert.equal(
+      await page.getByText(
+        "The selected range includes today; current values are still incomplete.",
+        { exact: true },
+      ).count(),
+      1,
+    );
     await page.goBack({ waitUntil: "load" });
     assert.equal(page.url(), fixedCalendarUrl);
 
@@ -273,6 +330,17 @@ async function main() {
     assert.equal(
       await page.locator(".desktop-context .context-state div", { hasText: "Comparison period" }).locator("dd").textContent(),
       "Previous period unavailable before 1970",
+    );
+    assert.equal(
+      await overviewKpi(page, "Visitors")
+        .locator(".kpi-detail").textContent(),
+      "Comparison unavailable",
+    );
+    assert.equal(
+      (await page.locator("#report").innerText()).includes(
+        "Comparison identity coverage:",
+      ),
+      false,
     );
     await page.goto(route("second", "analyze"), { waitUntil: "load" });
     const rangeForm = page.locator(".desktop-context form.range-filter");
@@ -706,6 +774,12 @@ async function assertMetric(page, label, expected) {
     has: page.getByText(label, { exact: true }),
   });
   assert.equal(await item.locator("strong").textContent(), expected);
+}
+
+function overviewKpi(page, label) {
+  return page.locator(".overview-metrics .kpi").filter({
+    has: page.getByText(label, { exact: true }),
+  });
 }
 
 async function assertFunnelFigure(page, mobile) {
