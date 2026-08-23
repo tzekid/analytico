@@ -67,9 +67,17 @@ async function main() {
     assert.equal(response.status(), 200);
     assert.equal(await page.locator("h1").textContent(), "Analytico");
     await assertMetric(page, "Page views", "8");
-    await assertMetric(page, "Daily visitors", "4");
+    await assertMetric(page, "Visitor-days", "4");
+    await assertMetric(page, "Distinct people", "4");
     await assertMetric(page, "Sessions", "5");
     await assertMetric(page, "Custom events", "5");
+    assert.equal(
+      await page.getByRole("heading", { name: "Traffic quality" }).count(),
+      1,
+    );
+    assert.equal((await page.locator("body").innerText()).includes(
+      "no additional event is excluded",
+    ), true);
     await assertVisualTheme(page, "light", "44px");
     if (process.env.ANALYTICO_MOBILE_SCREENSHOT_PATH) {
       await page.screenshot({
@@ -176,6 +184,7 @@ async function main() {
       "operating-systems",
       "devices",
       "events",
+      "traffic-quality",
       "goal&subject=Signup",
       "funnel&subject=Journey",
     ];
@@ -353,7 +362,9 @@ async function addSession(context) {
 }
 
 async function assertMetric(page, label, expected) {
-  const item = page.locator(".metrics li", { hasText: label });
+  const item = page.locator(".metrics li").filter({
+    has: page.getByText(label, { exact: true }),
+  });
   assert.equal(await item.locator("strong").textContent(), expected);
 }
 

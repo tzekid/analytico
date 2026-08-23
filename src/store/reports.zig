@@ -110,6 +110,108 @@ const overview_sql: [:0]const u8 =
     \\  AND received_date_utc BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
 ;
 
+const traffic_quality_sql: [:0]const u8 =
+    \\WITH params AS (
+    \\  SELECT ?::VARCHAR AS site_id, CAST(? AS DATE) AS start_date,
+    \\         CAST(? AS DATE) AS end_date
+    \\), range_events AS (
+    \\  SELECT e.* FROM events e, params p
+    \\  WHERE e.site_id = p.site_id
+    \\    AND e.received_date_utc BETWEEN p.start_date AND p.end_date
+    \\), meaningful AS (
+    \\  SELECT e.anonymous_id, e.identity_quality,
+    \\         COALESCE(l.user_id, '') AS linked_user_id
+    \\  FROM range_events e
+    \\  LEFT JOIN identity_links l
+    \\    ON l.site_id = e.site_id AND l.anonymous_id = e.anonymous_id
+    \\  WHERE e.kind IN (1, 2) AND e.device_category <> 'bot'
+    \\), people AS (
+    \\  SELECT DISTINCT CASE
+    \\    WHEN identity_quality = 1 AND linked_user_id != ''
+    \\      THEN 'u:' || linked_user_id
+    \\    WHEN identity_quality = 1
+    \\      THEN 'a:' || CAST(anonymous_id AS VARCHAR)
+    \\    WHEN identity_quality = 2
+    \\      THEN 'e:' || CAST(anonymous_id AS VARCHAR)
+    \\    WHEN identity_quality = 3
+    \\      THEN 'l:' || CAST(anonymous_id AS VARCHAR)
+    \\    ELSE NULL
+    \\  END AS canonical_key, identity_quality
+    \\  FROM meaningful
+    \\), person_summary AS (
+    \\  SELECT count(*) AS total,
+    \\    count(*) FILTER (WHERE identity_quality = 1) AS persistent,
+    \\    count(*) FILTER (WHERE identity_quality = 2) AS ephemeral,
+    \\    count(*) FILTER (WHERE identity_quality = 3) AS legacy
+    \\  FROM people WHERE canonical_key IS NOT NULL
+    \\), identity_summary AS (
+    \\  SELECT
+    \\    count(*) FILTER (WHERE identity_quality = 1) AS persistent_events,
+    \\    count(*) FILTER (
+    \\      WHERE identity_quality = 1 AND visitor_day_start
+    \\    ) AS persistent_visitor_days,
+    \\    count(*) FILTER (WHERE identity_quality = 2) AS ephemeral_events,
+    \\    count(*) FILTER (
+    \\      WHERE identity_quality = 2 AND visitor_day_start
+    \\    ) AS ephemeral_visitor_days,
+    \\    count(*) FILTER (WHERE identity_quality = 3) AS legacy_events,
+    \\    count(*) FILTER (
+    \\      WHERE identity_quality = 3 AND visitor_day_start
+    \\    ) AS legacy_visitor_days
+    \\  FROM range_events WHERE device_category <> 'bot'
+    \\), range_sessions AS (
+    \\  SELECT DISTINCT session_id FROM range_events
+    \\  WHERE kind IN (1, 2) AND device_category <> 'bot'
+    \\), session_quality AS (
+    \\  SELECT count(*) FILTER (
+    \\    WHERE meaningful_events = 1 AND engagement_ms = 0 AND max_scroll = 0
+    \\  ) AS zero_engagement_single_event_sessions
+    \\  FROM (
+    \\    SELECT e.session_id,
+    \\      count(*) FILTER (WHERE kind IN (1, 2)) AS meaningful_events,
+    \\      sum(engagement_ms) AS engagement_ms,
+    \\      max(max_scroll_depth) AS max_scroll
+    \\    FROM events e
+    \\    JOIN range_sessions r ON r.session_id = e.session_id
+    \\    JOIN params p ON p.site_id = e.site_id
+    \\    WHERE e.device_category <> 'bot'
+    \\    GROUP BY e.session_id
+    \\  ) sessions
+    \\), anonymous_first AS (
+    \\  SELECT e.anonymous_id, min(e.received_date_utc) AS first_date
+    \\  FROM events e, params p
+    \\  WHERE e.site_id = p.site_id AND e.kind IN (1, 2)
+    \\    AND e.device_category <> 'bot' AND e.identity_quality IN (1, 2)
+    \\  GROUP BY e.anonymous_id
+    \\), dates AS (
+    \\  SELECT p.start_date + CAST(day AS INTEGER) AS date
+    \\  FROM params p,
+    \\    range(date_diff('day', p.start_date, p.end_date) + 1) days(day)
+    \\), daily AS (
+    \\  SELECT d.date,
+    \\    (SELECT count(*) FROM anonymous_first a WHERE a.first_date = d.date)
+    \\      AS new_anonymous_identities,
+    \\    (SELECT count(*) FROM range_events e
+    \\      WHERE e.received_date_utc = d.date AND e.device_category = 'bot')
+    \\      AS bot_events
+    \\  FROM dates d
+    \\)
+    \\SELECT CAST(d.date AS VARCHAR), d.new_anonymous_identities, d.bot_events,
+    \\  p.total, p.persistent, p.ephemeral, p.legacy,
+    \\  i.persistent_visitor_days + i.ephemeral_visitor_days +
+    \\    i.legacy_visitor_days AS visitor_days,
+    \\  s.zero_engagement_single_event_sessions,
+    \\  i.persistent_events, i.persistent_visitor_days,
+    \\  i.ephemeral_events, i.ephemeral_visitor_days,
+    \\  i.legacy_events, i.legacy_visitor_days
+    \\FROM daily d
+    \\CROSS JOIN person_summary p
+    \\CROSS JOIN identity_summary i
+    \\CROSS JOIN session_quality s
+    \\ORDER BY d.date
+    \\LIMIT ? OFFSET ?
+;
+
 fn pagedSql(
     comptime body: []const u8,
     comptime order: report.Sort,
@@ -467,6 +569,13 @@ pub fn runWithTimeout(
             site_id,
             timeout_ms,
         ) },
+        .traffic_quality => .{ .traffic_quality = try trafficQuality(
+            allocator,
+            event_store,
+            request,
+            site_id,
+            timeout_ms,
+        ) },
         .pages => .{ .list = try list(
             allocator,
             event_store,
@@ -599,6 +708,99 @@ fn overview(
         .sessions = result.int64(2, 0),
         .custom_events = result.int64(3, 0),
         .bot_events = result.int64(4, 0),
+    };
+}
+
+pub fn trafficQuality(
+    allocator: std.mem.Allocator,
+    event_store: *events.Store,
+    request: report.Request,
+    site_id: []const u8,
+    timeout_ms: u32,
+) !report.TrafficQuality {
+    var statement = try event_store.database.prepare(traffic_quality_sql);
+    defer statement.deinit();
+    try bindRange(&statement, site_id, request);
+    try statement.bindInt64(4, @as(i64, request.limit) + 1);
+    const offset = try request.offset();
+    const range_days = @as(i64, request.end_day - request.start_day + 1);
+    if (offset >= range_days) return error.InvalidReportPage;
+    try statement.bindInt64(5, offset);
+    var result = try deadline.execute(&event_store.database, &statement, timeout_ms);
+    defer result.deinit();
+    const returned = result.rowCount();
+    const decoded = @min(returned, @as(usize, request.limit));
+    if (decoded == 0 or returned > @as(usize, request.limit) + 1 or
+        result.columnCount() != 15)
+    {
+        return error.InvalidReportResult;
+    }
+    const total = result.int64(3, 0);
+    const persistent = result.int64(4, 0);
+    const ephemeral = result.int64(5, 0);
+    const legacy = result.int64(6, 0);
+    const visitor_days = result.int64(7, 0);
+    const zero_sessions = result.int64(8, 0);
+    const identity_quality = [3]report.IdentityQualityRow{
+        .{
+            .quality = .persistent,
+            .events = result.int64(9, 0),
+            .visitor_days = result.int64(10, 0),
+        },
+        .{
+            .quality = .ephemeral,
+            .events = result.int64(11, 0),
+            .visitor_days = result.int64(12, 0),
+        },
+        .{
+            .quality = .legacy_daily,
+            .events = result.int64(13, 0),
+            .visitor_days = result.int64(14, 0),
+        },
+    };
+    if (total < 0 or persistent < 0 or ephemeral < 0 or legacy < 0 or
+        visitor_days < 0 or zero_sessions < 0 or
+        persistent + ephemeral + legacy != total or
+        identity_quality[0].visitor_days + identity_quality[1].visitor_days +
+            identity_quality[2].visitor_days != visitor_days)
+    {
+        return error.InvalidReportResult;
+    }
+    const days = try allocator.alloc(report.TrafficQualityDay, decoded);
+    for (days, 0..) |*day, index| {
+        const new_identities = result.int64(1, index);
+        const bot_events = result.int64(2, index);
+        if (new_identities < 0 or bot_events < 0 or
+            result.int64(3, index) != total or
+            result.int64(7, index) != visitor_days)
+        {
+            return error.InvalidReportResult;
+        }
+        day.* = .{
+            .date = try result.text(allocator, 0, index),
+            .new_anonymous_identities = new_identities,
+            .bot_events = bot_events,
+        };
+    }
+    const basis_points: u16 = if (total == 0)
+        0
+    else
+        @intCast(@divTrunc(
+            std.math.mul(i64, persistent, 10_000) catch
+                return error.InvalidReportResult,
+            total,
+        ));
+    return .{
+        .distinct_people = total,
+        .persistent_people = persistent,
+        .ephemeral_people = ephemeral,
+        .legacy_people = legacy,
+        .persistent_basis_points = basis_points,
+        .visitor_days = visitor_days,
+        .zero_engagement_single_event_sessions = zero_sessions,
+        .identity_quality = identity_quality,
+        .days = days,
+        .next_page = if (returned > decoded) request.page + 1 else null,
     };
 }
 

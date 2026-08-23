@@ -2,8 +2,47 @@ const std = @import("std");
 const analysis = @import("analysis.zig");
 const events = @import("store/events.zig");
 const analysis_store = @import("store/analysis.zig");
+const meta = @import("store/meta.zig");
 
 const site = "00000000-0000-4000-8000-000000000024";
+
+pub fn seedTrafficQuality(
+    allocator: std.mem.Allocator,
+    output: *std.Io.Writer,
+    directory: []const u8,
+) !void {
+    const meta_path = try std.fs.path.join(allocator, &.{ directory, "meta.db" });
+    const event_path = try std.fs.path.join(allocator, &.{ directory, "events.duckdb" });
+    var metadata = try meta.Store.open(allocator, meta_path);
+    defer metadata.deinit();
+    try metadata.requireCurrent();
+    var event_store = try events.Store.open(allocator, event_path);
+    defer event_store.deinit();
+    try event_store.requireCurrent();
+    if (try metadata.siteCount() != 0 or try event_store.eventCount() != 0) {
+        return error.TrafficQualitySeedRequiresEmptyStores;
+    }
+    try metadata.addSite(
+        site,
+        "quality",
+        "Traffic Quality",
+        "https://quality.example",
+        "UTC",
+        1_767_225_600_000_000,
+    );
+    try analysis_store.seedSemanticFixture(&event_store.database);
+    try event_store.database.exec(
+        \\INSERT INTO identity_links VALUES (
+        \\  '00000000-0000-4000-8000-000000000024',
+        \\  CAST('00000000-0000-4000-8000-0000000000a2' AS UUID),
+        \\  'user-a', 1767398404000000,
+        \\  CAST('00000000-0000-4000-8000-000000000107' AS UUID)
+        \\)
+    );
+    try metadata.checkpoint();
+    try event_store.checkpoint();
+    try output.writeAll("traffic-quality fixture committed sites=1 events=12 links=2\n");
+}
 
 pub fn run(
     allocator: std.mem.Allocator,

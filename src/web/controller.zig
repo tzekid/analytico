@@ -203,11 +203,26 @@ pub fn loadPage(
         )
     else
         null;
+    var quality_request = request;
+    quality_request.kind = .traffic_quality;
+    quality_request.limit = report.maximum_limit;
+    quality_request.page = 1;
+    const overview_quality: ?report.TrafficQuality = if (query.kind == .overview)
+        try reports.trafficQuality(
+            allocator,
+            event_store,
+            quality_request,
+            selected.id,
+            report_timeout_ms,
+        )
+    else
+        null;
     return .{
         .sites = sites,
         .selected_site = selected,
         .query = query,
         .result = result,
+        .overview_quality = overview_quality,
         .goals = goals,
         .funnels = funnels,
         .csrf_token = csrf_token,
@@ -313,10 +328,13 @@ fn validateQuery(query: model.Query) !void {
     if (end_day < start_day or end_day - start_day + 1 > report.maximum_range_days) {
         return error.InvalidReportRange;
     }
-    if (!query.kind.isList() and
+    if (!query.kind.isPaginated() and
         (query.sort != .count or query.limit != report.default_limit or
             query.page != 1))
     {
+        return error.ReportOptionsNotApplicable;
+    }
+    if (query.kind == .traffic_quality and query.sort != .count) {
         return error.ReportOptionsNotApplicable;
     }
     if (query.kind == .goal or query.kind == .funnel) {

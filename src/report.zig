@@ -2,6 +2,8 @@ const std = @import("std");
 const domain = @import("domain.zig");
 
 pub const metric_version: u8 = 1;
+pub const traffic_quality_metric_version: u8 = 2;
+pub const traffic_quality_version: u8 = 1;
 pub const default_limit: u16 = 25;
 pub const maximum_limit: u16 = 100;
 pub const maximum_range_days: u16 = 400;
@@ -61,6 +63,7 @@ pub const Kind = enum {
     operating_systems,
     devices,
     events,
+    traffic_quality,
     goal,
     funnel,
 
@@ -77,6 +80,7 @@ pub const Kind = enum {
             .operating_systems => "operating-systems",
             .devices => "devices",
             .events => "events",
+            .traffic_quality => "traffic-quality",
             .goal => "goal",
             .funnel => "funnel",
         };
@@ -106,6 +110,10 @@ pub const Kind = enum {
             => true,
             else => false,
         };
+    }
+
+    pub fn isPaginated(self: Kind) bool {
+        return self.isList() or self == .traffic_quality;
     }
 };
 
@@ -187,10 +195,13 @@ pub const Request = struct {
             }
             index += 2;
         }
-        if (!kind.isList() and
+        if (!kind.isPaginated() and
             (request.sort != .count or request.limit != default_limit or
                 request.page != 1))
         {
+            return error.ReportOptionsNotApplicable;
+        }
+        if (kind == .traffic_quality and request.sort != .count) {
             return error.ReportOptionsNotApplicable;
         }
         return request;
@@ -213,6 +224,45 @@ pub const Overview = struct {
     sessions: i64,
     custom_events: i64,
     bot_events: i64,
+};
+
+pub const IdentityQuality = enum {
+    persistent,
+    ephemeral,
+    legacy_daily,
+
+    pub fn name(self: IdentityQuality) []const u8 {
+        return switch (self) {
+            .persistent => "persistent",
+            .ephemeral => "ephemeral",
+            .legacy_daily => "legacy_daily",
+        };
+    }
+};
+
+pub const IdentityQualityRow = struct {
+    quality: IdentityQuality,
+    events: i64,
+    visitor_days: i64,
+};
+
+pub const TrafficQualityDay = struct {
+    date: []u8,
+    new_anonymous_identities: i64,
+    bot_events: i64,
+};
+
+pub const TrafficQuality = struct {
+    distinct_people: i64,
+    persistent_people: i64,
+    ephemeral_people: i64,
+    legacy_people: i64,
+    persistent_basis_points: u16,
+    visitor_days: i64,
+    zero_engagement_single_event_sessions: i64,
+    identity_quality: [3]IdentityQualityRow,
+    days: []TrafficQualityDay,
+    next_page: ?u32,
 };
 
 pub const ListRow = struct {
@@ -249,6 +299,7 @@ pub const Funnel = struct {
 
 pub const Result = union(enum) {
     overview: Overview,
+    traffic_quality: TrafficQuality,
     list: List,
     goal: Goal,
     funnel: Funnel,
@@ -271,16 +322,30 @@ fn renderTable(
     request: Request,
     result: Result,
 ) !void {
-    try output.print(
-        "metric_version={d}\tsite={s}\tutc_range={s}..{s}\treport={s}\n",
-        .{
-            metric_version,
-            request.site_slug,
-            request.start_date,
-            request.end_date,
-            request.kind.name(),
-        },
-    );
+    if (request.kind == .traffic_quality) {
+        try output.print(
+            "metric_version={d}\ttraffic_quality_version={d}\tsite={s}\tutc_range={s}..{s}\treport={s}\n",
+            .{
+                traffic_quality_metric_version,
+                traffic_quality_version,
+                request.site_slug,
+                request.start_date,
+                request.end_date,
+                request.kind.name(),
+            },
+        );
+    } else {
+        try output.print(
+            "metric_version={d}\tsite={s}\tutc_range={s}..{s}\treport={s}\n",
+            .{
+                metric_version,
+                request.site_slug,
+                request.start_date,
+                request.end_date,
+                request.kind.name(),
+            },
+        );
+    }
     switch (result) {
         .overview => |overview| {
             try output.writeAll(
@@ -292,6 +357,37 @@ fn renderTable(
                 overview.sessions,
                 overview.custom_events,
                 overview.bot_events,
+            });
+        },
+        .traffic_quality => |quality| {
+            try output.writeAll(
+                "distinct_people\tvisitor_days\tpersistent_people\tephemeral_people\tlegacy_people\tpersistent_basis_points\tzero_engagement_single_event_sessions\n",
+            );
+            try output.print("{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\n", .{
+                quality.distinct_people,
+                quality.visitor_days,
+                quality.persistent_people,
+                quality.ephemeral_people,
+                quality.legacy_people,
+                quality.persistent_basis_points,
+                quality.zero_engagement_single_event_sessions,
+            });
+            try output.writeAll("identity_quality\tevents\tvisitor_days\n");
+            for (quality.identity_quality) |row| {
+                try output.print("{s}\t{d}\t{d}\n", .{
+                    row.quality.name(), row.events, row.visitor_days,
+                });
+            }
+            try output.writeAll("date\tnew_anonymous_identities\tbot_events\n");
+            for (quality.days) |day| {
+                try output.print("{s}\t{d}\t{d}\n", .{
+                    day.date, day.new_anonymous_identities, day.bot_events,
+                });
+            }
+            try output.print("page={d}\tlimit={d}\tnext_page={s}\n", .{
+                request.page,
+                request.limit,
+                if (quality.next_page == null) "none" else "present",
             });
         },
         .list => |list| {
@@ -351,10 +447,14 @@ fn renderJson(
     request: Request,
     result: Result,
 ) !void {
-    try output.print(
-        "{{\"metric_version\":{d},\"site\":",
-        .{metric_version},
-    );
+    try output.print("{{\"metric_version\":{d}", .{if (request.kind == .traffic_quality)
+        traffic_quality_metric_version
+    else
+        metric_version});
+    if (request.kind == .traffic_quality) {
+        try output.print(",\"traffic_quality_version\":{d}", .{traffic_quality_version});
+    }
+    try output.writeAll(",\"site\":");
     try jsonString(output, request.site_slug);
     try output.writeAll(",\"start_date\":");
     try jsonString(output, request.start_date);
@@ -374,6 +474,52 @@ fn renderJson(
                 overview.bot_events,
             },
         ),
+        .traffic_quality => |quality| {
+            try output.print(
+                ",\"page\":{d},\"limit\":{d},\"next_page\":",
+                .{ request.page, request.limit },
+            );
+            if (quality.next_page) |next| {
+                try output.print("{d}", .{next});
+            } else {
+                try output.writeAll("null");
+            }
+            try output.print(
+                ",\"distinct_people\":{d},\"visitor_days\":{d}," ++
+                    "\"persistent_people\":{d},\"ephemeral_people\":{d}," ++
+                    "\"legacy_people\":{d},\"persistent_basis_points\":{d}," ++
+                    "\"zero_engagement_single_event_sessions\":{d}," ++
+                    "\"identity_quality\":[",
+                .{
+                    quality.distinct_people,
+                    quality.visitor_days,
+                    quality.persistent_people,
+                    quality.ephemeral_people,
+                    quality.legacy_people,
+                    quality.persistent_basis_points,
+                    quality.zero_engagement_single_event_sessions,
+                },
+            );
+            for (quality.identity_quality, 0..) |row, index| {
+                if (index != 0) try output.writeByte(',');
+                try output.writeAll("{\"quality\":");
+                try jsonString(output, row.quality.name());
+                try output.print(",\"events\":{d},\"visitor_days\":{d}}}", .{
+                    row.events, row.visitor_days,
+                });
+            }
+            try output.writeAll("],\"days\":[");
+            for (quality.days, 0..) |day, index| {
+                if (index != 0) try output.writeByte(',');
+                try output.writeAll("{\"date\":");
+                try jsonString(output, day.date);
+                try output.print(
+                    ",\"new_anonymous_identities\":{d},\"bot_events\":{d}}}",
+                    .{ day.new_anonymous_identities, day.bot_events },
+                );
+            }
+            try output.writeAll("]}\n");
+        },
         .list => |list| {
             try output.print(
                 ",\"page\":{d},\"limit\":{d},\"next_page\":",
@@ -458,6 +604,39 @@ fn renderCsv(
                 overview.custom_events,
                 overview.bot_events,
             });
+        },
+        .traffic_quality => |quality| {
+            try output.writeAll(
+                "metric_version,traffic_quality_version,row_type,label,events,visitor_days,new_anonymous_identities,bot_events,distinct_people,persistent_people,ephemeral_people,legacy_people,persistent_basis_points,zero_engagement_single_event_sessions\n",
+            );
+            try output.print("{d},{d},summary,all,,,,,{d},{d},{d},{d},{d},{d}\n", .{
+                traffic_quality_metric_version,
+                traffic_quality_version,
+                quality.distinct_people,
+                quality.persistent_people,
+                quality.ephemeral_people,
+                quality.legacy_people,
+                quality.persistent_basis_points,
+                quality.zero_engagement_single_event_sessions,
+            });
+            for (quality.identity_quality) |row| {
+                try output.print("{d},{d},identity_quality,{s},{d},{d},,,,,,,,\n", .{
+                    traffic_quality_metric_version,
+                    traffic_quality_version,
+                    row.quality.name(),
+                    row.events,
+                    row.visitor_days,
+                });
+            }
+            for (quality.days) |day| {
+                try output.print("{d},{d},day,{s},,,{d},{d},,,,,,\n", .{
+                    traffic_quality_metric_version,
+                    traffic_quality_version,
+                    day.date,
+                    day.new_anonymous_identities,
+                    day.bot_events,
+                });
+            }
         },
         .list => |list| {
             try csvText(output, list.label_name);

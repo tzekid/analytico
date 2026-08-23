@@ -152,6 +152,17 @@ pub fn build(b: *std.Build) void {
         "Run metric-v2 typed analysis against a real on-disk DuckDB file",
     ).dependOn(&analysis_e2e.step);
 
+    const traffic_quality_e2e = b.addSystemCommand(&.{
+        "bash",
+        "tests/e2e-traffic-quality.sh",
+    });
+    traffic_quality_e2e.addArtifactArg(app);
+    traffic_quality_e2e.step.dependOn(b.getInstallStep());
+    b.step(
+        "e2e-traffic-quality",
+        "Run traffic-quality diagnostics through real CLI and on-disk stores",
+    ).dependOn(&traffic_quality_e2e.step);
+
     const legacy_migration_e2e = b.addSystemCommand(&.{
         "bash",
         "scripts/run-v0.3-gate.sh",

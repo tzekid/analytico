@@ -65,7 +65,7 @@ pub fn page(output: *std.Io.Writer, value: model.Page) !void {
     try text(output, reportTitle(value.query.kind));
     try output.writeAll("</h2>");
     if (value.result) |result| {
-        try renderResult(output, value.query, result);
+        try renderResult(output, value.query, result, value.overview_quality);
     } else {
         try output.writeAll("<p class=\"muted\">Create a definition below to run this report.</p>");
     }
@@ -153,7 +153,10 @@ fn filters(output: *std.Io.Writer, value: model.Page) !void {
     if (value.query.kind.isList()) {
         try output.writeAll("<input type=\"hidden\" name=\"sort\" value=\"");
         try attribute(output, @tagName(value.query.sort));
-        try output.writeAll("\"><input type=\"hidden\" name=\"limit\" value=\"");
+        try output.writeAll("\">");
+    }
+    if (value.query.kind.isPaginated()) {
+        try output.writeAll("<input type=\"hidden\" name=\"limit\" value=\"");
         try output.print("{d}", .{value.query.limit});
         try output.writeAll("\">");
     }
@@ -177,6 +180,7 @@ const navigation = [_]NavItem{
     .{ .kind = .operating_systems, .label = "OS" },
     .{ .kind = .devices, .label = "Devices" },
     .{ .kind = .events, .label = "Events" },
+    .{ .kind = .traffic_quality, .label = "Traffic quality" },
 };
 
 fn reportNavigation(output: *std.Io.Writer, value: model.Page) !void {
@@ -228,17 +232,25 @@ fn renderResult(
     output: *std.Io.Writer,
     query: model.Query,
     result: report.Result,
+    overview_quality: ?report.TrafficQuality,
 ) !void {
     switch (result) {
         .overview => |overview| {
             try output.writeAll("<ul class=\"metrics\">");
             try metric(output, "Page views", overview.page_views);
-            try metric(output, "Daily visitors", overview.visitor_days);
+            try metric(output, "Visitor-days", overview.visitor_days);
+            try metric(
+                output,
+                "Distinct people",
+                (overview_quality orelse return error.MissingTrafficQuality).distinct_people,
+            );
             try metric(output, "Sessions", overview.sessions);
             try metric(output, "Custom events", overview.custom_events);
             try metric(output, "Bot events", overview.bot_events);
             try output.writeAll("</ul>");
+            try renderTrafficQuality(output, query, overview_quality.?, false);
         },
+        .traffic_quality => |quality| try renderTrafficQuality(output, query, quality, true),
         .list => |list| {
             if (query.kind == .campaigns) try campaignTabs(output, query);
             try output.writeAll("<div class=\"table-scroll\"><table><thead><tr><th>");
@@ -299,6 +311,79 @@ fn renderResult(
             try output.writeAll("</tbody></table></div>");
         },
     }
+}
+
+fn renderTrafficQuality(
+    output: *std.Io.Writer,
+    query: model.Query,
+    quality: report.TrafficQuality,
+    show_headlines: bool,
+) !void {
+    if (show_headlines) {
+        try output.writeAll("<ul class=\"metrics\">");
+        try metric(output, "Visitor-days", quality.visitor_days);
+        try metric(output, "Distinct people", quality.distinct_people);
+        try output.writeAll("</ul>");
+    }
+    try output.writeAll(
+        "<section aria-labelledby=\"traffic-quality-heading\"><h3 id=\"traffic-quality-heading\">Traffic quality</h3>" ++
+            "<p class=\"muted\">Measure-only diagnostics. Bot events are shown separately; no additional event is excluded.</p>" ++
+            "<ul class=\"metrics\">",
+    );
+    try metric(output, "Persistent people", quality.persistent_people);
+    try metric(output, "Ephemeral people", quality.ephemeral_people);
+    try metric(output, "Legacy daily people", quality.legacy_people);
+    try output.writeAll("<li><span>Persistent coverage</span><strong>");
+    try percent(output, quality.persistent_people, quality.distinct_people);
+    try output.writeAll("</strong></li>");
+    try metric(
+        output,
+        "Zero-engagement single-event sessions",
+        quality.zero_engagement_single_event_sessions,
+    );
+    try output.writeAll(
+        "</ul><h4>Identity quality</h4><div class=\"table-scroll\"><table><thead><tr>" ++
+            "<th>Identity quality</th><th>Events</th><th>Visitor-days</th>" ++
+            "</tr></thead><tbody>",
+    );
+    for (quality.identity_quality) |row| {
+        try output.writeAll("<tr><td>");
+        try text(output, humanize(row.quality.name()));
+        try output.print("</td><td>{d}</td><td>{d}</td></tr>", .{
+            row.events, row.visitor_days,
+        });
+    }
+    try output.writeAll(
+        "</tbody></table></div><h4>Daily diagnostics</h4>" ++
+            "<div class=\"table-scroll\"><table><thead><tr><th>Date (UTC)</th>" ++
+            "<th>New anonymous identities</th><th>Bot events</th>" ++
+            "</tr></thead><tbody>",
+    );
+    for (quality.days) |day| {
+        try output.writeAll("<tr><td>");
+        try text(output, day.date);
+        try output.print("</td><td>{d}</td><td>{d}</td></tr>", .{
+            day.new_anonymous_identities, day.bot_events,
+        });
+    }
+    try output.writeAll("</tbody></table></div><nav aria-label=\"Traffic-quality pagination\">");
+    if (!show_headlines and quality.next_page != null) {
+        try output.writeAll("<a hx-boost=\"true\" href=\"");
+        try queryUrl(output, query, .traffic_quality, "", 1);
+        try output.writeAll("\">View all diagnostics</a>");
+    } else if (show_headlines) {
+        if (query.page > 1) {
+            try output.writeAll("<a hx-boost=\"true\" rel=\"prev\" href=\"");
+            try queryUrl(output, query, .traffic_quality, "", query.page - 1);
+            try output.writeAll("\">Previous</a>");
+        }
+        if (quality.next_page) |next| {
+            try output.writeAll("<a hx-boost=\"true\" rel=\"next\" href=\"");
+            try queryUrl(output, query, .traffic_quality, "", next);
+            try output.writeAll("\">Next</a>");
+        }
+    }
+    try output.writeAll("</nav></section>");
 }
 
 fn campaignTabs(output: *std.Io.Writer, query: model.Query) !void {
@@ -439,6 +524,8 @@ fn queryUrl(
     if (kind.isList()) {
         try output.writeAll("&amp;sort=");
         try urlComponent(output, @tagName(query.sort));
+    }
+    if (kind.isPaginated()) {
         try output.print("&amp;limit={d}&amp;page={d}", .{ query.limit, page_number });
     }
 }
@@ -492,7 +579,10 @@ fn percent(output: *std.Io.Writer, numerator: i64, denominator: i64) !void {
 
 fn humanize(value: []const u8) []const u8 {
     if (std.mem.eql(u8, value, "page_views")) return "Page views";
-    if (std.mem.eql(u8, value, "visitor_days")) return "Daily visitors";
+    if (std.mem.eql(u8, value, "visitor_days")) return "Visitor-days";
+    if (std.mem.eql(u8, value, "persistent")) return "Persistent";
+    if (std.mem.eql(u8, value, "ephemeral")) return "Ephemeral";
+    if (std.mem.eql(u8, value, "legacy_daily")) return "Legacy daily";
     if (std.mem.eql(u8, value, "operating_system")) return "Operating system";
     if (std.mem.eql(u8, value, "event_count")) return "Events";
     if (std.mem.eql(u8, value, "utm_source")) return "UTM source";
@@ -517,6 +607,7 @@ fn reportTitle(kind: report.Kind) []const u8 {
         .operating_systems => "Operating systems",
         .devices => "Devices",
         .events => "Custom events",
+        .traffic_quality => "Traffic quality diagnostics",
         .goal => "Conversion goal",
         .funnel => "Funnel",
     };

@@ -757,6 +757,7 @@ pub const CurrentReportPreset = union(enum) {
     analysis: Preset,
     overview,
     campaign_tuple,
+    traffic_quality,
     goal,
     funnel,
 };
@@ -838,6 +839,7 @@ pub fn presetForCurrentReport(
         .operating_systems => .{ .analysis = .operating_systems },
         .devices => .{ .analysis = .devices },
         .events => .{ .analysis = .events },
+        .traffic_quality => .traffic_quality,
         .goal => .goal,
         .funnel => .funnel,
     };
