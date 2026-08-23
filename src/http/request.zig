@@ -35,6 +35,17 @@ pub const Request = struct {
     }
 };
 
+pub const CollectionTarget = enum {
+    none,
+    v1,
+    v2,
+    pixel,
+};
+
+pub const Observation = struct {
+    collection_target: CollectionTarget = .none,
+};
+
 pub const ReadError = error{
     BadRequest,
     PayloadTooLarge,
@@ -44,10 +55,12 @@ pub const ReadError = error{
 pub fn read(
     allocator: std.mem.Allocator,
     reader: *std.Io.Reader,
+    observation: *Observation,
 ) ReadError!?Request {
     const line = (reader.takeDelimiter('\n') catch |err| return mapReadError(err)) orelse
         return null;
     const request_line = parseRequestLine(line) orelse return error.BadRequest;
+    observation.collection_target = collectionTarget(request_line.target);
     if (request_line.target.len > max_target_bytes) return error.PayloadTooLarge;
     const body_limit = bodyLimit(request_line.target);
 
@@ -102,6 +115,15 @@ pub fn read(
         .headers = try allocator.dupe(Header, headers.items),
         .body = body,
     };
+}
+
+fn collectionTarget(target: []const u8) CollectionTarget {
+    const path_end = std.mem.findScalar(u8, target, '?') orelse target.len;
+    const path = target[0..path_end];
+    if (std.mem.eql(u8, path, "/v1/event")) return .v1;
+    if (std.mem.eql(u8, path, "/v2/event")) return .v2;
+    if (std.mem.eql(u8, path, "/v1/p.gif")) return .pixel;
+    return .none;
 }
 
 const RequestLine = struct {
@@ -198,4 +220,12 @@ fn mapReadError(err: anyerror) ReadError {
         error.StreamTooLong => error.PayloadTooLarge,
         else => @errorCast(err),
     };
+}
+
+test "request observation retains only a known collection target" {
+    try std.testing.expectEqual(CollectionTarget.v1, collectionTarget("/v1/event"));
+    try std.testing.expectEqual(CollectionTarget.v2, collectionTarget("/v2/event?ignored=yes"));
+    try std.testing.expectEqual(CollectionTarget.pixel, collectionTarget("/v1/p.gif?private=query"));
+    try std.testing.expectEqual(CollectionTarget.none, collectionTarget("/v1/eventual"));
+    try std.testing.expectEqual(CollectionTarget.none, collectionTarget("/admin/sites/example/live"));
 }

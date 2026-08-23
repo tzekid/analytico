@@ -180,6 +180,11 @@ offer distributed transactions.
    canonical digest for site-scoped idempotency and commits an identify link
    atomically when applicable.
 10. Only after commit does the adapter return success.
+11. The HTTP adapter records the terminal consequence in the one
+    restart-scoped, 200-slot diagnostics ring. The fixed summary owns only the
+    safe bounded fields in `PROTOCOL.md`; it does not participate in storage or
+    acceptance. Authenticated dashboard controllers copy a newest-first
+    site-filtered snapshot into the request-owned typed view model.
 
 At the target traffic level, direct durable inserts are simpler and more honest
 than an in-memory queue. A queue is reconsidered only after measured write
@@ -309,6 +314,12 @@ not a reason to add a worker pool before load requires it.
 | DuckDB unavailable/corrupt | Readiness fails; collection and reports unavailable |
 | Disk full | Reject writes, expose readiness failure, preserve existing files |
 | Renderer error | Return a small escaped server-rendered error page |
+
+The diagnostics ring is deliberately independent of both stores. A store
+failure can therefore be represented after the failed write, while a restart
+clears the evidence and returns to an empty ring. A mutex protects append and
+snapshot even though the current HTTP accept loop is sequential; callers never
+receive references into the mutable ring.
 
 ## 9. Server-rendered components and charts
 

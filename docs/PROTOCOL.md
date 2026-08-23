@@ -247,8 +247,52 @@ different user, returns fixed `409`. An identify link and its event are one
 DuckDB transaction. No response echoes a property, trait, identity, or request
 body. An identity-link conflict additionally carries the stable safe response
 header `X-Analytico-Code: identity_conflict`; event-ID conflicts retain the
-generic fixed response. The future authenticated diagnostics ring consumes the
-same code but is not part of the public identity state model.
+generic fixed response.
+
+### Authenticated collection diagnostics
+
+The collector appends one safe summary for each v1, v2, or pixel attempt that
+reaches its protocol handler, and for an oversized request whose exact collector
+path the bounded HTTP reader recognized. It appends after the attempt has a
+terminal outcome to a single fixed-capacity in-memory ring. The ring owns
+exactly 200 slots and clears whenever the process restarts. It is not an event
+queue, durable visitor audit, public endpoint, or source of product metrics.
+
+Each slot owns bounded copies of only:
+
+- server receipt time and a site-local correlation number within the retained
+  restart-scoped window;
+- protocol, event category, and `accepted`, `rejected`, `duplicate`, or
+  `store_failure` outcome;
+- a site ID only after the public ID resolves to a configured site;
+- a normalized allowed/disallowed origin host after syntactic validation;
+- a validated normalized path or event name;
+- for a valid custom event, at most 16 validated property key names and their
+  closed scalar types; and
+- one stable rejection code.
+
+The ring never copies an IP address or prefix, User-Agent, visitor/anonymous/
+session/user/event ID, title, referrer, campaign value, property value, trait
+key or value, payload JSON, request body, database path, or classifier rule.
+Unknown and malformed site IDs remain unassigned, so they cannot appear in an
+authenticated site-filtered view model. The authenticated dashboard boundary
+can request a copied, newest-first snapshot for the selected site; issue #43
+owns rendering that model and the Live refresh/polling behavior.
+
+The closed governing vocabulary is `site_unknown`, `site_disabled`,
+`origin_missing`, `origin_not_allowed`, `protocol_unsupported`,
+`payload_too_large`, `payload_invalid`, `event_invalid`, `event_id_conflict`,
+`property_invalid`, `property_type_conflict`, `identity_invalid`,
+`identity_conflict`, `session_invalid`, `timestamp_invalid`, `value_invalid`,
+`rate_limited`, `store_unavailable`, and `disk_full`. The current protocol
+handlers emit the applicable values from that vocabulary. When the bounded
+request reader rejects an oversized request for an exact known collector path,
+it appends a protocol-only `payload_too_large` summary without copying the
+target, query, headers, or body; no site is assigned. Current flat properties
+have no cross-event type-conflict rejection. DuckDB exposes write failures
+through one bounded error category, so a disk-full write is honestly reported
+as `store_unavailable` rather than guessed from an unstructured native message.
+The public collector status/body contract does not change.
 
 ## 5. Pixel page view
 

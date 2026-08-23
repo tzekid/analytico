@@ -1,5 +1,6 @@
 const analysis = @import("../analysis.zig");
 const calendar = @import("../calendar.zig");
+const diagnostics = @import("../diagnostics.zig");
 const meta = @import("../store/meta.zig");
 const report = @import("../report.zig");
 
@@ -119,6 +120,7 @@ pub const Page = struct {
     result: ?report.Result,
     overview_kpis: ?OverviewKpis = null,
     overview_quality: ?report.TrafficQuality = null,
+    collection_diagnostics: ?diagnostics.Snapshot = null,
     goals: []const meta.Goal,
     funnels: []const meta.Funnel,
     self_exclusion_origins: []const []u8,
