@@ -27,7 +27,7 @@ trap cleanup EXIT
 
 "$binary" init "$fixture_dir" >/dev/null
 "$binary" site add "$fixture_dir" benchmark "Collection benchmark" \
-    "https://benchmark.example" >/dev/null
+    "https://benchmark.example" --timezone UTC >/dev/null
 site_id=$("$binary" site list "$fixture_dir" |
     awk -F '\t' '$1 == "benchmark" { print $2 }')
 payload=$(printf \
