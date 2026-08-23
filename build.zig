@@ -188,6 +188,14 @@ pub fn build(b: *std.Build) void {
         "Run protocol-v2 identity persistence and reset in a real browser",
     ).dependOn(&identity_browser_e2e.step);
 
+    const tracker_browser_e2e = b.addSystemCommand(&.{ "bash", "tests/e2e-tracker-browser.sh" });
+    tracker_browser_e2e.addArtifactArg(app);
+    tracker_browser_e2e.step.dependOn(b.getInstallStep());
+    b.step(
+        "e2e-tracker-browser",
+        "Run tracker SPA, engagement, automatic event, and value behavior in real Chromium",
+    ).dependOn(&tracker_browser_e2e.step);
+
     const m2_benchmark = b.addSystemCommand(&.{ "bash", "bench/m2-collection.sh" });
     m2_benchmark.addArtifactArg(app);
     m2_benchmark.step.dependOn(b.getInstallStep());

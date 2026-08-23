@@ -25,10 +25,14 @@ const tracker_v2_anonymous_gzip = @embedFile("tracker.fb64c486.min.js.gz");
 const tracker_v2_sessions = @embedFile("tracker.78135195.min.js");
 const tracker_v2_sessions_br = @embedFile("tracker.78135195.min.js.br");
 const tracker_v2_sessions_gzip = @embedFile("tracker.78135195.min.js.gz");
+const tracker_v2_identify = @embedFile("tracker.d9e94247.min.js");
+const tracker_v2_identify_br = @embedFile("tracker.d9e94247.min.js.br");
+const tracker_v2_identify_gzip = @embedFile("tracker.d9e94247.min.js.gz");
 const tracker_v1_path = "/tracker.aef65945.js";
 const tracker_v2_anonymous_path = "/tracker.fb64c486.js";
 const tracker_v2_sessions_path = "/tracker.78135195.js";
-const tracker_v2_path = "/tracker.d9e94247.js";
+const tracker_v2_identify_path = "/tracker.d9e94247.js";
+const tracker_v2_path = "/tracker.81c3b777.js";
 const transparent_gif =
     "GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff" ++
     "!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00" ++
@@ -369,6 +373,7 @@ fn handle(context: *Context, stream: std.Io.net.Stream) !void {
         std.mem.eql(u8, path, tracker_v1_path) or
         std.mem.eql(u8, path, tracker_v2_anonymous_path) or
         std.mem.eql(u8, path, tracker_v2_sessions_path) or
+        std.mem.eql(u8, path, tracker_v2_identify_path) or
         std.mem.eql(u8, path, tracker_v2_path))
     {
         if (!std.mem.eql(u8, request.method, "GET")) {
@@ -377,10 +382,12 @@ fn handle(context: *Context, stream: std.Io.net.Stream) !void {
             const immutable = std.mem.eql(u8, path, tracker_v1_path) or
                 std.mem.eql(u8, path, tracker_v2_anonymous_path) or
                 std.mem.eql(u8, path, tracker_v2_sessions_path) or
+                std.mem.eql(u8, path, tracker_v2_identify_path) or
                 std.mem.eql(u8, path, tracker_v2_path);
             const use_v1 = std.mem.eql(u8, path, tracker_v1_path);
             const use_v2_anonymous = std.mem.eql(u8, path, tracker_v2_anonymous_path);
             const use_v2_sessions = std.mem.eql(u8, path, tracker_v2_sessions_path);
+            const use_v2_identify = std.mem.eql(u8, path, tracker_v2_identify_path);
             const encoding = request.header("accept-encoding") catch null;
             const use_brotli = if (encoding) |value|
                 acceptsEncoding(value, "br")
@@ -429,6 +436,8 @@ fn handle(context: *Context, stream: std.Io.net.Stream) !void {
                     if (use_brotli) tracker_v2_anonymous_br else if (use_gzip) tracker_v2_anonymous_gzip else tracker_v2_anonymous
                 else if (use_v2_sessions)
                     if (use_brotli) tracker_v2_sessions_br else if (use_gzip) tracker_v2_sessions_gzip else tracker_v2_sessions
+                else if (use_v2_identify)
+                    if (use_brotli) tracker_v2_identify_br else if (use_gzip) tracker_v2_identify_gzip else tracker_v2_identify
                 else if (use_brotli)
                     tracker_br
                 else if (use_gzip)

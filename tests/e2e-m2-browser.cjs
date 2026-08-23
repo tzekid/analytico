@@ -12,21 +12,25 @@ if (!collector || !site || !Number.isInteger(fixturePort)) {
 }
 
 const fixtureOrigin = `http://127.0.0.1:${fixturePort}`;
-const html = (javaScriptPath) => `<!doctype html>
+const html = (javaScriptPath, trackerPath) => `<!doctype html>
 <html lang="en">
 <meta charset="utf-8">
 <title>Analytico browser fixture</title>
 <main><h1>Useful server-rendered state</h1><p>${javaScriptPath}</p></main>
-<script defer src="${collector}/tracker.aef65945.js" data-site="${site}"></script>
+<script defer src="${collector}${trackerPath}" data-site="${site}"></script>
 <noscript><img alt="" src="${collector}/v1/p.gif?site=${site}&path=%2Fnoscript&utm_source=noscript"></noscript>
 </html>`;
 
 const server = http.createServer((request, response) => {
+  const requestPath = request.url || "/";
+  const trackerPath = requestPath.startsWith("/v2-browser-")
+    ? "/tracker.81c3b777.js"
+    : "/tracker.aef65945.js";
   response.writeHead(200, {
     "Content-Type": "text/html; charset=utf-8",
     "Cache-Control": "no-store",
   });
-  response.end(html(request.url || "/"));
+  response.end(html(requestPath, trackerPath));
 });
 
 async function listen() {
@@ -67,6 +71,43 @@ async function verifyTracker(name, browserType) {
       ),
       [],
     );
+    assert.equal(
+      await page.evaluate(async () =>
+        "serviceWorker" in navigator
+          ? (await navigator.serviceWorker.getRegistrations()).length
+          : 0,
+      ),
+      0,
+    );
+    await context.close();
+  } finally {
+    await browser.close();
+  }
+}
+
+async function verifyTrackerV2(name, browserType) {
+  const browser = await launch(name, browserType);
+  try {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    let eventRequests = 0;
+    page.on("request", (request) => {
+      if (request.url() === `${collector}/v2/event`) eventRequests += 1;
+    });
+    const accepted = page.waitForResponse(
+      (response) =>
+        response.url() === `${collector}/v2/event` &&
+        response.status() === 204,
+    );
+    await page.goto(`${fixtureOrigin}/v2-browser-${name}?private=${name}`, {
+      waitUntil: "load",
+    });
+    await accepted;
+    await page.waitForTimeout(100);
+    assert.equal(eventRequests, 1, `${name} v2 sent exactly one page view`);
+    assert.equal(await page.evaluate(() => localStorage.length), 2);
+    assert.equal(await page.evaluate(() => sessionStorage.length), 0);
+    assert.deepEqual(await page.evaluate(() => caches.keys()), []);
     assert.equal(
       await page.evaluate(async () =>
         "serviceWorker" in navigator
@@ -131,14 +172,17 @@ async function main() {
     ];
     for (const [name, browserType] of engines) {
       await verifyTracker(name, browserType);
+      await verifyTrackerV2(name, browserType);
       await verifyNoScript(name, browserType);
     }
     process.stdout.write(
       JSON.stringify({
         engines: engines.map(([name]) => name),
         tracker_pageviews: engines.length,
+        v2_tracker_pageviews: engines.length,
         noscript_pageviews: engines.length,
         persistent_storage_entries: 0,
+        v2_local_storage_entries_per_site: 2,
       }) + "\n",
     );
   } finally {

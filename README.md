@@ -228,8 +228,10 @@ Use the content-hashed protocol-v2 tracker:
 
 ```html
 <script defer
-  src="https://analytics.example/tracker.d9e94247.js"
-  data-site="YOUR-SITE-UUID"></script>
+  src="https://analytics.example/tracker.81c3b777.js"
+  data-site="YOUR-SITE-UUID"
+  data-spa="auto"
+  data-engagement="true"></script>
 <noscript>
   <img alt="" width="1" height="1"
     src="https://analytics.example/v1/p.gif?site=YOUR-SITE-UUID&amp;path=%2F">

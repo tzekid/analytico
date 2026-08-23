@@ -84,15 +84,17 @@ else
 fi
 
 grep -q '"tracker_pageviews":3' "$fixture_dir/browser-result.json"
+grep -q '"v2_tracker_pageviews":3' "$fixture_dir/browser-result.json"
 grep -q '"noscript_pageviews":3' "$fixture_dir/browser-result.json"
 grep -q '"persistent_storage_entries":0' "$fixture_dir/browser-result.json"
+grep -q '"v2_local_storage_entries_per_site":2' "$fixture_dir/browser-result.json"
 
 kill -TERM "$collector_pid"
 wait "$collector_pid" 2>/dev/null || true
 collector_pid=
 
 test "$("$binary" doctor "$fixture_dir")" = \
-    "ok metadata=v3 events=v3 sites=1 goals=0 funnels=0 stored_events=6 key=ok"
+    "ok metadata=v3 events=v3 sites=1 goals=0 funnels=0 stored_events=9 key=ok"
 
 if grep -aE '(browser-(chromium|firefox|webkit)\?|noscript-(chromium|firefox|webkit)\?)' \
     "$fixture_dir/events.duckdb" "$fixture_dir/server.stdout" \

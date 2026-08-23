@@ -175,8 +175,10 @@ ephemeral, and legacy canonical-person coverage without changing frozen
 metric-v1 outputs. Canonical protocol-v2 properties and traits are queried in
 place with pinned DuckDB built-in JSON functions through static, bound
 templates; no extension download, EAV table, or request-selected SQL is
-introduced. Decisions D26–D28 govern this version boundary; issue #12 owns the
-remaining SPA behavior.
+introduced. Decisions D26–D28 govern this version boundary. The single
+dependency-free protocol-v2 tracker now owns bounded opt-in SPA, engagement,
+scroll, and automatic-event behavior without creating an application state
+model or startup configuration request.
 
 ## 6. Report flow
 

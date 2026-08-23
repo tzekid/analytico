@@ -14,7 +14,7 @@ analytics.example {
 		max_size 192KB
 	}
 
-	@analytico_public path /tracker.aef65945.js /tracker.fb64c486.js /tracker.78135195.js /tracker.d9e94247.js /tracker.js /v1/event /v2/event /v1/p.gif
+	@analytico_public path /tracker.aef65945.js /tracker.fb64c486.js /tracker.78135195.js /tracker.d9e94247.js /tracker.81c3b777.js /tracker.js /v1/event /v2/event /v1/p.gif
 	handle @analytico_public {
 		reverse_proxy 127.0.0.1:4318 {
 			# Overwrite both trust inputs. Restrict direct origin access to

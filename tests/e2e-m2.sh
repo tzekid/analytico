@@ -112,7 +112,7 @@ expect_code 200 "$base/tracker.js"
 cmp "$fixture_dir/body" public/tracker.js
 grep -qi '^Content-Type: text/javascript; charset=utf-8' \
     "$fixture_dir/headers"
-grep -qi '^Content-Length: 3025' "$fixture_dir/headers"
+grep -qi '^Content-Length: 6266' "$fixture_dir/headers"
 grep -qi '^Cache-Control: public, max-age=300' "$fixture_dir/headers"
 grep -qi '^X-Content-Type-Options: nosniff' "$fixture_dir/headers"
 grep -qi '^Vary: Accept-Encoding' "$fixture_dir/headers"
@@ -149,6 +149,11 @@ grep -qi '^Cache-Control: public, max-age=31536000, immutable' \
 grep -qi '^Content-Encoding: gzip' "$fixture_dir/headers"
 cmp "$fixture_dir/body" src/http/tracker.fb64c486.min.js.gz
 expect_code 200 -H 'Accept-Encoding: br' "$base/tracker.d9e94247.js"
+grep -qi '^Cache-Control: public, max-age=31536000, immutable' \
+    "$fixture_dir/headers"
+grep -qi '^Content-Encoding: br' "$fixture_dir/headers"
+cmp "$fixture_dir/body" src/http/tracker.d9e94247.min.js.br
+expect_code 200 -H 'Accept-Encoding: br' "$base/tracker.81c3b777.js"
 grep -qi '^Cache-Control: public, max-age=31536000, immutable' \
     "$fixture_dir/headers"
 grep -qi '^Content-Encoding: br' "$fixture_dir/headers"
@@ -651,9 +656,11 @@ test "$probe" = \
     '{"attempted":100000,"capacity":4096,"accepted":4096,"rejected":95904}'
 
 cmp public/tracker.js src/http/tracker.min.js
-test "$(stat -c '%s' public/tracker.js)" -le 3072
-test "$(stat -c '%s' public/tracker.js.br)" -le 1536
+test "$(stat -c '%s' public/tracker.js)" -le 8192
+test "$(stat -c '%s' public/tracker.js.br)" -le 5120
 test "$(sha256sum public/tracker.js | cut -d' ' -f1)" = \
+    "81c3b7770d010bcb43d854b31fe0da85151f28017a2b469b4d34797e86d2b8df"
+test "$(sha256sum src/http/tracker.d9e94247.min.js | cut -d' ' -f1)" = \
     "d9e94247f97fa84795f5a9bb493a0d383b2aac11565e80e6ceb670b4e9e05c2c"
 test "$(sha256sum src/http/tracker.78135195.min.js | cut -d' ' -f1)" = \
     "7813519555b9ea0625a90c1d42c1adfb5db78d3d33b5229809e6b654830ffcf7"

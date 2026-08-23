@@ -8,8 +8,8 @@
 > keeps zero dependencies and a tracker-v2 budget below 5 KiB Brotli. Issue #7
 > bounds identity storage to two site-scoped `localStorage` keys, and issue #8
 > stores a bounded session JSON record. Issue #9 adds the optional identified
-> key and measures `identify()`; issue #12 still owns measured SPA/engagement
-> size.
+> key and measures `identify()`; issue #12 adds measured SPA, engagement,
+> scroll, value, and opt-in automatic behavior.
 
 The numbers in this file are budgets, not claims. M0 records the first measured
 baseline on the target VPS. A release passes both the absolute budget and the
@@ -140,8 +140,18 @@ record `{id,last_activity_ms,sequence}`), plus optional identified-user key
 `anl:<site-uuid>:u`, cleared by `reset()`. The identified key stores the first
 user ID only; traits are not duplicated in the browser. Sessions rotate after
 more than 30 minutes of inactivity. Issue #12 adds SPA/engagement without new
-dependencies. The v2 minified/Brotli budgets remain ≤ 3 KiB / ≤ 1.5 KiB until
-that issue proves a new measured ceiling below 5 KiB Brotli.
+dependencies. Its accepted current tracker is 6,266 bytes minified, 2,386
+bytes Brotli, and 2,649 bytes gzip. The post-#12 ceilings are 8 KiB minified
+and strictly below 5 KiB Brotli; historical content-hashed assets retain their
+original smaller bytes.
+
+The issue #12 real-Chromium gate runs the production executable against
+on-disk Turso and DuckDB files. It proves path-only SPA deduplication, 15-second
+visible activity deltas, hidden-time exclusion, scroll depth, opt-in automatic
+events, absence of form/query secrets, exact value/currency storage, and the
+measured compressed assets above. The existing collection-browser gate also
+loads the current v2 asset in the Chromium, Firefox, and WebKit versions pinned
+by `versions.json` while retaining its frozen-v1 and no-JavaScript checks.
 
 ### M2 measured baseline
 
