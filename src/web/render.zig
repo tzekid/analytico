@@ -1,11 +1,12 @@
 const std = @import("std");
+const analysis = @import("../analysis.zig");
 const report = @import("../report.zig");
 const charts = @import("charts.zig");
 const components = @import("components.zig");
 const model = @import("model.zig");
 
 pub const stylesheet = @embedFile("style.css");
-pub const stylesheet_path = "/admin/app.v5.css";
+pub const stylesheet_path = "/admin/app.v6.css";
 pub const htmx = @embedFile("htmx_js");
 pub const htmx_gzip = @embedFile("htmx_gzip");
 pub const htmx_path = "/admin/htmx.28fae7bb.js";
@@ -49,6 +50,12 @@ pub fn page(output: *std.Io.Writer, value: model.Page) !void {
             .message = value.form_error,
             .id = "form-error-summary",
             .focus = true,
+        });
+    }
+    if (value.report_time_basis == .metric_v1_utc) {
+        try components.feedback(output, .{
+            .kind = .warning,
+            .message = "Compatibility report: the values below still use UTC calendar dates. The selected site-local context is preserved for 1.0 analysis views.",
         });
     }
     try output.writeAll("<div class=\"page-heading\"><span class=\"eyebrow\">Analytico 1.0</span><h1>");
@@ -109,7 +116,7 @@ fn head(output: *std.Io.Writer, title: []const u8) !void {
 }
 
 fn foot(output: *std.Io.Writer) !void {
-    try output.writeAll("<footer class=\"first-run-footer\">UTC dates · server-rendered · no JavaScript required</footer></body></html>");
+    try output.writeAll("<footer class=\"first-run-footer\">Server-rendered · no JavaScript required</footer></body></html>");
 }
 
 fn shellStart(output: *std.Io.Writer, value: model.Page) !void {
@@ -121,9 +128,9 @@ fn shellStart(output: *std.Io.Writer, value: model.Page) !void {
     try output.writeAll("</aside><div class=\"app-column\"><header class=\"context-header\"><div class=\"mobile-context-heading\"><strong>");
     try text(output, value.selected_site.?.name);
     try output.writeAll("</strong><span class=\"muted\">");
-    try text(output, value.query.start_date);
+    try text(output, value.query.range.start);
     try output.writeAll(" – ");
-    try text(output, value.query.end_date);
+    try text(output, value.query.range.end);
     try output.writeAll("</span></div><div class=\"desktop-context\">");
     try contextControls(output, value);
     try output.writeAll("</div><details class=\"mobile-context\"><summary>Context</summary>");
@@ -133,7 +140,7 @@ fn shellStart(output: *std.Io.Writer, value: model.Page) !void {
 }
 
 fn shellEnd(output: *std.Io.Writer, value: model.Page) !void {
-    try output.writeAll("</main><footer class=\"app-footer\">UTC dates · server-rendered · no JavaScript required</footer></div></div>");
+    try output.writeAll("</main><footer class=\"app-footer\">Site-local context · server-rendered · no JavaScript required</footer></div></div>");
     try primaryNavigation(output, value, "mobile-navigation");
     try output.writeAll("</body></html>");
 }
@@ -178,6 +185,7 @@ fn primaryNavigation(
 }
 
 fn contextControls(output: *std.Io.Writer, value: model.Page) !void {
+    const context = value.calendar_context orelse return error.MissingCalendarContext;
     try output.writeAll(
         "<div class=\"context-controls\">" ++
             "<form class=\"site-switcher\" method=\"get\" action=\"/admin\" " ++
@@ -196,20 +204,75 @@ fn contextControls(output: *std.Io.Writer, value: model.Page) !void {
         if (site.disabled) try output.writeAll(" (disabled)");
         try output.writeAll("</option>");
     }
-    try output.writeAll("</select></label><input type=\"hidden\" name=\"start\" value=\"");
-    try attribute(output, value.query.start_date);
-    try output.writeAll("\"><input type=\"hidden\" name=\"end\" value=\"");
-    try attribute(output, value.query.end_date);
+    try output.writeAll("</select></label>");
+    try calendarHiddenFields(output, value.query);
     try output.writeAll(
-        "\"><button class=\"button-secondary\" type=\"submit\">View site</button></form>" ++
-            "<form class=\"range-filter\" method=\"get\" action=\"",
+        "<button class=\"button-secondary\" type=\"submit\">View site</button></form>" ++
+            "<details class=\"date-presets\"><summary>",
     );
+    try text(output, context.selected_preset.label());
+    try output.writeAll("</summary><nav class=\"preset-list\" aria-label=\"Date presets\">");
+    for (context.presets) |option| {
+        if (option.preset == .custom or option.range == null) continue;
+        var adjusted = value.query;
+        adjusted.range = option.range.?.view();
+        try output.writeAll("<a href=\"");
+        try canonicalUrl(output, value.destination, adjusted, adjusted.page);
+        if (option.preset == context.selected_preset) {
+            try output.writeAll("\" aria-current=\"page\">");
+        } else {
+            try output.writeAll("\">");
+        }
+        try text(output, option.preset.label());
+        try output.writeAll("</a>");
+    }
+    try output.writeAll("</nav></details><form class=\"range-filter\" method=\"get\" action=\"");
     try canonicalPath(output, value.destination, value.query);
-    try output.writeAll("\" hx-boost=\"true\" hx-sync=\"this:replace\"><label><span>Start</span><input type=\"date\" name=\"start\" required value=\"");
-    try attribute(output, value.query.start_date);
-    try output.writeAll("\"></label><label><span>End</span><input type=\"date\" name=\"end\" required value=\"");
-    try attribute(output, value.query.end_date);
-    try output.writeAll("\"></label>");
+    try output.writeAll("\" hx-boost=\"true\" hx-sync=\"this:replace\"><label><span>From</span><input type=\"date\" name=\"from\" required value=\"");
+    try attribute(output, value.query.range.start);
+    try output.writeAll("\"></label><label><span>To</span><input type=\"date\" name=\"to\" required value=\"");
+    try attribute(output, value.query.range.end);
+    try output.writeAll("\"></label><label><span>Compare</span><select name=\"compare\">");
+    inline for (std.meta.tags(@TypeOf(value.query.comparison))) |comparison| {
+        try output.writeAll("<option value=\"");
+        try attribute(output, comparison.name());
+        if (comparison == value.query.comparison) {
+            try output.writeAll("\" selected>");
+        } else {
+            try output.writeAll("\">");
+        }
+        try text(output, comparisonLabel(comparison));
+        try output.writeAll("</option>");
+    }
+    try output.writeAll("</select></label>");
+    try destinationHiddenFields(output, value);
+    try output.writeAll("<button type=\"submit\">Update context</button></form><dl class=\"context-state\"><div><dt>Timezone</dt><dd>");
+    try text(output, context.timezone_name);
+    try output.writeAll("</dd></div><div><dt>Comparison period</dt><dd>");
+    if (context.comparison == .none) {
+        try output.writeAll("None");
+    } else if (context.comparison_range) |comparison_range| {
+        try text(output, comparison_range.start[0..]);
+        try output.writeAll(" – ");
+        try text(output, comparison_range.end[0..]);
+    } else if (context.comparison_unavailable) |unavailable| {
+        try text(output, comparisonLabel(context.comparison));
+        try output.writeAll(switch (unavailable) {
+            .before_supported_calendar => " unavailable before 1970",
+        });
+    } else {
+        return error.MissingComparisonResolution;
+    }
+    try output.writeAll("</dd></div><div><dt>Range status</dt><dd>");
+    if (context.includes_incomplete_today) {
+        try output.writeAll("Today is incomplete");
+    } else {
+        try output.writeAll("Complete local dates");
+    }
+    try output.writeAll("</dd></div><div><dt>Segment</dt><dd>All visitors</dd></div><div><dt>Filters</dt><dd>None</dd></div></dl></div>");
+}
+
+fn destinationHiddenFields(output: *std.Io.Writer, value: model.Page) !void {
     if (value.destination == .analyze) {
         try output.writeAll("<input type=\"hidden\" name=\"report\" value=\"");
         try attribute(output, value.query.kind.name());
@@ -235,14 +298,26 @@ fn contextControls(output: *std.Io.Writer, value: model.Page) !void {
     {
         try output.writeAll("<input type=\"hidden\" name=\"limit\" value=\"");
         try output.print("{d}", .{value.query.limit});
-        try output.writeAll("\">");
+        try output.writeAll("\"><input type=\"hidden\" name=\"page\" value=\"1\">");
     }
-    try output.writeAll(
-        "<button type=\"submit\">Update dates</button></form>" ++
-            "<dl class=\"context-state\"><div><dt>Comparison</dt><dd>None</dd></div>" ++
-            "<div><dt>Segment</dt><dd>All visitors</dd></div>" ++
-            "<div><dt>Filters</dt><dd>None</dd></div></dl></div>",
-    );
+}
+
+fn calendarHiddenFields(output: *std.Io.Writer, query: model.Query) !void {
+    try output.writeAll("<input type=\"hidden\" name=\"from\" value=\"");
+    try attribute(output, query.range.start);
+    try output.writeAll("\"><input type=\"hidden\" name=\"to\" value=\"");
+    try attribute(output, query.range.end);
+    try output.writeAll("\"><input type=\"hidden\" name=\"compare\" value=\"");
+    try attribute(output, query.comparison.name());
+    try output.writeAll("\">");
+}
+
+fn comparisonLabel(value: analysis.Comparison) []const u8 {
+    return switch (value) {
+        .none => "None",
+        .previous => "Previous period",
+        .previous_year => "Previous year",
+    };
 }
 
 const NavItem = struct {
@@ -842,11 +917,8 @@ fn formCommon(output: *std.Io.Writer, value: model.Page) !void {
     try attribute(output, value.csrf_token);
     try output.writeAll("\"><input type=\"hidden\" name=\"site\" value=\"");
     try attribute(output, value.query.site);
-    try output.writeAll("\"><input type=\"hidden\" name=\"start\" value=\"");
-    try attribute(output, value.query.start_date);
-    try output.writeAll("\"><input type=\"hidden\" name=\"end\" value=\"");
-    try attribute(output, value.query.end_date);
     try output.writeAll("\">");
+    try calendarHiddenFields(output, value.query);
 }
 
 fn formErrorAttributes(
@@ -976,10 +1048,12 @@ fn canonicalUrl(
     }
     adjusted.page = page_number;
     try canonicalPath(output, destination, adjusted);
-    try output.writeAll("?start=");
-    try urlComponent(output, adjusted.start_date);
-    try output.writeAll("&amp;end=");
-    try urlComponent(output, adjusted.end_date);
+    try output.writeAll("?from=");
+    try urlComponent(output, adjusted.range.start);
+    try output.writeAll("&amp;to=");
+    try urlComponent(output, adjusted.range.end);
+    try output.writeAll("&amp;compare=");
+    try urlComponent(output, adjusted.comparison.name());
     switch (destination) {
         .analyze => {
             try output.writeAll("&amp;report=");
@@ -1213,5 +1287,5 @@ test "production stylesheet mirrors the approved accessible design tokens" {
 
     try std.testing.expect(std.mem.indexOf(u8, stylesheet, "@import") == null);
     try std.testing.expect(std.mem.indexOf(u8, stylesheet, "url(") == null);
-    try std.testing.expectEqualStrings("/admin/app.v5.css", stylesheet_path);
+    try std.testing.expectEqualStrings("/admin/app.v6.css", stylesheet_path);
 }

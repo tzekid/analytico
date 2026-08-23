@@ -765,11 +765,47 @@ fn appendUniqueOffset(output: *[maximum_types + 2]i32, count: *usize, value: i32
     count.* += 1;
 }
 
-const Civil = struct {
+pub const Date = struct {
     year: i64,
     month: u8,
     day: u8,
+
+    pub fn parse(text: []const u8) !Date {
+        return parseDate(text);
+    }
+
+    pub fn format(self: Date) ![10]u8 {
+        return formatDate(self);
+    }
+
+    pub fn dayNumber(self: Date) i64 {
+        return daysFromCivil(self.year, self.month, self.day);
+    }
+
+    pub fn addDays(self: Date, delta: i64) !Date {
+        const result = civilFromDays(try std.math.add(i64, self.dayNumber(), delta));
+        if (result.year < 1970 or result.year > 9999) {
+            return error.DateOutOfRange;
+        }
+        return result;
+    }
+
+    pub fn firstOfMonth(self: Date) Date {
+        return .{ .year = self.year, .month = self.month, .day = 1 };
+    }
+
+    pub fn previousYear(self: Date) !Date {
+        if (self.year <= 1970) return error.DateOutOfRange;
+        const year = self.year - 1;
+        return .{
+            .year = year,
+            .month = self.month,
+            .day = @min(self.day, monthLength(year, self.month)),
+        };
+    }
 };
+
+const Civil = Date;
 
 fn parseDate(text: []const u8) !Civil {
     if (text.len != 10 or text[4] != '-' or text[7] != '-') return error.InvalidDate;

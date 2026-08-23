@@ -42,7 +42,13 @@
   and the bounded legacy `site`/`report` query form redirect to the closest
   canonical route for one compatibility release. HTML, native navigation, and
   ordinary forms remain the application baseline; HTMX is optional enhancement
-  over the same complete documents.
+  over the same complete documents. Issue #25 adds server-owned site-local
+  calendar context: explicit canonical `from`, `to`, and `compare` values,
+  seven bounded presets, native custom/comparison forms, D27 UTC bounds,
+  current-day incompleteness, and previous/previous-year resolution. Known
+  `start`/`end` links redirect to the canonical spelling. Existing metric-v1
+  dashboard values remain visibly UTC compatibility data until their owning
+  metric-v2 page issues replace them as one coherent range.
 
 ## 1. Product statement
 

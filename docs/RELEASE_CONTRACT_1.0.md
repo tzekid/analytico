@@ -67,6 +67,11 @@ are not passes.
   without inferred fingerprint joins.
 - Site-local date grouping, range bounds, DST gaps/overlaps, stored offsets,
   timezone locking, and offline rebucketing match D27.
+- Shared calendar state uses explicit canonical `from`, `to`, and `compare`
+  values. Presets resolve under the selected site timezone; previous-period and
+  previous-year semantics, leap/month boundaries, unavailable comparison, and
+  current-day incompleteness match `ANALYSIS_QUERY.md`. Native and enhanced
+  back/forward/bookmark behavior reproduce the same server-owned context.
 - Legacy rows are marked `legacy_daily`, never linked across dates, and excluded
   or coverage-labeled wherever persistent identity is required.
 - Typed properties, exact value/currency behavior, attribution, goals, funnels,
@@ -130,6 +135,10 @@ are not passes.
   mobile records. Server form failures preserve submitted values, focus one
   error summary, and associate the affected controls without making JavaScript
   part of validation or recovery.
+- Calendar preset, custom-range, comparison, and site-switch controls remain
+  usable with JavaScript disabled at desktop and phone widths. The selected
+  timezone, exact dates, incomplete marker, and any UTC metric-v1 compatibility
+  basis are visible text rather than color- or client-only state.
 - The one-million-event mixed-data fixture passes the accepted latency, memory,
   disk, cardinality, asset, and response-size budgets. Measurements record the
   standard environment and any variance.

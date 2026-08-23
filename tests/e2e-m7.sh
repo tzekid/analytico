@@ -48,7 +48,7 @@ data="$fixture/data"
 "$binary" site add "$data" example Example https://example.com \
     --timezone UTC >/dev/null
 "$binary" site add "$data" second "Second Site" https://second.example \
-    --timezone UTC >/dev/null
+    --timezone Europe/Berlin >/dev/null
 site_id=$("$binary" site list "$data" |
     awk -F '\t' '$1 == "example" { print $2 }')
 "$binary" goal add "$data" example Signup event signup >/dev/null
@@ -110,7 +110,7 @@ cookie="analytico_session=$session_cookie"
 
 page="$fixture/page.html"
 curl --silent --fail --cookie "$cookie" \
-    "$dashboard/admin/sites/example/overview?start=2025-01-01&end=2025-01-02" \
+    "$dashboard/admin/sites/example/overview?from=2025-01-01&to=2025-01-02&compare=previous" \
     >"$page"
 grep -Fq 'hx-boost:inherited="true"' "$page"
 grep -Fq '/admin/htmx.28fae7bb.js' "$page"
