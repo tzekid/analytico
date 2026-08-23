@@ -43,6 +43,16 @@ pub const UserV2 = struct {
     traits: ?std.json.Value = null,
 };
 
+pub const SignalsV2 = struct {
+    v: u8,
+    webdriver: bool,
+    trusted_interactions: u8,
+    was_visible: bool,
+    was_prerendered: bool,
+    viewport_bucket: u8,
+    beacon_timing_bucket: u8,
+};
+
 pub const PayloadV2 = struct {
     v: u8,
     site: []const u8,
@@ -53,6 +63,7 @@ pub const PayloadV2 = struct {
     sequence: u32,
     occurred_at_ms: i64,
     self_excluded: bool = false,
+    signals: ?SignalsV2 = null,
     type: []const u8,
     name: ?[]const u8 = null,
     page: ?PageV2 = null,
@@ -105,6 +116,7 @@ pub const PreparedV2 = struct {
     engagement_ms: u32,
     max_scroll_depth: u8,
     self_excluded: bool,
+    signals: domain.ClientSignals,
     event_payload_digest: [64]u8,
 };
 
@@ -338,6 +350,22 @@ pub fn preparePostV2(
         engagement.max_scroll_depth
     else
         0;
+    const signals: domain.ClientSignals = if (payload.signals) |value| blk: {
+        if (value.v != 1 or value.trusted_interactions > 15 or
+            value.viewport_bucket > 4 or value.beacon_timing_bucket > 4)
+        {
+            return error.InvalidSignals;
+        }
+        break :blk .{
+            .version = 1,
+            .navigator_webdriver = value.webdriver,
+            .trusted_interactions = value.trusted_interactions,
+            .was_visible = value.was_visible,
+            .was_prerendered = value.was_prerendered,
+            .viewport_bucket = value.viewport_bucket,
+            .beacon_timing_bucket = value.beacon_timing_bucket,
+        };
+    } else .{};
 
     var prepared = PreparedV2{
         .site_id = policy.id,
@@ -366,6 +394,7 @@ pub fn preparePostV2(
         .engagement_ms = engagement_ms,
         .max_scroll_depth = max_scroll_depth,
         .self_excluded = payload.self_excluded,
+        .signals = signals,
         .event_payload_digest = undefined,
     };
     prepared.event_payload_digest = digestPreparedV2(prepared);
@@ -662,10 +691,39 @@ fn digestPreparedV2(prepared: PreparedV2) [64]u8 {
     hashField(&hasher, "currency", prepared.value_currency);
     hashInteger(&hasher, "engagement", prepared.engagement_ms);
     hashInteger(&hasher, "scroll", prepared.max_scroll_depth);
-    // Preserve the pre-D31 digest for absent/false so an unchanged event
-    // remains idempotent across the D31/D32 schema upgrades. A true flag adds a new
-    // component and therefore conflicts with an already stored unflagged row.
+    // Preserve the pre-D31 digest for absent/false self-exclusion. Likewise,
+    // an absent signal bundle adds nothing and preserves the pre-D33 digest.
+    // Present evidence participates completely, so changing one field conflicts.
     if (prepared.self_excluded) hashInteger(&hasher, "self_excluded", 1);
+    if (prepared.signals.version != 0) {
+        hashInteger(&hasher, "signals_v", prepared.signals.version);
+        hashInteger(
+            &hasher,
+            "webdriver",
+            @intFromBool(prepared.signals.navigator_webdriver),
+        );
+        hashInteger(
+            &hasher,
+            "trusted_interactions",
+            prepared.signals.trusted_interactions,
+        );
+        hashInteger(
+            &hasher,
+            "was_visible",
+            @intFromBool(prepared.signals.was_visible),
+        );
+        hashInteger(
+            &hasher,
+            "was_prerendered",
+            @intFromBool(prepared.signals.was_prerendered),
+        );
+        hashInteger(&hasher, "viewport_bucket", prepared.signals.viewport_bucket);
+        hashInteger(
+            &hasher,
+            "beacon_timing_bucket",
+            prepared.signals.beacon_timing_bucket,
+        );
+    }
     var digest: [32]u8 = undefined;
     hasher.final(&digest);
     return std.fmt.bytesToHex(digest, .lower);

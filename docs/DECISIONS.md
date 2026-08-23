@@ -41,6 +41,7 @@ semantic, or application state model is consequential and must be added here.
 | D30 | Traffic-quality compatibility diagnostics | Add a versioned bounded diagnostic bundle aligned to the frozen UTC Overview range | Accepted for 1.0 issue #66 |
 | D31 | Stored self-exclusion and non-bot inflation | Prerender/localhost guards, keyed ephemeral visitor-days, and stored bounded exclusion sources | Accepted for 1.0 issue #67 |
 | D32 | Permanent traffic class and UA classifier | Schema-5 stored classes with a pinned local classifier and one-release legacy shadow | Accepted for 1.0 issue #68 |
+| D33 | Bounded browser and receipt traffic evidence | Schema-6 closed signal fields, classifier v2, and permanent class eligibility | Accepted for 1.0 issue #69 |
 
 ## D01. MVP interface
 
@@ -1382,3 +1383,149 @@ filtering, diagnostics and bounded `serve_stopped` disagreement output, exact sc
 million-row/interrupted/repeated upgrade, backup/restore/rollback, unchanged
 eligible metric-v1 results, extracted-release execution, and Debug plus
 ReleaseSafe gates.
+
+## D33. Store bounded browser and receipt evidence and end the UA shadow
+
+**Status:** Accepted for Analytico 1.0 issue #69
+
+**Date:** 2026-08-23
+
+**Issues:** #69 and #70
+
+### Context and deployed shadow disposition
+
+UA rules cannot identify a browser that exposes an ordinary UA while running
+under automation. Issue #69 adds only coarse evidence needed by the later
+reversible #70 heuristics and the two hard observations approved in the bot
+plan. The evidence must not become a fingerprint, raw client-hint store, or a
+second application state model.
+
+Issue #68 completed one production release of the D32 shadow. At the #69 start,
+production contained one classifier-v1 `both-human` event and zero disagreement
+events. That sparse POC sample is not a statistical precision measurement. It
+does establish that the deployed diagnostic path works; deterministic rule,
+migration, HTTP, and browser fixtures remain the governing classifier evidence.
+D32 deliberately authorized #69 to end the shadow after that deployed review.
+The permanent traffic class is therefore promoted now, without claiming that
+later soft heuristics have been validated.
+
+### Storage candidates
+
+| Candidate | Advantages | Costs and risks |
+| --- | --- | --- |
+| Encode evidence in event properties | No schema migration | Collides with user-owned property semantics and weakens closed bounds |
+| Add first-class fields but keep the D32 legacy boolean and predicate | Smaller immediate query diff | Contradicts the one-release boundary, keeps duplicate classifier work/counters, and forces another migration |
+| Add one schema-6 evidence boundary and remove the completed shadow | Closed, honest, queryable, and leaves #70 reversible | Requires an exact schema-5 migration and deliberate product-predicate change |
+
+Select schema 6. Metadata remains schema 4. There is no session table, mutable
+signal upsert, dependency, background job, setting, or additional process.
+
+### Protocol and stored evidence
+
+Protocol v2 accepts one optional `signals` object. Version 1 contains:
+
+- `webdriver`, the exact boolean observation of `navigator.webdriver`;
+- `trusted_interactions`, a four-bit mask for trusted pointer move, key down,
+  scroll, and touch start observations accumulated before this beacon;
+- `was_visible` and `was_prerendered` page-lifetime latches;
+- `viewport_bucket` (`0 unknown`, `1 under 480`, `2 480–767`,
+  `3 768–1199`, `4 at least 1200` CSS pixels); and
+- `beacon_timing_bucket` (`0 unknown`, `1 under 100 ms`, `2 under 1 s`,
+  `3 under 5 s`, `4 at least 5 s` after navigation start).
+
+The bundle is closed and bounded. An absent bundle stores `signal_version=0`
+and zeros/false values; it is unknown evidence, not a negative observation.
+The current tracker sends version 1. Its mask is page-lifetime state; #70 may
+aggregate later events over a session, but #69 performs no session mutation.
+Client-carried evidence is not authenticated and a custom sender can omit or
+forge it. It may protect a session from future soft suspicion but never proves
+a human, identity, authorization, or entitlement; deterministic hard evidence
+only classifies the sending observation itself.
+An absent bundle preserves the pre-D33 payload digest. When present, every
+bundle field enters the digest, so a changed payload conflicts. Receipt-derived
+fields do not enter the digest and the first committed receipt remains
+immutable.
+
+The collector derives two additional closed values without retaining their
+inputs:
+
+- `client_hint_consistency`: `0 unknown historical`, `1 consistent or not
+  applicable`, `2 mismatch`, `3 absent when a Chromium-family UA expects the
+  low-entropy hint`; and
+- `accept_language_present`, true only when a nonempty header was received.
+
+`Sec-CH-UA` work is limited to 512 bytes. A longer or structurally contradictory
+value is mismatch. Matching checks only the bounded Chromium, Chrome, Edge,
+and HeadlessChrome brands needed for consistency. Raw hint values,
+`Accept-Language`, viewport dimensions, precise timing, normalized copies, and
+hashes are never persisted or logged. There is no canvas, WebGL, audio,
+battery, precise timezone/geo, runtime file, or classifier network access.
+
+### Classifier v2 and product predicate
+
+All new nonexcluded receipts record classifier version 2. A specific UA-v1
+declared-bot or automation rule remains authoritative and keeps its rule ID.
+Otherwise `webdriver=true` produces automation rule `signal.webdriver`; then a
+client-hint mismatch produces automation rule `signal.client-hint-mismatch`.
+An absent-when-expected hint, missing language, viewport/timing bucket,
+visibility, and lack of interaction do not classify in #69. Exclusion still
+takes precedence and retains its version-1 exclusion rule.
+
+Hard observations are not overridden by interaction. The positive-human-
+evidence veto applies to future soft classification only. Issue #70 must keep
+soft combination query-time, visible, reversible, and vetoed by trusted
+interaction, engagement, scroll, return, or conversion evidence.
+
+Schema 6 removes `legacy_bot_verdict`. Product eligibility becomes exactly:
+
+```text
+traffic_class IN (human-presumed, suspected)
+```
+
+This intentionally excludes UA-v1/v2 declared bots and automation and includes
+corrected human-presumed rows that the old six-substring predicate had rejected.
+`serve_stopped.bots` becomes the permanent declared-bot/automation request-
+attempt counter; the six D32 shadow counters are removed.
+
+Traffic-quality diagnostics advance to version 4. They retain identity,
+exclusion, permanent class, classifier version/rule, and daily permanent bot
+totals; remove legacy comparison fields; and add fixed counts for client-signal
+v1 coverage, webdriver, any trusted interaction, visible, prerendered,
+client-hint mismatch/absent-expected, and Accept-Language presence. No result
+key or group is input-derived; class/version/rule groups remain capped at 64.
+
+### Migration, tracker cutover, and rollback
+
+Migration 6 transactionally preserves every schema-5 row, identity link,
+traffic class, classifier version, rule, and unrelated-field fingerprint. It
+adds unknown/zero evidence and removes only `legacy_bot_verdict`. Historical
+headers and browser state are never reconstructed. The verifier proves row
+count plus XOR, sum, minimum, and maximum fingerprints, the complete zero-state
+mapping, link preservation, and absence of the shadow column before swap.
+
+The current tracker receives a new content hash. The `6de111c9` asset remains
+embedded and immutable for installed sites; `/tracker.js`, installation output,
+and the new hash select the current tracker. Caddy adds the new public path
+without removing an old one. Raw tracker size remains at most 8 KiB and Brotli
+at most 5 KiB.
+
+Deployment stops the sole writer, creates and independently restores a matched
+schema-5 backup with the exact prior binary, migrates, verifies the deliberate
+predicate disposition and real browser/HTTP evidence, then switches one exact
+release. Rollback restores that matched pair before starting the prior binary;
+switching only the executable is forbidden.
+
+**Affected contracts:** `BOT_DETECTION_1.0.md`, `UA_CLASSIFIER_V1.md`,
+`PROTOCOL.md`, `DATA_MODEL.md`, `METRIC_SEMANTICS_V2.md`,
+`ANALYSIS_QUERY.md`, `ARCHITECTURE.md`, `OPERATIONS.md`, `PERFORMANCE.md`,
+`SPEC.md`, and `RELEASE_CONTRACT_1.0.md`.
+
+### Acceptance evidence
+
+Issue #69 must prove closed payload presence/absence/bounds and digest behavior,
+bounded receipt-header consistency, hard-rule precedence, real Chromium
+webdriver and trusted-interaction facts, genuine prerender/visibility evidence,
+stored schema-6 fields without raw inputs, permanent product filtering and
+diagnostics, exact schema-5 million-row interrupted/repeated migration,
+backup/restore/rollback, immutable old/new tracker paths, collection/report
+budgets, extracted-release execution, and Debug plus ReleaseSafe gates.

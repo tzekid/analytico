@@ -58,7 +58,7 @@ are not passes.
 
 ### Data semantics
 
-- Protocol version 2, event schema version 5, and metric version 2 are
+- Protocol version 2, event schema version 6, and metric version 2 are
   documented and exercised together while schema-3 rows upgrade without lost
   facts and the documented protocol-v1 and metric-v1 compatibility paths
   remain honest.

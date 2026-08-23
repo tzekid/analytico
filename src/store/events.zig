@@ -3,7 +3,7 @@ const domain = @import("../domain.zig");
 const duckdb = @import("duckdb.zig");
 const timezone = @import("../timezone.zig");
 
-pub const schema_version: i64 = 5;
+pub const schema_version: i64 = 6;
 
 pub const InsertV2Outcome = enum {
     inserted,
@@ -23,7 +23,9 @@ pub const StoredEvent = struct {
     traffic_class: i64,
     classifier_version: i64,
     bot_rule: []u8,
-    legacy_bot_verdict: bool,
+    signals: domain.ClientSignals,
+    client_hint_consistency: i64,
+    accept_language_present: bool,
 };
 
 pub const ExportEvent = struct {
@@ -45,7 +47,9 @@ pub const ExportEvent = struct {
     traffic_class: i64,
     classifier_version: i64,
     bot_rule: []u8,
-    legacy_bot_verdict: bool,
+    signals: domain.ClientSignals,
+    client_hint_consistency: i64,
+    accept_language_present: bool,
 };
 
 pub const InspectedV2Event = struct {
@@ -89,7 +93,9 @@ pub const InspectedV2Event = struct {
     traffic_class: i64,
     classifier_version: i64,
     bot_rule: []u8,
-    legacy_bot_verdict: bool,
+    signals: domain.ClientSignals,
+    client_hint_consistency: i64,
+    accept_language_present: bool,
 };
 
 pub const ResolvedPerson = struct {
@@ -142,6 +148,10 @@ pub const Store = struct {
 
     pub fn migrateFixtureV4(self: *Store) !void {
         try self.migrateThrough(4);
+    }
+
+    pub fn migrateFixtureV5(self: *Store) !void {
+        try self.migrateThrough(5);
     }
 
     fn migrateThrough(self: *Store, target: i64) !void {
@@ -270,6 +280,9 @@ pub const Store = struct {
         }
         if (current < 5 and target >= 5) {
             try self.migrateV5();
+        }
+        if (current < 6 and target >= 6) {
+            try self.migrateV6();
         }
         try self.database.checkpoint();
     }
@@ -755,6 +768,176 @@ pub const Store = struct {
         try self.database.exec("COMMIT");
     }
 
+    fn migrateV6(self: *Store) !void {
+        const links_before = try self.scalar(
+            "SELECT count(*) FROM identity_links",
+        );
+        const links_hash_before = try self.scalar(
+            \\SELECT CAST(COALESCE(bit_xor(
+            \\  hash(site_id, anonymous_id, user_id, linked_at_utc_micros, event_id)
+            \\  & 9223372036854775807
+            \\), 0) AS BIGINT) FROM identity_links
+        );
+        try self.database.exec("BEGIN TRANSACTION");
+        errdefer self.database.exec("ROLLBACK") catch {};
+        try self.database.exec(
+            \\CREATE TABLE events_v6 (
+            \\  event_schema_version UTINYINT NOT NULL,
+            \\  protocol_version UTINYINT NOT NULL,
+            \\  tracker_version UTINYINT NOT NULL,
+            \\  event_id UUID NOT NULL,
+            \\  site_id VARCHAR NOT NULL,
+            \\  received_at_utc_micros BIGINT NOT NULL,
+            \\  occurred_at_utc_micros BIGINT NOT NULL,
+            \\  received_date_utc DATE NOT NULL,
+            \\  site_local_date DATE NOT NULL,
+            \\  site_utc_offset_minutes SMALLINT NOT NULL,
+            \\  kind UTINYINT NOT NULL,
+            \\  event_name VARCHAR NOT NULL,
+            \\  path VARCHAR NOT NULL,
+            \\  page_title VARCHAR NOT NULL,
+            \\  hostname VARCHAR NOT NULL,
+            \\  anonymous_id UUID NOT NULL,
+            \\  identity_quality UTINYINT NOT NULL,
+            \\  user_id VARCHAR NOT NULL,
+            \\  session_id UUID NOT NULL,
+            \\  sequence UINTEGER NOT NULL,
+            \\  session_start BOOLEAN NOT NULL,
+            \\  referrer_host VARCHAR NOT NULL,
+            \\  country_code VARCHAR NOT NULL,
+            \\  language VARCHAR NOT NULL,
+            \\  browser_family VARCHAR NOT NULL,
+            \\  os_family VARCHAR NOT NULL,
+            \\  device_category VARCHAR NOT NULL,
+            \\  utm_source VARCHAR NOT NULL,
+            \\  utm_medium VARCHAR NOT NULL,
+            \\  utm_campaign VARCHAR NOT NULL,
+            \\  utm_term VARCHAR NOT NULL,
+            \\  utm_content VARCHAR NOT NULL,
+            \\  properties_json VARCHAR NOT NULL,
+            \\  user_traits_json VARCHAR NOT NULL,
+            \\  value_amount DECIMAL(18,6),
+            \\  value_currency VARCHAR NOT NULL,
+            \\  engagement_ms UINTEGER NOT NULL,
+            \\  max_scroll_depth UTINYINT NOT NULL,
+            \\  visitor_day_id BLOB NOT NULL,
+            \\  visitor_day_start BOOLEAN NOT NULL,
+            \\  event_payload_digest VARCHAR NOT NULL,
+            \\  traffic_class UTINYINT NOT NULL,
+            \\  classifier_version USMALLINT NOT NULL,
+            \\  bot_rule VARCHAR NOT NULL,
+            \\  signal_version UTINYINT NOT NULL,
+            \\  navigator_webdriver BOOLEAN NOT NULL,
+            \\  trusted_interactions UTINYINT NOT NULL,
+            \\  was_visible BOOLEAN NOT NULL,
+            \\  was_prerendered BOOLEAN NOT NULL,
+            \\  viewport_bucket UTINYINT NOT NULL,
+            \\  beacon_timing_bucket UTINYINT NOT NULL,
+            \\  client_hint_consistency UTINYINT NOT NULL,
+            \\  accept_language_present BOOLEAN NOT NULL,
+            \\  CHECK (traffic_class BETWEEN 1 AND 5),
+            \\  CHECK (length(bot_rule) <= 64),
+            \\  CHECK (signal_version BETWEEN 0 AND 1),
+            \\  CHECK (trusted_interactions BETWEEN 0 AND 15),
+            \\  CHECK (viewport_bucket BETWEEN 0 AND 4),
+            \\  CHECK (beacon_timing_bucket BETWEEN 0 AND 4),
+            \\  CHECK (client_hint_consistency BETWEEN 0 AND 3)
+            \\);
+            \\INSERT INTO events_v6 SELECT
+            \\  6, protocol_version, tracker_version, event_id, site_id,
+            \\  received_at_utc_micros, occurred_at_utc_micros,
+            \\  received_date_utc, site_local_date, site_utc_offset_minutes,
+            \\  kind, event_name, path, page_title, hostname, anonymous_id,
+            \\  identity_quality, user_id, session_id, sequence, session_start,
+            \\  referrer_host, country_code, language, browser_family, os_family,
+            \\  device_category, utm_source, utm_medium, utm_campaign, utm_term,
+            \\  utm_content, properties_json, user_traits_json, value_amount,
+            \\  value_currency, engagement_ms, max_scroll_depth, visitor_day_id,
+            \\  visitor_day_start, event_payload_digest, traffic_class,
+            \\  classifier_version, bot_rule,
+            \\  0, FALSE, 0, FALSE, FALSE, 0, 0, 0, FALSE
+            \\FROM events;
+        );
+        const preserved_mismatches = try self.scalar(
+            \\WITH source_rows AS (
+            \\  SELECT hash(protocol_version, tracker_version, event_id, site_id,
+            \\    received_at_utc_micros, occurred_at_utc_micros,
+            \\    received_date_utc, site_local_date, site_utc_offset_minutes,
+            \\    kind, event_name, path, page_title, hostname, anonymous_id,
+            \\    identity_quality, user_id, session_id, sequence, session_start,
+            \\    referrer_host, country_code, language, browser_family, os_family,
+            \\    device_category, utm_source, utm_medium, utm_campaign, utm_term,
+            \\    utm_content, properties_json, user_traits_json, value_amount,
+            \\    value_currency, engagement_ms, max_scroll_depth, visitor_day_id,
+            \\    visitor_day_start, event_payload_digest, traffic_class,
+            \\    classifier_version, bot_rule) AS row_hash
+            \\  FROM events
+            \\), target_rows AS (
+            \\  SELECT hash(protocol_version, tracker_version, event_id, site_id,
+            \\    received_at_utc_micros, occurred_at_utc_micros,
+            \\    received_date_utc, site_local_date, site_utc_offset_minutes,
+            \\    kind, event_name, path, page_title, hostname, anonymous_id,
+            \\    identity_quality, user_id, session_id, sequence, session_start,
+            \\    referrer_host, country_code, language, browser_family, os_family,
+            \\    device_category, utm_source, utm_medium, utm_campaign, utm_term,
+            \\    utm_content, properties_json, user_traits_json, value_amount,
+            \\    value_currency, engagement_ms, max_scroll_depth, visitor_day_id,
+            \\    visitor_day_start, event_payload_digest, traffic_class,
+            \\    classifier_version, bot_rule) AS row_hash
+            \\  FROM events_v6
+            \\), source AS (
+            \\  SELECT count(*) AS rows, bit_xor(row_hash) AS xor_hash,
+            \\    sum(CAST(row_hash AS UHUGEINT)) AS sum_hash,
+            \\    min(row_hash) AS min_hash, max(row_hash) AS max_hash
+            \\  FROM source_rows
+            \\), target AS (
+            \\  SELECT count(*) AS rows, bit_xor(row_hash) AS xor_hash,
+            \\    sum(CAST(row_hash AS UHUGEINT)) AS sum_hash,
+            \\    min(row_hash) AS min_hash, max(row_hash) AS max_hash
+            \\  FROM target_rows
+            \\)
+            \\SELECT count(*) FROM source s, target t
+            \\WHERE s.rows != t.rows OR s.xor_hash IS DISTINCT FROM t.xor_hash
+            \\  OR s.sum_hash IS DISTINCT FROM t.sum_hash
+            \\  OR s.min_hash IS DISTINCT FROM t.min_hash
+            \\  OR s.max_hash IS DISTINCT FROM t.max_hash
+        );
+        const mapping_mismatches = try self.scalar(
+            \\SELECT count(*) FROM events_v6
+            \\WHERE event_schema_version != 6 OR signal_version != 0
+            \\  OR navigator_webdriver OR trusted_interactions != 0
+            \\  OR was_visible OR was_prerendered OR viewport_bucket != 0
+            \\  OR beacon_timing_bucket != 0 OR client_hint_consistency != 0
+            \\  OR accept_language_present
+        );
+        const shadow_columns = try self.scalar(
+            \\SELECT count(*) FROM information_schema.columns
+            \\WHERE table_name = 'events_v6'
+            \\  AND column_name = 'legacy_bot_verdict'
+        );
+        const links_after = try self.scalar("SELECT count(*) FROM identity_links");
+        const links_hash_after = try self.scalar(
+            \\SELECT CAST(COALESCE(bit_xor(
+            \\  hash(site_id, anonymous_id, user_id, linked_at_utc_micros, event_id)
+            \\  & 9223372036854775807
+            \\), 0) AS BIGINT) FROM identity_links
+        );
+        if (preserved_mismatches != 0 or mapping_mismatches != 0 or
+            shadow_columns != 0 or links_before != links_after or
+            links_hash_before != links_hash_after)
+        {
+            return error.BotSignalMigrationValidationFailed;
+        }
+        try self.database.exec(
+            \\DROP TABLE events;
+            \\ALTER TABLE events_v6 RENAME TO events;
+            \\INSERT INTO event_migrations VALUES (
+            \\  6, 'bounded-bot-signals', 0
+            \\)
+        );
+        try self.database.exec("COMMIT");
+    }
+
     pub fn insert(self: *Store, event: domain.Event) !void {
         try domain.validateUuid(event.event_id);
         try domain.validateUuid(event.site_id);
@@ -767,8 +950,8 @@ pub const Store = struct {
             event.traffic_class,
             event.classifier_version,
             event.bot_rule,
-            event.legacy_bot_verdict,
         );
+        try validateSignals(event.signals, event.client_hint_consistency);
         if (std.mem.eql(u8, event.device_category, "bot")) {
             return error.InvalidDeviceCategory;
         }
@@ -782,10 +965,14 @@ pub const Store = struct {
             \\  country_code, browser_family, os_family, device_category,
             \\  utm_source, utm_medium, utm_campaign, utm_term, utm_content,
             \\  properties_json, traffic_class, classifier_version, bot_rule,
-            \\  legacy_bot_verdict
+            \\  signal_version, navigator_webdriver, trusted_interactions,
+            \\  was_visible, was_prerendered, viewport_bucket,
+            \\  beacon_timing_bucket, client_hint_consistency,
+            \\  accept_language_present
             \\) AS (
             \\  SELECT ?, ?, ?, CAST(? AS DATE), CAST(? AS DATE), ?,
-            \\         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            \\         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            \\         ?, ?, ?, ?, ?, ?, ?, ?, ?
             \\),
             \\resolved AS (
             \\  SELECT i.*, p.session_id AS prior_session_id,
@@ -799,7 +986,7 @@ pub const Store = struct {
             \\    WHERE e.site_id = i.site_id
             \\      AND e.received_date_utc = i.received_date_utc
             \\      AND e.visitor_day_id = i.visitor_day_id
-            \\      AND e.traffic_class != 4 AND NOT e.legacy_bot_verdict
+            \\      AND e.traffic_class IN (1, 5)
             \\      AND e.received_at_utc_micros <= i.received_at_utc_micros
             \\    ORDER BY e.received_at_utc_micros DESC, e.event_id DESC
             \\    LIMIT 1
@@ -810,12 +997,12 @@ pub const Store = struct {
             \\    WHERE e.site_id = i.site_id
             \\      AND e.received_date_utc = i.received_date_utc
             \\      AND e.visitor_day_id = i.visitor_day_id
-            \\      AND e.traffic_class != 4 AND NOT e.legacy_bot_verdict
+            \\      AND e.traffic_class IN (1, 5)
             \\    LIMIT 1
             \\  ) a ON true
             \\)
             \\SELECT
-            \\  5, 1, 1, CAST(i.event_id AS UUID), i.site_id,
+            \\  6, 1, 1, CAST(i.event_id AS UUID), i.site_id,
             \\  i.received_at_utc_micros, i.received_at_utc_micros,
             \\  i.received_date_utc, i.site_local_date,
             \\  i.site_utc_offset_minutes,
@@ -831,7 +1018,7 @@ pub const Store = struct {
             \\    THEN i.prior_sequence + 1
             \\    ELSE 0
             \\  END,
-            \\  i.traffic_class != 4 AND NOT i.legacy_bot_verdict
+            \\  i.traffic_class IN (1, 5)
             \\    AND (i.prior_session_id IS NULL
             \\    OR i.received_at_utc_micros - i.prior_at > 1800000000),
             \\  i.referrer_host, i.country_code, '', i.browser_family, i.os_family,
@@ -839,10 +1026,13 @@ pub const Store = struct {
             \\  i.utm_term, i.utm_content, i.properties_json
             \\  , '{}', CAST(NULL AS DECIMAL(18,6)), '', 0, 0,
             \\  i.visitor_day_id,
-            \\  i.traffic_class != 4 AND NOT i.legacy_bot_verdict
+            \\  i.traffic_class IN (1, 5)
             \\    AND i.prior_session_id IS NULL, '',
             \\  i.traffic_class, i.classifier_version, i.bot_rule,
-            \\  i.legacy_bot_verdict
+            \\  i.signal_version, i.navigator_webdriver,
+            \\  i.trusted_interactions, i.was_visible, i.was_prerendered,
+            \\  i.viewport_bucket, i.beacon_timing_bucket,
+            \\  i.client_hint_consistency, i.accept_language_present
             \\FROM resolved i
         );
         defer statement.deinit();
@@ -870,7 +1060,15 @@ pub const Store = struct {
         try statement.bindInt64(22, @backingInt(event.traffic_class));
         try statement.bindInt64(23, event.classifier_version);
         try statement.bindText(24, event.bot_rule);
-        try statement.bindInt64(25, @intFromBool(event.legacy_bot_verdict));
+        try statement.bindInt64(25, event.signals.version);
+        try statement.bindInt64(26, @intFromBool(event.signals.navigator_webdriver));
+        try statement.bindInt64(27, event.signals.trusted_interactions);
+        try statement.bindInt64(28, @intFromBool(event.signals.was_visible));
+        try statement.bindInt64(29, @intFromBool(event.signals.was_prerendered));
+        try statement.bindInt64(30, event.signals.viewport_bucket);
+        try statement.bindInt64(31, event.signals.beacon_timing_bucket);
+        try statement.bindInt64(32, @backingInt(event.client_hint_consistency));
+        try statement.bindInt64(33, @intFromBool(event.accept_language_present));
         var result = try statement.execute();
         result.deinit();
     }
@@ -898,8 +1096,8 @@ pub const Store = struct {
             event.traffic_class,
             event.classifier_version,
             event.bot_rule,
-            event.legacy_bot_verdict,
         );
+        try validateSignals(event.signals, event.client_hint_consistency);
         if (std.mem.eql(u8, event.device_category, "bot")) {
             return error.InvalidDeviceCategory;
         }
@@ -941,7 +1139,7 @@ pub const Store = struct {
         try self.database.exec("BEGIN TRANSACTION");
         errdefer self.database.exec("ROLLBACK") catch {};
         if (event.identify_user_id.len != 0 and linked_user == null and
-            event.traffic_class.productEligible(event.legacy_bot_verdict))
+            event.traffic_class.productEligible())
         {
             var link_statement = try self.database.prepare(
                 \\INSERT INTO identity_links (
@@ -972,26 +1170,30 @@ pub const Store = struct {
             \\  user_traits_json, value_amount, value_currency, engagement_ms,
             \\  max_scroll_depth, visitor_day_id, payload_digest,
             \\  traffic_class, classifier_version, bot_rule,
-            \\  legacy_bot_verdict
+            \\  signal_version, navigator_webdriver, trusted_interactions,
+            \\  was_visible, was_prerendered, viewport_bucket,
+            \\  beacon_timing_bucket, client_hint_consistency,
+            \\  accept_language_present
             \\) AS (
             \\  SELECT ?, ?, ?, ?, CAST(? AS DATE), CAST(? AS DATE), ?,
             \\         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-            \\         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            \\         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            \\         ?, ?, ?, ?, ?, ?, ?
             \\)
             \\SELECT
-            \\  5, 2, 2, CAST(i.event_id AS UUID), i.site_id,
+            \\  6, 2, 2, CAST(i.event_id AS UUID), i.site_id,
             \\  i.received_at, i.occurred_at, i.received_date,
             \\  i.site_local_date, i.site_utc_offset_minutes,
             \\  i.kind, i.event_name, i.path,
             \\  i.page_title, i.hostname, CAST(i.anonymous_id AS UUID),
             \\  i.identity_quality, i.user_id, CAST(i.session_id AS UUID),
             \\  i.sequence,
-            \\  i.traffic_class != 4 AND NOT i.legacy_bot_verdict
+            \\  i.traffic_class IN (1, 5)
             \\  AND NOT EXISTS (
             \\    SELECT 1 FROM events e
             \\    WHERE e.site_id = i.site_id
             \\      AND e.session_id = CAST(i.session_id AS UUID)
-            \\      AND e.traffic_class != 4 AND NOT e.legacy_bot_verdict
+            \\      AND e.traffic_class IN (1, 5)
             \\  ),
             \\  i.referrer_host, i.country_code, i.language,
             \\  i.browser_family, i.os_family, i.device_category,
@@ -1004,16 +1206,19 @@ pub const Store = struct {
             \\  END,
             \\  i.value_currency, i.engagement_ms, i.max_scroll_depth,
             \\  i.visitor_day_id,
-            \\  i.traffic_class != 4 AND NOT i.legacy_bot_verdict
+            \\  i.traffic_class IN (1, 5)
             \\  AND NOT EXISTS (
             \\    SELECT 1 FROM events e
             \\    WHERE e.site_id = i.site_id
             \\      AND e.received_date_utc = i.received_date
             \\      AND e.visitor_day_id = i.visitor_day_id
-            \\      AND e.traffic_class != 4 AND NOT e.legacy_bot_verdict
+            \\      AND e.traffic_class IN (1, 5)
             \\  ),
             \\  i.payload_digest, i.traffic_class, i.classifier_version,
-            \\  i.bot_rule, i.legacy_bot_verdict
+            \\  i.bot_rule, i.signal_version, i.navigator_webdriver,
+            \\  i.trusted_interactions, i.was_visible, i.was_prerendered,
+            \\  i.viewport_bucket, i.beacon_timing_bucket,
+            \\  i.client_hint_consistency, i.accept_language_present
             \\FROM incoming i
         );
         defer statement.deinit();
@@ -1056,7 +1261,15 @@ pub const Store = struct {
         try statement.bindInt64(37, @backingInt(event.traffic_class));
         try statement.bindInt64(38, event.classifier_version);
         try statement.bindText(39, event.bot_rule);
-        try statement.bindInt64(40, @intFromBool(event.legacy_bot_verdict));
+        try statement.bindInt64(40, event.signals.version);
+        try statement.bindInt64(41, @intFromBool(event.signals.navigator_webdriver));
+        try statement.bindInt64(42, event.signals.trusted_interactions);
+        try statement.bindInt64(43, @intFromBool(event.signals.was_visible));
+        try statement.bindInt64(44, @intFromBool(event.signals.was_prerendered));
+        try statement.bindInt64(45, event.signals.viewport_bucket);
+        try statement.bindInt64(46, event.signals.beacon_timing_bucket);
+        try statement.bindInt64(47, @backingInt(event.client_hint_consistency));
+        try statement.bindInt64(48, @intFromBool(event.accept_language_present));
         var result = try statement.execute();
         result.deinit();
         try self.database.exec("COMMIT");
@@ -1096,7 +1309,7 @@ pub const Store = struct {
         ;
         var result = try self.database.query(switch (current) {
             2 => source_sql,
-            3, 4, 5 => migrated_sql,
+            3, 4, 5, 6 => migrated_sql,
             else => return error.UnsupportedLegacyEvidenceSchema,
         });
         defer result.deinit();
@@ -1330,7 +1543,10 @@ pub const Store = struct {
             \\       browser_family, os_family, device_category,
             \\       utm_source, utm_medium, utm_campaign, utm_term,
             \\       utm_content, properties_json, traffic_class,
-            \\       classifier_version, bot_rule, legacy_bot_verdict
+            \\       classifier_version, bot_rule, signal_version,
+            \\       navigator_webdriver, trusted_interactions, was_visible,
+            \\       was_prerendered, viewport_bucket, beacon_timing_bucket,
+            \\       client_hint_consistency, accept_language_present
             \\FROM events
             \\WHERE site_id = ?
             \\  AND received_date_utc BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
@@ -1345,7 +1561,7 @@ pub const Store = struct {
         try statement.bindInt64(5, offset);
         var result = try statement.execute();
         defer result.deinit();
-        if (result.columnCount() != 19) return error.InvalidExportResult;
+        if (result.columnCount() != 27) return error.InvalidExportResult;
         const output = try allocator.alloc(ExportEvent, result.rowCount());
         for (output, 0..) |*event, index| {
             event.* = .{
@@ -1367,7 +1583,17 @@ pub const Store = struct {
                 .traffic_class = result.int64(15, index),
                 .classifier_version = result.int64(16, index),
                 .bot_rule = try result.text(allocator, 17, index),
-                .legacy_bot_verdict = result.int64(18, index) != 0,
+                .signals = .{
+                    .version = @intCast(result.int64(18, index)),
+                    .navigator_webdriver = result.int64(19, index) != 0,
+                    .trusted_interactions = @intCast(result.int64(20, index)),
+                    .was_visible = result.int64(21, index) != 0,
+                    .was_prerendered = result.int64(22, index) != 0,
+                    .viewport_bucket = @intCast(result.int64(23, index)),
+                    .beacon_timing_bucket = @intCast(result.int64(24, index)),
+                },
+                .client_hint_consistency = result.int64(25, index),
+                .accept_language_present = result.int64(26, index) != 0,
             };
         }
         return output;
@@ -1389,7 +1615,10 @@ pub const Store = struct {
             \\SELECT event_name, path, referrer_host, country_code,
             \\       browser_family, os_family, device_category,
             \\       utm_source, properties_json, traffic_class,
-            \\       classifier_version, bot_rule, legacy_bot_verdict
+            \\       classifier_version, bot_rule, signal_version,
+            \\       navigator_webdriver, trusted_interactions, was_visible,
+            \\       was_prerendered, viewport_bucket, beacon_timing_bucket,
+            \\       client_hint_consistency, accept_language_present
             \\FROM events
             \\ORDER BY received_at_utc_micros DESC, event_id DESC
             \\LIMIT 1
@@ -1409,7 +1638,17 @@ pub const Store = struct {
             .traffic_class = result.int64(9, 0),
             .classifier_version = result.int64(10, 0),
             .bot_rule = try result.text(allocator, 11, 0),
-            .legacy_bot_verdict = result.int64(12, 0) != 0,
+            .signals = .{
+                .version = @intCast(result.int64(12, 0)),
+                .navigator_webdriver = result.int64(13, 0) != 0,
+                .trusted_interactions = @intCast(result.int64(14, 0)),
+                .was_visible = result.int64(15, 0) != 0,
+                .was_prerendered = result.int64(16, 0) != 0,
+                .viewport_bucket = @intCast(result.int64(17, 0)),
+                .beacon_timing_bucket = @intCast(result.int64(18, 0)),
+            },
+            .client_hint_consistency = result.int64(19, 0),
+            .accept_language_present = result.int64(20, 0) != 0,
         };
     }
 
@@ -1423,7 +1662,10 @@ pub const Store = struct {
             \\SELECT event_name, path, referrer_host, country_code,
             \\       browser_family, os_family, device_category,
             \\       utm_source, properties_json, traffic_class,
-            \\       classifier_version, bot_rule, legacy_bot_verdict
+            \\       classifier_version, bot_rule, signal_version,
+            \\       navigator_webdriver, trusted_interactions, was_visible,
+            \\       was_prerendered, viewport_bucket, beacon_timing_bucket,
+            \\       client_hint_consistency, accept_language_present
             \\FROM events
             \\WHERE event_name = ?
             \\ORDER BY received_at_utc_micros DESC, event_id DESC
@@ -1489,7 +1731,10 @@ pub const Store = struct {
             \\  e.user_traits_json, CAST(e.value_amount AS VARCHAR),
             \\  e.value_currency, e.engagement_ms, e.max_scroll_depth,
             \\  COALESCE(l.user_id, ''), e.traffic_class,
-            \\  e.classifier_version, e.bot_rule, e.legacy_bot_verdict
+            \\  e.classifier_version, e.bot_rule, e.signal_version,
+            \\  e.navigator_webdriver, e.trusted_interactions, e.was_visible,
+            \\  e.was_prerendered, e.viewport_bucket, e.beacon_timing_bucket,
+            \\  e.client_hint_consistency, e.accept_language_present
             \\FROM events e
             \\LEFT JOIN identity_links l
             \\  ON l.site_id = e.site_id AND l.anonymous_id = e.anonymous_id
@@ -1500,7 +1745,7 @@ pub const Store = struct {
         try statement.bindText(2, event_id);
         var result = try statement.execute();
         defer result.deinit();
-        if (result.rowCount() != 1 or result.columnCount() != 41) {
+        if (result.rowCount() != 1 or result.columnCount() != 49) {
             return error.EventNotFound;
         }
         return .{
@@ -1547,7 +1792,17 @@ pub const Store = struct {
             .traffic_class = result.int64(37, 0),
             .classifier_version = result.int64(38, 0),
             .bot_rule = try result.text(allocator, 39, 0),
-            .legacy_bot_verdict = result.int64(40, 0) != 0,
+            .signals = .{
+                .version = @intCast(result.int64(40, 0)),
+                .navigator_webdriver = result.int64(41, 0) != 0,
+                .trusted_interactions = @intCast(result.int64(42, 0)),
+                .was_visible = result.int64(43, 0) != 0,
+                .was_prerendered = result.int64(44, 0) != 0,
+                .viewport_bucket = @intCast(result.int64(45, 0)),
+                .beacon_timing_bucket = @intCast(result.int64(46, 0)),
+            },
+            .client_hint_consistency = result.int64(47, 0),
+            .accept_language_present = result.int64(48, 0) != 0,
         };
     }
 
@@ -1565,7 +1820,7 @@ pub const Store = struct {
             \\LEFT JOIN identity_links l
             \\  ON l.site_id = e.site_id AND l.anonymous_id = e.anonymous_id
             \\WHERE e.site_id = ? AND e.anonymous_id = CAST(? AS UUID)
-            \\  AND e.traffic_class != 4 AND NOT e.legacy_bot_verdict
+            \\  AND e.traffic_class IN (1, 5)
             \\ORDER BY e.occurred_at_utc_micros DESC, e.sequence DESC,
             \\         e.received_at_utc_micros DESC, e.event_id DESC
             \\LIMIT 1
@@ -1601,7 +1856,7 @@ pub const Store = struct {
             \\    SELECT e.user_traits_json
             \\    FROM events e
             \\    WHERE e.site_id = ? AND e.kind = 4 AND e.user_id = ?
-            \\      AND e.traffic_class != 4 AND NOT e.legacy_bot_verdict
+            \\      AND e.traffic_class IN (1, 5)
             \\    ORDER BY e.occurred_at_utc_micros DESC, e.sequence DESC,
             \\             e.received_at_utc_micros DESC, e.event_id DESC
             \\    LIMIT 1
@@ -1703,9 +1958,8 @@ fn validateTrafficClassification(
     traffic_class: domain.TrafficClass,
     classifier_version: u16,
     bot_rule: []const u8,
-    legacy_bot_verdict: bool,
 ) !void {
-    if (classifier_version != 1 or bot_rule.len > 64) {
+    if (bot_rule.len > 64) {
         return error.InvalidTrafficClassification;
     }
     for (bot_rule) |byte| {
@@ -1716,14 +1970,15 @@ fn validateTrafficClassification(
         }
     }
     switch (traffic_class) {
-        .human_presumed => if (bot_rule.len != 0)
+        .human_presumed => if (classifier_version != 2 or bot_rule.len != 0)
             return error.InvalidTrafficClassification,
-        .declared_bot, .automation => if (bot_rule.len == 0 or
+        .declared_bot, .automation => if (classifier_version != 2 or
+            bot_rule.len == 0 or
             std.mem.startsWith(u8, bot_rule, "exclude."))
         {
             return error.InvalidTrafficClassification;
         },
-        .excluded => if (legacy_bot_verdict or
+        .excluded => if (classifier_version != 1 or
             !(std.mem.eql(u8, bot_rule, "exclude.tracker") or
                 std.mem.eql(u8, bot_rule, "exclude.network") or
                 std.mem.eql(u8, bot_rule, "exclude.both")))
@@ -1731,6 +1986,25 @@ fn validateTrafficClassification(
             return error.InvalidTrafficClassification;
         },
         .suspected => return error.InvalidTrafficClassification,
+    }
+}
+
+fn validateSignals(
+    signals: domain.ClientSignals,
+    client_hint_consistency: domain.ClientHintConsistency,
+) !void {
+    _ = client_hint_consistency;
+    if (signals.version > 1 or signals.trusted_interactions > 15 or
+        signals.viewport_bucket > 4 or signals.beacon_timing_bucket > 4)
+    {
+        return error.InvalidBotSignals;
+    }
+    if (signals.version == 0 and (signals.navigator_webdriver or
+        signals.trusted_interactions != 0 or signals.was_visible or
+        signals.was_prerendered or signals.viewport_bucket != 0 or
+        signals.beacon_timing_bucket != 0))
+    {
+        return error.InvalidBotSignals;
     }
 }
 
@@ -1751,6 +2025,16 @@ fn decodeStoredEvent(
         .traffic_class = result.int64(9, 0),
         .classifier_version = result.int64(10, 0),
         .bot_rule = try result.text(allocator, 11, 0),
-        .legacy_bot_verdict = result.int64(12, 0) != 0,
+        .signals = .{
+            .version = @intCast(result.int64(12, 0)),
+            .navigator_webdriver = result.int64(13, 0) != 0,
+            .trusted_interactions = @intCast(result.int64(14, 0)),
+            .was_visible = result.int64(15, 0) != 0,
+            .was_prerendered = result.int64(16, 0) != 0,
+            .viewport_bucket = @intCast(result.int64(17, 0)),
+            .beacon_timing_bucket = @intCast(result.int64(18, 0)),
+        },
+        .client_hint_consistency = result.int64(19, 0),
+        .accept_language_present = result.int64(20, 0) != 0,
     };
 }

@@ -2,7 +2,7 @@
 
 > **Status:** Sections 1–10 describe the shipped one-process runtime, its frozen
 > protocol-v1 compatibility path, additive protocol-v2 collector foundation,
-> event schema 5, protocol-v2 tracker anonymous identity, and 30-minute client
+> event schema 6, protocol-v2 tracker anonymous identity, and 30-minute client
 > sessions. The remaining 1.0 evolution is stated separately below; it
 > preserves this runtime shape and lands only with its issue evidence.
 
@@ -104,6 +104,8 @@ keep metric-v1 report SQL honest until versioned metric-v2 queries replace it.
 Event schema 4 added D31's temporary stored exclusion source. Event schema 5
 consumes that source into the permanent D32 traffic class, classifier version,
 and bounded rule and retains one release-only legacy verdict for comparison.
+Event schema 6 adds D33's closed browser/receipt evidence, removes the completed
+shadow byte, and promotes permanent class eligibility without a new store.
 
 Decision D29 adds a parallel pure `AnalysisQuery` model and finite metric-v2
 store compiler. The domain model validates and canonicalizes state without I/O;
@@ -203,12 +205,21 @@ D32's event schema 5 losslessly maps those sources to permanent
 class from the device dimension. A small compile-time rule table uses the
 pinned provenance in `UA_CLASSIFIER_V1.md`; the complete upstream corpus is not
 a runtime dependency or file. No raw UA, hash, new metadata setting, tracker
-change, Caddy change, process, or background work is added. During one deployed
-release, product queries retain the legacy verdict while the same bounded
-diagnostics statement exposes new/old disagreement. Six fixed `u64` process
-counters expose the same comparison for newly inserted nonexcluded rows at
-shutdown; they add no input-keyed state. Every otherwise accepted event remains
-stored.
+change, Caddy change, process, or background work was added. During the deployed
+#68 release, product queries retained the legacy verdict while the same bounded
+diagnostics statement exposed new/old disagreement. Six fixed `u64` process
+counters exposed the same comparison for newly inserted nonexcluded rows at
+shutdown; D33 ends that temporary boundary. Every otherwise accepted event
+remains stored.
+
+D33's event schema 6 stores one optional versioned browser-evidence bundle plus
+bounded receipt-derived consistency/presence values, never their raw inputs.
+Classifier v2 adds only webdriver and client-hint mismatch as hard rules, ends
+the completed D32 shadow, and makes permanent class the product predicate.
+Historical rows receive explicit unknown evidence rather than reconstructed
+facts. The existing tracker remains immutable at its old hash while one new
+current hash is added. No session table, fingerprint, dependency, setting,
+runtime file/network access, process, or background work is introduced.
 
 ## 6. Report flow
 

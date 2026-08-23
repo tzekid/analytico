@@ -51,24 +51,26 @@
   },
   "tracker_v2": {
     "protocol": 2,
-    "source_bytes": 15592,
-    "minified_bytes": 7448,
-    "brotli_bytes": 2759,
-    "gzip_bytes": 3071,
-    "minifier": "terser 5.44.0 (acceptance tooling only)",
-    "minified_sha256": "6de111c93fb57ccef475d7716e1eff1f1eaa1367b6135d4c8910bb74ead141a6",
-    "brotli_sha256": "b5b9c7457f906e3720181e58d45f94fae52618c410c10e51d7a87ad31b441a2b",
-    "gzip_sha256": "99d5768b0bde4e50a2cb064748fbc1aed2c7c11d6c3f77cedaba872e6e2bfa7d",
-    "content_hash_path": "/tracker.6de111c9.js",
+    "source_bytes": 8071,
+    "source_form": "project-authored minified JavaScript",
+    "minified_bytes": 8071,
+    "brotli_bytes": 2988,
+    "gzip_bytes": 3334,
+    "minifier": "terser 5.44.0 baseline plus bounded direct signal patch (acceptance tooling only)",
+    "minified_sha256": "bc506cfe6ffe27f1004d62a5552cd9ca095d5d2fc1da87d1457130eab99f8a19",
+    "brotli_sha256": "71503963d3dd7ddacc05882e82bb5ef81e3aa714d605f342400f3924628c8fd3",
+    "gzip_sha256": "d19eeddb6fb30589ba95602be21a6b46c3167685a49b83fa89592613b517d8d9",
+    "content_hash_path": "/tracker.bc506cfe.js",
     "immutable_compatibility_paths": [
       "/tracker.fb64c486.js",
       "/tracker.78135195.js",
       "/tracker.d9e94247.js",
-      "/tracker.81c3b777.js"
+      "/tracker.81c3b777.js",
+      "/tracker.6de111c9.js"
     ],
     "local_storage_keys_per_site": 4,
     "third_party_dependencies": 0,
-    "status": "accepted 1.0 tracker with stored self-exclusion, SPA, engagement, automatic events, identity, and sessions"
+    "status": "accepted 1.0 tracker with bounded signals, stored self-exclusion, SPA, engagement, automatic events, identity, and sessions"
   },
   "browser_e2e": {
     "playwright": "1.62.0",

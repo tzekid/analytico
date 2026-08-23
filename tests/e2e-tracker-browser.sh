@@ -92,7 +92,8 @@ jq -e '
       .engagement.active_window_events <= 4) and
     .automatic.automatic_opt_in_only and
     .automatic.form_values_absent and
-    .automatic.requests == 6 and .automatic.disabled_requests == 1
+    .automatic.requests == 6 and .automatic.disabled_requests == 1 and
+    .signals.trusted_interactions == 7
 ' "$fixture/browser-result.json" >/dev/null
 
 kill -TERM "$collector_pid"
@@ -113,6 +114,8 @@ lifecycle_engagement=$(inspect '.engagement.lifecycle')
 download=$(inspect '.automatic.download')
 form=$(inspect '.automatic.form')
 purchase=$(inspect '.automatic.purchase')
+automation_signal=$(inspect '.signals.automation')
+human_signal=$(inspect '.signals.human')
 
 jq -e '
     .kind == 3 and .event_name == "engagement" and
@@ -144,9 +147,22 @@ jq -e '
     .properties_json == "{\"plan\":\"pro\"}" and
     .value_amount == "49.000000" and .value_currency == "EUR"
 ' <<<"$purchase" >/dev/null
+jq -e '
+    .traffic_class == 3 and .classifier_version == 2 and
+    .bot_rule == "signal.webdriver" and
+    .signals.version == 1 and .signals.navigator_webdriver and
+    .signals.trusted_interactions == 0 and .signals.was_visible and
+    (.signals.viewport_bucket == 4)
+' <<<"$automation_signal" >/dev/null
+jq -e '
+    .traffic_class == 1 and .classifier_version == 2 and .bot_rule == "" and
+    .signals.version == 1 and (.signals.navigator_webdriver | not) and
+    .signals.trusted_interactions == 7 and
+    .signals.was_visible and (.signals.was_prerendered | not)
+' <<<"$human_signal" >/dev/null
 
 doctor=$("$binary" doctor "$fixture")
-[[ "$doctor" == ok\ metadata=v4\ events=v5\ sites=1\ goals=0\ funnels=0\ stored_events=*\ key=ok ]]
+[[ "$doctor" == ok\ metadata=v4\ events=v6\ sites=1\ goals=0\ funnels=0\ stored_events=*\ key=ok ]]
 stored_events=$(sed -n 's/.*stored_events=\([0-9][0-9]*\).*/\1/p' <<<"$doctor")
 expected_events=$(jq -r .stored_events_expected "$fixture/browser-result.json")
 if [[ "$stored_events" != "$expected_events" ]]; then
@@ -170,6 +186,12 @@ gzip --test public/tracker.js.gz
 test "$(stat -c '%s' public/tracker.js)" -le 8192
 test "$(stat -c '%s' public/tracker.js.br)" -le 5120
 test "$(sha256sum public/tracker.js | cut -d' ' -f1)" = \
+    "bc506cfe6ffe27f1004d62a5552cd9ca095d5d2fc1da87d1457130eab99f8a19"
+test "$(sha256sum public/tracker.js.br | cut -d' ' -f1)" = \
+    "71503963d3dd7ddacc05882e82bb5ef81e3aa714d605f342400f3924628c8fd3"
+test "$(sha256sum public/tracker.js.gz | cut -d' ' -f1)" = \
+    "d19eeddb6fb30589ba95602be21a6b46c3167685a49b83fa89592613b517d8d9"
+test "$(sha256sum src/http/tracker.6de111c9.min.js | cut -d' ' -f1)" = \
     "6de111c93fb57ccef475d7716e1eff1f1eaa1367b6135d4c8910bb74ead141a6"
 test "$(sha256sum src/http/tracker.d9e94247.min.js | cut -d' ' -f1)" = \
     "d9e94247f97fa84795f5a9bb493a0d383b2aac11565e80e6ceb670b4e9e05c2c"
@@ -185,4 +207,4 @@ printf '{"tracker_raw_bytes":%s,"tracker_brotli_bytes":%s,"tracker_gzip_bytes":%
     "$(stat -c '%s' public/tracker.js)" \
     "$(stat -c '%s' public/tracker.js.br)" \
     "$(stat -c '%s' public/tracker.js.gz)"
-echo "tracker SPA, engagement, automatic event, and value checks passed"
+echo "tracker SPA, engagement, automatic event, value, and real signal checks passed"

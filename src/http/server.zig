@@ -31,12 +31,16 @@ const tracker_v2_identify_gzip = @embedFile("tracker.d9e94247.min.js.gz");
 const tracker_v2_spa = @embedFile("tracker.81c3b777.min.js");
 const tracker_v2_spa_br = @embedFile("tracker.81c3b777.min.js.br");
 const tracker_v2_spa_gzip = @embedFile("tracker.81c3b777.min.js.gz");
+const tracker_v2_exclusion = @embedFile("tracker.6de111c9.min.js");
+const tracker_v2_exclusion_br = @embedFile("tracker.6de111c9.min.js.br");
+const tracker_v2_exclusion_gzip = @embedFile("tracker.6de111c9.min.js.gz");
 const tracker_v1_path = "/tracker.aef65945.js";
 const tracker_v2_anonymous_path = "/tracker.fb64c486.js";
 const tracker_v2_sessions_path = "/tracker.78135195.js";
 const tracker_v2_identify_path = "/tracker.d9e94247.js";
 const tracker_v2_spa_path = "/tracker.81c3b777.js";
-const tracker_v2_path = "/tracker.6de111c9.js";
+const tracker_v2_exclusion_path = "/tracker.6de111c9.js";
+const tracker_v2_path = "/tracker.bc506cfe.js";
 const transparent_gif =
     "GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff" ++
     "!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00" ++
@@ -201,10 +205,7 @@ pub fn run(
             "\"rejected\":{d},\"rate_limited\":{d},\"bots\":{d}," ++
             "\"unknown_country\":{d},\"unknown_client\":{d}," ++
             "\"duplicates\":{d},\"conflicts\":{d},\"write_failures\":{d}," ++
-            "\"request_failures\":{d},\"excluded\":{d}," ++
-            "\"legacy_bot_positive\":{d},\"classifier_bot_positive\":{d}," ++
-            "\"shadow_both_human\":{d},\"shadow_legacy_only\":{d}," ++
-            "\"shadow_classifier_only\":{d},\"shadow_both_bot\":{d}}}\n",
+            "\"request_failures\":{d},\"excluded\":{d}}}\n",
         .{
             context.counters.accepted,
             context.counters.rejected,
@@ -217,12 +218,6 @@ pub fn run(
             context.counters.write_failures,
             context.counters.request_failures,
             context.counters.excluded,
-            context.counters.legacy_bot_positive,
-            context.counters.classifier_bot_positive,
-            context.counters.shadow_both_human,
-            context.counters.shadow_legacy_only,
-            context.counters.shadow_classifier_only,
-            context.counters.shadow_both_bot,
         },
     );
 }
@@ -239,12 +234,6 @@ const Counters = struct {
     write_failures: u64 = 0,
     request_failures: u64 = 0,
     excluded: u64 = 0,
-    legacy_bot_positive: u64 = 0,
-    classifier_bot_positive: u64 = 0,
-    shadow_both_human: u64 = 0,
-    shadow_legacy_only: u64 = 0,
-    shadow_classifier_only: u64 = 0,
-    shadow_both_bot: u64 = 0,
 };
 
 const Context = struct {
@@ -404,6 +393,7 @@ fn handle(context: *Context, stream: std.Io.net.Stream) !void {
         std.mem.eql(u8, path, tracker_v2_sessions_path) or
         std.mem.eql(u8, path, tracker_v2_identify_path) or
         std.mem.eql(u8, path, tracker_v2_spa_path) or
+        std.mem.eql(u8, path, tracker_v2_exclusion_path) or
         std.mem.eql(u8, path, tracker_v2_path))
     {
         if (!std.mem.eql(u8, request.method, "GET")) {
@@ -414,12 +404,14 @@ fn handle(context: *Context, stream: std.Io.net.Stream) !void {
                 std.mem.eql(u8, path, tracker_v2_sessions_path) or
                 std.mem.eql(u8, path, tracker_v2_identify_path) or
                 std.mem.eql(u8, path, tracker_v2_spa_path) or
+                std.mem.eql(u8, path, tracker_v2_exclusion_path) or
                 std.mem.eql(u8, path, tracker_v2_path);
             const use_v1 = std.mem.eql(u8, path, tracker_v1_path);
             const use_v2_anonymous = std.mem.eql(u8, path, tracker_v2_anonymous_path);
             const use_v2_sessions = std.mem.eql(u8, path, tracker_v2_sessions_path);
             const use_v2_identify = std.mem.eql(u8, path, tracker_v2_identify_path);
             const use_v2_spa = std.mem.eql(u8, path, tracker_v2_spa_path);
+            const use_v2_exclusion = std.mem.eql(u8, path, tracker_v2_exclusion_path);
             const encoding = request.header("accept-encoding") catch null;
             const use_brotli = if (encoding) |value|
                 acceptsEncoding(value, "br")
@@ -472,6 +464,8 @@ fn handle(context: *Context, stream: std.Io.net.Stream) !void {
                     if (use_brotli) tracker_v2_identify_br else if (use_gzip) tracker_v2_identify_gzip else tracker_v2_identify
                 else if (use_v2_spa)
                     if (use_brotli) tracker_v2_spa_br else if (use_gzip) tracker_v2_spa_gzip else tracker_v2_spa
+                else if (use_v2_exclusion)
+                    if (use_brotli) tracker_v2_exclusion_br else if (use_gzip) tracker_v2_exclusion_gzip else tracker_v2_exclusion
                 else if (use_brotli)
                     tracker_br
                 else if (use_gzip)
@@ -780,9 +774,10 @@ fn acceptEvent(
 
     const user_agent = (try request.header("user-agent")) orelse "";
     if (user_agent.len > 1024) return error.InvalidUserAgent;
-    const client = classify.userAgent(user_agent);
+    const receipt = try classifyRequest(request, user_agent, .{});
+    const client = receipt.client;
     const country_code = classify.country(try request.header("x-analytico-country"));
-    if (client.traffic.legacy_bot_verdict) context.counters.bots += 1;
+    if (client.traffic.class.isClassifierBot()) context.counters.bots += 1;
     if (std.mem.eql(u8, country_code[0..], "ZZ")) {
         context.counters.unknown_country += 1;
     }
@@ -836,7 +831,9 @@ fn acceptEvent(
         .traffic_class = traffic.class,
         .classifier_version = traffic.classifier_version,
         .bot_rule = traffic.rule,
-        .legacy_bot_verdict = traffic.legacy_bot_verdict,
+        .signals = .{},
+        .client_hint_consistency = receipt.client_hint_consistency,
+        .accept_language_present = receipt.accept_language_present,
     }) catch {
         context.events_healthy = false;
         context.counters.write_failures += 1;
@@ -845,8 +842,6 @@ fn acceptEvent(
     context.counters.accepted += 1;
     if (traffic.class.isExcluded()) {
         context.counters.excluded += 1;
-    } else {
-        recordShadow(&context.counters, traffic);
     }
     return true;
 }
@@ -862,9 +857,10 @@ fn acceptEventV2(
     const client_ip = try requestClientIp(request);
     const user_agent = (try request.header("user-agent")) orelse "";
     if (user_agent.len > 1024) return error.InvalidUserAgent;
-    const client = classify.userAgent(user_agent);
+    const receipt = try classifyRequest(request, user_agent, prepared.signals);
+    const client = receipt.client;
     const country_code = classify.country(try request.header("x-analytico-country"));
-    if (client.traffic.legacy_bot_verdict) context.counters.bots += 1;
+    if (client.traffic.class.isClassifierBot()) context.counters.bots += 1;
     if (std.mem.eql(u8, country_code[0..], "ZZ")) {
         context.counters.unknown_country += 1;
     }
@@ -938,7 +934,9 @@ fn acceptEventV2(
         .traffic_class = traffic.class,
         .classifier_version = traffic.classifier_version,
         .bot_rule = traffic.rule,
-        .legacy_bot_verdict = traffic.legacy_bot_verdict,
+        .signals = prepared.signals,
+        .client_hint_consistency = receipt.client_hint_consistency,
+        .accept_language_present = receipt.accept_language_present,
     }) catch |err| switch (err) {
         error.EventIdConflict,
         error.IdentityConflict,
@@ -958,31 +956,39 @@ fn acceptEventV2(
             context.counters.accepted += 1;
             if (traffic.class.isExcluded()) {
                 context.counters.excluded += 1;
-            } else {
-                recordShadow(&context.counters, traffic);
             }
         },
         .duplicate => context.counters.duplicates += 1,
     }
 }
 
-fn recordShadow(
-    counters: *Counters,
-    traffic: domain.TrafficClassification,
-) void {
-    std.debug.assert(!traffic.class.isExcluded());
-    const classifier_bot = traffic.class.isClassifierBot();
-    if (traffic.legacy_bot_verdict) counters.legacy_bot_positive += 1;
-    if (classifier_bot) counters.classifier_bot_positive += 1;
-    if (traffic.legacy_bot_verdict and classifier_bot) {
-        counters.shadow_both_bot += 1;
-    } else if (traffic.legacy_bot_verdict) {
-        counters.shadow_legacy_only += 1;
-    } else if (classifier_bot) {
-        counters.shadow_classifier_only += 1;
-    } else {
-        counters.shadow_both_human += 1;
-    }
+const ReceiptClient = struct {
+    client: classify.Client,
+    client_hint_consistency: domain.ClientHintConsistency,
+    accept_language_present: bool,
+};
+
+fn classifyRequest(
+    request: request_mod.Request,
+    user_agent: []const u8,
+    signals: domain.ClientSignals,
+) !ReceiptClient {
+    var client = classify.userAgent(user_agent);
+    const client_hint_consistency = classify.clientHintConsistency(
+        user_agent,
+        try request.header("sec-ch-ua"),
+    );
+    client.traffic = classify.applySignals(
+        client.traffic,
+        signals,
+        client_hint_consistency,
+    );
+    const accept_language = try request.header("accept-language");
+    return .{
+        .client = client,
+        .client_hint_consistency = client_hint_consistency,
+        .accept_language_present = if (accept_language) |value| value.len != 0 else false,
+    };
 }
 
 fn eventRateAllowed(

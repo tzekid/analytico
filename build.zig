@@ -171,7 +171,7 @@ pub fn build(b: *std.Build) void {
     classifier_e2e.step.dependOn(b.getInstallStep());
     b.step(
         "e2e-classifier",
-        "Run UA classifier v1 through real loopback HTTP and on-disk stores",
+        "Run classifier v2 signals through real loopback HTTP and on-disk stores",
     ).dependOn(&classifier_e2e.step);
 
     const schema5_migration_e2e = b.addSystemCommand(&.{
@@ -185,6 +185,18 @@ pub fn build(b: *std.Build) void {
         "e2e-schema5-migration",
         "Migrate and roll back the exact deployed schema-4 predecessor",
     ).dependOn(&schema5_migration_e2e.step);
+
+    const schema6_migration_e2e = b.addSystemCommand(&.{
+        "bash",
+        "scripts/run-schema5-gate.sh",
+    });
+    schema6_migration_e2e.addArtifactArg(app);
+    schema6_migration_e2e.addArg("tests/e2e-schema6-migration.sh");
+    schema6_migration_e2e.step.dependOn(b.getInstallStep());
+    b.step(
+        "e2e-schema6-migration",
+        "Migrate and roll back the exact deployed schema-5 predecessor",
+    ).dependOn(&schema6_migration_e2e.step);
 
     const exclusion_e2e = b.addSystemCommand(&.{
         "bash",
@@ -238,7 +250,7 @@ pub fn build(b: *std.Build) void {
     tracker_browser_e2e.step.dependOn(b.getInstallStep());
     b.step(
         "e2e-tracker-browser",
-        "Run tracker SPA, engagement, automatic event, and value behavior in real Chromium",
+        "Run tracker behavior and bounded signals in real Chromium",
     ).dependOn(&tracker_browser_e2e.step);
 
     const m2_benchmark = b.addSystemCommand(&.{ "bash", "bench/m2-collection.sh" });

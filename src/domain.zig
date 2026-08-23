@@ -65,8 +65,8 @@ pub const TrafficClass = enum(u8) {
         return self == .excluded;
     }
 
-    pub fn productEligible(self: TrafficClass, legacy_bot_verdict: bool) bool {
-        return !self.isExcluded() and !legacy_bot_verdict;
+    pub fn productEligible(self: TrafficClass) bool {
+        return self == .human_presumed or self == .suspected;
     }
 };
 
@@ -74,7 +74,6 @@ pub const TrafficClassification = struct {
     class: TrafficClass,
     classifier_version: u16,
     rule: []const u8,
-    legacy_bot_verdict: bool,
 
     pub fn withExclusion(
         self: TrafficClassification,
@@ -85,9 +84,25 @@ pub const TrafficClassification = struct {
             .class = .excluded,
             .classifier_version = 1,
             .rule = source.rule(),
-            .legacy_bot_verdict = false,
         };
     }
+};
+
+pub const ClientHintConsistency = enum(u8) {
+    unknown = 0,
+    consistent = 1,
+    mismatch = 2,
+    absent_when_expected = 3,
+};
+
+pub const ClientSignals = struct {
+    version: u8 = 0,
+    navigator_webdriver: bool = false,
+    trusted_interactions: u8 = 0,
+    was_visible: bool = false,
+    was_prerendered: bool = false,
+    viewport_bucket: u8 = 0,
+    beacon_timing_bucket: u8 = 0,
 };
 
 pub const Event = struct {
@@ -113,9 +128,11 @@ pub const Event = struct {
     utm_content: []const u8 = "",
     properties_json: []const u8 = "{}",
     traffic_class: TrafficClass = .human_presumed,
-    classifier_version: u16 = 1,
+    classifier_version: u16 = 2,
     bot_rule: []const u8 = "",
-    legacy_bot_verdict: bool = false,
+    signals: ClientSignals = .{},
+    client_hint_consistency: ClientHintConsistency = .unknown,
+    accept_language_present: bool = false,
 };
 
 pub const EventV2 = struct {
@@ -156,9 +173,11 @@ pub const EventV2 = struct {
     visitor_day_id: [16]u8,
     event_payload_digest: []const u8,
     traffic_class: TrafficClass = .human_presumed,
-    classifier_version: u16 = 1,
+    classifier_version: u16 = 2,
     bot_rule: []const u8 = "",
-    legacy_bot_verdict: bool = false,
+    signals: ClientSignals = .{},
+    client_hint_consistency: ClientHintConsistency = .unknown,
+    accept_language_present: bool = false,
 };
 
 pub fn canonicalPersonKey(

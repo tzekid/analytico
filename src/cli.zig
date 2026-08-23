@@ -444,7 +444,7 @@ fn siteCommand(
         const site_id = try store.siteIdBySlug(allocator, args[4]);
         try output.print(
             \\<!-- Analytico tracker -->
-            \\<script defer src="{s}/tracker.6de111c9.js" data-site="{s}" data-spa="auto" data-engagement="true"></script>
+            \\<script defer src="{s}/tracker.bc506cfe.js" data-site="{s}" data-spa="auto" data-engagement="true"></script>
             \\<noscript>
             \\  <img alt="" width="1" height="1" src="{s}/v1/p.gif?site={s}&amp;path=%2F">
             \\</noscript>
@@ -611,7 +611,8 @@ fn eventCommand(
         else
             try event_store.latest(allocator);
         try output.print(
-            "{s}\t{s}\t{s}\t{s}\t{s}\t{s}\t{s}\t{s}\t{s}\t{d}\t{d}\t{s}\t{s}\n",
+            "{s}\t{s}\t{s}\t{s}\t{s}\t{s}\t{s}\t{s}\t{s}\t{d}\t{d}\t{s}" ++
+                "\t{d}\t{s}\t{d}\t{s}\t{s}\t{d}\t{d}\t{d}\t{s}\n",
             .{
                 event.event_name,
                 event.path,
@@ -625,7 +626,15 @@ fn eventCommand(
                 event.traffic_class,
                 event.classifier_version,
                 event.bot_rule,
-                if (event.legacy_bot_verdict) "true" else "false",
+                event.signals.version,
+                if (event.signals.navigator_webdriver) "true" else "false",
+                event.signals.trusted_interactions,
+                if (event.signals.was_visible) "true" else "false",
+                if (event.signals.was_prerendered) "true" else "false",
+                event.signals.viewport_bucket,
+                event.signals.beacon_timing_bucket,
+                event.client_hint_consistency,
+                if (event.accept_language_present) "true" else "false",
             },
         );
         return;

@@ -86,7 +86,7 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
         -e "s|127\\.0\\.0\\.1:4318|127.0.0.1:$server_port|" deploy/Caddyfile
     printf '\nhttps://prerender.test:%s {\n' "$secure_site_port"
     printf '\ttls %s %s\n' "$fixture/prerender.crt" "$fixture/prerender.key"
-    printf '\t@collector path /tracker.6de111c9.js /v2/event\n'
+    printf '\t@collector path /tracker.bc506cfe.js /v2/event\n'
     printf '\thandle @collector {\n\t\treverse_proxy 127.0.0.1:%s {\n' "$server_port"
     printf '\t\t\theader_up X-Forwarded-For {http.request.remote.host}\n'
     printf '\t\t}\n\t}\n'
@@ -107,6 +107,12 @@ if [[ "$status" != 303 ]]; then
     cat "$fixture/caddy.stderr" >&2
     exit 1
 fi
+curl --silent --fail "$dashboard/tracker.6de111c9.js" \
+    --output "$fixture/tracker-old.js"
+cmp "$fixture/tracker-old.js" src/http/tracker.6de111c9.min.js
+curl --silent --fail "$dashboard/tracker.bc506cfe.js" \
+    --output "$fixture/tracker-current.js"
+cmp "$fixture/tracker-current.js" src/http/tracker.min.js
 
 cookie_file="$fixture/session.cookie"
 TMPDIR="$fixture" NODE_PATH="$module_root" \
@@ -235,6 +241,21 @@ real_prerender_overview=$("$binary" report "$data" real-prerender \
     "$today" "$today" overview --format json)
 jq -e '.page_views == 1 and .visitor_days == 1 and .sessions == 1' \
     <<<"$real_prerender_overview" >/dev/null
+real_prerender_quality=$("$binary" report "$data" real-prerender \
+    "$today" "$today" traffic-quality --format json)
+jq -e '
+    .traffic_classes == [
+      {"class":"human-presumed","events":1},
+      {"class":"declared-bot","events":0},
+      {"class":"automation","events":0},
+      {"class":"excluded","events":0},
+      {"class":"suspected","events":0}
+    ] and
+    .signal_evidence.client_signal_v1_events == 1 and
+    .signal_evidence.webdriver_events == 0 and
+    .signal_evidence.visible_events == 1 and
+    .signal_evidence.prerendered_events == 1
+' <<<"$real_prerender_quality" >/dev/null
 self_overview=$("$binary" report "$data" self "$today" "$today" \
     overview --format json)
 jq -e '.page_views == 2 and .visitor_days == 2 and .sessions == 2' \
@@ -251,17 +272,16 @@ jq -e '
 network_row=$("$binary" m2 v2-inspect "$data" "$self_site" "$network_event")
 jq -e '
     .traffic_class == 4 and .classifier_version == 1 and
-    .bot_rule == "exclude.network" and .legacy_bot_verdict == false
+    .bot_rule == "exclude.network"
 ' <<<"$network_row" >/dev/null
 both_row=$("$binary" m2 v2-inspect "$data" "$self_site" "$both_event")
 jq -e '
     .traffic_class == 4 and .classifier_version == 1 and
-    .bot_rule == "exclude.both" and .legacy_bot_verdict == false
+    .bot_rule == "exclude.both"
 ' <<<"$both_row" >/dev/null
 included_row=$("$binary" m2 v2-inspect "$data" "$self_site" "$included_event")
 jq -e '
-    .traffic_class == 1 and .classifier_version == 1 and
-    .bot_rule == "" and .legacy_bot_verdict == false
+    .traffic_class == 1 and .classifier_version == 2 and .bot_rule == ""
 ' <<<"$included_row" >/dev/null
 test "$("$binary" m2 identity-links "$data")" = 0
 person=$("$binary" m2 person-inspect "$data" "$self_site" "$identify_anon")
@@ -275,7 +295,7 @@ if grep -aF '203.0.113.9' "$data/meta.db" "$data/events.duckdb" \
     exit 1
 fi
 test "$("$binary" doctor "$data")" = \
-    "ok metadata=v4 events=v5 sites=4 goals=0 funnels=0 stored_events=12 key=ok"
+    "ok metadata=v4 events=v6 sites=4 goals=0 funnels=0 stored_events=12 key=ok"
 grep -Fq '"accepted":12' "$fixture/server.stderr"
 grep -Fq '"excluded":6' "$fixture/server.stderr"
 

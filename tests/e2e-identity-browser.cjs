@@ -24,7 +24,7 @@ function html(site) {
 <meta charset="utf-8">
 <title>Analytico identity fixture</title>
 <main><h1>Useful server-rendered state</h1><p>${site}</p></main>
-<script defer src="${collector}/tracker.6de111c9.js" data-site="${site}"></script>
+<script defer src="${collector}/tracker.bc506cfe.js" data-site="${site}"></script>
 </html>`;
 }
 
@@ -42,6 +42,9 @@ function launch() {
     headless: true,
     args: [
       "--no-sandbox",
+      "--disable-blink-features=AutomationControlled",
+      "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 " +
+        "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
       "--ozone-platform=headless",
       "--use-angle=swiftshader-webgl",
     ],
@@ -50,6 +53,16 @@ function launch() {
     options.executablePath = process.env.ANALYTICO_CHROMIUM_PATH;
   }
   return chromium.launch(options);
+}
+
+function humanContext(browser, options = {}) {
+  return browser.newContext({
+    ...options,
+    extraHTTPHeaders: {
+      ...(options.extraHTTPHeaders || {}),
+      "Sec-CH-UA": '"Chromium";v="151", "Google Chrome";v="151"',
+    },
+  });
 }
 
 function eventBody(request) {
@@ -120,7 +133,7 @@ async function verifyPersistenceAndReset() {
   const browser = await launch();
   try {
     let unlinked;
-    const context = await browser.newContext();
+    const context = await humanContext(browser);
     const page = await context.newPage();
     let accepted = nextV2(page);
     await page.goto(`${fixtureOrigin}/a`, { waitUntil: "load" });
@@ -159,7 +172,7 @@ async function verifyPersistenceAndReset() {
 
     const restoredBrowser = await launch();
     try {
-      const restoredContext = await restoredBrowser.newContext({
+      const restoredContext = await humanContext(restoredBrowser, {
         storageState: state,
       });
       const restoredPage = await restoredContext.newPage();
@@ -224,7 +237,7 @@ async function verifyPersistenceAndReset() {
 async function verifySessionRotation() {
   const browser = await launch();
   try {
-    const context = await browser.newContext();
+    const context = await humanContext(browser);
     const page = await context.newPage();
     let accepted = nextV2(page);
     await page.goto(`${fixtureOrigin}/a-session`, { waitUntil: "load" });
@@ -264,7 +277,7 @@ async function verifySessionRotation() {
     const midnight = Math.floor(Date.now() / 86400000) * 86400000;
     const beforeMidnight = midnight - 10 * 60 * 1000;
     const afterMidnight = midnight + 10 * 60 * 1000;
-    const midnightContext = await browser.newContext();
+    const midnightContext = await humanContext(browser);
     await midnightContext.addInitScript(
       ({ anonymousKey, sessionKey, anonymous, record, frozen }) => {
         Object.defineProperty(Date, "now", { value: () => frozen });
@@ -302,7 +315,7 @@ async function verifyIdentifyAndConflict() {
   const browserA = await launch();
   const browserB = await launch();
   try {
-    const contextA = await browserA.newContext();
+    const contextA = await humanContext(browserA);
     const pageA = await contextA.newPage();
     let accepted = nextV2(pageA);
     await pageA.goto(`${fixtureOrigin}/a-identify?utm_source=campaign`, {
@@ -331,7 +344,7 @@ async function verifyIdentifyAndConflict() {
     assert.equal(repeatedA.event.anonymous_id, firstA.anonymous_id);
     assert.equal((await storageKeys(pageA, siteA)).identified, "user_A");
 
-    const contextB = await browserB.newContext();
+    const contextB = await humanContext(browserB);
     const pageB = await contextB.newPage();
     accepted = nextV2(pageB);
     await pageB.goto(`${fixtureOrigin}/a-device-two`, { waitUntil: "load" });
@@ -423,7 +436,7 @@ async function verifyIdentifyAndConflict() {
 async function verifyStorageException() {
   const browser = await launch();
   try {
-    const context = await browser.newContext();
+    const context = await humanContext(browser);
     await context.addInitScript(() => {
       Object.defineProperty(window, "localStorage", {
         get() {
@@ -456,7 +469,7 @@ async function verifyStorageException() {
 async function verifyRandomValuesFallback() {
   const browser = await launch();
   try {
-    const context = await browser.newContext();
+    const context = await humanContext(browser);
     await context.addInitScript(() => {
       Object.defineProperty(crypto, "randomUUID", { value: undefined });
       Object.defineProperty(navigator, "sendBeacon", {

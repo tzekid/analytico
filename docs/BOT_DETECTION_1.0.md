@@ -3,8 +3,8 @@
 This plan corrects inflated visitor counts and establishes layered bot
 detection. It is sequenced so each phase delivers value alone and every
 detection change is measurable before it affects product metrics. Tracked in
-GitHub issues #66–#70; execute in that order. Phases 0–2 describe the shipped
-#68 candidate, while phases 3–4 remain planned work.
+GitHub issues #66–#70; execute in that order. Phases 0–3 describe the #69
+candidate, while phase 4 remains planned work.
 
 ## Motivation
 
@@ -77,7 +77,11 @@ The accepted mechanism and pinned rule provenance are D32 and
 Protocol v2: `navigator.webdriver`, trusted-interaction bitmask,
 `was_visible`/`was_prerendered`, coarse viewport bucket, time-to-beacon
 bucket. Server-side: `Sec-CH-UA` consistency enum, `Accept-Language`
-presence boolean.
+presence boolean. D33 stores only the closed evidence in schema 6, promotes
+the permanent traffic-class predicate after the deployed #68 shadow review,
+and removes the temporary legacy verdict/counters. UA rules, webdriver, and
+client-hint mismatch are hard; every other new fact remains diagnostic input
+for #70 and cannot classify in this phase.
 
 ### Phase 4 — Query-time heuristics and verification (#70, P1)
 

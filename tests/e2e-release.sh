@@ -56,7 +56,7 @@ data="$fixture/data"
 "$release_binary" event add "$data" release pageview / \
     1785456000000000 2026-07-31 203.0.113.1 Chrome Linux desktop >/dev/null
 test "$("$release_binary" doctor "$data")" = \
-    "ok metadata=v4 events=v5 sites=1 goals=0 funnels=0 stored_events=1 key=ok"
+    "ok metadata=v4 events=v6 sites=1 goals=0 funnels=0 stored_events=1 key=ok"
 report=$("$release_binary" report "$data" release 2026-07-31 2026-07-31 \
     overview --format json)
 test "$report" = \
@@ -81,6 +81,8 @@ if [[ ${3:-} == "--full" ]]; then
     done
     bash scripts/run-schema4-gate.sh "$release_binary" \
         tests/e2e-schema5-migration.sh
+    bash scripts/run-schema5-gate.sh "$release_binary" \
+        tests/e2e-schema6-migration.sh
 fi
 
 echo "release archive checksum, linkage, proxy, and fresh-data checks passed"
