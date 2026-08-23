@@ -174,6 +174,17 @@ pub fn build(b: *std.Build) void {
         "Run query heuristics and collection caps through real stores and HTTP",
     ).dependOn(&heuristics_e2e.step);
 
+    const diagnostics_e2e = b.addSystemCommand(&.{
+        "bash",
+        "tests/e2e-diagnostics.sh",
+    });
+    diagnostics_e2e.addArtifactArg(app);
+    diagnostics_e2e.step.dependOn(b.getInstallStep());
+    b.step(
+        "e2e-diagnostics",
+        "Run bounded collection diagnostics through real stores, HTTP, and auth",
+    ).dependOn(&diagnostics_e2e.step);
+
     const classifier_e2e = b.addSystemCommand(&.{
         "bash",
         "tests/e2e-classifier.sh",

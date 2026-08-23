@@ -1,4 +1,5 @@
 const std = @import("std");
+const diagnostics = @import("../diagnostics.zig");
 const domain = @import("../domain.zig");
 const meta = @import("../store/meta.zig");
 const events = @import("../store/events.zig");
@@ -200,13 +201,18 @@ pub fn run(
         active_stream_fd.store(-1, .release);
     }
     if (context.events_healthy) try event_store.checkpoint();
+    const diagnostic_stats = context.diagnostics.stats();
     std.debug.print(
         "{{\"level\":\"info\",\"code\":\"serve_stopped\",\"accepted\":{d}," ++
             "\"rejected\":{d},\"rate_limited\":{d},\"bots\":{d}," ++
             "\"unknown_country\":{d},\"unknown_client\":{d}," ++
             "\"duplicates\":{d},\"conflicts\":{d},\"write_failures\":{d}," ++
             "\"request_failures\":{d},\"excluded\":{d}," ++
-            "\"daily_ceiling_rejected\":{d}}}\n",
+            "\"daily_ceiling_rejected\":{d},\"diagnostics_retained\":{d}," ++
+            "\"diagnostics_overwritten\":{d},\"diagnostics_accepted\":{d}," ++
+            "\"diagnostics_rejected\":{d},\"diagnostics_duplicates\":{d}," ++
+            "\"diagnostics_store_failures\":{d},\"diagnostic_snapshots\":{d}," ++
+            "\"diagnostic_snapshot_rows\":{d}}}\n",
         .{
             context.counters.accepted,
             context.counters.rejected,
@@ -220,6 +226,14 @@ pub fn run(
             context.counters.request_failures,
             context.counters.excluded,
             context.counters.daily_ceiling_rejected,
+            diagnostic_stats.retained,
+            diagnostic_stats.overwritten,
+            diagnostic_stats.counts.accepted,
+            diagnostic_stats.counts.rejected,
+            diagnostic_stats.counts.duplicates,
+            diagnostic_stats.counts.store_failures,
+            context.counters.diagnostic_snapshots,
+            context.counters.diagnostic_snapshot_rows,
         },
     );
 }
@@ -237,6 +251,8 @@ const Counters = struct {
     request_failures: u64 = 0,
     excluded: u64 = 0,
     daily_ceiling_rejected: u64 = 0,
+    diagnostic_snapshots: u64 = 0,
+    diagnostic_snapshot_rows: u64 = 0,
 };
 
 const Context = struct {
@@ -257,6 +273,7 @@ const Context = struct {
     limiter: rate_limit.Limiter = .{},
     events_healthy: bool = true,
     counters: Counters = .{},
+    diagnostics: diagnostics.Ring = .{},
 };
 
 fn requestShutdown(_: std.posix.SIG) callconv(.c) void {
@@ -280,8 +297,16 @@ fn handle(context: *Context, stream: std.Io.net.Stream) !void {
     var arena_state = std.heap.ArenaAllocator.init(context.allocator);
     defer arena_state.deinit();
     const allocator = arena_state.allocator();
-    const request = (request_mod.read(allocator, &reader.interface) catch |err| {
+    var observation: request_mod.Observation = .{};
+    const request = (request_mod.read(
+        allocator,
+        &reader.interface,
+        &observation,
+    ) catch |err| {
         context.counters.rejected += 1;
+        if (err == error.PayloadTooLarge) {
+            appendOversizedDiagnostic(context, observation.collection_target);
+        }
         switch (err) {
             error.PayloadTooLarge => try writeError(output, 413),
             error.UnsupportedTransferEncoding => try writeError(output, 415),
@@ -384,6 +409,10 @@ fn handle(context: *Context, stream: std.Io.net.Stream) !void {
             .policy_refresh = .{
                 .context = context,
                 .apply = refreshCollectionPolicies,
+            },
+            .diagnostics = .{
+                .context = context,
+                .snapshot = dashboardDiagnostics,
             },
         }, request, output) catch |err| switch (err) {
             error.DuplicateHeader => {
@@ -525,54 +554,85 @@ fn postEvent(
     request: request_mod.Request,
     output: *std.Io.Writer,
 ) !void {
+    var diagnostic = diagnostics.Summary.init(.v1, 0);
+    defer context.diagnostics.append(diagnostic);
+    const now = currentTime() catch {
+        diagnostic.outcome = .store_failure;
+        diagnostic.rejection_code = .store_unavailable;
+        try reject(context, output, 500);
+        return;
+    };
+    diagnostic.received_at_utc_micros = now.micros;
     if (!context.events_healthy) {
+        diagnostic.outcome = .store_failure;
+        diagnostic.rejection_code = .store_unavailable;
         try reject(context, output, 503);
         return;
     }
     if (!supportedContentType(try request.header("content-type")) or
         (try request.header("content-encoding")) != null)
     {
+        diagnostic.rejection_code = .protocol_unsupported;
         try reject(context, output, 415);
         return;
     }
     const payload = collect.parsePost(allocator, request.body) catch {
+        diagnostic.rejection_code = .payload_invalid;
         try reject(context, output, 400);
         return;
     };
     const policy = findPolicy(context.policies, payload.site) orelse {
+        diagnostic.rejection_code = .site_unknown;
         try reject(context, output, 404);
         return;
     };
+    diagnostic.setSite(policy.metadata.id);
     if (policy.metadata.disabled) {
+        diagnostic.rejection_code = .site_disabled;
         try reject(context, output, 404);
         return;
     }
     const raw_origin = (try request.header("origin")) orelse {
+        diagnostic.rejection_code = .origin_missing;
         try reject(context, output, 403);
         return;
     };
     const origin = domain.normalizeOrigin(allocator, raw_origin) catch {
+        diagnostic.rejection_code = .origin_not_allowed;
         try reject(context, output, 403);
         return;
     };
+    diagnostic.setOrigin(origin);
     if (!policy.metadata.allowsOrigin(origin)) {
+        diagnostic.rejection_code = .origin_not_allowed;
         try reject(context, output, 403);
         return;
     }
-    const prepared = collect.preparePost(allocator, payload, policy.metadata) catch {
+    const prepared = collect.preparePost(allocator, payload, policy.metadata) catch |err| {
+        diagnostic.rejection_code = diagnosticCodeForV1Prepare(err);
         try reject(context, output, 400);
         return;
     };
+    diagnostic.setEvent(prepared.kind, prepared.path, prepared.event_name);
+    diagnostic.setProperties(payload.properties);
     const accepted = acceptEvent(
         context,
         allocator,
         request,
         prepared,
+        now,
         policy,
     ) catch |err| {
         if (err == error.DailyEventCeilingReached) {
+            diagnostic.rejection_code = .rate_limited;
             try rejectDailyCeiling(context, output);
             return;
+        }
+        if (err == error.EventWriteFailed or err == error.TimezoneUnavailable) {
+            diagnostic.outcome = .store_failure;
+            diagnostic.rejection_code = .store_unavailable;
+        } else {
+            diagnostic.rejection_code = .event_invalid;
         }
         try reject(
             context,
@@ -583,6 +643,7 @@ fn postEvent(
         return;
     };
     if (!accepted) {
+        diagnostic.rejection_code = .rate_limited;
         context.counters.rate_limited += 1;
         context.counters.rejected += 1;
         try response.write(
@@ -594,6 +655,8 @@ fn postEvent(
         );
         return;
     }
+    diagnostic.outcome = .accepted;
+    diagnostic.rejection_code = .none;
     var headers = std.Io.Writer.Allocating.init(allocator);
     try headers.writer.print(
         "{s}Access-Control-Allow-Origin: {s}\r\nVary: Origin\r\n",
@@ -608,53 +671,71 @@ fn postEventV2(
     request: request_mod.Request,
     output: *std.Io.Writer,
 ) !void {
+    var diagnostic = diagnostics.Summary.init(.v2, 0);
+    defer context.diagnostics.append(diagnostic);
+    const now = currentTime() catch {
+        diagnostic.outcome = .store_failure;
+        diagnostic.rejection_code = .store_unavailable;
+        try reject(context, output, 500);
+        return;
+    };
+    diagnostic.received_at_utc_micros = now.micros;
     if (!context.events_healthy) {
+        diagnostic.outcome = .store_failure;
+        diagnostic.rejection_code = .store_unavailable;
         try reject(context, output, 503);
         return;
     }
     if (!supportedContentType(try request.header("content-type")) or
         (try request.header("content-encoding")) != null)
     {
+        diagnostic.rejection_code = .protocol_unsupported;
         try reject(context, output, 415);
         return;
     }
     const payload = collect.parsePostV2(allocator, request.body) catch {
+        diagnostic.rejection_code = .payload_invalid;
         try reject(context, output, 400);
         return;
     };
     const policy = findPolicy(context.policies, payload.site) orelse {
+        diagnostic.rejection_code = .site_unknown;
         try reject(context, output, 404);
         return;
     };
+    diagnostic.setSite(policy.metadata.id);
     if (policy.metadata.disabled) {
+        diagnostic.rejection_code = .site_disabled;
         try reject(context, output, 404);
         return;
     }
     const raw_origin = (try request.header("origin")) orelse {
+        diagnostic.rejection_code = .origin_missing;
         try reject(context, output, 403);
         return;
     };
     const origin = domain.normalizeOrigin(allocator, raw_origin) catch {
+        diagnostic.rejection_code = .origin_not_allowed;
         try reject(context, output, 403);
         return;
     };
+    diagnostic.setOrigin(origin);
     if (!policy.metadata.allowsOrigin(origin)) {
+        diagnostic.rejection_code = .origin_not_allowed;
         try reject(context, output, 403);
         return;
     }
-    const now = currentTime() catch {
-        try reject(context, output, 500);
-        return;
-    };
     if (!(eventRateAllowed(
         context,
         request,
         policy.metadata.id,
         now.seconds,
     ) catch {
+        diagnostic.rejection_code = .event_invalid;
         try reject(context, output, 400);
         return;
     })) {
+        diagnostic.rejection_code = .rate_limited;
         context.counters.rate_limited += 1;
         context.counters.rejected += 1;
         try response.write(
@@ -671,11 +752,14 @@ fn postEventV2(
         payload,
         policy.metadata,
         now.micros,
-    ) catch {
+    ) catch |err| {
+        diagnostic.rejection_code = diagnosticCodeForV2Prepare(err);
         try reject(context, output, 400);
         return;
     };
-    acceptEventV2(
+    diagnostic.setEvent(prepared.kind, prepared.path, prepared.event_name);
+    diagnostic.setProperties(payload.properties);
+    const outcome = acceptEventV2(
         context,
         allocator,
         request,
@@ -684,6 +768,7 @@ fn postEventV2(
         policy,
     ) catch |err| {
         if (err == error.DailyEventCeilingReached) {
+            diagnostic.rejection_code = .rate_limited;
             try rejectDailyCeiling(context, output);
             return;
         }
@@ -695,6 +780,17 @@ fn postEventV2(
             error.EventWriteFailed, error.TimezoneUnavailable => 500,
             else => 400,
         };
+        switch (err) {
+            error.EventIdConflict => diagnostic.rejection_code = .event_id_conflict,
+            error.IdentityConflict,
+            error.IdentityQualityConflict,
+            => diagnostic.rejection_code = .identity_conflict,
+            error.EventWriteFailed, error.TimezoneUnavailable => {
+                diagnostic.outcome = .store_failure;
+                diagnostic.rejection_code = .store_unavailable;
+            },
+            else => diagnostic.rejection_code = .event_invalid,
+        }
         if (err == error.IdentityConflict) {
             try rejectIdentityConflict(context, output);
         } else {
@@ -702,6 +798,11 @@ fn postEventV2(
         }
         return;
     };
+    switch (outcome) {
+        .inserted => diagnostic.outcome = .accepted,
+        .duplicate => diagnostic.outcome = .duplicate,
+    }
+    diagnostic.rejection_code = .none;
     var headers = std.Io.Writer.Allocating.init(allocator);
     try headers.writer.print(
         "{s}Access-Control-Allow-Origin: {s}\r\nVary: Origin\r\n",
@@ -716,45 +817,76 @@ fn pixelEvent(
     request: request_mod.Request,
     output: *std.Io.Writer,
 ) !void {
+    var diagnostic = diagnostics.Summary.init(.pixel, 0);
+    defer context.diagnostics.append(diagnostic);
+    const now = currentTime() catch {
+        diagnostic.outcome = .store_failure;
+        diagnostic.rejection_code = .store_unavailable;
+        try reject(context, output, 500);
+        return;
+    };
+    diagnostic.received_at_utc_micros = now.micros;
     if (!context.events_healthy) {
+        diagnostic.outcome = .store_failure;
+        diagnostic.rejection_code = .store_unavailable;
         try reject(context, output, 503);
         return;
     }
     const pixel = collect.parsePixel(allocator, request.target) catch {
+        diagnostic.rejection_code = .payload_invalid;
         try reject(context, output, 400);
         return;
     };
     const policy = findPolicy(context.policies, pixel.site) orelse {
+        diagnostic.rejection_code = .site_unknown;
         try reject(context, output, 404);
         return;
     };
+    diagnostic.setSite(policy.metadata.id);
     if (policy.metadata.disabled) {
+        diagnostic.rejection_code = .site_disabled;
         try reject(context, output, 404);
         return;
     }
     const referer = (try request.header("referer")) orelse {
+        diagnostic.rejection_code = .origin_missing;
         try reject(context, output, 403);
         return;
     };
+    const origin = collect.urlOrigin(allocator, referer) catch {
+        diagnostic.rejection_code = .origin_not_allowed;
+        try reject(context, output, 403);
+        return;
+    };
+    diagnostic.setOrigin(origin);
     const prepared = collect.preparePixel(
-        allocator,
         pixel,
         policy.metadata,
-        referer,
+        origin,
     ) catch {
+        diagnostic.rejection_code = .origin_not_allowed;
         try reject(context, output, 403);
         return;
     };
+    diagnostic.setEvent(prepared.kind, prepared.path, prepared.event_name);
     const accepted = acceptEvent(
         context,
         allocator,
         request,
         prepared,
+        now,
         policy,
     ) catch |err| {
         if (err == error.DailyEventCeilingReached) {
+            diagnostic.rejection_code = .rate_limited;
             try rejectDailyCeiling(context, output);
             return;
+        }
+        if (err == error.EventWriteFailed or err == error.TimezoneUnavailable) {
+            diagnostic.outcome = .store_failure;
+            diagnostic.rejection_code = .store_unavailable;
+        } else {
+            diagnostic.rejection_code = .event_invalid;
         }
         try reject(
             context,
@@ -765,10 +897,13 @@ fn pixelEvent(
         return;
     };
     if (!accepted) {
+        diagnostic.rejection_code = .rate_limited;
         context.counters.rate_limited += 1;
         try reject(context, output, 429);
         return;
     }
+    diagnostic.outcome = .accepted;
+    diagnostic.rejection_code = .none;
     try response.write(
         output,
         200,
@@ -783,10 +918,10 @@ fn acceptEvent(
     allocator: std.mem.Allocator,
     request: request_mod.Request,
     prepared: collect.Prepared,
+    now: CurrentTime,
     policy: RuntimePolicy,
 ) !bool {
     const client_ip = try requestClientIp(request);
-    const now = try currentTime();
     const rate_key = domain.networkPrefixHash(prepared.site_id, client_ip) catch
         return error.InvalidForwardedIp;
     if (!context.limiter.allow(rate_key, now.seconds)) return false;
@@ -882,7 +1017,7 @@ fn acceptEventV2(
     prepared: collect.PreparedV2,
     now: CurrentTime,
     policy: RuntimePolicy,
-) !void {
+) !events.InsertV2Outcome {
     const client_ip = try requestClientIp(request);
     const user_agent = (try request.header("user-agent")) orelse "";
     if (user_agent.len > 1024) return error.InvalidUserAgent;
@@ -997,6 +1132,7 @@ fn acceptEventV2(
         },
         .duplicate => context.counters.duplicates += 1,
     }
+    return outcome;
 }
 
 const ReceiptClient = struct {
@@ -1112,6 +1248,57 @@ fn supportedContentType(value: ?[]const u8) bool {
         std.ascii.eqlIgnoreCase(content_type, "text/plain; charset=UTF-8");
 }
 
+fn diagnosticCodeForV1Prepare(err: anyerror) diagnostics.RejectionCode {
+    return switch (err) {
+        error.InvalidProtocol => .protocol_unsupported,
+        error.InvalidProperties,
+        error.TooManyProperties,
+        error.PropertyDenied,
+        error.InvalidPropertyValue,
+        error.PropertyValueTooLarge,
+        error.PropertiesTooLarge,
+        => .property_invalid,
+        else => .event_invalid,
+    };
+}
+
+fn diagnosticCodeForV2Prepare(err: anyerror) diagnostics.RejectionCode {
+    return switch (err) {
+        error.InvalidProtocol => .protocol_unsupported,
+        error.InvalidAnonymousId,
+        error.InvalidIdentityQuality,
+        error.InvalidIdentity,
+        => .identity_invalid,
+        error.InvalidSessionId => .session_invalid,
+        error.InvalidOccurrenceTime => .timestamp_invalid,
+        error.InvalidProperties,
+        error.TooManyProperties,
+        error.InvalidPropertyValue,
+        error.PropertiesTooLarge,
+        => .property_invalid,
+        error.InvalidDecimal, error.InvalidCurrency => .value_invalid,
+        else => .event_invalid,
+    };
+}
+
+fn appendOversizedDiagnostic(
+    context: *Context,
+    target: request_mod.CollectionTarget,
+) void {
+    const protocol: diagnostics.Protocol = switch (target) {
+        .none => return,
+        .v1 => .v1,
+        .v2 => .v2,
+        .pixel => .pixel,
+    };
+    var diagnostic = diagnostics.Summary.init(protocol, 0);
+    if (currentTime()) |now| {
+        diagnostic.received_at_utc_micros = now.micros;
+    } else |_| {}
+    diagnostic.rejection_code = .payload_too_large;
+    context.diagnostics.append(diagnostic);
+}
+
 fn acceptsEncoding(value: []const u8, expected: []const u8) bool {
     var encodings = std.mem.splitScalar(u8, value, ',');
     while (encodings.next()) |raw_encoding| {
@@ -1209,6 +1396,19 @@ fn dashboardSiteCalendar(value: *anyopaque, site_id: []const u8) ?dashboard.Site
     };
 }
 
+fn dashboardDiagnostics(
+    value: *anyopaque,
+    allocator: std.mem.Allocator,
+    site_id: []const u8,
+) !diagnostics.Snapshot {
+    const context: *Context = @ptrCast(@alignCast(value));
+    const output = try allocator.alloc(diagnostics.Summary, diagnostics.capacity);
+    const snapshot = context.diagnostics.snapshot(site_id, output);
+    context.counters.diagnostic_snapshots +|= 1;
+    context.counters.diagnostic_snapshot_rows +|= snapshot.summaries.len;
+    return snapshot;
+}
+
 fn methodNotAllowed(output: *std.Io.Writer, allow: []const u8) !void {
     try response.write(
         output,
@@ -1272,5 +1472,40 @@ fn rejectIdentityConflict(
         "text/plain; charset=utf-8",
         no_store_headers ++ "X-Analytico-Code: identity_conflict\r\n",
         "conflict\n",
+    );
+}
+
+test "diagnostic preparation errors have stable codes" {
+    try std.testing.expectEqual(
+        diagnostics.RejectionCode.protocol_unsupported,
+        diagnosticCodeForV1Prepare(error.InvalidProtocol),
+    );
+    try std.testing.expectEqual(
+        diagnostics.RejectionCode.property_invalid,
+        diagnosticCodeForV1Prepare(error.PropertyDenied),
+    );
+    try std.testing.expectEqual(
+        diagnostics.RejectionCode.identity_invalid,
+        diagnosticCodeForV2Prepare(error.InvalidAnonymousId),
+    );
+    try std.testing.expectEqual(
+        diagnostics.RejectionCode.session_invalid,
+        diagnosticCodeForV2Prepare(error.InvalidSessionId),
+    );
+    try std.testing.expectEqual(
+        diagnostics.RejectionCode.timestamp_invalid,
+        diagnosticCodeForV2Prepare(error.InvalidOccurrenceTime),
+    );
+    try std.testing.expectEqual(
+        diagnostics.RejectionCode.property_invalid,
+        diagnosticCodeForV2Prepare(error.TooManyProperties),
+    );
+    try std.testing.expectEqual(
+        diagnostics.RejectionCode.value_invalid,
+        diagnosticCodeForV2Prepare(error.InvalidCurrency),
+    );
+    try std.testing.expectEqual(
+        diagnostics.RejectionCode.event_invalid,
+        diagnosticCodeForV2Prepare(error.InvalidEventId),
     );
 }

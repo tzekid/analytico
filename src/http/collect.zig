@@ -218,9 +218,9 @@ pub fn preparePostV2(
     if (payload.v != 2 or !std.mem.eql(u8, payload.site, policy.id)) {
         return error.InvalidProtocol;
     }
-    try domain.validateUuid(payload.event_id);
-    try domain.validateUuid(payload.anonymous_id);
-    try domain.validateUuid(payload.session_id);
+    domain.validateUuid(payload.event_id) catch return error.InvalidEventId;
+    domain.validateUuid(payload.anonymous_id) catch return error.InvalidAnonymousId;
+    domain.validateUuid(payload.session_id) catch return error.InvalidSessionId;
     if (payload.occurred_at_ms < 0) return error.InvalidOccurrenceTime;
     const occurred_at_utc_micros = std.math.mul(
         i64,
@@ -325,7 +325,7 @@ pub fn preparePostV2(
         "{}";
     const user = payload.user;
     const identify_user_id = if (user) |value| blk: {
-        try validateV2Text(value.id, 160, false);
+        validateV2Text(value.id, 160, false) catch return error.InvalidIdentity;
         break :blk value.id;
     } else "";
     const user_traits_json = if (user) |value| if (value.traits) |traits|
@@ -457,14 +457,12 @@ pub fn parsePixel(
 }
 
 pub fn preparePixel(
-    allocator: std.mem.Allocator,
     pixel: Pixel,
     policy: meta.SitePolicy,
-    referer: []const u8,
+    normalized_origin: []const u8,
 ) !Prepared {
     if (!std.mem.eql(u8, pixel.site, policy.id)) return error.InvalidProtocol;
-    const origin = try urlOrigin(allocator, referer);
-    if (!policy.allowsOrigin(origin)) return error.OriginDenied;
+    if (!policy.allowsOrigin(normalized_origin)) return error.OriginDenied;
     return .{
         .site_id = policy.id,
         .kind = 1,

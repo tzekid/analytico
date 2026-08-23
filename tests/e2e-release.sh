@@ -69,6 +69,7 @@ if [[ ${3:-} == "--full" ]]; then
         tests/e2e-m2.sh \
         tests/e2e-m2-browser.sh \
         tests/e2e-traffic-quality.sh \
+        tests/e2e-diagnostics.sh \
         tests/e2e-classifier.sh \
         tests/e2e-m3.sh \
         tests/e2e-m4.sh \

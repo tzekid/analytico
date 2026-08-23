@@ -239,6 +239,16 @@ Logs never include IPs, user agents, paths, referrers, campaigns, properties,
 request bodies, visitor IDs, matched rule IDs, keys, or database paths.
 Counter names are closed and do not vary with input. Journald owns rotation.
 
+The collector also owns the process-local 200-slot diagnostics ring documented
+in `PROTOCOL.md`. `serve_stopped` reports only closed retained-outcome, wrap,
+snapshot, and returned-row counters from that ring. The authenticated dashboard
+boundary exposes a typed site-filtered snapshot seam, but issue #21 deliberately
+adds no visible recent list, manual refresh control, polling, pause/hidden
+behavior, or stale-state UI; those remain owned by issue #43.
+
+Ring wrap overwrites the oldest summary and restart clears every slot. No backup
+contains the ring, and logs never expand a summary into input-derived strings.
+
 ## 8. Backup
 
 The MVP chooses a short honest outage over an online two-store coordinator:

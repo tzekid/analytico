@@ -1,6 +1,7 @@
 const std = @import("std");
 const analysis = @import("../analysis.zig");
 const calendar = @import("../calendar.zig");
+const diagnostics_mod = @import("../diagnostics.zig");
 const domain = @import("../domain.zig");
 const request_mod = @import("../http/request.zig");
 const response = @import("../http/response.zig");
@@ -22,6 +23,7 @@ pub const Dependencies = struct {
     report_timeout_ms: u32,
     policy_refresh: ?PolicyRefresh = null,
     site_calendar: ?SiteCalendarLookup = null,
+    diagnostics: ?DiagnosticsLookup = null,
 };
 
 pub const PolicyRefresh = struct {
@@ -44,6 +46,23 @@ pub const SiteCalendarLookup = struct {
 
     fn find(self: SiteCalendarLookup, site_id: []const u8) ?SiteCalendar {
         return self.get(self.context, site_id);
+    }
+};
+
+pub const DiagnosticsLookup = struct {
+    context: *anyopaque,
+    snapshot: *const fn (
+        *anyopaque,
+        std.mem.Allocator,
+        []const u8,
+    ) anyerror!diagnostics_mod.Snapshot,
+
+    fn get(
+        self: DiagnosticsLookup,
+        allocator: std.mem.Allocator,
+        site_id: []const u8,
+    ) !diagnostics_mod.Snapshot {
+        return self.snapshot(self.context, allocator, site_id);
     }
 };
 
@@ -417,7 +436,7 @@ fn getPage(
         );
         return;
     }
-    const loaded = controller.loadPage(
+    var loaded = controller.loadPage(
         dependencies.allocator,
         dependencies.metadata,
         dependencies.events,
@@ -454,6 +473,14 @@ fn getPage(
         }
         return;
     };
+    if (route.destination == .live) {
+        const diagnostics = dependencies.diagnostics orelse
+            return error.MissingDiagnosticsLookup;
+        loaded.collection_diagnostics = try diagnostics.get(
+            dependencies.allocator,
+            selected.id,
+        );
+    }
     try writePage(output, 200, loaded);
 }
 

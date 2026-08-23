@@ -9,6 +9,7 @@ comptime {
     _ = @import("report.zig");
     _ = @import("analysis.zig");
     _ = @import("analysis_probe.zig");
+    _ = @import("diagnostics.zig");
     _ = @import("ops.zig");
     _ = @import("cli.zig");
     _ = @import("store/duckdb.zig");
