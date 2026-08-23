@@ -39,6 +39,7 @@ semantic, or application state model is consequential and must be added here.
 | D28 | Protocol-v2 and event-schema-3 foundation | Separate bounded route, explicit identity quality, single-writer idempotency, transactional schema swap | Accepted for 1.0 issue #6 |
 | D29 | Typed metric-v2 analysis boundary | Separate closed domain model and finite bound-SQL compiler; preserve metric-v1 reports | Accepted for 1.0 issue #24 |
 | D30 | Traffic-quality compatibility diagnostics | Add a versioned bounded diagnostic bundle aligned to the frozen UTC Overview range | Accepted for 1.0 issue #66 |
+| D31 | Stored self-exclusion and non-bot inflation | Prerender/localhost guards, keyed ephemeral visitor-days, and stored bounded exclusion sources | Accepted for 1.0 issue #67 |
 
 ## D01. MVP interface
 
@@ -1123,3 +1124,115 @@ real CLI and on-disk Turso/DuckDB files, canonical-person collapse, identity
 coverage, zero days, zero-engagement observation, identity mint dates, current
 bot accounting, unchanged metric-v1 output, server-rendered dashboard behavior,
 and Debug/ReleaseSafe execution.
+
+## D31. Store explicit self-exclusion and close non-bot inflation leaks
+
+**Status:** Accepted for Analytico 1.0 issue #67
+
+**Date:** 2026-08-23
+
+**Issues:** #67 and #68
+
+### Context
+
+Three independent behaviors inflate product traffic: speculative prerenders
+send a page view before activation, storage-unavailable pages mint a new
+anonymous UUID for every load and therefore a new compatibility visitor-day,
+and the operator cannot distinguish their own visits. The traffic-quality plan
+requires store-and-classify: an observed self-excluded event must not disappear
+merely because permanent `traffic_class` arrives in the following issue.
+
+The dashboard and measured site commonly have different origins, so the
+dashboard cannot directly write the site's localStorage. Network exclusions
+must use only transient trusted-proxy IP input, apply without restart, and
+never persist an observed raw IP or hash.
+
+### Stored-classification candidates
+
+| Candidate | Advantages | Costs and risks |
+| --- | --- | --- |
+| Drop self-excluded requests with a process counter | No event migration | Violates store-and-classify; history and diagnostics cannot inspect the events |
+| Reserve a value in `language`, `device_category`, or `properties_json` | Avoids a schema migration | Corrupts an unrelated semantic field and can lose the original device or property value |
+| Add a companion exclusion table | Preserves event columns and reasons | Adds a second event relation, join, lifecycle, and consistency surface for one short transition |
+| Add one closed `exclusion_source` byte to each event | Direct, queryable, lossless reason bits; one predicate in product queries | Advances event schema 4, so #68's permanent classifier becomes schema 5 |
+
+Select the one-byte field. Values are 0 none, 1 tracker self-flag, 2 configured
+network prefix, and 3 both. Migration 4 transactionally preserves every
+schema-3 field, stamps schema 4, initializes existing rows to zero, and proves
+the mapping before swap with bounded row-count and aggregate fingerprints over
+all preserved fields. All received events are inserted. Product queries
+require zero, while traffic-quality diagnostics report stored excluded events
+by source. #68 maps every nonzero value to `traffic_class=excluded`, preserves
+the matched exclusion reason in its versioned rule identifier, then removes the
+temporary field in event schema 5.
+
+The classification belongs to the first committed event. Protocol-v2's
+canonical digest adds a component for a true client self-flag; absent and false
+retain the pre-D31 digest so ordinary retries remain compatible across the
+upgrade, while changing an existing event to true conflicts. A duplicate replay
+from a different network does not mutate the already committed row or its
+receipt-context classification.
+
+### Tracker-control candidates
+
+| Candidate | Advantages | Costs and risks |
+| --- | --- | --- |
+| Dashboard writes localStorage directly | Minimal code | Impossible across origins under browser same-origin policy |
+| A fragment alone sets the durable flag | No dashboard script change | Anyone who copies the public site UUID could durably exclude another browser |
+| Site-bound fragment plus origin-checked opener handshake | No request or secret; runs in the site's first-party context | One small dashboard/tracker message island; self-exclusion intrinsically requires JavaScript |
+
+Select the handshake. The exact control fragment marks that page's envelope as
+self-excluded immediately. Because localStorage is origin-scoped, the dashboard
+exposes the same bounded control for every configured measured origin rather
+than inventing a primary-origin order. A durable set/clear is accepted only
+through `postMessage` from the tracker asset's collector/dashboard origin and
+the opening window, then the fragment is stripped. Ordinary native dashboard
+navigation and forms remain the baseline; this narrow control is JavaScript
+because localStorage itself is a browser API.
+
+### Recommendation
+
+- The current tracker returns before identity or network activity on localhost
+  and defers initial page-view/not-found behavior until a prerender activates.
+  A document never activated produces no visit because it was never observed.
+- The tracker stores `anl:<site>:x`. Flagged events still send with bounded
+  `self_excluded:true`; no fingerprint or configuration fetch is added.
+- Storage-unavailable v2 rows retain their random page-lifetime anonymous and
+  session IDs, but their metric-v1 compatibility visitor-day uses the existing
+  keyed site/date/network-prefix/coarse-client derivation.
+- Metadata migration 4 stores at most 16 canonical IPv4 `/24` or IPv6 `/48`
+  rows per site. The collector combines the tracker and network bits after
+  exact site/origin validation and before insertion. Raw IP is transient.
+- Excluded rows never consume the visitor-day or session-start boundary needed
+  by a later eligible row. Product base relations filter exclusion before
+  visitor, session, identity, property, goal, funnel, and analysis semantics.
+  An excluded identify row remains stored but does not create an identity link;
+  a later eligible row therefore cannot inherit product identity from it.
+- Authenticated add/delete forms use POST/303/GET, CSRF, exact dashboard Origin,
+  and an immediate bounded site-policy refresh. There is no runtime network
+  call, CIDR data file, background process, or arbitrary range engine.
+
+### Consequences
+
+- Metric-v1 report bytes change only where stored self-excluded rows are
+  deliberately omitted. Existing nonexcluded rows and semantics remain exact.
+- Traffic-quality diagnostics advance to version 2 and retain exclusion counts
+  even though product reports omit those rows.
+- Event and metadata schema 4 require a verified pre-migration pair for
+  rollback. Deployment stops the sole writer, backs up, migrates, verifies, and
+  starts one exact release artifact.
+- #68 is renumbered to event schema 5 and must consume every temporary marker
+  before dropping `exclusion_source`. #69 retains the no-fingerprinting and
+  no-runtime-network boundaries.
+
+**Affected contracts:** `BOT_DETECTION_1.0.md`, `METRIC_SEMANTICS_V2.md`,
+`PROTOCOL.md`, `ARCHITECTURE.md`, `DATA_MODEL.md`, and `OPERATIONS.md`.
+
+### Acceptance evidence
+
+Issue #67 must prove real Chromium prerender activation/non-activation,
+localhost silence, two storage-blocked page loads collapsing to one
+visitor-day, dashboard-to-site flag set/clear, stored-but-product-excluded
+flagged traffic, configured network and combined source rows, immediate policy
+refresh, raw-IP absence, exact schema-3 upgrade preservation, backup/rollback,
+and Debug/ReleaseSafe gates through the real executable and on-disk stores.

@@ -444,7 +444,7 @@ fn siteCommand(
         const site_id = try store.siteIdBySlug(allocator, args[4]);
         try output.print(
             \\<!-- Analytico tracker -->
-            \\<script defer src="{s}/tracker.81c3b777.js" data-site="{s}" data-spa="auto" data-engagement="true"></script>
+            \\<script defer src="{s}/tracker.6de111c9.js" data-site="{s}" data-spa="auto" data-engagement="true"></script>
             \\<noscript>
             \\  <img alt="" width="1" height="1" src="{s}/v1/p.gif?site={s}&amp;path=%2F">
             \\</noscript>

@@ -28,11 +28,15 @@ const tracker_v2_sessions_gzip = @embedFile("tracker.78135195.min.js.gz");
 const tracker_v2_identify = @embedFile("tracker.d9e94247.min.js");
 const tracker_v2_identify_br = @embedFile("tracker.d9e94247.min.js.br");
 const tracker_v2_identify_gzip = @embedFile("tracker.d9e94247.min.js.gz");
+const tracker_v2_spa = @embedFile("tracker.81c3b777.min.js");
+const tracker_v2_spa_br = @embedFile("tracker.81c3b777.min.js.br");
+const tracker_v2_spa_gzip = @embedFile("tracker.81c3b777.min.js.gz");
 const tracker_v1_path = "/tracker.aef65945.js";
 const tracker_v2_anonymous_path = "/tracker.fb64c486.js";
 const tracker_v2_sessions_path = "/tracker.78135195.js";
 const tracker_v2_identify_path = "/tracker.d9e94247.js";
-const tracker_v2_path = "/tracker.81c3b777.js";
+const tracker_v2_spa_path = "/tracker.81c3b777.js";
+const tracker_v2_path = "/tracker.6de111c9.js";
 const transparent_gif =
     "GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff" ++
     "!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00" ++
@@ -136,11 +140,13 @@ pub fn run(
         .metadata = &metadata,
         .events = &event_store,
         .policies = policies,
+        .policy_arena = &policy_arena,
         .master_key = key_bytes[0..32].*,
         .meta_path = options.meta_path,
         .event_path = options.event_path,
         .key_path = options.key_path,
         .report_timeout_ms = options.report_timeout_ms,
+        .zoneinfo_root = options.zoneinfo_root,
         .auth_policy = auth_policy,
     };
     defer std.crypto.secureZero(u8, &context.master_key);
@@ -195,7 +201,7 @@ pub fn run(
             "\"rejected\":{d},\"rate_limited\":{d},\"bots\":{d}," ++
             "\"unknown_country\":{d},\"unknown_client\":{d}," ++
             "\"duplicates\":{d},\"conflicts\":{d},\"write_failures\":{d}," ++
-            "\"request_failures\":{d}}}\n",
+            "\"request_failures\":{d},\"excluded\":{d}}}\n",
         .{
             context.counters.accepted,
             context.counters.rejected,
@@ -207,6 +213,7 @@ pub fn run(
             context.counters.conflicts,
             context.counters.write_failures,
             context.counters.request_failures,
+            context.counters.excluded,
         },
     );
 }
@@ -222,6 +229,7 @@ const Counters = struct {
     conflicts: u64 = 0,
     write_failures: u64 = 0,
     request_failures: u64 = 0,
+    excluded: u64 = 0,
 };
 
 const Context = struct {
@@ -230,11 +238,13 @@ const Context = struct {
     metadata: *meta.Store,
     events: *events.Store,
     policies: []const RuntimePolicy,
+    policy_arena: *std.heap.ArenaAllocator,
     master_key: [32]u8,
     meta_path: []const u8,
     event_path: []const u8,
     key_path: []const u8,
     report_timeout_ms: u32,
+    zoneinfo_root: []const u8,
     auth_policy: ?auth_store.Policy,
     auth_limiter: auth_http.Limiter = .{},
     limiter: rate_limit.Limiter = .{},
@@ -360,6 +370,10 @@ fn handle(context: *Context, stream: std.Io.net.Stream) !void {
             .csrf_token = session.csrf_token,
             .origin = policy.origin,
             .report_timeout_ms = context.report_timeout_ms,
+            .policy_refresh = .{
+                .context = context,
+                .apply = refreshCollectionPolicies,
+            },
         }, request, output) catch |err| switch (err) {
             error.DuplicateHeader => {
                 try writeError(output, 400);
@@ -374,6 +388,7 @@ fn handle(context: *Context, stream: std.Io.net.Stream) !void {
         std.mem.eql(u8, path, tracker_v2_anonymous_path) or
         std.mem.eql(u8, path, tracker_v2_sessions_path) or
         std.mem.eql(u8, path, tracker_v2_identify_path) or
+        std.mem.eql(u8, path, tracker_v2_spa_path) or
         std.mem.eql(u8, path, tracker_v2_path))
     {
         if (!std.mem.eql(u8, request.method, "GET")) {
@@ -383,11 +398,13 @@ fn handle(context: *Context, stream: std.Io.net.Stream) !void {
                 std.mem.eql(u8, path, tracker_v2_anonymous_path) or
                 std.mem.eql(u8, path, tracker_v2_sessions_path) or
                 std.mem.eql(u8, path, tracker_v2_identify_path) or
+                std.mem.eql(u8, path, tracker_v2_spa_path) or
                 std.mem.eql(u8, path, tracker_v2_path);
             const use_v1 = std.mem.eql(u8, path, tracker_v1_path);
             const use_v2_anonymous = std.mem.eql(u8, path, tracker_v2_anonymous_path);
             const use_v2_sessions = std.mem.eql(u8, path, tracker_v2_sessions_path);
             const use_v2_identify = std.mem.eql(u8, path, tracker_v2_identify_path);
+            const use_v2_spa = std.mem.eql(u8, path, tracker_v2_spa_path);
             const encoding = request.header("accept-encoding") catch null;
             const use_brotli = if (encoding) |value|
                 acceptsEncoding(value, "br")
@@ -438,6 +455,8 @@ fn handle(context: *Context, stream: std.Io.net.Stream) !void {
                     if (use_brotli) tracker_v2_sessions_br else if (use_gzip) tracker_v2_sessions_gzip else tracker_v2_sessions
                 else if (use_v2_identify)
                     if (use_brotli) tracker_v2_identify_br else if (use_gzip) tracker_v2_identify_gzip else tracker_v2_identify
+                else if (use_v2_spa)
+                    if (use_brotli) tracker_v2_spa_br else if (use_gzip) tracker_v2_spa_gzip else tracker_v2_spa
                 else if (use_brotli)
                     tracker_br
                 else if (use_gzip)
@@ -533,7 +552,7 @@ fn postEvent(
         allocator,
         request,
         prepared,
-        policy.timezone,
+        policy,
     ) catch |err| {
         try reject(
             context,
@@ -642,7 +661,7 @@ fn postEventV2(
         request,
         prepared,
         now,
-        policy.timezone,
+        policy,
     ) catch |err| {
         const status: u16 = switch (err) {
             error.EventIdConflict,
@@ -707,7 +726,7 @@ fn pixelEvent(
         allocator,
         request,
         prepared,
-        policy.timezone,
+        policy,
     ) catch |err| {
         try reject(
             context,
@@ -736,14 +755,9 @@ fn acceptEvent(
     allocator: std.mem.Allocator,
     request: request_mod.Request,
     prepared: collect.Prepared,
-    site_timezone: timezone.Zone,
+    policy: RuntimePolicy,
 ) !bool {
-    const client_ip = (try request.header("x-forwarded-for")) orelse "127.0.0.1";
-    if (client_ip.len == 0 or client_ip.len > 64 or
-        std.mem.findScalar(u8, client_ip, ',') != null)
-    {
-        return error.InvalidForwardedIp;
-    }
+    const client_ip = try requestClientIp(request);
     const now = try currentTime();
     const rate_key = domain.networkPrefixHash(prepared.site_id, client_ip) catch
         return error.InvalidForwardedIp;
@@ -775,7 +789,11 @@ fn acceptEvent(
         coarse,
     );
     const event_id = try domain.randomUuid(context.io);
-    const local = site_timezone.localAt(now.seconds) catch
+    const exclusion_source = domain.ExclusionSource.classify(
+        false,
+        try policy.metadata.excludesNetwork(client_ip),
+    );
+    const local = policy.timezone.localAt(now.seconds) catch
         return error.TimezoneUnavailable;
     context.events.insert(.{
         .event_id = &event_id,
@@ -799,12 +817,14 @@ fn acceptEvent(
         .utm_term = prepared.utm_term,
         .utm_content = prepared.utm_content,
         .properties_json = prepared.properties_json,
+        .exclusion_source = exclusion_source,
     }) catch {
         context.events_healthy = false;
         context.counters.write_failures += 1;
         return error.EventWriteFailed;
     };
     context.counters.accepted += 1;
+    if (exclusion_source.isExcluded()) context.counters.excluded += 1;
     return true;
 }
 
@@ -814,8 +834,9 @@ fn acceptEventV2(
     request: request_mod.Request,
     prepared: collect.PreparedV2,
     now: CurrentTime,
-    site_timezone: timezone.Zone,
+    policy: RuntimePolicy,
 ) !void {
+    const client_ip = try requestClientIp(request);
     const user_agent = (try request.header("user-agent")) orelse "";
     if (user_agent.len > 1024) return error.InvalidUserAgent;
     const client = classify.userAgent(user_agent);
@@ -829,12 +850,30 @@ fn acceptEventV2(
     {
         context.counters.unknown_client += 1;
     }
-    const visitor_day_id = try domain.deriveVisitorDayCompatibilityId(
-        prepared.site_id,
-        &now.date,
-        prepared.anonymous_id,
+    const coarse = try std.fmt.allocPrint(allocator, "{s}|{s}|{s}", .{
+        client.browser,
+        client.os,
+        client.device,
+    });
+    const visitor_day_id = if (prepared.identity_quality == 2)
+        try domain.deriveVisitorDayId(
+            context.master_key,
+            prepared.site_id,
+            &now.date,
+            client_ip,
+            coarse,
+        )
+    else
+        try domain.deriveVisitorDayCompatibilityId(
+            prepared.site_id,
+            &now.date,
+            prepared.anonymous_id,
+        );
+    const exclusion_source = domain.ExclusionSource.classify(
+        prepared.self_excluded,
+        try policy.metadata.excludesNetwork(client_ip),
     );
-    const local = site_timezone.localAt(now.seconds) catch
+    const local = policy.timezone.localAt(now.seconds) catch
         return error.TimezoneUnavailable;
     const outcome = context.events.insertV2(allocator, .{
         .event_id = prepared.event_id,
@@ -872,6 +911,7 @@ fn acceptEventV2(
         .max_scroll_depth = prepared.max_scroll_depth,
         .visitor_day_id = visitor_day_id,
         .event_payload_digest = &prepared.event_payload_digest,
+        .exclusion_source = exclusion_source,
     }) catch |err| switch (err) {
         error.EventIdConflict,
         error.IdentityConflict,
@@ -887,7 +927,10 @@ fn acceptEventV2(
         },
     };
     switch (outcome) {
-        .inserted => context.counters.accepted += 1,
+        .inserted => {
+            context.counters.accepted += 1;
+            if (exclusion_source.isExcluded()) context.counters.excluded += 1;
+        },
         .duplicate => context.counters.duplicates += 1,
     }
 }
@@ -898,15 +941,22 @@ fn eventRateAllowed(
     site_id: []const u8,
     now_seconds: i64,
 ) !bool {
+    const client_ip = try requestClientIp(request);
+    const rate_key = domain.networkPrefixHash(site_id, client_ip) catch
+        return error.InvalidForwardedIp;
+    return context.limiter.allow(rate_key, now_seconds);
+}
+
+fn requestClientIp(request: request_mod.Request) ![]const u8 {
     const client_ip = (try request.header("x-forwarded-for")) orelse "127.0.0.1";
     if (client_ip.len == 0 or client_ip.len > 64 or
         std.mem.findScalar(u8, client_ip, ',') != null)
     {
         return error.InvalidForwardedIp;
     }
-    const rate_key = domain.networkPrefixHash(site_id, client_ip) catch
+    _ = std.Io.net.IpAddress.parse(client_ip, 0) catch
         return error.InvalidForwardedIp;
-    return context.limiter.allow(rate_key, now_seconds);
+    return client_ip;
 }
 
 fn pathsReady(context: *Context) bool {
@@ -1025,6 +1075,26 @@ fn loadPolicies(
         );
     }
     return policies.toOwnedSlice(allocator);
+}
+
+fn refreshCollectionPolicies(value: *anyopaque) !void {
+    const context: *Context = @ptrCast(@alignCast(value));
+    var replacement = std.heap.ArenaAllocator.init(context.allocator);
+    errdefer replacement.deinit();
+    const policies = try loadPolicies(
+        replacement.allocator(),
+        context.io,
+        context.metadata,
+        context.zoneinfo_root,
+    );
+    const auth_policy = try (auth_store.Store{ .metadata = context.metadata }).policy(
+        replacement.allocator(),
+    );
+    var previous = context.policy_arena.*;
+    context.policy_arena.* = replacement;
+    context.policies = policies;
+    context.auth_policy = auth_policy;
+    previous.deinit();
 }
 
 fn findPolicy(

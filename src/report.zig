@@ -3,7 +3,7 @@ const domain = @import("domain.zig");
 
 pub const metric_version: u8 = 1;
 pub const traffic_quality_metric_version: u8 = 2;
-pub const traffic_quality_version: u8 = 1;
+pub const traffic_quality_version: u8 = 2;
 pub const default_limit: u16 = 25;
 pub const maximum_limit: u16 = 100;
 pub const maximum_range_days: u16 = 400;
@@ -246,6 +246,11 @@ pub const IdentityQualityRow = struct {
     visitor_days: i64,
 };
 
+pub const ExclusionSourceRow = struct {
+    source: domain.ExclusionSource,
+    events: i64,
+};
+
 pub const TrafficQualityDay = struct {
     date: []u8,
     new_anonymous_identities: i64,
@@ -261,6 +266,7 @@ pub const TrafficQuality = struct {
     visitor_days: i64,
     zero_engagement_single_event_sessions: i64,
     identity_quality: [3]IdentityQualityRow,
+    exclusion_sources: [3]ExclusionSourceRow,
     days: []TrafficQualityDay,
     next_page: ?u32,
 };
@@ -377,6 +383,10 @@ fn renderTable(
                 try output.print("{s}\t{d}\t{d}\n", .{
                     row.quality.name(), row.events, row.visitor_days,
                 });
+            }
+            try output.writeAll("exclusion_source\tevents\n");
+            for (quality.exclusion_sources) |row| {
+                try output.print("{s}\t{d}\n", .{ @tagName(row.source), row.events });
             }
             try output.writeAll("date\tnew_anonymous_identities\tbot_events\n");
             for (quality.days) |day| {
@@ -508,6 +518,13 @@ fn renderJson(
                     row.events, row.visitor_days,
                 });
             }
+            try output.writeAll("],\"exclusion_sources\":[");
+            for (quality.exclusion_sources, 0..) |row, index| {
+                if (index != 0) try output.writeByte(',');
+                try output.writeAll("{\"source\":");
+                try jsonString(output, @tagName(row.source));
+                try output.print(",\"events\":{d}}}", .{row.events});
+            }
             try output.writeAll("],\"days\":[");
             for (quality.days, 0..) |day, index| {
                 if (index != 0) try output.writeByte(',');
@@ -626,6 +643,14 @@ fn renderCsv(
                     row.quality.name(),
                     row.events,
                     row.visitor_days,
+                });
+            }
+            for (quality.exclusion_sources) |row| {
+                try output.print("{d},{d},exclusion_source,{s},{d},,,,,,,,,\n", .{
+                    traffic_quality_metric_version,
+                    traffic_quality_version,
+                    @tagName(row.source),
+                    row.events,
                 });
             }
             for (quality.days) |day| {

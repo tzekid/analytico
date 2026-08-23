@@ -11,7 +11,7 @@ if (!collector || !site || !Number.isInteger(fixturePort)) {
   throw new Error("usage: node e2e-m2-browser.cjs <collector> <site-id> <fixture-port>");
 }
 
-const fixtureOrigin = `http://127.0.0.1:${fixturePort}`;
+const fixtureOrigin = `http://127.0.0.2:${fixturePort}`;
 const html = (javaScriptPath, trackerPath) => `<!doctype html>
 <html lang="en">
 <meta charset="utf-8">
@@ -24,7 +24,7 @@ const html = (javaScriptPath, trackerPath) => `<!doctype html>
 const server = http.createServer((request, response) => {
   const requestPath = request.url || "/";
   const trackerPath = requestPath.startsWith("/v2-browser-")
-    ? "/tracker.81c3b777.js"
+    ? "/tracker.6de111c9.js"
     : "/tracker.aef65945.js";
   response.writeHead(200, {
     "Content-Type": "text/html; charset=utf-8",
@@ -36,7 +36,7 @@ const server = http.createServer((request, response) => {
 async function listen() {
   await new Promise((resolve, reject) => {
     server.once("error", reject);
-    server.listen(fixturePort, "127.0.0.1", resolve);
+    server.listen(fixturePort, "0.0.0.0", resolve);
   });
 }
 

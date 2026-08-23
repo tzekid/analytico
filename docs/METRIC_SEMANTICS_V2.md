@@ -40,6 +40,12 @@ This additive metric-v2 diagnostic does not change ordinary `AnalysisQuery`
 site-local semantics or any existing metric-v1 output. A later Overview
 migration must move both displayed values to one site-local range together.
 
+For new protocol-v2 rows marked `identity_quality=ephemeral`, D31 derives the
+metric-v1 compatibility visitor-day from the same keyed site, receipt-UTC date,
+normalized network prefix, and coarse client categories as protocol v1. The
+page-lifetime anonymous UUID remains stored and visible as ephemeral identity,
+but no longer makes every storage-blocked page load a distinct visitor-day.
+
 ### New and returning visitors
 
 New visitors are compatible persistent people whose first accepted meaningful
@@ -55,21 +61,22 @@ session crossing a range boundary is included when activity occurs in range.
 
 Page views divided by sessions, with zero-safe formatting.
 
-## Traffic-quality diagnostics version 1
+## Traffic-quality diagnostics version 2
 
-The bounded `traffic-quality` report is measure-only. It stores no new data,
-changes no classifier, excludes no additional event, and makes no network or
-runtime-data-file request. Until schema 4 introduces `traffic_class`, the
-current `device_category = 'bot'` verdict is the only bot boundary and its
-limitations remain visible.
+The bounded `traffic-quality` report makes no network or runtime-data-file
+request. Version 1 was measure-only. Version 2 retains those observations and
+adds D31's visible self-exclusion accounting. Until event schema 5 introduces
+the permanent `traffic_class`, the current `device_category = 'bot'` verdict is
+the only bot boundary and its limitations remain visible.
 
 For the inclusive received-UTC report range, it exposes:
 
 - distinct people and their persistent/ephemeral/legacy coverage as defined
   above;
-- non-bot accepted events and metric-v1 visitor-days split by raw
-  `identity_quality` (`persistent`, `ephemeral`, `legacy_daily`); bot events are
-  reported separately so they do not silently overlap the quality split;
+- non-bot, non-self-excluded accepted events and metric-v1 visitor-days split
+  by raw `identity_quality` (`persistent`, `ephemeral`, `legacy_daily`); bot
+  events are reported separately so they do not silently overlap the quality
+  split;
 - non-bot sessions with a meaningful event in range and exactly one meaningful
   page-view or custom event across the whole stored session, total
   `engagement_ms = 0`, and maximum `max_scroll_depth = 0`; this is a diagnostic
@@ -78,6 +85,18 @@ For the inclusive received-UTC report range, it exposes:
   meaningful event for each persistent or ephemeral anonymous ID over the
   site's full history, excluding migrated legacy daily IDs; and
 - all currently classified bot events per receipt UTC day.
+
+It also reports stored events by the closed event-schema-4
+`exclusion_source`: tracker self-flag, configured network prefix, or both.
+Self-excluded rows remain in DuckDB and in diagnostics but are ineligible for
+product visitor, person, session, page, event, goal, funnel, property, and
+analysis metrics. The operator choice is not a bot verdict and does not weaken
+the positive-human-evidence veto used by later heuristic classification.
+An excluded row never consumes the persisted visitor-day or session-start
+boundary needed by a later eligible row with the same compatibility identity
+or client session. An excluded identify row does not create an identity link,
+so later eligible traffic cannot inherit product identity from an excluded
+observation.
 
 Every date in the requested range appears, including zero days. The request is
 limited to 400 dates and one DuckDB deadline; CLI and dashboard results page
@@ -101,5 +120,7 @@ combined and no foreign-exchange conversion occurs.
 
 Bots are excluded from product visitor, session, and audience metrics and
 counted in diagnostics. Classification is versioned by the governing traffic
-class contract. #66 does not reinterpret history; #68 owns the schema and
-classifier change.
+class contract. #66 does not reinterpret history. D31's temporary event schema
+4 stores self-exclusion explicitly; #68 owns event schema 5 and migrates every
+nonzero `exclusion_source` to permanent `traffic_class=excluded` before
+removing the temporary field.

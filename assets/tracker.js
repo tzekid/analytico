@@ -3,10 +3,18 @@
   const site = script && script.dataset.site;
   if (!site) return;
   const endpoint = new URL("/v2/event", script.src).href;
+  const collectorOrigin = new URL(script.src).origin;
+  const host = location.hostname.toLowerCase();
+  if (host === "localhost" || host.endsWith(".localhost") ||
+      host === "127.0.0.1" || host === "::1" || host === "[::1]") {
+    window.analytico = { track() {}, identify() {}, reset() {} };
+    return;
+  }
   const prefix = "anl:" + site;
   const anonymousKey = prefix + ":a";
   const sessionKey = prefix + ":s";
   const identifiedKey = prefix + ":u";
+  const exclusionKey = prefix + ":x";
   const idleLimitMs = 30 * 60 * 1000;
   const activeLimitMs = 60 * 1000;
   const engagementIntervalMs = 15 * 1000;
@@ -54,6 +62,46 @@
   function remove(key) {
     try {
       localStorage.removeItem(key);
+    } catch (_) {}
+  }
+
+  const controlPrefix = "#analytico-self-exclusion=";
+  let controlAction = "";
+  if (location.hash.startsWith(controlPrefix)) {
+    const parts = location.hash.slice(controlPrefix.length).split(":");
+    if (parts.length === 2 && parts[1] === site &&
+        (parts[0] === "on" || parts[0] === "off")) {
+      controlAction = parts[0];
+    }
+  }
+  let selfExcluded = controlAction !== "" || read(exclusionKey) === "1";
+
+  if (controlAction && window.opener) {
+    addEventListener("message", (event) => {
+      try {
+        const data = event.data;
+        if (event.origin !== collectorOrigin || event.source !== window.opener ||
+            !data || data.analytico !== "self-exclusion-apply" ||
+            data.site !== site || data.action !== controlAction) return;
+        if (controlAction === "on") {
+          write(exclusionKey, "1");
+        } else {
+          remove(exclusionKey);
+        }
+        history.replaceState(history.state, "", location.pathname + location.search);
+        window.opener.postMessage({
+          analytico: "self-exclusion-applied",
+          site,
+          action: controlAction,
+        }, collectorOrigin);
+      } catch (_) {}
+    });
+    try {
+      window.opener.postMessage({
+        analytico: "self-exclusion-ready",
+        site,
+        action: controlAction,
+      }, collectorOrigin);
     } catch (_) {}
   }
 
@@ -126,6 +174,7 @@
   let identityQuality = "persistent";
   let anonymousId = "";
   let session = null;
+  let activated = document.prerendering !== true;
 
   function persistSession() {
     if (!session) return 0;
@@ -177,9 +226,10 @@
     }
   }
 
-  loadIdentity();
+  if (activated) loadIdentity();
 
   function send(type, extra, page) {
+    if (!activated) return "";
     if (!anonymousId || !session) loadIdentity();
     if (!anonymousId || !session) return "";
     const eventId = uuid();
@@ -212,6 +262,7 @@
         session_id: session.id,
         sequence,
         occurred_at_ms: now,
+        self_excluded: selfExcluded || undefined,
         type,
         page: page || currentPage(),
         referrer: attributed ? document.referrer || undefined : undefined,
@@ -311,7 +362,7 @@
     if (engagementEnabled) emitEngagement(trackedPage);
     trackedPage = next;
     if (engagementEnabled) resetPageEngagement();
-    send("pageview", undefined, trackedPage);
+    if (activated) send("pageview", undefined, trackedPage);
   }
 
   if (spaEnabled) {
@@ -422,6 +473,25 @@
     identify,
     reset,
   };
-  send("pageview", undefined, trackedPage);
-  if (notFoundEnabled) send("event", { name: "not_found" }, trackedPage);
+  function initialEvents() {
+    if (!activated) return;
+    send("pageview", undefined, trackedPage);
+    if (notFoundEnabled) send("event", { name: "not_found" }, trackedPage);
+  }
+
+  if (activated) {
+    initialEvents();
+  } else {
+    document.addEventListener("prerenderingchange", () => {
+      try {
+        if (document.prerendering === true) return;
+        activated = true;
+        loadIdentity();
+        trackedPage = currentPage();
+        visible = document.visibilityState !== "hidden";
+        if (engagementEnabled) resetPageEngagement();
+        initialEvents();
+      } catch (_) {}
+    }, { once: true });
+  }
 })();

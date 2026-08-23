@@ -32,11 +32,14 @@ pub const Page = struct {
     overview_quality: ?report.TrafficQuality = null,
     goals: []const meta.Goal,
     funnels: []const meta.Funnel,
+    self_exclusion_origins: []const []u8,
+    excluded_networks: []const []u8,
     csrf_token: []const u8,
     notice: []const u8 = "",
     form_error: []const u8 = "",
     goal_draft: GoalDraft = .{},
     funnel_draft: FunnelDraft = .{},
+    network_draft: []const u8 = "",
 };
 
 pub const ErrorPage = struct {

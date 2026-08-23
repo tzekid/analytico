@@ -8,7 +8,9 @@ pub const htmx = @embedFile("htmx_js");
 pub const htmx_gzip = @embedFile("htmx_gzip");
 pub const htmx_path = "/admin/htmx.28fae7bb.js";
 pub const dashboard_js = @embedFile("dashboard.js");
-pub const dashboard_js_path = "/admin/dashboard.5f88a716.js";
+pub const dashboard_js_previous = @embedFile("dashboard.5f88a716.js");
+pub const dashboard_js_previous_path = "/admin/dashboard.5f88a716.js";
+pub const dashboard_js_path = "/admin/dashboard.9c3ac396.js";
 
 const html_headers =
     "Cache-Control: private, no-store, max-age=0\r\n" ++
@@ -71,6 +73,7 @@ pub fn page(output: *std.Io.Writer, value: model.Page) !void {
     }
     try output.writeAll("</section>");
     try definitions(output, value);
+    try selfExclusions(output, value);
     try output.writeAll("</main>");
     try foot(output);
 }
@@ -327,7 +330,7 @@ fn renderTrafficQuality(
     }
     try output.writeAll(
         "<section aria-labelledby=\"traffic-quality-heading\"><h3 id=\"traffic-quality-heading\">Traffic quality</h3>" ++
-            "<p class=\"muted\">Measure-only diagnostics. Bot events are shown separately; no additional event is excluded.</p>" ++
+            "<p class=\"muted\">Stored diagnostics. Bot and explicit self-exclusion are visible separately; self-excluded events stay stored but do not enter product metrics.</p>" ++
             "<ul class=\"metrics\">",
     );
     try metric(output, "Persistent people", quality.persistent_people);
@@ -352,6 +355,16 @@ fn renderTrafficQuality(
         try output.print("</td><td>{d}</td><td>{d}</td></tr>", .{
             row.events, row.visitor_days,
         });
+    }
+    try output.writeAll(
+        "</tbody></table></div><h4>Stored self-exclusion</h4>" ++
+            "<div class=\"table-scroll\"><table><thead><tr>" ++
+            "<th>Source</th><th>Events</th></tr></thead><tbody>",
+    );
+    for (quality.exclusion_sources) |row| {
+        try output.writeAll("<tr><td>");
+        try text(output, humanize(@tagName(row.source)));
+        try output.print("</td><td>{d}</td></tr>", .{row.events});
     }
     try output.writeAll(
         "</tbody></table></div><h4>Daily diagnostics</h4>" ++
@@ -463,6 +476,84 @@ fn definitions(output: *std.Io.Writer, value: model.Page) !void {
     try output.writeAll("\"></label><label>Steps, one <code>kind=value</code> per line<textarea name=\"steps\" maxlength=\"8192\" required>");
     try text(output, value.funnel_draft.steps);
     try output.writeAll("</textarea></label><button type=\"submit\">Add funnel</button></form></section></div></details>");
+}
+
+fn selfExclusions(output: *std.Io.Writer, value: model.Page) !void {
+    const site = value.selected_site.?;
+    try output.writeAll(
+        "<details class=\"management\"><summary><span>Self-visit exclusion</span><span class=\"muted\">",
+    );
+    try output.print("{d} network prefixes</span></summary><div class=\"split\">", .{
+        value.excluded_networks.len,
+    });
+    try output.writeAll(
+        "<section class=\"panel\"><h2>This browser</h2>" ++
+            "<p>Browser storage is origin-scoped. Set or clear the flag on each measured origin you use. " ++
+            "This control requires JavaScript; flagged events remain stored in traffic-quality diagnostics.</p>" ++
+            "<ul class=\"definition-list\">",
+    );
+    for (value.self_exclusion_origins) |origin| {
+        try output.writeAll("<li><code>");
+        try text(output, origin);
+        try output.writeAll(
+            "</code> <a class=\"button-secondary\" hx-boost=\"false\" target=\"_blank\" data-self-exclusion=\"on\" data-site=\"",
+        );
+        try attribute(output, site.id);
+        try output.writeAll("\" data-origin=\"");
+        try attribute(output, origin);
+        try output.writeAll("\" href=\"");
+        try attribute(output, origin);
+        try output.writeAll("/#analytico-self-exclusion=on:");
+        try attribute(output, site.id);
+        try output.writeAll(
+            "\">Exclude this browser</a> " ++
+                "<a hx-boost=\"false\" target=\"_blank\" data-self-exclusion=\"off\" data-site=\"",
+        );
+        try attribute(output, site.id);
+        try output.writeAll("\" data-origin=\"");
+        try attribute(output, origin);
+        try output.writeAll("\" href=\"");
+        try attribute(output, origin);
+        try output.writeAll("/#analytico-self-exclusion=off:");
+        try attribute(output, site.id);
+        try output.writeAll("\">Include this browser again</a></li>");
+    }
+    try output.writeAll(
+        "</ul></section>" ++
+            "<section class=\"panel\"><h2>Network prefixes</h2>" ++
+            "<p>Store at most 16 exact IPv4 /24 or IPv6 /48 prefixes. Raw visitor IPs are never stored.</p>" ++
+            "<ul class=\"definition-list\">",
+    );
+    for (value.excluded_networks) |network| {
+        try output.writeAll("<li><code>");
+        try text(output, network);
+        try output.writeAll(
+            "</code> <form class=\"inline\" method=\"post\" hx-boost=\"true\" hx-sync=\"this:drop\" action=\"/admin/exclusions/networks/delete\">",
+        );
+        try formCommon(output, value);
+        try output.writeAll("<input type=\"hidden\" name=\"network\" value=\"");
+        try attribute(output, network);
+        try output.writeAll(
+            "\"><button class=\"danger\" type=\"submit\">Delete</button></form></li>",
+        );
+    }
+    if (value.excluded_networks.len == 0) {
+        try output.writeAll("<li>No network exclusions yet.</li>");
+    }
+    try output.writeAll(
+        "</ul><h3>Add network prefix</h3>" ++
+            "<form method=\"post\" action=\"/admin/exclusions/networks\" hx-boost=\"true\" hx-sync=\"this:drop\">",
+    );
+    try formCommon(output, value);
+    try output.writeAll(
+        "<label>IP address or fixed prefix<input name=\"network\" maxlength=\"64\" " ++
+            "placeholder=\"203.0.113.0/24\" required value=\"",
+    );
+    try attribute(output, value.network_draft);
+    try output.writeAll(
+        "\"></label><button type=\"submit\">Add network exclusion</button></form>" ++
+            "</section></div></details>",
+    );
 }
 
 fn deleteForm(

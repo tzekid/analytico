@@ -16,6 +16,16 @@ pub const Dependencies = struct {
     csrf_token: []const u8,
     origin: []const u8,
     report_timeout_ms: u32,
+    policy_refresh: ?PolicyRefresh = null,
+};
+
+pub const PolicyRefresh = struct {
+    context: *anyopaque,
+    apply: *const fn (*anyopaque) anyerror!void,
+
+    fn run(self: PolicyRefresh) !void {
+        try self.apply(self.context);
+    }
 };
 
 pub fn handle(
@@ -65,7 +75,9 @@ pub fn handle(
         }
         return true;
     }
-    if (std.mem.eql(u8, path, render.dashboard_js_path)) {
+    if (std.mem.eql(u8, path, render.dashboard_js_path) or
+        std.mem.eql(u8, path, render.dashboard_js_previous_path))
+    {
         if (!std.mem.eql(u8, request.method, "GET")) {
             try methodNotAllowed(output, "GET");
         } else {
@@ -75,7 +87,10 @@ pub fn handle(
                 "text/javascript; charset=utf-8",
                 "Cache-Control: private, max-age=31536000, immutable\r\n" ++
                     "X-Content-Type-Options: nosniff\r\n",
-                render.dashboard_js,
+                if (std.mem.eql(u8, path, render.dashboard_js_path))
+                    render.dashboard_js
+                else
+                    render.dashboard_js_previous,
             );
         }
         return true;
@@ -104,6 +119,8 @@ const Action = enum {
     delete_goal,
     add_funnel,
     delete_funnel,
+    add_excluded_network,
+    delete_excluded_network,
 };
 
 fn actionFor(path: []const u8) ?Action {
@@ -111,6 +128,12 @@ fn actionFor(path: []const u8) ?Action {
     if (std.mem.eql(u8, path, "/admin/goals/delete")) return .delete_goal;
     if (std.mem.eql(u8, path, "/admin/funnels")) return .add_funnel;
     if (std.mem.eql(u8, path, "/admin/funnels/delete")) return .delete_funnel;
+    if (std.mem.eql(u8, path, "/admin/exclusions/networks")) {
+        return .add_excluded_network;
+    }
+    if (std.mem.eql(u8, path, "/admin/exclusions/networks/delete")) {
+        return .delete_excluded_network;
+    }
     return null;
 }
 
@@ -260,12 +283,35 @@ fn postAction(
             dependencies.metadata,
             form,
         ),
+        .add_excluded_network => controller.addExcludedNetwork(
+            dependencies.allocator,
+            dependencies.metadata,
+            form,
+            now,
+        ),
+        .delete_excluded_network => controller.deleteExcludedNetwork(
+            dependencies.allocator,
+            dependencies.metadata,
+            form,
+        ),
     };
     operation catch |err| {
         if (!isFormError(err)) return err;
         try formErrorPage(dependencies, output, form, action);
         return;
     };
+    if (action == .add_excluded_network or action == .delete_excluded_network) {
+        if (dependencies.policy_refresh) |refresh| {
+            refresh.run() catch {
+                try writeError(output, .{
+                    .status = 503,
+                    .title = "Collection policy refresh failed",
+                    .message = "The network setting was stored, but the running collector could not refresh it. Restart the service before relying on the change.",
+                });
+                return;
+            };
+        }
+    }
     const site = try form.required("site");
     var location = std.Io.Writer.Allocating.init(dependencies.allocator);
     try location.writer.writeAll("/admin?site=");
@@ -280,6 +326,8 @@ fn postAction(
         .delete_goal => "goal-deleted",
         .add_funnel => "funnel-added",
         .delete_funnel => "funnel-deleted",
+        .add_excluded_network => "network-exclusion-added",
+        .delete_excluded_network => "network-exclusion-deleted",
     });
     var headers = std.Io.Writer.Allocating.init(dependencies.allocator);
     try headers.writer.print(
@@ -331,7 +379,11 @@ fn formErrorPage(
         });
         return;
     };
-    page.form_error = "The definition was not saved. Check its name, match kind, value, and step count.";
+    page.form_error = if (action == .add_excluded_network or
+        action == .delete_excluded_network)
+        "The network exclusion was not saved. Enter an IPv4 address or /24, or an IPv6 address or /48."
+    else
+        "The definition was not saved. Check its name, match kind, value, and step count.";
     if (action == .add_goal) {
         page.goal_draft = .{
             .name = form.required("name") catch "",
@@ -343,6 +395,8 @@ fn formErrorPage(
             .name = form.required("name") catch "",
             .steps = form.required("steps") catch "",
         };
+    } else if (action == .add_excluded_network) {
+        page.network_draft = form.required("network") catch "";
     }
     try writePage(output, 422, page);
 }
@@ -456,6 +510,12 @@ fn noticeMessage(target: []const u8) []const u8 {
     if (std.mem.indexOf(u8, target, "notice=funnel-deleted") != null) {
         return "Funnel deleted.";
     }
+    if (std.mem.indexOf(u8, target, "notice=network-exclusion-added") != null) {
+        return "Network exclusion added and collection policy refreshed.";
+    }
+    if (std.mem.indexOf(u8, target, "notice=network-exclusion-deleted") != null) {
+        return "Network exclusion deleted and collection policy refreshed.";
+    }
     return "";
 }
 
@@ -486,6 +546,9 @@ fn isFormError(err: anyerror) bool {
         error.InvalidFunnelStep,
         error.GoalNotFound,
         error.FunnelNotFound,
+        error.InvalidNetworkPrefix,
+        error.TooManyNetworkExclusions,
+        error.NetworkExclusionNotFound,
         error.Constraint,
         => true,
         else => std.mem.indexOf(u8, @errorName(err), "Constraint") != null,

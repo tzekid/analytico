@@ -51,22 +51,24 @@
   },
   "tracker_v2": {
     "protocol": 2,
-    "source_bytes": 13203,
-    "minified_bytes": 6266,
-    "brotli_bytes": 2386,
-    "gzip_bytes": 2649,
-    "minified_sha256": "81c3b7770d010bcb43d854b31fe0da85151f28017a2b469b4d34797e86d2b8df",
-    "brotli_sha256": "0b96413f8ffad259a45a780b1f5c8950f6416b22b0724800fb1b84e69e32f288",
-    "gzip_sha256": "f9de02eb5d8b588b9dfc48692065d4d9bd7d9236c2765a6bc5080282f0aba825",
-    "content_hash_path": "/tracker.81c3b777.js",
+    "source_bytes": 15592,
+    "minified_bytes": 7448,
+    "brotli_bytes": 2759,
+    "gzip_bytes": 3071,
+    "minifier": "terser 5.44.0 (acceptance tooling only)",
+    "minified_sha256": "6de111c93fb57ccef475d7716e1eff1f1eaa1367b6135d4c8910bb74ead141a6",
+    "brotli_sha256": "b5b9c7457f906e3720181e58d45f94fae52618c410c10e51d7a87ad31b441a2b",
+    "gzip_sha256": "99d5768b0bde4e50a2cb064748fbc1aed2c7c11d6c3f77cedaba872e6e2bfa7d",
+    "content_hash_path": "/tracker.6de111c9.js",
     "immutable_compatibility_paths": [
       "/tracker.fb64c486.js",
       "/tracker.78135195.js",
-      "/tracker.d9e94247.js"
+      "/tracker.d9e94247.js",
+      "/tracker.81c3b777.js"
     ],
-    "local_storage_keys_per_site": 3,
+    "local_storage_keys_per_site": 4,
     "third_party_dependencies": 0,
-    "status": "accepted 1.0 SPA, engagement, automatic-event, identity, and session tracker"
+    "status": "accepted 1.0 tracker with stored self-exclusion, SPA, engagement, automatic events, identity, and sessions"
   },
   "browser_e2e": {
     "playwright": "1.62.0",
@@ -91,11 +93,11 @@
     "status": "accepted M7 optional enhancement; exact core asset embedded and self-hosted"
   },
   "dashboard_enhancement": {
-    "source_bytes": 315,
-    "sha256": "5f88a716358d2672418fb55c4cc4f08389dfa1467304741787474b54e121cbde",
+    "source_bytes": 1802,
+    "sha256": "9c3ac3966ac0cbbd5dd36c5a38453acdaf16b93b058e8d2c5978fccffdf48cd5",
     "third_party_dependencies": 0,
-    "purpose": "submit the existing native site form on selection changes",
-    "status": "accepted U1 optional enhancement; delegated listener survives HTMX body swaps"
+    "purpose": "submit the native site form and complete the origin-bound self-exclusion handshake",
+    "status": "accepted optional enhancement; native forms remain the dashboard baseline"
   },
   "passcay": {
     "version": "3.1.0",

@@ -28,6 +28,7 @@ const identity_coverage_sql: [:0]const u8 =
     \\    AND e.site_local_date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
     \\    AND e.kind IN (1, 2)
     \\    AND e.device_category <> 'bot'
+    \\    AND e.exclusion_source = 0
     \\), people AS (
     \\  SELECT DISTINCT CASE
     \\    WHEN identity_quality = 1 AND linked_user_id != ''
@@ -49,7 +50,8 @@ const identity_coverage_sql: [:0]const u8 =
     \\       (SELECT CAST(min(site_local_date) AS VARCHAR)
     \\        FROM events
     \\        WHERE site_id = ? AND kind IN (1, 2)
-    \\          AND device_category <> 'bot' AND identity_quality = 1)
+    \\          AND device_category <> 'bot' AND exclusion_source = 0
+    \\          AND identity_quality = 1)
     \\FROM people
     \\WHERE canonical_key IS NOT NULL
 ;
@@ -60,7 +62,8 @@ const session_cte =
     \\    AND received_date_utc BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
     \\),
     \\filtered AS (
-    \\  SELECT * FROM filtered_all WHERE device_category <> 'bot'
+    \\  SELECT * FROM filtered_all
+    \\  WHERE device_category <> 'bot' AND exclusion_source = 0
     \\),
     \\sessioned AS (
     \\  SELECT * FROM filtered
@@ -98,13 +101,22 @@ const first_event_cte = session_cte ++
 
 const overview_sql: [:0]const u8 =
     \\SELECT
-    \\  count(*) FILTER (WHERE kind = 1 AND device_category <> 'bot'),
+    \\  count(*) FILTER (
+    \\    WHERE kind = 1 AND device_category <> 'bot' AND exclusion_source = 0
+    \\  ),
     \\  count(*) FILTER (
     \\    WHERE visitor_day_start AND device_category <> 'bot'
+    \\      AND exclusion_source = 0
     \\  ),
-    \\  count(*) FILTER (WHERE session_start AND device_category <> 'bot'),
-    \\  count(*) FILTER (WHERE kind = 2 AND device_category <> 'bot'),
-    \\  count(*) FILTER (WHERE device_category = 'bot')
+    \\  count(*) FILTER (
+    \\    WHERE session_start AND device_category <> 'bot' AND exclusion_source = 0
+    \\  ),
+    \\  count(*) FILTER (
+    \\    WHERE kind = 2 AND device_category <> 'bot' AND exclusion_source = 0
+    \\  ),
+    \\  count(*) FILTER (
+    \\    WHERE device_category = 'bot' AND exclusion_source = 0
+    \\  )
     \\FROM events
     \\WHERE site_id = ?
     \\  AND received_date_utc BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
@@ -125,6 +137,7 @@ const traffic_quality_sql: [:0]const u8 =
     \\  LEFT JOIN identity_links l
     \\    ON l.site_id = e.site_id AND l.anonymous_id = e.anonymous_id
     \\  WHERE e.kind IN (1, 2) AND e.device_category <> 'bot'
+    \\    AND e.exclusion_source = 0
     \\), people AS (
     \\  SELECT DISTINCT CASE
     \\    WHEN identity_quality = 1 AND linked_user_id != ''
@@ -158,10 +171,18 @@ const traffic_quality_sql: [:0]const u8 =
     \\    count(*) FILTER (
     \\      WHERE identity_quality = 3 AND visitor_day_start
     \\    ) AS legacy_visitor_days
-    \\  FROM range_events WHERE device_category <> 'bot'
+    \\  FROM range_events
+    \\  WHERE device_category <> 'bot' AND exclusion_source = 0
+    \\), exclusion_summary AS (
+    \\  SELECT
+    \\    count(*) FILTER (WHERE exclusion_source = 1) AS tracker_events,
+    \\    count(*) FILTER (WHERE exclusion_source = 2) AS network_events,
+    \\    count(*) FILTER (WHERE exclusion_source = 3) AS both_events
+    \\  FROM range_events
     \\), range_sessions AS (
     \\  SELECT DISTINCT session_id FROM range_events
     \\  WHERE kind IN (1, 2) AND device_category <> 'bot'
+    \\    AND exclusion_source = 0
     \\), session_quality AS (
     \\  SELECT count(*) FILTER (
     \\    WHERE meaningful_events = 1 AND engagement_ms = 0 AND max_scroll = 0
@@ -174,14 +195,15 @@ const traffic_quality_sql: [:0]const u8 =
     \\    FROM events e
     \\    JOIN range_sessions r ON r.session_id = e.session_id
     \\    JOIN params p ON p.site_id = e.site_id
-    \\    WHERE e.device_category <> 'bot'
+    \\    WHERE e.device_category <> 'bot' AND e.exclusion_source = 0
     \\    GROUP BY e.session_id
     \\  ) sessions
     \\), anonymous_first AS (
     \\  SELECT e.anonymous_id, min(e.received_date_utc) AS first_date
     \\  FROM events e, params p
     \\  WHERE e.site_id = p.site_id AND e.kind IN (1, 2)
-    \\    AND e.device_category <> 'bot' AND e.identity_quality IN (1, 2)
+    \\    AND e.device_category <> 'bot' AND e.exclusion_source = 0
+    \\    AND e.identity_quality IN (1, 2)
     \\  GROUP BY e.anonymous_id
     \\), dates AS (
     \\  SELECT p.start_date + CAST(day AS INTEGER) AS date
@@ -192,7 +214,8 @@ const traffic_quality_sql: [:0]const u8 =
     \\    (SELECT count(*) FROM anonymous_first a WHERE a.first_date = d.date)
     \\      AS new_anonymous_identities,
     \\    (SELECT count(*) FROM range_events e
-    \\      WHERE e.received_date_utc = d.date AND e.device_category = 'bot')
+    \\      WHERE e.received_date_utc = d.date AND e.device_category = 'bot'
+    \\        AND e.exclusion_source = 0)
     \\      AS bot_events
     \\  FROM dates d
     \\)
@@ -203,11 +226,13 @@ const traffic_quality_sql: [:0]const u8 =
     \\  s.zero_engagement_single_event_sessions,
     \\  i.persistent_events, i.persistent_visitor_days,
     \\  i.ephemeral_events, i.ephemeral_visitor_days,
-    \\  i.legacy_events, i.legacy_visitor_days
+    \\  i.legacy_events, i.legacy_visitor_days,
+    \\  x.tracker_events, x.network_events, x.both_events
     \\FROM daily d
     \\CROSS JOIN person_summary p
     \\CROSS JOIN identity_summary i
     \\CROSS JOIN session_quality s
+    \\CROSS JOIN exclusion_summary x
     \\ORDER BY d.date
     \\LIMIT ? OFFSET ?
 ;
@@ -367,6 +392,7 @@ const funnel_sql: [:0]const u8 =
     \\  WHERE site_id = ?
     \\    AND received_date_utc BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
     \\    AND device_category <> 'bot'
+    \\    AND exclusion_source = 0
     \\),
     \\sessioned AS (
     \\  SELECT * FROM filtered
@@ -731,7 +757,7 @@ pub fn trafficQuality(
     const returned = result.rowCount();
     const decoded = @min(returned, @as(usize, request.limit));
     if (decoded == 0 or returned > @as(usize, request.limit) + 1 or
-        result.columnCount() != 15)
+        result.columnCount() != 18)
     {
         return error.InvalidReportResult;
     }
@@ -758,11 +784,18 @@ pub fn trafficQuality(
             .visitor_days = result.int64(14, 0),
         },
     };
+    const exclusion_sources = [3]report.ExclusionSourceRow{
+        .{ .source = .tracker, .events = result.int64(15, 0) },
+        .{ .source = .network, .events = result.int64(16, 0) },
+        .{ .source = .both, .events = result.int64(17, 0) },
+    };
     if (total < 0 or persistent < 0 or ephemeral < 0 or legacy < 0 or
         visitor_days < 0 or zero_sessions < 0 or
         persistent + ephemeral + legacy != total or
         identity_quality[0].visitor_days + identity_quality[1].visitor_days +
-            identity_quality[2].visitor_days != visitor_days)
+            identity_quality[2].visitor_days != visitor_days or
+        exclusion_sources[0].events < 0 or exclusion_sources[1].events < 0 or
+        exclusion_sources[2].events < 0)
     {
         return error.InvalidReportResult;
     }
@@ -799,6 +832,7 @@ pub fn trafficQuality(
         .visitor_days = visitor_days,
         .zero_engagement_single_event_sessions = zero_sessions,
         .identity_quality = identity_quality,
+        .exclusion_sources = exclusion_sources,
         .days = days,
         .next_page = if (returned > decoded) request.page + 1 else null,
     };

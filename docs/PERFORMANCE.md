@@ -9,7 +9,8 @@
 > bounds identity storage to two site-scoped `localStorage` keys, and issue #8
 > stores a bounded session JSON record. Issue #9 adds the optional identified
 > key and measures `identify()`; issue #12 adds measured SPA, engagement,
-> scroll, value, and opt-in automatic behavior.
+> scroll, value, and opt-in automatic behavior. D31 adds one bounded
+> self-exclusion key; the current tracker remains below the 5 KiB Brotli budget.
 
 The numbers in this file are budgets, not claims. M0 records the first measured
 baseline on the target VPS. A release passes both the absolute budget and the
@@ -171,7 +172,7 @@ fixture details are in `bench/results/m3-reports-release-safe.json`.
 
 ### Analytico 1.0 property-query gate
 
-Issue #10 adds a separate ReleaseSafe fixture with 1,000,000 event-schema-3
+Issue #10 adds a separate ReleaseSafe fixture with 1,000,000 event-schema-4
 rows and 12 flat properties spanning string, signed integer, exact decimal,
 boolean, null/missing, mixed-type conflict, and one high-cardinality value. It
 uses the serving DuckDB limits above, one warmup, and ten samples for the

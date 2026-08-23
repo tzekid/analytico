@@ -166,7 +166,9 @@ async function normal() {
       waitUntil: "load",
     });
     await page.waitForFunction(() => window.htmx !== undefined);
-    await page.locator("details.management > summary").click();
+    await page.locator(
+      'details.management:has(form[action="/admin/goals"]) > summary',
+    ).click();
     const goalForm = page.locator('form[action="/admin/goals"]');
     const postCountBeforeValidation = enhanced.filter(
       (entry) => entry.method === "POST",

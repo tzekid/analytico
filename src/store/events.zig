@@ -3,7 +3,7 @@ const domain = @import("../domain.zig");
 const duckdb = @import("duckdb.zig");
 const timezone = @import("../timezone.zig");
 
-pub const schema_version: i64 = 3;
+pub const schema_version: i64 = 4;
 
 pub const InsertV2Outcome = enum {
     inserted,
@@ -78,6 +78,7 @@ pub const InspectedV2Event = struct {
     engagement_ms: i64,
     max_scroll_depth: i64,
     linked_user_id: []u8,
+    exclusion_source: i64,
 };
 
 pub const ResolvedPerson = struct {
@@ -243,6 +244,9 @@ pub const Store = struct {
         }
         if (current < 3) {
             try self.migrateV3();
+        }
+        if (current < 4) {
+            try self.migrateV4();
         }
         try self.database.checkpoint();
     }
@@ -425,6 +429,127 @@ pub const Store = struct {
         try self.database.exec("COMMIT");
     }
 
+    fn migrateV4(self: *Store) !void {
+        try self.database.exec("BEGIN TRANSACTION");
+        errdefer self.database.exec("ROLLBACK") catch {};
+        try self.database.exec(
+            \\CREATE TABLE events_v4 (
+            \\  event_schema_version UTINYINT NOT NULL,
+            \\  protocol_version UTINYINT NOT NULL,
+            \\  tracker_version UTINYINT NOT NULL,
+            \\  event_id UUID NOT NULL,
+            \\  site_id VARCHAR NOT NULL,
+            \\  received_at_utc_micros BIGINT NOT NULL,
+            \\  occurred_at_utc_micros BIGINT NOT NULL,
+            \\  received_date_utc DATE NOT NULL,
+            \\  site_local_date DATE NOT NULL,
+            \\  site_utc_offset_minutes SMALLINT NOT NULL,
+            \\  kind UTINYINT NOT NULL,
+            \\  event_name VARCHAR NOT NULL,
+            \\  path VARCHAR NOT NULL,
+            \\  page_title VARCHAR NOT NULL,
+            \\  hostname VARCHAR NOT NULL,
+            \\  anonymous_id UUID NOT NULL,
+            \\  identity_quality UTINYINT NOT NULL,
+            \\  user_id VARCHAR NOT NULL,
+            \\  session_id UUID NOT NULL,
+            \\  sequence UINTEGER NOT NULL,
+            \\  session_start BOOLEAN NOT NULL,
+            \\  referrer_host VARCHAR NOT NULL,
+            \\  country_code VARCHAR NOT NULL,
+            \\  language VARCHAR NOT NULL,
+            \\  browser_family VARCHAR NOT NULL,
+            \\  os_family VARCHAR NOT NULL,
+            \\  device_category VARCHAR NOT NULL,
+            \\  utm_source VARCHAR NOT NULL,
+            \\  utm_medium VARCHAR NOT NULL,
+            \\  utm_campaign VARCHAR NOT NULL,
+            \\  utm_term VARCHAR NOT NULL,
+            \\  utm_content VARCHAR NOT NULL,
+            \\  properties_json VARCHAR NOT NULL,
+            \\  user_traits_json VARCHAR NOT NULL,
+            \\  value_amount DECIMAL(18,6),
+            \\  value_currency VARCHAR NOT NULL,
+            \\  engagement_ms UINTEGER NOT NULL,
+            \\  max_scroll_depth UTINYINT NOT NULL,
+            \\  visitor_day_id BLOB NOT NULL,
+            \\  visitor_day_start BOOLEAN NOT NULL,
+            \\  event_payload_digest VARCHAR NOT NULL,
+            \\  exclusion_source UTINYINT NOT NULL,
+            \\  CHECK (exclusion_source BETWEEN 0 AND 3)
+            \\);
+            \\INSERT INTO events_v4 SELECT
+            \\  4, protocol_version, tracker_version, event_id, site_id,
+            \\  received_at_utc_micros, occurred_at_utc_micros,
+            \\  received_date_utc, site_local_date, site_utc_offset_minutes,
+            \\  kind, event_name, path, page_title, hostname, anonymous_id,
+            \\  identity_quality, user_id, session_id, sequence, session_start,
+            \\  referrer_host, country_code, language, browser_family, os_family,
+            \\  device_category, utm_source, utm_medium, utm_campaign, utm_term,
+            \\  utm_content, properties_json, user_traits_json, value_amount,
+            \\  value_currency, engagement_ms, max_scroll_depth, visitor_day_id,
+            \\  visitor_day_start, event_payload_digest, 0
+            \\FROM events;
+        );
+        const preserved_mismatches = try self.scalar(
+            \\WITH source_rows AS (
+            \\  SELECT hash(protocol_version, tracker_version, event_id, site_id,
+            \\    received_at_utc_micros, occurred_at_utc_micros,
+            \\    received_date_utc, site_local_date, site_utc_offset_minutes,
+            \\    kind, event_name, path, page_title, hostname, anonymous_id,
+            \\    identity_quality, user_id, session_id, sequence, session_start,
+            \\    referrer_host, country_code, language, browser_family, os_family,
+            \\    device_category, utm_source, utm_medium, utm_campaign, utm_term,
+            \\    utm_content, properties_json, user_traits_json, value_amount,
+            \\    value_currency, engagement_ms, max_scroll_depth, visitor_day_id,
+            \\    visitor_day_start, event_payload_digest) AS row_hash
+            \\  FROM events
+            \\), target_rows AS (
+            \\  SELECT hash(protocol_version, tracker_version, event_id, site_id,
+            \\    received_at_utc_micros, occurred_at_utc_micros,
+            \\    received_date_utc, site_local_date, site_utc_offset_minutes,
+            \\    kind, event_name, path, page_title, hostname, anonymous_id,
+            \\    identity_quality, user_id, session_id, sequence, session_start,
+            \\    referrer_host, country_code, language, browser_family, os_family,
+            \\    device_category, utm_source, utm_medium, utm_campaign, utm_term,
+            \\    utm_content, properties_json, user_traits_json, value_amount,
+            \\    value_currency, engagement_ms, max_scroll_depth, visitor_day_id,
+            \\    visitor_day_start, event_payload_digest) AS row_hash
+            \\  FROM events_v4
+            \\), source AS (
+            \\  SELECT count(*) AS rows, bit_xor(row_hash) AS xor_hash,
+            \\    sum(CAST(row_hash AS UHUGEINT)) AS sum_hash,
+            \\    min(row_hash) AS min_hash, max(row_hash) AS max_hash
+            \\  FROM source_rows
+            \\), target AS (
+            \\  SELECT count(*) AS rows, bit_xor(row_hash) AS xor_hash,
+            \\    sum(CAST(row_hash AS UHUGEINT)) AS sum_hash,
+            \\    min(row_hash) AS min_hash, max(row_hash) AS max_hash
+            \\  FROM target_rows
+            \\)
+            \\SELECT count(*) FROM source s, target t
+            \\WHERE s.rows != t.rows OR s.xor_hash IS DISTINCT FROM t.xor_hash
+            \\  OR s.sum_hash IS DISTINCT FROM t.sum_hash
+            \\  OR s.min_hash IS DISTINCT FROM t.min_hash
+            \\  OR s.max_hash IS DISTINCT FROM t.max_hash
+        );
+        const invalid = try self.scalar(
+            "SELECT count(*) FROM events_v4 " ++
+                "WHERE event_schema_version != 4 OR exclusion_source != 0",
+        );
+        if (preserved_mismatches != 0 or invalid != 0) {
+            return error.ExclusionMigrationValidationFailed;
+        }
+        try self.database.exec(
+            \\DROP TABLE events;
+            \\ALTER TABLE events_v4 RENAME TO events;
+            \\INSERT INTO event_migrations VALUES (
+            \\  4, 'stored-self-exclusion', 0
+            \\)
+        );
+        try self.database.exec("COMMIT");
+    }
+
     pub fn insert(self: *Store, event: domain.Event) !void {
         try domain.validateUuid(event.event_id);
         try domain.validateUuid(event.site_id);
@@ -442,10 +567,10 @@ pub const Store = struct {
             \\  kind, event_name, path, visitor_day_id, referrer_host,
             \\  country_code, browser_family, os_family, device_category,
             \\  utm_source, utm_medium, utm_campaign, utm_term, utm_content,
-            \\  properties_json
+            \\  properties_json, exclusion_source
             \\) AS (
             \\  SELECT ?, ?, ?, CAST(? AS DATE), CAST(? AS DATE), ?,
-            \\         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            \\         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             \\),
             \\resolved AS (
             \\  SELECT i.*, p.session_id AS prior_session_id,
@@ -459,6 +584,7 @@ pub const Store = struct {
             \\    WHERE e.site_id = i.site_id
             \\      AND e.received_date_utc = i.received_date_utc
             \\      AND e.visitor_day_id = i.visitor_day_id
+            \\      AND e.exclusion_source = 0
             \\      AND e.received_at_utc_micros <= i.received_at_utc_micros
             \\    ORDER BY e.received_at_utc_micros DESC, e.event_id DESC
             \\    LIMIT 1
@@ -469,11 +595,12 @@ pub const Store = struct {
             \\    WHERE e.site_id = i.site_id
             \\      AND e.received_date_utc = i.received_date_utc
             \\      AND e.visitor_day_id = i.visitor_day_id
+            \\      AND e.exclusion_source = 0
             \\    LIMIT 1
             \\  ) a ON true
             \\)
             \\SELECT
-            \\  3, 1, 1, CAST(i.event_id AS UUID), i.site_id,
+            \\  4, 1, 1, CAST(i.event_id AS UUID), i.site_id,
             \\  i.received_at_utc_micros, i.received_at_utc_micros,
             \\  i.received_date_utc, i.site_local_date,
             \\  i.site_utc_offset_minutes,
@@ -489,13 +616,15 @@ pub const Store = struct {
             \\    THEN i.prior_sequence + 1
             \\    ELSE 0
             \\  END,
-            \\  i.prior_session_id IS NULL
-            \\    OR i.received_at_utc_micros - i.prior_at > 1800000000,
+            \\  i.exclusion_source = 0 AND (i.prior_session_id IS NULL
+            \\    OR i.received_at_utc_micros - i.prior_at > 1800000000),
             \\  i.referrer_host, i.country_code, '', i.browser_family, i.os_family,
             \\  i.device_category, i.utm_source, i.utm_medium, i.utm_campaign,
             \\  i.utm_term, i.utm_content, i.properties_json
             \\  , '{}', CAST(NULL AS DECIMAL(18,6)), '', 0, 0,
-            \\  i.visitor_day_id, i.prior_session_id IS NULL, ''
+            \\  i.visitor_day_id,
+            \\  i.exclusion_source = 0 AND i.prior_session_id IS NULL, '',
+            \\  i.exclusion_source
             \\FROM resolved i
         );
         defer statement.deinit();
@@ -520,6 +649,7 @@ pub const Store = struct {
         try statement.bindText(19, event.utm_term);
         try statement.bindText(20, event.utm_content);
         try statement.bindText(21, event.properties_json);
+        try statement.bindInt64(22, @backingInt(event.exclusion_source));
         var result = try statement.execute();
         result.deinit();
     }
@@ -580,7 +710,9 @@ pub const Store = struct {
 
         try self.database.exec("BEGIN TRANSACTION");
         errdefer self.database.exec("ROLLBACK") catch {};
-        if (event.identify_user_id.len != 0 and linked_user == null) {
+        if (event.identify_user_id.len != 0 and linked_user == null and
+            !event.exclusion_source.isExcluded())
+        {
             var link_statement = try self.database.prepare(
                 \\INSERT INTO identity_links (
                 \\  site_id, anonymous_id, user_id,
@@ -608,24 +740,26 @@ pub const Store = struct {
             \\  os_family, device_category, utm_source, utm_medium,
             \\  utm_campaign, utm_term, utm_content, properties_json,
             \\  user_traits_json, value_amount, value_currency, engagement_ms,
-            \\  max_scroll_depth, visitor_day_id, payload_digest
+            \\  max_scroll_depth, visitor_day_id, payload_digest,
+            \\  exclusion_source
             \\) AS (
             \\  SELECT ?, ?, ?, ?, CAST(? AS DATE), CAST(? AS DATE), ?,
             \\         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-            \\         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            \\         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             \\)
             \\SELECT
-            \\  3, 2, 2, CAST(i.event_id AS UUID), i.site_id,
+            \\  4, 2, 2, CAST(i.event_id AS UUID), i.site_id,
             \\  i.received_at, i.occurred_at, i.received_date,
             \\  i.site_local_date, i.site_utc_offset_minutes,
             \\  i.kind, i.event_name, i.path,
             \\  i.page_title, i.hostname, CAST(i.anonymous_id AS UUID),
             \\  i.identity_quality, i.user_id, CAST(i.session_id AS UUID),
             \\  i.sequence,
-            \\  NOT EXISTS (
+            \\  i.exclusion_source = 0 AND NOT EXISTS (
             \\    SELECT 1 FROM events e
             \\    WHERE e.site_id = i.site_id
             \\      AND e.session_id = CAST(i.session_id AS UUID)
+            \\      AND e.exclusion_source = 0
             \\  ),
             \\  i.referrer_host, i.country_code, i.language,
             \\  i.browser_family, i.os_family, i.device_category,
@@ -638,13 +772,14 @@ pub const Store = struct {
             \\  END,
             \\  i.value_currency, i.engagement_ms, i.max_scroll_depth,
             \\  i.visitor_day_id,
-            \\  NOT EXISTS (
+            \\  i.exclusion_source = 0 AND NOT EXISTS (
             \\    SELECT 1 FROM events e
             \\    WHERE e.site_id = i.site_id
             \\      AND e.received_date_utc = i.received_date
             \\      AND e.visitor_day_id = i.visitor_day_id
+            \\      AND e.exclusion_source = 0
             \\  ),
-            \\  i.payload_digest
+            \\  i.payload_digest, i.exclusion_source
             \\FROM incoming i
         );
         defer statement.deinit();
@@ -684,6 +819,7 @@ pub const Store = struct {
         try statement.bindInt64(34, event.max_scroll_depth);
         try statement.bindBlob(35, &event.visitor_day_id);
         try statement.bindText(36, event.event_payload_digest);
+        try statement.bindInt64(37, @backingInt(event.exclusion_source));
         var result = try statement.execute();
         result.deinit();
         try self.database.exec("COMMIT");
@@ -723,7 +859,7 @@ pub const Store = struct {
         ;
         var result = try self.database.query(switch (current) {
             2 => source_sql,
-            3 => migrated_sql,
+            3, 4 => migrated_sql,
             else => return error.UnsupportedLegacyEvidenceSchema,
         });
         defer result.deinit();
@@ -1104,7 +1240,7 @@ pub const Store = struct {
             \\  e.utm_term, e.utm_content, e.properties_json,
             \\  e.user_traits_json, CAST(e.value_amount AS VARCHAR),
             \\  e.value_currency, e.engagement_ms, e.max_scroll_depth,
-            \\  COALESCE(l.user_id, '')
+            \\  COALESCE(l.user_id, ''), e.exclusion_source
             \\FROM events e
             \\LEFT JOIN identity_links l
             \\  ON l.site_id = e.site_id AND l.anonymous_id = e.anonymous_id
@@ -1115,7 +1251,7 @@ pub const Store = struct {
         try statement.bindText(2, event_id);
         var result = try statement.execute();
         defer result.deinit();
-        if (result.rowCount() != 1 or result.columnCount() != 37) {
+        if (result.rowCount() != 1 or result.columnCount() != 38) {
             return error.EventNotFound;
         }
         return .{
@@ -1159,6 +1295,7 @@ pub const Store = struct {
             .engagement_ms = result.int64(34, 0),
             .max_scroll_depth = result.int64(35, 0),
             .linked_user_id = try result.text(allocator, 36, 0),
+            .exclusion_source = result.int64(37, 0),
         };
     }
 
@@ -1176,6 +1313,7 @@ pub const Store = struct {
             \\LEFT JOIN identity_links l
             \\  ON l.site_id = e.site_id AND l.anonymous_id = e.anonymous_id
             \\WHERE e.site_id = ? AND e.anonymous_id = CAST(? AS UUID)
+            \\  AND e.exclusion_source = 0
             \\ORDER BY e.occurred_at_utc_micros DESC, e.sequence DESC,
             \\         e.received_at_utc_micros DESC, e.event_id DESC
             \\LIMIT 1
@@ -1211,6 +1349,7 @@ pub const Store = struct {
             \\    SELECT e.user_traits_json
             \\    FROM events e
             \\    WHERE e.site_id = ? AND e.kind = 4 AND e.user_id = ?
+            \\      AND e.exclusion_source = 0
             \\    ORDER BY e.occurred_at_utc_micros DESC, e.sequence DESC,
             \\             e.received_at_utc_micros DESC, e.event_id DESC
             \\    LIMIT 1
