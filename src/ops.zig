@@ -377,7 +377,8 @@ pub fn exportCsv(
         "received_at_utc_micros,received_date_utc,event_name,path," ++
             "referrer_host,country_code,browser_family,os_family," ++
             "device_category,utm_source,utm_medium,utm_campaign,utm_term," ++
-            "utm_content,properties_json\n",
+            "utm_content,properties_json,traffic_class,classifier_version," ++
+            "bot_rule,legacy_bot_verdict\n",
     );
     var offset: i64 = 0;
     var written: i64 = 0;
@@ -740,10 +741,18 @@ fn writeExportEvent(output: *std.Io.Writer, event: events.ExportEvent) !void {
         event.utm_term,
         event.utm_content,
         event.properties_json,
-    }, 0..) |value, index| {
+    }) |value| {
         try csvText(output, value);
-        try output.writeByte(if (index == 13) '\n' else ',');
+        try output.writeByte(',');
     }
+    try output.print("{d},{d},", .{
+        event.traffic_class,
+        event.classifier_version,
+    });
+    try csvText(output, event.bot_rule);
+    try output.print(",{s}\n", .{
+        if (event.legacy_bot_verdict) "true" else "false",
+    });
 }
 
 fn csvText(output: *std.Io.Writer, value: []const u8) !void {

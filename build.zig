@@ -163,6 +163,29 @@ pub fn build(b: *std.Build) void {
         "Run traffic-quality diagnostics through real CLI and on-disk stores",
     ).dependOn(&traffic_quality_e2e.step);
 
+    const classifier_e2e = b.addSystemCommand(&.{
+        "bash",
+        "tests/e2e-classifier.sh",
+    });
+    classifier_e2e.addArtifactArg(app);
+    classifier_e2e.step.dependOn(b.getInstallStep());
+    b.step(
+        "e2e-classifier",
+        "Run UA classifier v1 through real loopback HTTP and on-disk stores",
+    ).dependOn(&classifier_e2e.step);
+
+    const schema5_migration_e2e = b.addSystemCommand(&.{
+        "bash",
+        "scripts/run-schema4-gate.sh",
+    });
+    schema5_migration_e2e.addArtifactArg(app);
+    schema5_migration_e2e.addArg("tests/e2e-schema5-migration.sh");
+    schema5_migration_e2e.step.dependOn(b.getInstallStep());
+    b.step(
+        "e2e-schema5-migration",
+        "Migrate and roll back the exact deployed schema-4 predecessor",
+    ).dependOn(&schema5_migration_e2e.step);
+
     const exclusion_e2e = b.addSystemCommand(&.{
         "bash",
         "tests/e2e-exclusion.sh",

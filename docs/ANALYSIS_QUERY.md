@@ -119,9 +119,11 @@ string/number conversion is permitted.
 
 ## 4. Metric and dimension semantics
 
-Metric v2 uses `site_local_date`, excludes `device_category='bot'` from product
-metrics, and treats only page-view/custom-event rows as independently
-meaningful. Canonical person identity follows D26 and D28:
+Metric v2 uses `site_local_date`, applies D32's versioned product-eligibility
+predicate, and treats only page-view/custom-event rows as independently
+meaningful. During the one-release #68 shadow that predicate is
+`traffic_class <> excluded AND legacy_bot_verdict=false`; traffic class never
+overloads the device dimension. Canonical person identity follows D26 and D28:
 
 Trend buckets follow the receipt-time authority in `PROTOCOL.md` and D27.
 Day, week, and month intervals derive from the persisted `site_local_date`.

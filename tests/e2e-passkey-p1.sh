@@ -55,7 +55,7 @@ SQL
 legacy_backup="$fixture/legacy-backup"
 "$binary" backup "$legacy" "$legacy_backup" >/dev/null
 "$binary" migrate "$legacy" "$legacy_backup" >"$fixture/upgrade.txt"
-grep -Fq 'metadata=v4 events=v4' "$fixture/upgrade.txt"
+grep -Fq 'metadata=v4 events=v5' "$fixture/upgrade.txt"
 "$binary" site timezone-set "$legacy" preserved UTC >/dev/null
 "$binary" site list "$legacy" | grep -Fq $'preserved\t'
 

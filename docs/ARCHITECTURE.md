@@ -2,7 +2,7 @@
 
 > **Status:** Sections 1–10 describe the shipped one-process runtime, its frozen
 > protocol-v1 compatibility path, additive protocol-v2 collector foundation,
-> event schema 4, protocol-v2 tracker anonymous identity, and 30-minute client
+> event schema 5, protocol-v2 tracker anonymous identity, and 30-minute client
 > sessions. The remaining 1.0 evolution is stated separately below; it
 > preserves this runtime shape and lands only with its issue evidence.
 
@@ -101,6 +101,9 @@ Event schema 3 adds the accepted protocol-v2 event and identity-link foundation
 through the same DuckDB ownership boundary. It does not move configuration into
 DuckDB or permit Turso to query analytics rows. Temporary visitor-day columns
 keep metric-v1 report SQL honest until versioned metric-v2 queries replace it.
+Event schema 4 added D31's temporary stored exclusion source. Event schema 5
+consumes that source into the permanent D32 traffic class, classifier version,
+and bounded rule and retains one release-only legacy verdict for comparison.
 
 Decision D29 adds a parallel pure `AnalysisQuery` model and finite metric-v2
 store compiler. The domain model validates and canonicalizes state without I/O;
@@ -136,18 +139,22 @@ offer distributed transactions.
 5. It classifies an operator self-exclusion from the tracker flag and/or one of
    at most 16 configured normalized network prefixes. The raw IP remains
    transient; the event is still stored.
-6. Domain normalization removes arbitrary query strings, canonicalizes the
+6. Unless excluded, it runs D32's bounded allocation-free classifier over the
+   at-most-1,024-byte UA and immediately discards the UA. Exclusion takes
+   precedence. The permanent class/version/rule and temporary legacy boolean
+   are the only traffic-classification facts stored.
+7. Domain normalization removes arbitrary query strings, canonicalizes the
    path and referral host, validates the event name and bounded flat
    properties, and derives coarse dimensions. The frozen v1 path additionally
    enforces its configured property allowlist.
-7. On protocol v1, and for storage-unavailable protocol-v2 events, a keyed
+8. On protocol v1, and for storage-unavailable protocol-v2 events, a keyed
    daily pseudonym is derived from
    site, UTC date, normalized network prefix, and coarse user-agent input. Raw
    inputs are then discarded.
-8. The DuckDB adapter inserts one event in a short transaction. V2 checks its
+9. The DuckDB adapter inserts one event in a short transaction. V2 checks its
    canonical digest for site-scoped idempotency and commits an identify link
    atomically when applicable.
-9. Only after commit does the adapter return success.
+10. Only after commit does the adapter return success.
 
 At the target traffic level, direct durable inserts are simpler and more honest
 than an in-memory queue. A queue is reconsidered only after measured write
@@ -188,10 +195,20 @@ D31 adds no fingerprint or configuration fetch. The dashboard uses a
 site-bound, origin-checked `postMessage` handshake to set the site's first-party
 self-exclusion flag. Metadata migration 4 stores at most 16 explicit network
 prefixes per site and an authenticated non-destructive mutation refreshes the
-in-memory policy without restart. Event schema 4 stores the closed temporary
-`exclusion_source` (`none`, tracker flag, network prefix, or both). Product
-queries require `none`; diagnostics retain all rows. #68 migrates this field to
-the permanent traffic-class representation.
+in-memory policy without restart. Event schema 4 stored the closed temporary
+`exclusion_source` (`none`, tracker flag, network prefix, or both).
+
+D32's event schema 5 losslessly maps those sources to permanent
+`traffic_class=excluded`, removes the temporary field, and separates traffic
+class from the device dimension. A small compile-time rule table uses the
+pinned provenance in `UA_CLASSIFIER_V1.md`; the complete upstream corpus is not
+a runtime dependency or file. No raw UA, hash, new metadata setting, tracker
+change, Caddy change, process, or background work is added. During one deployed
+release, product queries retain the legacy verdict while the same bounded
+diagnostics statement exposes new/old disagreement. Six fixed `u64` process
+counters expose the same comparison for newly inserted nonexcluded rows at
+shutdown; they add no input-keyed state. Every otherwise accepted event remains
+stored.
 
 ## 6. Report flow
 

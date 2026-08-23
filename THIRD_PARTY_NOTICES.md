@@ -1,6 +1,6 @@
 # Third-party notices
 
-Analytico ships five non-system third-party components:
+Analytico ships six non-system third-party components or derived data sources:
 
 - DuckDB 1.4.5 LTS as `lib/libduckdb.so`, under the MIT License in
   `LICENSES/DuckDB.txt`.
@@ -15,6 +15,11 @@ Analytico ships five non-system third-party components:
   `LICENSES/Passcay.txt`.
 - zbor `0.21.2`, statically linked to enforce the accepted COSE public-key
   algorithms, under the MIT License in `LICENSES/zbor.txt`.
+- A curated compile-time rule table derived from the
+  `monperrus/crawler-user-agents` data at commit
+  `7baee040e86208bfaf24b2815fd8f322318bd2fa`; the complete runtime data file
+  is not shipped. The source data is under the MIT License in
+  `LICENSES/Crawler-User-Agents.txt`.
 
 The tracker and dashboard CSS are original Analytico code. Zig, glibc,
 libstdc++, libgcc, and the Linux dynamic loader are build or platform

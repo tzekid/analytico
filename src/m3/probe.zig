@@ -248,7 +248,8 @@ pub fn million(
         \\  utm_medium, utm_campaign, utm_term, utm_content,
         \\  properties_json, user_traits_json, value_amount, value_currency,
         \\  engagement_ms, max_scroll_depth, visitor_day_id,
-        \\  visitor_day_start, event_payload_digest, exclusion_source
+        \\  visitor_day_start, event_payload_digest, traffic_class,
+        \\  classifier_version, bot_rule, legacy_bot_verdict
         \\)
         \\WITH generated AS (
         \\  SELECT
@@ -295,7 +296,7 @@ pub fn million(
         \\  FROM generated
         \\)
         \\SELECT
-        \\  4, 1, 1, event_id, site_id,
+        \\  5, 1, 1, event_id, site_id,
         \\  received_at, received_at, received_date, received_date, 0,
         \\  kind, event_name, path, '', '', CAST(
         \\    substr(identity_hash, 1, 8) || '-' ||
@@ -307,7 +308,7 @@ pub fn million(
         \\  3, '', session_id, CAST(i % 10 AS UINTEGER), i % 10 = 0,
         \\  '', 'US', '', 'Chrome', 'Linux', 'desktop',
         \\  '', '', '', '', '', '{}', '{}', CAST(NULL AS DECIMAL(18,6)), '',
-        \\  0, 0, visitor_day_id, visitor_day_start, '', 0
+        \\  0, 0, visitor_day_id, visitor_day_start, '', 1, 0, '', FALSE
         \\FROM sequenced
     );
     defer statement.deinit();
@@ -398,13 +399,13 @@ pub fn legacyVerify(
     var store = try events.Store.open(allocator, event_path);
     defer store.deinit();
     try store.migrate();
-    if (try store.migrationVersion() != 4) return error.LegacyMigrationVersion;
+    if (try store.migrationVersion() != 5) return error.LegacyMigrationVersion;
     var result = try store.database.query(
         \\SELECT count(*), count(DISTINCT session_id),
         \\       count(*) FILTER (WHERE visitor_day_start),
         \\       count(*) FILTER (WHERE session_start),
         \\       count(*) FILTER (
-        \\         WHERE event_schema_version = 4
+        \\         WHERE event_schema_version = 5
         \\           AND protocol_version = 1 AND tracker_version = 1
         \\           AND identity_quality = 3
         \\           AND occurred_at_utc_micros = received_at_utc_micros
@@ -414,7 +415,8 @@ pub fn legacyVerify(
         \\           AND language = '' AND user_traits_json = '{}'
         \\           AND value_amount IS NULL AND value_currency = ''
         \\           AND engagement_ms = 0 AND max_scroll_depth = 0
-        \\           AND exclusion_source = 0
+        \\           AND traffic_class = 1 AND classifier_version = 0
+        \\           AND bot_rule = '' AND NOT legacy_bot_verdict
         \\       ),
         \\       count(DISTINCT anonymous_id), sum(sequence)
         \\FROM events
@@ -504,6 +506,7 @@ fn insertFixture(
     site_id: []const u8,
     row: FixtureEvent,
 ) !void {
+    const is_bot = std.mem.eql(u8, row.device, "bot");
     try store.insert(.{
         .event_id = row.id,
         .site_id = site_id,
@@ -519,9 +522,12 @@ fn insertFixture(
         .country_code = row.country,
         .browser_family = row.browser,
         .os_family = row.os,
-        .device_category = row.device,
+        .device_category = if (is_bot) "unknown" else row.device,
         .utm_source = row.utm_source,
         .utm_medium = row.utm_medium,
         .utm_campaign = row.utm_campaign,
+        .traffic_class = if (is_bot) .declared_bot else .human_presumed,
+        .bot_rule = if (is_bot) "generic.bot" else "",
+        .legacy_bot_verdict = is_bot,
     });
 }

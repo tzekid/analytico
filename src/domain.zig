@@ -29,6 +29,65 @@ pub const ExclusionSource = enum(u8) {
     pub fn isExcluded(self: ExclusionSource) bool {
         return self != .none;
     }
+
+    pub fn rule(self: ExclusionSource) []const u8 {
+        return switch (self) {
+            .none => "",
+            .tracker => "exclude.tracker",
+            .network => "exclude.network",
+            .both => "exclude.both",
+        };
+    }
+};
+
+pub const TrafficClass = enum(u8) {
+    human_presumed = 1,
+    declared_bot = 2,
+    automation = 3,
+    excluded = 4,
+    suspected = 5,
+
+    pub fn name(self: TrafficClass) []const u8 {
+        return switch (self) {
+            .human_presumed => "human-presumed",
+            .declared_bot => "declared-bot",
+            .automation => "automation",
+            .excluded => "excluded",
+            .suspected => "suspected",
+        };
+    }
+
+    pub fn isClassifierBot(self: TrafficClass) bool {
+        return self == .declared_bot or self == .automation;
+    }
+
+    pub fn isExcluded(self: TrafficClass) bool {
+        return self == .excluded;
+    }
+
+    pub fn productEligible(self: TrafficClass, legacy_bot_verdict: bool) bool {
+        return !self.isExcluded() and !legacy_bot_verdict;
+    }
+};
+
+pub const TrafficClassification = struct {
+    class: TrafficClass,
+    classifier_version: u16,
+    rule: []const u8,
+    legacy_bot_verdict: bool,
+
+    pub fn withExclusion(
+        self: TrafficClassification,
+        source: ExclusionSource,
+    ) TrafficClassification {
+        if (!source.isExcluded()) return self;
+        return .{
+            .class = .excluded,
+            .classifier_version = 1,
+            .rule = source.rule(),
+            .legacy_bot_verdict = false,
+        };
+    }
 };
 
 pub const Event = struct {
@@ -53,7 +112,10 @@ pub const Event = struct {
     utm_term: []const u8 = "",
     utm_content: []const u8 = "",
     properties_json: []const u8 = "{}",
-    exclusion_source: ExclusionSource = .none,
+    traffic_class: TrafficClass = .human_presumed,
+    classifier_version: u16 = 1,
+    bot_rule: []const u8 = "",
+    legacy_bot_verdict: bool = false,
 };
 
 pub const EventV2 = struct {
@@ -93,7 +155,10 @@ pub const EventV2 = struct {
     max_scroll_depth: u8,
     visitor_day_id: [16]u8,
     event_payload_digest: []const u8,
-    exclusion_source: ExclusionSource = .none,
+    traffic_class: TrafficClass = .human_presumed,
+    classifier_version: u16 = 1,
+    bot_rule: []const u8 = "",
+    legacy_bot_verdict: bool = false,
 };
 
 pub fn canonicalPersonKey(

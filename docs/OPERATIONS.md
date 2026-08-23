@@ -93,12 +93,14 @@ The optional `--report-timeout-ms 1..2000` flag exists for constrained
 deployments and acceptance testing; production defaults to the fixed 2,000 ms
 interactive deadline.
 
-Metadata migration 4 adds the bounded per-site network-exclusion policy and
-event migration 4 adds the temporary stored self-exclusion classification.
-They are forward-only schema changes: stop the sole writer, create and verify a
-matched backup, run `migrate`, then start the candidate. An older binary must
-use a restored pre-migration database pair; switching only the executable is
-not rollback.
+Metadata migration 4 adds the bounded per-site network-exclusion policy. Event
+migration 4 added its temporary stored source, and event migration 5 consumes
+every source into D32's permanent class/version/rule plus the one-release
+legacy verdict. Both event migrations are forward-only schema changes: stop
+the sole writer, create and verify a matched backup, run `migrate`, then start
+the candidate. An older binary must use a restored pre-migration database pair;
+switching only the executable is not rollback. Schema 5 adds no metadata,
+tracker, Caddy, service-unit, or environment change.
 
 DuckDB is configured before its configuration is locked: one query thread,
 128 MiB memory, 256 MiB temp limit, insertion-order preservation off,
@@ -220,10 +222,19 @@ The service emits newline-delimited structured JSON to stderr for:
 - `serve_started`, containing only host and port;
 - `request_failed`, containing only an error category;
 - `serve_stopped`, containing accepted, rejected, rate-limited, bot, unknown
-  classification, write-failure, and request-failure counters.
+  classification, write-failure, and request-failure counters. During D32's
+  shadow release it additionally contains six fixed-cardinality counters for
+  newly inserted nonexcluded events: `legacy_bot_positive`,
+  `classifier_bot_positive`, `shadow_both_human`, `shadow_legacy_only`,
+  `shadow_classifier_only`, and `shadow_both_bot`. The existing `bots` counter
+  retains its legacy request-attempt meaning. Durable traffic-quality
+  diagnostics remain the date-range evidence; the process counters are the
+  restart-scoped cross-check. Duplicate, conflicting, rejected, failed, and
+  excluded rows do not enter the six shadow counters.
 
 Logs never include IPs, user agents, paths, referrers, campaigns, properties,
-request bodies, visitor IDs, keys, or database paths. Journald owns rotation.
+request bodies, visitor IDs, matched rule IDs, keys, or database paths.
+Counter names are closed and do not vary with input. Journald owns rotation.
 
 ## 8. Backup
 
@@ -304,11 +315,14 @@ match the live pair before migration starts. The event file also receives a
 conservative free-space preflight. `init`, `report`, `site`, `event`, goal,
 funnel, and authentication commands never substitute for this explicit step.
 
-Migrations are numbered and transactional. Killing the process during the
+Migrations are numbered and transactional. Event migration 5 must preserve
+every schema-4 row and identity link, prove the complete D32 mapping and
+preserved-field fingerprints, and remove `exclusion_source` only in the swap
+transaction. Killing the process during the
 million-row DuckDB migration chain and retrying with the same verified backup
 is an automated release gate. A binary refuses a database with a newer unknown
-schema. Event schemas 3 and 4 require database-pair restoration before an older
-binary is started for rollback. Metric-v1 reports continue to use their
+schema. Event schemas 3, 4, and 5 require database-pair restoration before an
+older binary is started for rollback. Metric-v1 reports continue to use their
 original UTC dates; explicit timezone rebucketing populates the separate
 site-local date/offset before the service can become ready.
 
@@ -317,6 +331,16 @@ Rollback means stopping the new binary, restoring both stores and the key from
 that backup into a new data directory, switching the data path, and starting
 the prior binary. `zig build e2e-rollback` builds the actual prior commit and
 rehearses this procedure.
+
+For the schema-5 deployment, the pre-upgrade backup must record metadata schema
+4 and event schema 4, and `restore ... --verify` plus the prior schema-4 binary
+must open a disposable sibling copy before the production files are migrated.
+After migration, `doctor`, metric-v1 parity, traffic-quality version 3, and one
+real loopback collection/report journey must pass before the release symlink is
+accepted. Verification then proves the service owner, `/proc/<pid>/exe`, the
+private DuckDB library, ready/health endpoints, exact deployed commit, and the
+authenticated public report path. The release record includes the backup and
+artifact hashes. No runtime classifier file or network access is deployed.
 
 ## 11. Retention and site deletion
 
@@ -352,8 +376,9 @@ analytico export /var/lib/analytico example \
 
 Export pages through the real database in bounded 1,000-row chunks and creates
 a new mode-`0600` CSV. It includes normalized event dimensions and properties,
-not visitor/session IDs. Spreadsheet formula prefixes are escaped. The
-destination must not already exist.
+traffic class, classifier version, bounded rule, and the release-scoped legacy
+verdict, but not visitor/session IDs or the raw User-Agent. Spreadsheet formula
+prefixes are escaped. The destination must not already exist.
 
 ## 13. Disk-full and corruption response
 
@@ -374,19 +399,21 @@ For the exact pinned environment:
 ```sh
 zig build test -Doptimize=ReleaseSafe \
   -Dturso-native-path=<exact-prefix>
-zig build e2e-m0 e2e-m1 e2e-m2 e2e-properties e2e-legacy-migration \
-  e2e-m2-browser e2e-m3 e2e-m4 e2e-m6 \
-  e2e-m7 e2e-passkey-p1 \
+zig build e2e-m0 e2e-m1 e2e-m2 e2e-timezone e2e-properties \
+  e2e-analysis e2e-traffic-quality e2e-classifier e2e-schema5-migration \
+  e2e-exclusion e2e-legacy-migration e2e-m2-browser e2e-m3 e2e-m4 \
+  e2e-m6 e2e-m7 e2e-passkey-p1 \
   -Doptimize=ReleaseSafe -Dturso-native-path=<exact-prefix>
 zig build bench-properties \
   -Doptimize=ReleaseSafe -Dturso-native-path=<exact-prefix>
 zig build e2e-rollback \
   -Doptimize=ReleaseSafe -Dturso-native-path=<exact-prefix>
-zig build e2e-release \
+zig build e2e-release-full \
   -Doptimize=ReleaseSafe -Dturso-native-path=<exact-prefix>
 ```
 
-`e2e-release` checks the outer and inner checksums, private DuckDB linkage,
+`e2e-release-full` checks the outer and inner checksums, private DuckDB linkage,
 Caddy syntax, systemd security, and a fresh real-data report from the extracted
-archive. Large event/browser fixtures are acceptance tooling only and are not
-shipped.
+archive, then runs the complete packaged real-process set including classifier,
+traffic-quality, and exact schema-4 migration evidence. Large event/browser
+fixtures are acceptance tooling only and are not shipped.

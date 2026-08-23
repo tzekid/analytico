@@ -3,7 +3,7 @@ const domain = @import("../domain.zig");
 const duckdb = @import("duckdb.zig");
 const timezone = @import("../timezone.zig");
 
-pub const schema_version: i64 = 4;
+pub const schema_version: i64 = 5;
 
 pub const InsertV2Outcome = enum {
     inserted,
@@ -20,6 +20,10 @@ pub const StoredEvent = struct {
     device_category: []u8,
     utm_source: []u8,
     properties_json: []u8,
+    traffic_class: i64,
+    classifier_version: i64,
+    bot_rule: []u8,
+    legacy_bot_verdict: bool,
 };
 
 pub const ExportEvent = struct {
@@ -38,6 +42,10 @@ pub const ExportEvent = struct {
     utm_term: []u8,
     utm_content: []u8,
     properties_json: []u8,
+    traffic_class: i64,
+    classifier_version: i64,
+    bot_rule: []u8,
+    legacy_bot_verdict: bool,
 };
 
 pub const InspectedV2Event = struct {
@@ -78,7 +86,10 @@ pub const InspectedV2Event = struct {
     engagement_ms: i64,
     max_scroll_depth: i64,
     linked_user_id: []u8,
-    exclusion_source: i64,
+    traffic_class: i64,
+    classifier_version: i64,
+    bot_rule: []u8,
+    legacy_bot_verdict: bool,
 };
 
 pub const ResolvedPerson = struct {
@@ -126,6 +137,15 @@ pub const Store = struct {
     }
 
     pub fn migrate(self: *Store) !void {
+        try self.migrateThrough(schema_version);
+    }
+
+    pub fn migrateFixtureV4(self: *Store) !void {
+        try self.migrateThrough(4);
+    }
+
+    fn migrateThrough(self: *Store, target: i64) !void {
+        if (target < 1 or target > schema_version) return error.InvalidEventSchema;
         try self.database.exec(
             \\CREATE TABLE IF NOT EXISTS event_migrations (
             \\  version INTEGER PRIMARY KEY,
@@ -136,8 +156,8 @@ pub const Store = struct {
         const current = try self.scalar(
             "SELECT COALESCE(MAX(version), 0) FROM event_migrations",
         );
-        if (current > schema_version) return error.NewerEventSchema;
-        if (current < 1) {
+        if (current > target) return error.NewerEventSchema;
+        if (current < 1 and target >= 1) {
             try self.database.exec(
                 \\BEGIN TRANSACTION;
                 \\CREATE TABLE events (
@@ -166,7 +186,7 @@ pub const Store = struct {
                 \\COMMIT;
             );
         }
-        if (current < 2) {
+        if (current < 2 and target >= 2) {
             try self.database.exec(
                 \\BEGIN TRANSACTION;
                 \\CREATE TABLE events_v2 (
@@ -242,11 +262,14 @@ pub const Store = struct {
                 \\COMMIT;
             );
         }
-        if (current < 3) {
+        if (current < 3 and target >= 3) {
             try self.migrateV3();
         }
-        if (current < 4) {
+        if (current < 4 and target >= 4) {
             try self.migrateV4();
+        }
+        if (current < 5 and target >= 5) {
+            try self.migrateV5();
         }
         try self.database.checkpoint();
     }
@@ -550,6 +573,188 @@ pub const Store = struct {
         try self.database.exec("COMMIT");
     }
 
+    fn migrateV5(self: *Store) !void {
+        const links_before = try self.scalar(
+            "SELECT count(*) FROM identity_links",
+        );
+        const links_hash_before = try self.scalar(
+            \\SELECT CAST(COALESCE(bit_xor(
+            \\  hash(site_id, anonymous_id, user_id, linked_at_utc_micros, event_id)
+            \\  & 9223372036854775807
+            \\), 0) AS BIGINT) FROM identity_links
+        );
+        try self.database.exec("BEGIN TRANSACTION");
+        errdefer self.database.exec("ROLLBACK") catch {};
+        try self.database.exec(
+            \\CREATE TABLE events_v5 (
+            \\  event_schema_version UTINYINT NOT NULL,
+            \\  protocol_version UTINYINT NOT NULL,
+            \\  tracker_version UTINYINT NOT NULL,
+            \\  event_id UUID NOT NULL,
+            \\  site_id VARCHAR NOT NULL,
+            \\  received_at_utc_micros BIGINT NOT NULL,
+            \\  occurred_at_utc_micros BIGINT NOT NULL,
+            \\  received_date_utc DATE NOT NULL,
+            \\  site_local_date DATE NOT NULL,
+            \\  site_utc_offset_minutes SMALLINT NOT NULL,
+            \\  kind UTINYINT NOT NULL,
+            \\  event_name VARCHAR NOT NULL,
+            \\  path VARCHAR NOT NULL,
+            \\  page_title VARCHAR NOT NULL,
+            \\  hostname VARCHAR NOT NULL,
+            \\  anonymous_id UUID NOT NULL,
+            \\  identity_quality UTINYINT NOT NULL,
+            \\  user_id VARCHAR NOT NULL,
+            \\  session_id UUID NOT NULL,
+            \\  sequence UINTEGER NOT NULL,
+            \\  session_start BOOLEAN NOT NULL,
+            \\  referrer_host VARCHAR NOT NULL,
+            \\  country_code VARCHAR NOT NULL,
+            \\  language VARCHAR NOT NULL,
+            \\  browser_family VARCHAR NOT NULL,
+            \\  os_family VARCHAR NOT NULL,
+            \\  device_category VARCHAR NOT NULL,
+            \\  utm_source VARCHAR NOT NULL,
+            \\  utm_medium VARCHAR NOT NULL,
+            \\  utm_campaign VARCHAR NOT NULL,
+            \\  utm_term VARCHAR NOT NULL,
+            \\  utm_content VARCHAR NOT NULL,
+            \\  properties_json VARCHAR NOT NULL,
+            \\  user_traits_json VARCHAR NOT NULL,
+            \\  value_amount DECIMAL(18,6),
+            \\  value_currency VARCHAR NOT NULL,
+            \\  engagement_ms UINTEGER NOT NULL,
+            \\  max_scroll_depth UTINYINT NOT NULL,
+            \\  visitor_day_id BLOB NOT NULL,
+            \\  visitor_day_start BOOLEAN NOT NULL,
+            \\  event_payload_digest VARCHAR NOT NULL,
+            \\  traffic_class UTINYINT NOT NULL,
+            \\  classifier_version USMALLINT NOT NULL,
+            \\  bot_rule VARCHAR NOT NULL,
+            \\  legacy_bot_verdict BOOLEAN NOT NULL,
+            \\  CHECK (traffic_class BETWEEN 1 AND 5),
+            \\  CHECK (length(bot_rule) <= 64)
+            \\);
+            \\INSERT INTO events_v5 SELECT
+            \\  5, protocol_version, tracker_version, event_id, site_id,
+            \\  received_at_utc_micros, occurred_at_utc_micros,
+            \\  received_date_utc, site_local_date, site_utc_offset_minutes,
+            \\  kind, event_name, path, page_title, hostname, anonymous_id,
+            \\  identity_quality, user_id, session_id, sequence, session_start,
+            \\  referrer_host, country_code, language, browser_family, os_family,
+            \\  CASE WHEN device_category = 'bot'
+            \\    THEN 'unknown' ELSE device_category END,
+            \\  utm_source, utm_medium, utm_campaign, utm_term, utm_content,
+            \\  properties_json, user_traits_json, value_amount, value_currency,
+            \\  engagement_ms, max_scroll_depth, visitor_day_id,
+            \\  visitor_day_start, event_payload_digest,
+            \\  CASE WHEN exclusion_source != 0 THEN 4
+            \\    WHEN device_category = 'bot' THEN 2 ELSE 1 END,
+            \\  CASE WHEN exclusion_source != 0 THEN 1 ELSE 0 END,
+            \\  CASE exclusion_source
+            \\    WHEN 1 THEN 'exclude.tracker'
+            \\    WHEN 2 THEN 'exclude.network'
+            \\    WHEN 3 THEN 'exclude.both'
+            \\    ELSE CASE WHEN device_category = 'bot'
+            \\      THEN 'legacy-device-bot' ELSE '' END
+            \\  END,
+            \\  exclusion_source = 0 AND device_category = 'bot'
+            \\FROM events;
+        );
+        const preserved_mismatches = try self.scalar(
+            \\WITH source_rows AS (
+            \\  SELECT hash(protocol_version, tracker_version, event_id, site_id,
+            \\    received_at_utc_micros, occurred_at_utc_micros,
+            \\    received_date_utc, site_local_date, site_utc_offset_minutes,
+            \\    kind, event_name, path, page_title, hostname, anonymous_id,
+            \\    identity_quality, user_id, session_id, sequence, session_start,
+            \\    referrer_host, country_code, language, browser_family, os_family,
+            \\    CASE WHEN device_category = 'bot'
+            \\      THEN 'unknown' ELSE device_category END,
+            \\    utm_source, utm_medium, utm_campaign, utm_term, utm_content,
+            \\    properties_json, user_traits_json, value_amount, value_currency,
+            \\    engagement_ms, max_scroll_depth, visitor_day_id,
+            \\    visitor_day_start, event_payload_digest) AS row_hash
+            \\  FROM events
+            \\), target_rows AS (
+            \\  SELECT hash(protocol_version, tracker_version, event_id, site_id,
+            \\    received_at_utc_micros, occurred_at_utc_micros,
+            \\    received_date_utc, site_local_date, site_utc_offset_minutes,
+            \\    kind, event_name, path, page_title, hostname, anonymous_id,
+            \\    identity_quality, user_id, session_id, sequence, session_start,
+            \\    referrer_host, country_code, language, browser_family, os_family,
+            \\    device_category, utm_source, utm_medium, utm_campaign, utm_term,
+            \\    utm_content, properties_json, user_traits_json, value_amount,
+            \\    value_currency, engagement_ms, max_scroll_depth, visitor_day_id,
+            \\    visitor_day_start, event_payload_digest) AS row_hash
+            \\  FROM events_v5
+            \\), source AS (
+            \\  SELECT count(*) AS rows, bit_xor(row_hash) AS xor_hash,
+            \\    sum(CAST(row_hash AS UHUGEINT)) AS sum_hash,
+            \\    min(row_hash) AS min_hash, max(row_hash) AS max_hash
+            \\  FROM source_rows
+            \\), target AS (
+            \\  SELECT count(*) AS rows, bit_xor(row_hash) AS xor_hash,
+            \\    sum(CAST(row_hash AS UHUGEINT)) AS sum_hash,
+            \\    min(row_hash) AS min_hash, max(row_hash) AS max_hash
+            \\  FROM target_rows
+            \\)
+            \\SELECT count(*) FROM source s, target t
+            \\WHERE s.rows != t.rows OR s.xor_hash IS DISTINCT FROM t.xor_hash
+            \\  OR s.sum_hash IS DISTINCT FROM t.sum_hash
+            \\  OR s.min_hash IS DISTINCT FROM t.min_hash
+            \\  OR s.max_hash IS DISTINCT FROM t.max_hash
+        );
+        const mapping_mismatches = try self.scalar(
+            \\SELECT count(*)
+            \\FROM events s
+            \\FULL OUTER JOIN events_v5 t
+            \\  ON s.site_id = t.site_id AND s.event_id = t.event_id
+            \\WHERE s.event_id IS NULL OR t.event_id IS NULL
+            \\  OR t.event_schema_version != 5
+            \\  OR t.device_category != CASE
+            \\    WHEN s.device_category = 'bot'
+            \\    THEN 'unknown' ELSE s.device_category END
+            \\  OR t.traffic_class != CASE WHEN s.exclusion_source != 0 THEN 4
+            \\    WHEN s.device_category = 'bot' THEN 2 ELSE 1 END
+            \\  OR t.classifier_version != CASE
+            \\    WHEN s.exclusion_source != 0 THEN 1 ELSE 0 END
+            \\  OR t.bot_rule != CASE s.exclusion_source
+            \\    WHEN 1 THEN 'exclude.tracker'
+            \\    WHEN 2 THEN 'exclude.network'
+            \\    WHEN 3 THEN 'exclude.both'
+            \\    ELSE CASE WHEN s.device_category = 'bot'
+            \\      THEN 'legacy-device-bot' ELSE '' END END
+            \\  OR t.legacy_bot_verdict !=
+            \\    (s.exclusion_source = 0 AND s.device_category = 'bot')
+        );
+        const temporary_columns = try self.scalar(
+            \\SELECT count(*) FROM information_schema.columns
+            \\WHERE table_name = 'events_v5' AND column_name = 'exclusion_source'
+        );
+        const links_after = try self.scalar("SELECT count(*) FROM identity_links");
+        const links_hash_after = try self.scalar(
+            \\SELECT CAST(COALESCE(bit_xor(
+            \\  hash(site_id, anonymous_id, user_id, linked_at_utc_micros, event_id)
+            \\  & 9223372036854775807
+            \\), 0) AS BIGINT) FROM identity_links
+        );
+        if (preserved_mismatches != 0 or mapping_mismatches != 0 or
+            temporary_columns != 0 or links_before != links_after or
+            links_hash_before != links_hash_after)
+        {
+            return error.TrafficClassMigrationValidationFailed;
+        }
+        try self.database.exec(
+            \\DROP TABLE events;
+            \\ALTER TABLE events_v5 RENAME TO events;
+            \\INSERT INTO event_migrations VALUES (
+            \\  5, 'traffic-class-v1-shadow', 0
+            \\)
+        );
+        try self.database.exec("COMMIT");
+    }
+
     pub fn insert(self: *Store, event: domain.Event) !void {
         try domain.validateUuid(event.event_id);
         try domain.validateUuid(event.site_id);
@@ -558,6 +763,15 @@ pub const Store = struct {
         try domain.validateIdentifier(event.event_name);
         _ = try domain.normalizePath(event.path);
         if (event.kind != 1 and event.kind != 2) return error.InvalidEventKind;
+        try validateTrafficClassification(
+            event.traffic_class,
+            event.classifier_version,
+            event.bot_rule,
+            event.legacy_bot_verdict,
+        );
+        if (std.mem.eql(u8, event.device_category, "bot")) {
+            return error.InvalidDeviceCategory;
+        }
 
         var statement = try self.database.prepare(
             \\INSERT INTO events
@@ -567,10 +781,11 @@ pub const Store = struct {
             \\  kind, event_name, path, visitor_day_id, referrer_host,
             \\  country_code, browser_family, os_family, device_category,
             \\  utm_source, utm_medium, utm_campaign, utm_term, utm_content,
-            \\  properties_json, exclusion_source
+            \\  properties_json, traffic_class, classifier_version, bot_rule,
+            \\  legacy_bot_verdict
             \\) AS (
             \\  SELECT ?, ?, ?, CAST(? AS DATE), CAST(? AS DATE), ?,
-            \\         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            \\         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             \\),
             \\resolved AS (
             \\  SELECT i.*, p.session_id AS prior_session_id,
@@ -584,7 +799,7 @@ pub const Store = struct {
             \\    WHERE e.site_id = i.site_id
             \\      AND e.received_date_utc = i.received_date_utc
             \\      AND e.visitor_day_id = i.visitor_day_id
-            \\      AND e.exclusion_source = 0
+            \\      AND e.traffic_class != 4 AND NOT e.legacy_bot_verdict
             \\      AND e.received_at_utc_micros <= i.received_at_utc_micros
             \\    ORDER BY e.received_at_utc_micros DESC, e.event_id DESC
             \\    LIMIT 1
@@ -595,12 +810,12 @@ pub const Store = struct {
             \\    WHERE e.site_id = i.site_id
             \\      AND e.received_date_utc = i.received_date_utc
             \\      AND e.visitor_day_id = i.visitor_day_id
-            \\      AND e.exclusion_source = 0
+            \\      AND e.traffic_class != 4 AND NOT e.legacy_bot_verdict
             \\    LIMIT 1
             \\  ) a ON true
             \\)
             \\SELECT
-            \\  4, 1, 1, CAST(i.event_id AS UUID), i.site_id,
+            \\  5, 1, 1, CAST(i.event_id AS UUID), i.site_id,
             \\  i.received_at_utc_micros, i.received_at_utc_micros,
             \\  i.received_date_utc, i.site_local_date,
             \\  i.site_utc_offset_minutes,
@@ -616,15 +831,18 @@ pub const Store = struct {
             \\    THEN i.prior_sequence + 1
             \\    ELSE 0
             \\  END,
-            \\  i.exclusion_source = 0 AND (i.prior_session_id IS NULL
+            \\  i.traffic_class != 4 AND NOT i.legacy_bot_verdict
+            \\    AND (i.prior_session_id IS NULL
             \\    OR i.received_at_utc_micros - i.prior_at > 1800000000),
             \\  i.referrer_host, i.country_code, '', i.browser_family, i.os_family,
             \\  i.device_category, i.utm_source, i.utm_medium, i.utm_campaign,
             \\  i.utm_term, i.utm_content, i.properties_json
             \\  , '{}', CAST(NULL AS DECIMAL(18,6)), '', 0, 0,
             \\  i.visitor_day_id,
-            \\  i.exclusion_source = 0 AND i.prior_session_id IS NULL, '',
-            \\  i.exclusion_source
+            \\  i.traffic_class != 4 AND NOT i.legacy_bot_verdict
+            \\    AND i.prior_session_id IS NULL, '',
+            \\  i.traffic_class, i.classifier_version, i.bot_rule,
+            \\  i.legacy_bot_verdict
             \\FROM resolved i
         );
         defer statement.deinit();
@@ -649,7 +867,10 @@ pub const Store = struct {
         try statement.bindText(19, event.utm_term);
         try statement.bindText(20, event.utm_content);
         try statement.bindText(21, event.properties_json);
-        try statement.bindInt64(22, @backingInt(event.exclusion_source));
+        try statement.bindInt64(22, @backingInt(event.traffic_class));
+        try statement.bindInt64(23, event.classifier_version);
+        try statement.bindText(24, event.bot_rule);
+        try statement.bindInt64(25, @intFromBool(event.legacy_bot_verdict));
         var result = try statement.execute();
         result.deinit();
     }
@@ -672,6 +893,15 @@ pub const Store = struct {
             event.event_payload_digest.len != 64)
         {
             return error.InvalidV2Event;
+        }
+        try validateTrafficClassification(
+            event.traffic_class,
+            event.classifier_version,
+            event.bot_rule,
+            event.legacy_bot_verdict,
+        );
+        if (std.mem.eql(u8, event.device_category, "bot")) {
+            return error.InvalidDeviceCategory;
         }
 
         const existing_digest = try self.eventDigest(
@@ -711,7 +941,7 @@ pub const Store = struct {
         try self.database.exec("BEGIN TRANSACTION");
         errdefer self.database.exec("ROLLBACK") catch {};
         if (event.identify_user_id.len != 0 and linked_user == null and
-            !event.exclusion_source.isExcluded())
+            event.traffic_class.productEligible(event.legacy_bot_verdict))
         {
             var link_statement = try self.database.prepare(
                 \\INSERT INTO identity_links (
@@ -741,25 +971,27 @@ pub const Store = struct {
             \\  utm_campaign, utm_term, utm_content, properties_json,
             \\  user_traits_json, value_amount, value_currency, engagement_ms,
             \\  max_scroll_depth, visitor_day_id, payload_digest,
-            \\  exclusion_source
+            \\  traffic_class, classifier_version, bot_rule,
+            \\  legacy_bot_verdict
             \\) AS (
             \\  SELECT ?, ?, ?, ?, CAST(? AS DATE), CAST(? AS DATE), ?,
             \\         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-            \\         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            \\         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             \\)
             \\SELECT
-            \\  4, 2, 2, CAST(i.event_id AS UUID), i.site_id,
+            \\  5, 2, 2, CAST(i.event_id AS UUID), i.site_id,
             \\  i.received_at, i.occurred_at, i.received_date,
             \\  i.site_local_date, i.site_utc_offset_minutes,
             \\  i.kind, i.event_name, i.path,
             \\  i.page_title, i.hostname, CAST(i.anonymous_id AS UUID),
             \\  i.identity_quality, i.user_id, CAST(i.session_id AS UUID),
             \\  i.sequence,
-            \\  i.exclusion_source = 0 AND NOT EXISTS (
+            \\  i.traffic_class != 4 AND NOT i.legacy_bot_verdict
+            \\  AND NOT EXISTS (
             \\    SELECT 1 FROM events e
             \\    WHERE e.site_id = i.site_id
             \\      AND e.session_id = CAST(i.session_id AS UUID)
-            \\      AND e.exclusion_source = 0
+            \\      AND e.traffic_class != 4 AND NOT e.legacy_bot_verdict
             \\  ),
             \\  i.referrer_host, i.country_code, i.language,
             \\  i.browser_family, i.os_family, i.device_category,
@@ -772,14 +1004,16 @@ pub const Store = struct {
             \\  END,
             \\  i.value_currency, i.engagement_ms, i.max_scroll_depth,
             \\  i.visitor_day_id,
-            \\  i.exclusion_source = 0 AND NOT EXISTS (
+            \\  i.traffic_class != 4 AND NOT i.legacy_bot_verdict
+            \\  AND NOT EXISTS (
             \\    SELECT 1 FROM events e
             \\    WHERE e.site_id = i.site_id
             \\      AND e.received_date_utc = i.received_date
             \\      AND e.visitor_day_id = i.visitor_day_id
-            \\      AND e.exclusion_source = 0
+            \\      AND e.traffic_class != 4 AND NOT e.legacy_bot_verdict
             \\  ),
-            \\  i.payload_digest, i.exclusion_source
+            \\  i.payload_digest, i.traffic_class, i.classifier_version,
+            \\  i.bot_rule, i.legacy_bot_verdict
             \\FROM incoming i
         );
         defer statement.deinit();
@@ -819,7 +1053,10 @@ pub const Store = struct {
         try statement.bindInt64(34, event.max_scroll_depth);
         try statement.bindBlob(35, &event.visitor_day_id);
         try statement.bindText(36, event.event_payload_digest);
-        try statement.bindInt64(37, @backingInt(event.exclusion_source));
+        try statement.bindInt64(37, @backingInt(event.traffic_class));
+        try statement.bindInt64(38, event.classifier_version);
+        try statement.bindText(39, event.bot_rule);
+        try statement.bindInt64(40, @intFromBool(event.legacy_bot_verdict));
         var result = try statement.execute();
         result.deinit();
         try self.database.exec("COMMIT");
@@ -859,7 +1096,7 @@ pub const Store = struct {
         ;
         var result = try self.database.query(switch (current) {
             2 => source_sql,
-            3, 4 => migrated_sql,
+            3, 4, 5 => migrated_sql,
             else => return error.UnsupportedLegacyEvidenceSchema,
         });
         defer result.deinit();
@@ -1092,7 +1329,8 @@ pub const Store = struct {
             \\       event_name, path, referrer_host, country_code,
             \\       browser_family, os_family, device_category,
             \\       utm_source, utm_medium, utm_campaign, utm_term,
-            \\       utm_content, properties_json
+            \\       utm_content, properties_json, traffic_class,
+            \\       classifier_version, bot_rule, legacy_bot_verdict
             \\FROM events
             \\WHERE site_id = ?
             \\  AND received_date_utc BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
@@ -1107,7 +1345,7 @@ pub const Store = struct {
         try statement.bindInt64(5, offset);
         var result = try statement.execute();
         defer result.deinit();
-        if (result.columnCount() != 15) return error.InvalidExportResult;
+        if (result.columnCount() != 19) return error.InvalidExportResult;
         const output = try allocator.alloc(ExportEvent, result.rowCount());
         for (output, 0..) |*event, index| {
             event.* = .{
@@ -1126,6 +1364,10 @@ pub const Store = struct {
                 .utm_term = try result.text(allocator, 12, index),
                 .utm_content = try result.text(allocator, 13, index),
                 .properties_json = try result.text(allocator, 14, index),
+                .traffic_class = result.int64(15, index),
+                .classifier_version = result.int64(16, index),
+                .bot_rule = try result.text(allocator, 17, index),
+                .legacy_bot_verdict = result.int64(18, index) != 0,
             };
         }
         return output;
@@ -1146,7 +1388,8 @@ pub const Store = struct {
         var result = try self.database.query(
             \\SELECT event_name, path, referrer_host, country_code,
             \\       browser_family, os_family, device_category,
-            \\       utm_source, properties_json
+            \\       utm_source, properties_json, traffic_class,
+            \\       classifier_version, bot_rule, legacy_bot_verdict
             \\FROM events
             \\ORDER BY received_at_utc_micros DESC, event_id DESC
             \\LIMIT 1
@@ -1163,6 +1406,10 @@ pub const Store = struct {
             .device_category = try result.text(allocator, 6, 0),
             .utm_source = try result.text(allocator, 7, 0),
             .properties_json = try result.text(allocator, 8, 0),
+            .traffic_class = result.int64(9, 0),
+            .classifier_version = result.int64(10, 0),
+            .bot_rule = try result.text(allocator, 11, 0),
+            .legacy_bot_verdict = result.int64(12, 0) != 0,
         };
     }
 
@@ -1175,7 +1422,8 @@ pub const Store = struct {
         var statement = try self.database.prepare(
             \\SELECT event_name, path, referrer_host, country_code,
             \\       browser_family, os_family, device_category,
-            \\       utm_source, properties_json
+            \\       utm_source, properties_json, traffic_class,
+            \\       classifier_version, bot_rule, legacy_bot_verdict
             \\FROM events
             \\WHERE event_name = ?
             \\ORDER BY received_at_utc_micros DESC, event_id DESC
@@ -1240,7 +1488,8 @@ pub const Store = struct {
             \\  e.utm_term, e.utm_content, e.properties_json,
             \\  e.user_traits_json, CAST(e.value_amount AS VARCHAR),
             \\  e.value_currency, e.engagement_ms, e.max_scroll_depth,
-            \\  COALESCE(l.user_id, ''), e.exclusion_source
+            \\  COALESCE(l.user_id, ''), e.traffic_class,
+            \\  e.classifier_version, e.bot_rule, e.legacy_bot_verdict
             \\FROM events e
             \\LEFT JOIN identity_links l
             \\  ON l.site_id = e.site_id AND l.anonymous_id = e.anonymous_id
@@ -1251,7 +1500,7 @@ pub const Store = struct {
         try statement.bindText(2, event_id);
         var result = try statement.execute();
         defer result.deinit();
-        if (result.rowCount() != 1 or result.columnCount() != 38) {
+        if (result.rowCount() != 1 or result.columnCount() != 41) {
             return error.EventNotFound;
         }
         return .{
@@ -1295,7 +1544,10 @@ pub const Store = struct {
             .engagement_ms = result.int64(34, 0),
             .max_scroll_depth = result.int64(35, 0),
             .linked_user_id = try result.text(allocator, 36, 0),
-            .exclusion_source = result.int64(37, 0),
+            .traffic_class = result.int64(37, 0),
+            .classifier_version = result.int64(38, 0),
+            .bot_rule = try result.text(allocator, 39, 0),
+            .legacy_bot_verdict = result.int64(40, 0) != 0,
         };
     }
 
@@ -1313,7 +1565,7 @@ pub const Store = struct {
             \\LEFT JOIN identity_links l
             \\  ON l.site_id = e.site_id AND l.anonymous_id = e.anonymous_id
             \\WHERE e.site_id = ? AND e.anonymous_id = CAST(? AS UUID)
-            \\  AND e.exclusion_source = 0
+            \\  AND e.traffic_class != 4 AND NOT e.legacy_bot_verdict
             \\ORDER BY e.occurred_at_utc_micros DESC, e.sequence DESC,
             \\         e.received_at_utc_micros DESC, e.event_id DESC
             \\LIMIT 1
@@ -1349,7 +1601,7 @@ pub const Store = struct {
             \\    SELECT e.user_traits_json
             \\    FROM events e
             \\    WHERE e.site_id = ? AND e.kind = 4 AND e.user_id = ?
-            \\      AND e.exclusion_source = 0
+            \\      AND e.traffic_class != 4 AND NOT e.legacy_bot_verdict
             \\    ORDER BY e.occurred_at_utc_micros DESC, e.sequence DESC,
             \\             e.received_at_utc_micros DESC, e.event_id DESC
             \\    LIMIT 1
@@ -1447,6 +1699,41 @@ pub const Store = struct {
     }
 };
 
+fn validateTrafficClassification(
+    traffic_class: domain.TrafficClass,
+    classifier_version: u16,
+    bot_rule: []const u8,
+    legacy_bot_verdict: bool,
+) !void {
+    if (classifier_version != 1 or bot_rule.len > 64) {
+        return error.InvalidTrafficClassification;
+    }
+    for (bot_rule) |byte| {
+        if (!(std.ascii.isAlphanumeric(byte) or byte == '.' or
+            byte == '_' or byte == '-'))
+        {
+            return error.InvalidTrafficClassification;
+        }
+    }
+    switch (traffic_class) {
+        .human_presumed => if (bot_rule.len != 0)
+            return error.InvalidTrafficClassification,
+        .declared_bot, .automation => if (bot_rule.len == 0 or
+            std.mem.startsWith(u8, bot_rule, "exclude."))
+        {
+            return error.InvalidTrafficClassification;
+        },
+        .excluded => if (legacy_bot_verdict or
+            !(std.mem.eql(u8, bot_rule, "exclude.tracker") or
+                std.mem.eql(u8, bot_rule, "exclude.network") or
+                std.mem.eql(u8, bot_rule, "exclude.both")))
+        {
+            return error.InvalidTrafficClassification;
+        },
+        .suspected => return error.InvalidTrafficClassification,
+    }
+}
+
 fn decodeStoredEvent(
     allocator: std.mem.Allocator,
     result: *duckdb.Result,
@@ -1461,5 +1748,9 @@ fn decodeStoredEvent(
         .device_category = try result.text(allocator, 6, 0),
         .utm_source = try result.text(allocator, 7, 0),
         .properties_json = try result.text(allocator, 8, 0),
+        .traffic_class = result.int64(9, 0),
+        .classifier_version = result.int64(10, 0),
+        .bot_rule = try result.text(allocator, 11, 0),
+        .legacy_bot_verdict = result.int64(12, 0) != 0,
     };
 }

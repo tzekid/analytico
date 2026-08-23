@@ -201,7 +201,10 @@ pub fn run(
             "\"rejected\":{d},\"rate_limited\":{d},\"bots\":{d}," ++
             "\"unknown_country\":{d},\"unknown_client\":{d}," ++
             "\"duplicates\":{d},\"conflicts\":{d},\"write_failures\":{d}," ++
-            "\"request_failures\":{d},\"excluded\":{d}}}\n",
+            "\"request_failures\":{d},\"excluded\":{d}," ++
+            "\"legacy_bot_positive\":{d},\"classifier_bot_positive\":{d}," ++
+            "\"shadow_both_human\":{d},\"shadow_legacy_only\":{d}," ++
+            "\"shadow_classifier_only\":{d},\"shadow_both_bot\":{d}}}\n",
         .{
             context.counters.accepted,
             context.counters.rejected,
@@ -214,6 +217,12 @@ pub fn run(
             context.counters.write_failures,
             context.counters.request_failures,
             context.counters.excluded,
+            context.counters.legacy_bot_positive,
+            context.counters.classifier_bot_positive,
+            context.counters.shadow_both_human,
+            context.counters.shadow_legacy_only,
+            context.counters.shadow_classifier_only,
+            context.counters.shadow_both_bot,
         },
     );
 }
@@ -230,6 +239,12 @@ const Counters = struct {
     write_failures: u64 = 0,
     request_failures: u64 = 0,
     excluded: u64 = 0,
+    legacy_bot_positive: u64 = 0,
+    classifier_bot_positive: u64 = 0,
+    shadow_both_human: u64 = 0,
+    shadow_legacy_only: u64 = 0,
+    shadow_classifier_only: u64 = 0,
+    shadow_both_bot: u64 = 0,
 };
 
 const Context = struct {
@@ -767,7 +782,7 @@ fn acceptEvent(
     if (user_agent.len > 1024) return error.InvalidUserAgent;
     const client = classify.userAgent(user_agent);
     const country_code = classify.country(try request.header("x-analytico-country"));
-    if (std.mem.eql(u8, client.device, "bot")) context.counters.bots += 1;
+    if (client.traffic.legacy_bot_verdict) context.counters.bots += 1;
     if (std.mem.eql(u8, country_code[0..], "ZZ")) {
         context.counters.unknown_country += 1;
     }
@@ -793,6 +808,7 @@ fn acceptEvent(
         false,
         try policy.metadata.excludesNetwork(client_ip),
     );
+    const traffic = client.traffic.withExclusion(exclusion_source);
     const local = policy.timezone.localAt(now.seconds) catch
         return error.TimezoneUnavailable;
     context.events.insert(.{
@@ -817,14 +833,21 @@ fn acceptEvent(
         .utm_term = prepared.utm_term,
         .utm_content = prepared.utm_content,
         .properties_json = prepared.properties_json,
-        .exclusion_source = exclusion_source,
+        .traffic_class = traffic.class,
+        .classifier_version = traffic.classifier_version,
+        .bot_rule = traffic.rule,
+        .legacy_bot_verdict = traffic.legacy_bot_verdict,
     }) catch {
         context.events_healthy = false;
         context.counters.write_failures += 1;
         return error.EventWriteFailed;
     };
     context.counters.accepted += 1;
-    if (exclusion_source.isExcluded()) context.counters.excluded += 1;
+    if (traffic.class.isExcluded()) {
+        context.counters.excluded += 1;
+    } else {
+        recordShadow(&context.counters, traffic);
+    }
     return true;
 }
 
@@ -841,7 +864,7 @@ fn acceptEventV2(
     if (user_agent.len > 1024) return error.InvalidUserAgent;
     const client = classify.userAgent(user_agent);
     const country_code = classify.country(try request.header("x-analytico-country"));
-    if (std.mem.eql(u8, client.device, "bot")) context.counters.bots += 1;
+    if (client.traffic.legacy_bot_verdict) context.counters.bots += 1;
     if (std.mem.eql(u8, country_code[0..], "ZZ")) {
         context.counters.unknown_country += 1;
     }
@@ -873,6 +896,7 @@ fn acceptEventV2(
         prepared.self_excluded,
         try policy.metadata.excludesNetwork(client_ip),
     );
+    const traffic = client.traffic.withExclusion(exclusion_source);
     const local = policy.timezone.localAt(now.seconds) catch
         return error.TimezoneUnavailable;
     const outcome = context.events.insertV2(allocator, .{
@@ -911,7 +935,10 @@ fn acceptEventV2(
         .max_scroll_depth = prepared.max_scroll_depth,
         .visitor_day_id = visitor_day_id,
         .event_payload_digest = &prepared.event_payload_digest,
-        .exclusion_source = exclusion_source,
+        .traffic_class = traffic.class,
+        .classifier_version = traffic.classifier_version,
+        .bot_rule = traffic.rule,
+        .legacy_bot_verdict = traffic.legacy_bot_verdict,
     }) catch |err| switch (err) {
         error.EventIdConflict,
         error.IdentityConflict,
@@ -929,9 +956,32 @@ fn acceptEventV2(
     switch (outcome) {
         .inserted => {
             context.counters.accepted += 1;
-            if (exclusion_source.isExcluded()) context.counters.excluded += 1;
+            if (traffic.class.isExcluded()) {
+                context.counters.excluded += 1;
+            } else {
+                recordShadow(&context.counters, traffic);
+            }
         },
         .duplicate => context.counters.duplicates += 1,
+    }
+}
+
+fn recordShadow(
+    counters: *Counters,
+    traffic: domain.TrafficClassification,
+) void {
+    std.debug.assert(!traffic.class.isExcluded());
+    const classifier_bot = traffic.class.isClassifierBot();
+    if (traffic.legacy_bot_verdict) counters.legacy_bot_positive += 1;
+    if (classifier_bot) counters.classifier_bot_positive += 1;
+    if (traffic.legacy_bot_verdict and classifier_bot) {
+        counters.shadow_both_bot += 1;
+    } else if (traffic.legacy_bot_verdict) {
+        counters.shadow_legacy_only += 1;
+    } else if (classifier_bot) {
+        counters.shadow_classifier_only += 1;
+    } else {
+        counters.shadow_both_human += 1;
     }
 }
 

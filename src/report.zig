@@ -3,7 +3,7 @@ const domain = @import("domain.zig");
 
 pub const metric_version: u8 = 1;
 pub const traffic_quality_metric_version: u8 = 2;
-pub const traffic_quality_version: u8 = 2;
+pub const traffic_quality_version: u8 = 3;
 pub const default_limit: u16 = 25;
 pub const maximum_limit: u16 = 100;
 pub const maximum_range_days: u16 = 400;
@@ -251,6 +251,25 @@ pub const ExclusionSourceRow = struct {
     events: i64,
 };
 
+pub const TrafficClassRow = struct {
+    class: domain.TrafficClass,
+    events: i64,
+};
+
+pub const TrafficShadow = struct {
+    both_human: i64,
+    legacy_only: i64,
+    classifier_only: i64,
+    both_bot: i64,
+};
+
+pub const TrafficRuleRow = struct {
+    class: domain.TrafficClass,
+    classifier_version: u16,
+    rule: []u8,
+    events: i64,
+};
+
 pub const TrafficQualityDay = struct {
     date: []u8,
     new_anonymous_identities: i64,
@@ -267,6 +286,10 @@ pub const TrafficQuality = struct {
     zero_engagement_single_event_sessions: i64,
     identity_quality: [3]IdentityQualityRow,
     exclusion_sources: [3]ExclusionSourceRow,
+    traffic_classes: [5]TrafficClassRow,
+    classifier_v1_events: i64,
+    shadow: TrafficShadow,
+    rules: []TrafficRuleRow,
     days: []TrafficQualityDay,
     next_page: ?u32,
 };
@@ -387,6 +410,34 @@ fn renderTable(
             try output.writeAll("exclusion_source\tevents\n");
             for (quality.exclusion_sources) |row| {
                 try output.print("{s}\t{d}\n", .{ @tagName(row.source), row.events });
+            }
+            try output.writeAll("traffic_class\tevents\n");
+            for (quality.traffic_classes) |row| {
+                try output.print("{s}\t{d}\n", .{ row.class.name(), row.events });
+            }
+            try output.print(
+                "classifier_v1_events\t{d}\n" ++
+                    "shadow_verdict\tevents\n" ++
+                    "both_human\t{d}\nlegacy_only\t{d}\n" ++
+                    "classifier_only\t{d}\nboth_bot\t{d}\n",
+                .{
+                    quality.classifier_v1_events,
+                    quality.shadow.both_human,
+                    quality.shadow.legacy_only,
+                    quality.shadow.classifier_only,
+                    quality.shadow.both_bot,
+                },
+            );
+            try output.writeAll(
+                "classifier_rule\ttraffic_class\tclassifier_version\tevents\n",
+            );
+            for (quality.rules) |row| {
+                try output.print("{s}\t{s}\t{d}\t{d}\n", .{
+                    if (row.rule.len == 0) "(none)" else row.rule,
+                    row.class.name(),
+                    row.classifier_version,
+                    row.events,
+                });
             }
             try output.writeAll("date\tnew_anonymous_identities\tbot_events\n");
             for (quality.days) |day| {
@@ -525,6 +576,37 @@ fn renderJson(
                 try jsonString(output, @tagName(row.source));
                 try output.print(",\"events\":{d}}}", .{row.events});
             }
+            try output.writeAll("],\"traffic_classes\":[");
+            for (quality.traffic_classes, 0..) |row, index| {
+                if (index != 0) try output.writeByte(',');
+                try output.writeAll("{\"class\":");
+                try jsonString(output, row.class.name());
+                try output.print(",\"events\":{d}}}", .{row.events});
+            }
+            try output.print(
+                "],\"classifier_v1_events\":{d},\"shadow\":{{" ++
+                    "\"both_human\":{d},\"legacy_only\":{d}," ++
+                    "\"classifier_only\":{d},\"both_bot\":{d}}}," ++
+                    "\"classifier_rules\":[",
+                .{
+                    quality.classifier_v1_events,
+                    quality.shadow.both_human,
+                    quality.shadow.legacy_only,
+                    quality.shadow.classifier_only,
+                    quality.shadow.both_bot,
+                },
+            );
+            for (quality.rules, 0..) |row, index| {
+                if (index != 0) try output.writeByte(',');
+                try output.writeAll("{\"class\":");
+                try jsonString(output, row.class.name());
+                try output.print(
+                    ",\"classifier_version\":{d},\"rule\":",
+                    .{row.classifier_version},
+                );
+                try jsonString(output, row.rule);
+                try output.print(",\"events\":{d}}}", .{row.events});
+            }
             try output.writeAll("],\"days\":[");
             for (quality.days, 0..) |day, index| {
                 if (index != 0) try output.writeByte(',');
@@ -624,9 +706,9 @@ fn renderCsv(
         },
         .traffic_quality => |quality| {
             try output.writeAll(
-                "metric_version,traffic_quality_version,row_type,label,events,visitor_days,new_anonymous_identities,bot_events,distinct_people,persistent_people,ephemeral_people,legacy_people,persistent_basis_points,zero_engagement_single_event_sessions\n",
+                "metric_version,traffic_quality_version,row_type,label,events,visitor_days,new_anonymous_identities,bot_events,distinct_people,persistent_people,ephemeral_people,legacy_people,persistent_basis_points,zero_engagement_single_event_sessions,traffic_class,classifier_version,rule\n",
             );
-            try output.print("{d},{d},summary,all,,,,,{d},{d},{d},{d},{d},{d}\n", .{
+            try output.print("{d},{d},summary,all,,,,,{d},{d},{d},{d},{d},{d},,,\n", .{
                 traffic_quality_metric_version,
                 traffic_quality_version,
                 quality.distinct_people,
@@ -637,7 +719,7 @@ fn renderCsv(
                 quality.zero_engagement_single_event_sessions,
             });
             for (quality.identity_quality) |row| {
-                try output.print("{d},{d},identity_quality,{s},{d},{d},,,,,,,,\n", .{
+                try output.print("{d},{d},identity_quality,{s},{d},{d},,,,,,,,,,,\n", .{
                     traffic_quality_metric_version,
                     traffic_quality_version,
                     row.quality.name(),
@@ -646,15 +728,56 @@ fn renderCsv(
                 });
             }
             for (quality.exclusion_sources) |row| {
-                try output.print("{d},{d},exclusion_source,{s},{d},,,,,,,,,\n", .{
+                try output.print("{d},{d},exclusion_source,{s},{d},,,,,,,,,,,,\n", .{
                     traffic_quality_metric_version,
                     traffic_quality_version,
                     @tagName(row.source),
                     row.events,
                 });
             }
+            for (quality.traffic_classes) |row| {
+                try output.print("{d},{d},traffic_class,{s},{d},,,,,,,,,,{s},,\n", .{
+                    traffic_quality_metric_version,
+                    traffic_quality_version,
+                    row.class.name(),
+                    row.events,
+                    row.class.name(),
+                });
+            }
+            try output.print("{d},{d},classifier_coverage,v1,{d},,,,,,,,,,,1,\n", .{
+                traffic_quality_metric_version,
+                traffic_quality_version,
+                quality.classifier_v1_events,
+            });
+            inline for (.{
+                .{ "both_human", quality.shadow.both_human },
+                .{ "legacy_only", quality.shadow.legacy_only },
+                .{ "classifier_only", quality.shadow.classifier_only },
+                .{ "both_bot", quality.shadow.both_bot },
+            }) |row| {
+                try output.print("{d},{d},shadow,{s},{d},,,,,,,,,,,,\n", .{
+                    traffic_quality_metric_version,
+                    traffic_quality_version,
+                    row[0],
+                    row[1],
+                });
+            }
+            for (quality.rules) |row| {
+                try output.print(
+                    "{d},{d},classifier_rule,{s},{d},,,,,,,,,,{s},{d},{s}\n",
+                    .{
+                        traffic_quality_metric_version,
+                        traffic_quality_version,
+                        row.rule,
+                        row.events,
+                        row.class.name(),
+                        row.classifier_version,
+                        row.rule,
+                    },
+                );
+            }
             for (quality.days) |day| {
-                try output.print("{d},{d},day,{s},,,{d},{d},,,,,,\n", .{
+                try output.print("{d},{d},day,{s},,,{d},{d},,,,,,,,,\n", .{
                     traffic_quality_metric_version,
                     traffic_quality_version,
                     day.date,

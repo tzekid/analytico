@@ -18,7 +18,8 @@ Count distinct canonical person keys with at least one accepted meaningful
 page-view or custom event in range. Engagement and identify rows do not create
 a person independently. A linked persistent identity uses `u:<user_id>`;
 otherwise persistent, ephemeral, and migrated legacy identities use disjoint
-`a:`, `e:`, and `l:` namespaces around their anonymous ID. Bots are excluded.
+`a:`, `e:`, and `l:` namespaces around their anonymous ID. Product-ineligible
+traffic is excluded under the versioned predicate below.
 
 This is a modeled pseudonymous identity count, not a claim about physical
 humans. The result therefore carries persistent, ephemeral, and legacy person
@@ -29,8 +30,9 @@ across days and are never linked into a persistent person.
 
 A visitor-day counts a product-eligible daily identity once per date. It is not
 a person count: one person present on three dates contributes three
-visitor-days. The metric-v1 compatibility value counts non-bot
-`visitor_day_start` rows over receipt UTC dates. It must be labeled
+visitor-days. The metric-v1 compatibility value counts product-eligible
+`visitor_day_start` rows over receipt UTC dates under the versioned D32
+predicate. It must be labeled
 `visitor-days`, never `daily visitors` or `people`.
 
 The #66 Overview diagnostic is intentionally a compatibility bridge: both its
@@ -61,34 +63,52 @@ session crossing a range boundary is included when activity occurs in range.
 
 Page views divided by sessions, with zero-safe formatting.
 
-## Traffic-quality diagnostics version 2
+## Traffic-quality diagnostics version 3
 
 The bounded `traffic-quality` report makes no network or runtime-data-file
-request. Version 1 was measure-only. Version 2 retains those observations and
-adds D31's visible self-exclusion accounting. Until event schema 5 introduces
-the permanent `traffic_class`, the current `device_category = 'bot'` verdict is
-the only bot boundary and its limitations remain visible.
+request. Version 1 was measure-only and version 2 added D31's stored
+self-exclusion accounting. Version 3 retains those observations and reports
+D32's event-schema-5 permanent traffic class, classifier version, bounded rule,
+and one-release legacy comparison without storing raw UAs.
+
+During the #68 shadow release, the product-eligible base predicate is exactly:
+
+```text
+traffic_class != excluded AND legacy_bot_verdict = false
+```
+
+The predicate keeps every D31 exclusion and every old-classifier bot out of
+product metrics while the expanded classifier is measured. A classifier-only
+declared-bot or automation row remains product-compatible for this one release;
+that compatibility is explicit rather than a human claim. #69 must review the
+deployed disagreement cells before it may remove the boolean and promote the
+permanent class predicate. Excluded rows take precedence over UA classification.
 
 For the inclusive received-UTC report range, it exposes:
 
 - distinct people and their persistent/ephemeral/legacy coverage as defined
   above;
-- non-bot, non-self-excluded accepted events and metric-v1 visitor-days split
-  by raw `identity_quality` (`persistent`, `ephemeral`, `legacy_daily`); bot
-  events are reported separately so they do not silently overlap the quality
-  split;
-- non-bot sessions with a meaningful event in range and exactly one meaningful
+- product-eligible accepted events and metric-v1 visitor-days split
+  by raw `identity_quality` (`persistent`, `ephemeral`, `legacy_daily`);
+  legacy-bot and excluded observations are reported separately so they do not silently
+  overlap the quality split;
+- product-eligible sessions with a meaningful event in range and exactly one meaningful
   page-view or custom event across the whole stored session, total
   `engagement_ms = 0`, and maximum `max_scroll_depth = 0`; this is a diagnostic
   observation, not a bot or suspected-traffic classification;
-- new anonymous identities per receipt UTC day: the first accepted non-bot
+- new anonymous identities per receipt UTC day: the first product-eligible
   meaningful event for each persistent or ephemeral anonymous ID over the
   site's full history, excluding migrated legacy daily IDs; and
-- all currently classified bot events per receipt UTC day.
+- all rows with the legacy bot verdict per receipt UTC day;
+- all five stored traffic-class totals and classifier-v1 coverage;
+- the four nonexcluded classifier-v1 shadow cells (`both_human`,
+  `legacy_only`, `classifier_only`, and `both_bot`); and
+- grouped class/version/rule totals, ordered deterministically and capped at 64
+  rows.
 
-It also reports stored events by the closed event-schema-4
-`exclusion_source`: tracker self-flag, configured network prefix, or both.
-Self-excluded rows remain in DuckDB and in diagnostics but are ineligible for
+It continues to report stored exclusions by the permanent rules
+`exclude.tracker`, `exclude.network`, and `exclude.both`. Excluded rows remain
+in DuckDB and diagnostics but are ineligible for
 product visitor, person, session, page, event, goal, funnel, property, and
 analysis metrics. The operator choice is not a bot verdict and does not weaken
 the positive-human-evidence veto used by later heuristic classification.
@@ -98,11 +118,12 @@ or client session. An excluded identify row does not create an identity link,
 so later eligible traffic cannot inherit product identity from an excluded
 observation.
 
-Every date in the requested range appears, including zero days. The request is
-limited to 400 dates and one DuckDB deadline; CLI and dashboard results page
-daily rows at no more than 100 rows. Positive engagement or scroll evidence
-necessarily removes a session from the zero-engagement observation; no soft
-signal affects product metrics in this phase.
+Every date in the requested range appears, including zero days. The daily page
+and the bounded rule groups are branches of one static bound DuckDB statement
+under one deadline. The request is limited to 400 dates; CLI and dashboard
+results page daily rows at no more than 100. Positive engagement or scroll
+evidence necessarily removes a session from the zero-engagement observation;
+no soft signal affects product metrics in this phase.
 
 ## Engagement
 
@@ -118,9 +139,12 @@ combined and no foreign-exchange conversion occurs.
 
 ## Bots
 
-Bots are excluded from product visitor, session, and audience metrics and
-counted in diagnostics. Classification is versioned by the governing traffic
-class contract. #66 does not reinterpret history. D31's temporary event schema
-4 stores self-exclusion explicitly; #68 owns event schema 5 and migrates every
-nonzero `exclusion_source` to permanent `traffic_class=excluded` before
-removing the temporary field.
+Traffic classification is versioned by D32 and
+`UA_CLASSIFIER_V1.md`. Historical source-zero rows use classifier version zero
+because their discarded UAs cannot be recovered. All schema-4 exclusions are
+migrated losslessly to permanent class `excluded` before the temporary source
+is removed. The #68 shadow predicate above, rather than an unqualified label,
+defines product compatibility for one release; diagnostics expose both old and
+new verdicts. #69 owns any promotion to `traffic_class IN
+(human-presumed, suspected)` after measured review. Every otherwise accepted
+event remains stored.

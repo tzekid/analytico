@@ -367,7 +367,52 @@ fn renderTrafficQuality(
         try output.print("</td><td>{d}</td></tr>", .{row.events});
     }
     try output.writeAll(
-        "</tbody></table></div><h4>Daily diagnostics</h4>" ++
+        "</tbody></table></div><h4>Traffic class</h4>" ++
+            "<div class=\"table-scroll\"><table><thead><tr>" ++
+            "<th>Class</th><th>Events</th></tr></thead><tbody>",
+    );
+    for (quality.traffic_classes) |row| {
+        try output.writeAll("<tr><td>");
+        try text(output, humanize(row.class.name()));
+        try output.print("</td><td>{d}</td></tr>", .{row.events});
+    }
+    try output.print(
+        "</tbody></table></div><p class=\"muted\">Classifier-v1 comparison coverage: {d} non-excluded events.</p>" ++
+            "<h4>Legacy / classifier shadow</h4>" ++
+            "<div class=\"table-scroll\"><table><thead><tr>" ++
+            "<th>Verdict</th><th>Events</th></tr></thead><tbody>" ++
+            "<tr><td>Both human</td><td>{d}</td></tr>" ++
+            "<tr><td>Legacy only</td><td>{d}</td></tr>" ++
+            "<tr><td>Classifier only</td><td>{d}</td></tr>" ++
+            "<tr><td>Both bot</td><td>{d}</td></tr></tbody></table></div>",
+        .{
+            quality.classifier_v1_events,
+            quality.shadow.both_human,
+            quality.shadow.legacy_only,
+            quality.shadow.classifier_only,
+            quality.shadow.both_bot,
+        },
+    );
+    if (show_headlines) {
+        try output.writeAll(
+            "<h4>Classifier rules</h4><div class=\"table-scroll\"><table>" ++
+                "<thead><tr><th>Rule</th><th>Class</th><th>Version</th>" ++
+                "<th>Events</th></tr></thead><tbody>",
+        );
+        for (quality.rules) |row| {
+            try output.writeAll("<tr><td>");
+            try text(output, if (row.rule.len == 0) "(none)" else row.rule);
+            try output.writeAll("</td><td>");
+            try text(output, humanize(row.class.name()));
+            try output.print("</td><td>{d}</td><td>{d}</td></tr>", .{
+                row.classifier_version,
+                row.events,
+            });
+        }
+        try output.writeAll("</tbody></table></div>");
+    }
+    try output.writeAll(
+        "<h4>Daily diagnostics</h4>" ++
             "<div class=\"table-scroll\"><table><thead><tr><th>Date (UTC)</th>" ++
             "<th>New anonymous identities</th><th>Bot events</th>" ++
             "</tr></thead><tbody>",

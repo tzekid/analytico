@@ -70,6 +70,8 @@ measure_series() {
     2025-01-01 2025-01-12 overview --format json >/dev/null
 "$binary" report "$fixture_dir" scale \
     2025-01-01 2025-01-12 funnel signup-flow --format json >/dev/null
+"$binary" report "$fixture_dir" scale \
+    2025-01-01 2025-01-12 traffic-quality --format json >/dev/null
 
 printf '{'
 printf '"events":1000000,'
@@ -82,6 +84,8 @@ measure goal "$binary" report "$fixture_dir" scale \
     2025-01-01 2025-01-12 goal signups --format json
 measure_series funnel 10 "$binary" report "$fixture_dir" scale \
     2025-01-01 2025-01-12 funnel signup-flow --format json
+measure_series traffic_quality 10 "$binary" report "$fixture_dir" scale \
+    2025-01-01 2025-01-12 traffic-quality --format json
 printf '"database_bytes":%d}\n' "$(stat -c '%s' "$fixture_dir/events.duckdb")"
 
 grep -q '"page_views":800000' "$fixture_dir/overview.json"
@@ -92,5 +96,7 @@ grep -q '"name":"/checkout","sessions":100000' "$fixture_dir/funnel.json"
 
 overview_p95=$(sort -n "$fixture_dir/overview.durations" | tail -n 1)
 funnel_p95=$(sort -n "$fixture_dir/funnel.durations" | tail -n 1)
+traffic_quality_p95=$(sort -n "$fixture_dir/traffic_quality.durations" | tail -n 1)
 test "$overview_p95" -le 500
 test "$funnel_p95" -le 2000
+test "$traffic_quality_p95" -le 2000

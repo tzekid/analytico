@@ -40,6 +40,7 @@ semantic, or application state model is consequential and must be added here.
 | D29 | Typed metric-v2 analysis boundary | Separate closed domain model and finite bound-SQL compiler; preserve metric-v1 reports | Accepted for 1.0 issue #24 |
 | D30 | Traffic-quality compatibility diagnostics | Add a versioned bounded diagnostic bundle aligned to the frozen UTC Overview range | Accepted for 1.0 issue #66 |
 | D31 | Stored self-exclusion and non-bot inflation | Prerender/localhost guards, keyed ephemeral visitor-days, and stored bounded exclusion sources | Accepted for 1.0 issue #67 |
+| D32 | Permanent traffic class and UA classifier | Schema-5 stored classes with a pinned local classifier and one-release legacy shadow | Accepted for 1.0 issue #68 |
 
 ## D01. MVP interface
 
@@ -1109,8 +1110,8 @@ Select the additive diagnostics result:
 
 - A future site-local Overview migration cannot change only one of the two
   headline ranges. It must migrate visitor-days and distinct people together.
-- Schema 4 traffic class work may replace the current device-bot predicate, but
-  it must preserve visible diagnostic accounting and version the new meaning.
+- D32's schema-5 traffic class replaces the device-bot predicate while
+  preserving visible diagnostic accounting and versioning the new meaning.
 - Rollback removes the additive report, renderer, and documentation only. No
   database restore or compatibility fallback is required.
 
@@ -1236,3 +1237,148 @@ visitor-day, dashboard-to-site flag set/clear, stored-but-product-excluded
 flagged traffic, configured network and combined source rows, immediate policy
 refresh, raw-IP absence, exact schema-3 upgrade preservation, backup/rollback,
 and Debug/ReleaseSafe gates through the real executable and on-disk stores.
+
+## D32. Store permanent traffic class and run one legacy shadow release
+
+**Status:** Accepted for Analytico 1.0 issue #68
+
+**Date:** 2026-08-23
+
+**Issues:** #68 and #69
+
+### Context
+
+The shipped six-substring, case-sensitive User-Agent classifier overloads
+`device_category=bot`. It misses common HTTP clients, headless browsers,
+case variants, and tokenless named crawlers, while strings such as `Cubot` can
+false-positive. Raw User-Agent strings are deliberately discarded, so old
+source-zero rows cannot be honestly reclassified. Event schema 4 also carries
+D31's deliberately temporary `exclusion_source`; #68 must consume every marker
+without losing an observed event.
+
+The corrected classifier needs measurable disagreement evidence before its
+expanded bot verdict changes product metrics. That requirement does not
+authorize storing raw User-Agents, loading an unbounded runtime rules file, or
+calling a classification service.
+
+### Rule-source candidates
+
+| Candidate | Advantages | Costs and risks |
+| --- | --- | --- |
+| Fetch or load the complete upstream regular-expression corpus at runtime | Broad and readily updated | Adds network/file availability, regex/dependency, privacy, and unbounded-rule work to collection |
+| Keep the current six substrings | No migration or new rule table | Known false positives and false negatives remain; device and traffic semantics stay conflated |
+| Vendor a small reviewed table derived from one pinned upstream revision plus explicit client/headless rules | Deterministic, auditable, bounded, dependency-free, and fixtureable | Updates require an intentional source review and classifier-version change |
+
+Select the small compiled table. `docs/UA_CLASSIFIER_V1.md` records the source
+commit, content hash, license, reviewed rule families, match modes, bounds, and
+fixtures. Matching is ASCII case-insensitive. Named crawler, monitor, and
+headless discriminants require token boundaries; only narrow slash-bearing
+HTTP-client markers use explicit prefix or substring modes. There is no regex
+engine, allocation, runtime file, runtime network call, fingerprint, or raw-UA
+persistence. Empty UA is a declared bot. Device, browser, and operating-system
+parsing remains an independent coarse dimension operation.
+
+### Schema and historical mapping
+
+Event schema 5 replaces `exclusion_source` with:
+
+- `traffic_class` (`1 human-presumed`, `2 declared-bot`, `3 automation`,
+  `4 excluded`, `5 suspected`);
+- `classifier_version` (`0` honest legacy/unknown source, `1` UA classifier
+  v1 or D31 exclusion mapping); and
+- `bot_rule`, an ASCII rule identifier no longer than 64 bytes.
+
+For exactly the #68 comparison release it also stores
+`legacy_bot_verdict BOOLEAN`. New nonexcluded rows record the permanent
+classification and the exact old six-substring verdict from the same bounded
+request header. Exclusion takes precedence, stores the applicable exclusion
+rule, and canonicalizes the legacy boolean to false so the row sits wholly
+outside UA shadow evidence.
+`traffic_class` and the first receipt's rule/version are immutable on an
+idempotent replay; the UA and network receipt context are not added to the
+payload digest.
+
+Migration 5 maps all rows transactionally:
+
+| Schema-4 row | Schema-5 traffic fields | Preserved-field exception |
+| --- | --- | --- |
+| `exclusion_source=1` | excluded, v1, `exclude.tracker`, legacy false | old device `bot` becomes `unknown`; otherwise none |
+| `exclusion_source=2` | excluded, v1, `exclude.network`, legacy false | old device `bot` becomes `unknown`; otherwise none |
+| `exclusion_source=3` | excluded, v1, `exclude.both`, legacy false | old device `bot` becomes `unknown`; otherwise none |
+| source zero and `device_category=bot` | declared-bot, v0, `legacy-device-bot`, legacy true | device becomes `unknown` |
+| every other source-zero row | human-presumed, v0, empty rule, legacy false | none |
+
+The device rewrite applies to every old `device_category=bot` row regardless
+of exclusion because the discarded UA cannot reconstruct its actual device.
+It is the only permitted preserved-field difference and removes the old
+category from the pure device dimension. The streaming
+verifier proves row count plus XOR, sum, minimum, and maximum fingerprints over
+every other field, the complete mapping above, identity-link preservation, and
+the absence of `exclusion_source` before swap. Interrupted and repeated
+migrations remain safe. Rollback requires the verified pre-schema-5 database
+pair and the prior binary.
+
+### One-release compatibility shadow
+
+Issue #68 stores and exposes the permanent verdict immediately but deliberately
+keeps the product predicate compatible for one deployed release:
+
+```text
+traffic_class != excluded AND legacy_bot_verdict = false
+```
+
+Thus migrated and newly observed self-excluded events remain diagnostic-only,
+and traffic rejected by the old classifier remains outside product metrics.
+Classifier-only disagreements remain product-compatible until the measured
+promotion decision in #69. Excluded rows take precedence over UA classes and
+do not participate in UA disagreement cells.
+
+Traffic-quality diagnostics advance to version 3. In the same bounded
+statement and deadline they report the five stored class totals, classifier-v1
+coverage, bounded class/version/rule totals, and four nonexcluded v1 shadow
+cells: both human, legacy only, classifier only, and both bot. The existing
+identity/exclusion observations remain visible. At most 64 grouped rule rows
+are returned; no raw UA can appear in any output.
+
+The serving process also keeps fixed-cardinality, restart-scoped counters for
+newly inserted nonexcluded rows: `legacy_bot_positive`,
+`classifier_bot_positive`, `shadow_both_human`, `shadow_legacy_only`,
+`shadow_classifier_only`, and `shadow_both_bot`. They are emitted only in
+`serve_stopped`, contain no UA or rule strings, and complement rather than
+replace the durable date-range diagnostics. Existing `bots` retains its legacy
+request-attempt meaning for operational compatibility. Duplicate, conflicting,
+rejected, failed, and excluded rows do not enter the six new shadow counters.
+
+Excluded and legacy-bot rows do not consume visitor-day or session-start
+boundaries and cannot create identity links. Classifier-only rows retain the
+compatibility behavior during the shadow release. #69 may remove
+`legacy_bot_verdict` and promote product eligibility to
+`traffic_class IN (human-presumed, suspected)` only after reviewing deployed
+#68 diagnostics and recording that disposition. The positive-human-evidence
+veto remains mandatory for later soft-signal work.
+
+### Consequences
+
+- Every otherwise accepted event is stored. There is no per-site drop mode or
+  self-opt-out collection suppression.
+- The source corpus is attributed and licensed but is not shipped as a runtime
+  data file. Updates require a new classifier version and fixtures.
+- Metadata remains schema 4; #68 adds no site setting, tracker change, Caddy
+  change, dependency, process, or background task.
+- A schema-5 binary refuses an older event store until explicit migration;
+  an older binary requires matched-store restore for rollback.
+
+**Affected contracts:** `UA_CLASSIFIER_V1.md`, `BOT_DETECTION_1.0.md`,
+`METRIC_SEMANTICS_V2.md`, `ANALYSIS_QUERY.md`, `PROTOCOL.md`,
+`ARCHITECTURE.md`, `DATA_MODEL.md`, `OPERATIONS.md`, `PERFORMANCE.md`, and
+`RELEASE_CONTRACT_1.0.md`.
+
+### Acceptance evidence
+
+Issue #68 must prove the bounded rule corpus (including case variants, empty
+UA, and false-positive traps), real loopback collection into on-disk schema 5,
+stored rule/version/class fields, no raw-UA persistence, compatibility product
+filtering, diagnostics and bounded `serve_stopped` disagreement output, exact schema-4 migration,
+million-row/interrupted/repeated upgrade, backup/restore/rollback, unchanged
+eligible metric-v1 results, extracted-release execution, and Debug plus
+ReleaseSafe gates.

@@ -663,7 +663,7 @@ fn digestPreparedV2(prepared: PreparedV2) [64]u8 {
     hashInteger(&hasher, "engagement", prepared.engagement_ms);
     hashInteger(&hasher, "scroll", prepared.max_scroll_depth);
     // Preserve the pre-D31 digest for absent/false so an unchanged event
-    // remains idempotent across the schema-4 upgrade. A true flag adds a new
+    // remains idempotent across the D31/D32 schema upgrades. A true flag adds a new
     // component and therefore conflicts with an already stored unflagged row.
     if (prepared.self_excluded) hashInteger(&hasher, "self_excluded", 1);
     var digest: [32]u8 = undefined;

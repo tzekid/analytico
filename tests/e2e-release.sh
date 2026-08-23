@@ -36,6 +36,8 @@ test ! -L "$release_root"
 test "$(find "$release_root" -type l -print -quit)" = ""
 test "$(stat -c '%a' "$release_binary")" = 755
 test "$(stat -c '%a' "$release_root/lib/libduckdb.so")" = 644
+test -f "$release_root/LICENSES/Crawler-User-Agents.txt"
+test -f "$release_root/docs/UA_CLASSIFIER_V1.md"
 (cd "$release_root" && sha256sum -c SHA256SUMS)
 test "$("$release_binary" version)" = "analytico $version"
 ldd "$release_binary" | grep -Fq "$release_root/bin/../lib/libduckdb.so"
@@ -54,7 +56,7 @@ data="$fixture/data"
 "$release_binary" event add "$data" release pageview / \
     1785456000000000 2026-07-31 203.0.113.1 Chrome Linux desktop >/dev/null
 test "$("$release_binary" doctor "$data")" = \
-    "ok metadata=v4 events=v4 sites=1 goals=0 funnels=0 stored_events=1 key=ok"
+    "ok metadata=v4 events=v5 sites=1 goals=0 funnels=0 stored_events=1 key=ok"
 report=$("$release_binary" report "$data" release 2026-07-31 2026-07-31 \
     overview --format json)
 test "$report" = \
@@ -66,6 +68,8 @@ if [[ ${3:-} == "--full" ]]; then
         tests/e2e-m1.sh \
         tests/e2e-m2.sh \
         tests/e2e-m2-browser.sh \
+        tests/e2e-traffic-quality.sh \
+        tests/e2e-classifier.sh \
         tests/e2e-m3.sh \
         tests/e2e-m4.sh \
         tests/e2e-m6.sh \
@@ -75,6 +79,8 @@ if [[ ${3:-} == "--full" ]]; then
         ANALYTICO_CADDYFILE="$release_root/deploy/Caddyfile" \
             bash "$gate" "$release_binary"
     done
+    bash scripts/run-schema4-gate.sh "$release_binary" \
+        tests/e2e-schema5-migration.sh
 fi
 
 echo "release archive checksum, linkage, proxy, and fresh-data checks passed"
