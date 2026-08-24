@@ -148,6 +148,14 @@ metric-v1 report SQL/output remains intact, and specialized journey/session
 queries retain their own result types. `ANALYSIS_QUERY.md` defines the exact
 grammar, limits, serialization, compilation, and result boundary.
 
+Decision D37 adds one bounded browser Trend-set envelope without changing the
+single-query compiler. It materializes one through three ordinary Trend
+queries, executes them sequentially under one shared interrupt budget, and
+shares only the set's identical empty-filter identity coverage. It returns
+owned typed results to the server renderer. Bare Analyze and the known
+Overview point handoff use that metric-v2 path. Explicit metric-v1 `report=`
+list URLs remain separate compatibility routes until their #29 replacement.
+
 The serving process configures one query thread, a bounded memory limit, a
 bounded temporary directory, no community extensions, and no external file or
 network access. It never executes request-supplied SQL.
@@ -292,6 +300,12 @@ DuckDB migration is added.
 5. Decode into an owned typed report.
 6. Render table, JSON, or CSV in the CLI, or deterministic HTML from the same
    report type in the dashboard.
+
+The D37 Analyze Trend controller applies the same flow to at most three
+one-metric plans under one request deadline. It aligns sparse rows to generated
+site-local buckets and renders at most three exact-currency-aware visual series
+without adding or converting currencies. No renderer or browser code executes
+queries or recomputes metric facts.
 
 D34 reports also derive one versioned session-quality relation. Stored traffic
 facts and diagnostics remain independent of strict state. Strict product

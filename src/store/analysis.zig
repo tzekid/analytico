@@ -211,6 +211,104 @@ pub fn execute(
     };
 }
 
+pub fn executeTrendSet(
+    allocator: std.mem.Allocator,
+    event_store: *events.Store,
+    execution: analysis.TrendSetExecution,
+) !analysis.TrendSetResult {
+    try execution.validate();
+    var budget = deadline.Budget.init(execution.timeout_ms);
+    const coverage_execution = trendSetItemExecution(
+        execution,
+        execution.set.series[0],
+    );
+    const coverage_compiled = try compile(allocator, coverage_execution);
+    const completeness = try executeCoverage(
+        allocator,
+        &event_store.database,
+        coverage_compiled.coverage,
+        &budget,
+    );
+    const comparison_completeness = if (coverage_compiled.comparison_coverage) |plan|
+        try executeCoverage(
+            allocator,
+            &event_store.database,
+            plan,
+            &budget,
+        )
+    else
+        null;
+    const series = try allocator.alloc(
+        analysis.TrendResult,
+        execution.set.series.len,
+    );
+    for (execution.set.series, series) |metric, *target| {
+        target.* = try executeTrendWithCoverage(
+            allocator,
+            event_store,
+            trendSetItemExecution(execution, metric),
+            &budget,
+            completeness,
+            comparison_completeness,
+        );
+    }
+    return .{ .series = series };
+}
+
+fn trendSetItemExecution(
+    execution: analysis.TrendSetExecution,
+    metric: analysis.Metric,
+) analysis.Execution {
+    return .{
+        .query = execution.set.query(metric),
+        .comparison_range = execution.comparison_range,
+        .active_goals = execution.active_goals,
+        .strict_traffic_mode = execution.strict_traffic_mode,
+        .timeout_ms = execution.timeout_ms,
+    };
+}
+
+fn executeTrendWithCoverage(
+    allocator: std.mem.Allocator,
+    event_store: *events.Store,
+    execution: analysis.Execution,
+    budget: *deadline.Budget,
+    completeness: analysis.Completeness,
+    comparison_completeness: ?analysis.Completeness,
+) !analysis.TrendResult {
+    const compiled = try compile(allocator, execution);
+    const primary = try executeRows(
+        allocator,
+        &event_store.database,
+        compiled.primary_rows,
+        budget,
+    );
+    const comparison = if (compiled.comparison_rows) |plan|
+        try executeRows(allocator, &event_store.database, plan, budget)
+    else
+        null;
+    return .{
+        .points = try trendPoints(allocator, primary),
+        .comparison_points = if (comparison) |rows|
+            try trendPoints(allocator, rows)
+        else
+            null,
+        .comparison_total = if (compiled.comparison_total) |plan|
+            try executeTotals(allocator, &event_store.database, plan, budget)
+        else
+            null,
+        .comparison_completeness = comparison_completeness,
+        .total = try executeTotals(
+            allocator,
+            &event_store.database,
+            compiled.primary_total.?,
+            budget,
+        ),
+        .interval = compiled.interval,
+        .completeness = completeness,
+    };
+}
+
 pub fn compileOverview(
     allocator: std.mem.Allocator,
     execution: analysis.OverviewExecution,
@@ -1696,7 +1794,7 @@ fn compileRows(
     }
     try builder.write(" AS label, ");
     try writeMeasure(&builder, execution, range, "e", "s");
-    try builder.write(" FROM qualified e JOIN session_facts s USING (session_id)");
+    try writeMetricSource(&builder, execution);
     try writeMetricWhere(&builder, execution, "e", "s");
     try builder.write(" GROUP BY 1");
     if (isAmount(execution.query.metric.kind)) try builder.write(", e.value_currency");
@@ -1723,7 +1821,8 @@ fn compileTotal(
     try writeCommon(&builder, execution, range);
     try builder.write(" SELECT '' AS label, ");
     try writeMeasure(&builder, execution, range, "e", "s");
-    try builder.write(", 1::BIGINT AS cardinality FROM qualified e JOIN session_facts s USING (session_id)");
+    try builder.write(", 1::BIGINT AS cardinality");
+    try writeMetricSource(&builder, execution);
     try writeMetricWhere(&builder, execution, "e", "s");
     if (isAmount(execution.query.metric.kind)) {
         try builder.write(" GROUP BY e.value_currency ORDER BY e.value_currency LIMIT ");
@@ -1764,6 +1863,9 @@ fn writeCommon(
     execution: analysis.Execution,
     range: analysis.LocalDateRange,
 ) !void {
+    if (!needsSessionFacts(execution)) {
+        return writeSimpleTrendCommon(builder, execution, range);
+    }
     if (execution.strict_traffic_mode) {
         var goals: [analysis.maximum_active_goals]traffic.Goal = undefined;
         for (execution.active_goals, 0..) |goal, index| {
@@ -1893,6 +1995,82 @@ fn writeCommon(
             " FROM d34_current_suspected_sessions)",
     );
     try builder.write(")");
+}
+
+fn needsSessionFacts(execution: analysis.Execution) bool {
+    if (execution.query.mode != .trend or
+        execution.query.filters.clauses.len != 0 or
+        execution.query.segment_id != null)
+    {
+        return true;
+    }
+    return switch (execution.query.metric.kind) {
+        .engaged_sessions, .engagement_rate, .bounce_rate => true,
+        else => false,
+    };
+}
+
+fn writeSimpleTrendCommon(
+    builder: *Builder,
+    execution: analysis.Execution,
+    range: analysis.LocalDateRange,
+) !void {
+    if (execution.strict_traffic_mode) {
+        var goals: [analysis.maximum_active_goals]traffic.Goal = undefined;
+        for (execution.active_goals, 0..) |goal, index| goals[index] = .{
+            .kind = switch (goal.selector.kind) {
+                .exact_event => .event,
+                .exact_page => .path,
+                .page_prefix => .prefix,
+                .saved_goal => return error.UnresolvedGoalSelector,
+            },
+            .value = goal.selector.value,
+        };
+        try builder.write("WITH ");
+        try builder.appendTraffic(try traffic.classifierFragment(
+            builder.allocator,
+            execution.query.site_id,
+            goals[0..execution.active_goals.len],
+            true,
+        ));
+        try builder.write(", range_events AS (SELECT e.*, CASE");
+    } else {
+        try builder.write("WITH range_events AS (SELECT e.*, CASE");
+    }
+    try builder.write(
+        " WHEN e.identity_quality = 1 AND COALESCE(l.user_id, e.user_id, '') <> ''" ++
+            " THEN 'u:' || COALESCE(l.user_id, e.user_id)" ++
+            " WHEN e.identity_quality = 1 THEN 'a:' || CAST(e.anonymous_id AS VARCHAR)" ++
+            " WHEN e.identity_quality = 2 THEN 'e:' || CAST(e.anonymous_id AS VARCHAR)" ++
+            " WHEN e.identity_quality = 3 THEN 'l:' || CAST(e.anonymous_id AS VARCHAR)" ++
+            " ELSE NULL END AS person_key" ++
+            " FROM events e LEFT JOIN identity_links l" ++
+            " ON l.site_id = e.site_id AND l.anonymous_id = e.anonymous_id" ++
+            " WHERE e.site_id = ",
+    );
+    try builder.bindText(execution.query.site_id);
+    try builder.write(" AND e.site_local_date BETWEEN CAST(");
+    try builder.bindText(range.start);
+    try builder.write(" AS DATE) AND CAST(");
+    try builder.bindText(range.end);
+    try builder.write(
+        " AS DATE) AND e.traffic_class IN (1, 5))," ++
+            " base AS (SELECT * FROM range_events WHERE kind IN (1, 2))," ++
+            " qualified AS (SELECT e.* FROM base e WHERE TRUE",
+    );
+    if (execution.strict_traffic_mode) try builder.write(
+        " AND e.session_id NOT IN (SELECT session_id" ++
+            " FROM d34_current_suspected_sessions)",
+    );
+    try builder.write(")");
+}
+
+fn writeMetricSource(builder: *Builder, execution: analysis.Execution) !void {
+    if (needsSessionFacts(execution)) {
+        try builder.write(" FROM qualified e JOIN session_facts s USING (session_id)");
+    } else {
+        try builder.write(" FROM qualified e");
+    }
 }
 
 fn writeActiveGoalExists(
@@ -2881,6 +3059,54 @@ test "declared maximum filters selectors and active goals still compile bounded"
     try std.testing.expect(compiled.primary_rows.bindings.len <= maximum_bindings);
 }
 
+test "simple empty-filter Trend plans omit unused session facts" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const base = analysis.Query{
+        .site_id = "00000000-0000-4000-8000-000000000024",
+        .range = .{ .start = "2026-01-01", .end = "2026-01-02" },
+        .mode = .trend,
+        .metric = .{ .kind = .visitors },
+        .interval = .day,
+    };
+    const simple = try compile(arena.allocator(), .{ .query = base });
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        simple.primary_rows.sql,
+        "session_facts",
+    ) == null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        simple.primary_rows.sql,
+        "FROM qualified e JOIN",
+    ) == null);
+
+    var engaged_query = base;
+    engaged_query.metric = .{ .kind = .engagement_rate };
+    const engaged = try compile(arena.allocator(), .{ .query = engaged_query });
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        engaged.primary_rows.sql,
+        "session_facts",
+    ) != null);
+
+    const filter = [_]analysis.Clause{.{
+        .scope = .event,
+        .field = .{ .kind = .page },
+        .operator = .is,
+        .scalar_type = .string,
+        .values = &.{"/"},
+    }};
+    var filtered_query = base;
+    filtered_query.filters = .{ .clauses = &filter };
+    const filtered = try compile(arena.allocator(), .{ .query = filtered_query });
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        filtered.primary_rows.sql,
+        "session_facts",
+    ) != null);
+}
+
 test "metric v2 executes against a real on-disk schema four store" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
@@ -2917,6 +3143,79 @@ test "metric v2 executes against a real on-disk schema four store" {
     try std.testing.expectEqual(@as(i64, 2), visitors.trend.completeness.persistent_people);
     try std.testing.expectEqual(@as(i64, 1), visitors.trend.completeness.ephemeral_people);
     try std.testing.expectEqual(@as(i64, 1), visitors.trend.completeness.legacy_people);
+
+    const sessions = try execute(query_allocator, &event_store, .{
+        .query = .{
+            .site_id = site,
+            .range = range,
+            .mode = .trend,
+            .metric = .{ .kind = .sessions },
+            .interval = .day,
+        },
+    });
+    const page_views = try execute(query_allocator, &event_store, .{
+        .query = .{
+            .site_id = site,
+            .range = range,
+            .mode = .trend,
+            .metric = .{ .kind = .page_views },
+            .interval = .day,
+        },
+    });
+
+    const set_metrics = [_]analysis.Metric{
+        .{ .kind = .visitors },
+        .{ .kind = .sessions },
+        .{ .kind = .page_views },
+    };
+    const trend_set = try executeTrendSet(query_allocator, &event_store, .{
+        .set = .{
+            .site_id = site,
+            .range = range,
+            .interval = .day,
+            .series = &set_metrics,
+        },
+    });
+    try std.testing.expectEqual(@as(usize, 3), trend_set.series.len);
+    try std.testing.expectEqual(
+        visitors.trend.total[0].count,
+        trend_set.series[0].total[0].count,
+    );
+    try std.testing.expectEqual(
+        sessions.trend.total[0].count,
+        trend_set.series[1].total[0].count,
+    );
+    try std.testing.expectEqual(
+        page_views.trend.total[0].count,
+        trend_set.series[2].total[0].count,
+    );
+    for (trend_set.series) |series| {
+        try std.testing.expectEqualDeep(
+            visitors.trend.completeness,
+            series.completeness,
+        );
+    }
+    inline for (.{
+        analysis.Interval.auto,
+        analysis.Interval.hour,
+        analysis.Interval.day,
+        analysis.Interval.week,
+        analysis.Interval.month,
+    }) |interval| {
+        const manual = try execute(query_allocator, &event_store, .{
+            .query = .{
+                .site_id = site,
+                .range = range,
+                .mode = .trend,
+                .metric = .{ .kind = .page_views },
+                .interval = interval,
+            },
+        });
+        try std.testing.expectEqual(
+            if (interval == .auto) analysis.Interval.hour else interval,
+            manual.trend.interval,
+        );
+    }
 
     const engaged = try execute(query_allocator, &event_store, .{
         .query = .{

@@ -17,9 +17,11 @@ pub const TrendPoint = struct {
     comparison_interval_label: []const u8 = "",
     current: ?i128,
     current_incomplete: bool = false,
+    current_highlighted: bool = false,
     current_formatted: []const u8 = "",
     current_href: []const u8 = "",
     comparison: ?i128 = null,
+    comparison_highlighted: bool = false,
     comparison_formatted: []const u8 = "",
     comparison_href: []const u8 = "",
 };
@@ -33,6 +35,7 @@ pub const TrendFigure = struct {
     show_comparison: bool = false,
     scale: u8 = 0,
     points: []const TrendPoint,
+    render_exact_table: bool = true,
 };
 
 pub const Bar = struct {
@@ -118,6 +121,7 @@ pub fn renderTrend(output: *std.Io.Writer, value: TrendFigure) !void {
     var comparison_count: usize = 0;
     var current_has_gap = false;
     var incomplete_index: ?usize = null;
+    var highlighted_count: usize = 0;
     for (value.points, 0..) |point, index| {
         if (point.current != null) try validateRequiredLabel(point.label) else try validateLabel(point.label);
         try validateLabel(point.comparison_interval_label);
@@ -133,10 +137,20 @@ pub fn renderTrend(output: *std.Io.Writer, value: TrendFigure) !void {
             current_has_gap = true;
         }
         if (point.current_incomplete) {
-            if (point.current == null or incomplete_index != null) {
+            if (incomplete_index != null) {
                 return error.InvalidIncompleteTrendPoint;
             }
             incomplete_index = index;
+        }
+        if (point.current_highlighted) {
+            if (point.label.len == 0) return error.InvalidHighlightedTrendPoint;
+            highlighted_count += 1;
+        }
+        if (point.comparison_highlighted) {
+            if (!value.show_comparison or point.comparison_interval_label.len == 0) {
+                return error.InvalidHighlightedTrendPoint;
+            }
+            highlighted_count += 1;
         }
         if (value.show_comparison) {
             if (point.comparison) |number| {
@@ -146,6 +160,7 @@ pub fn renderTrend(output: *std.Io.Writer, value: TrendFigure) !void {
             }
         }
     }
+    if (highlighted_count > 1) return error.InvalidHighlightedTrendPoint;
     if (incomplete_index) |index| {
         for (value.points[index + 1 ..]) |point| {
             if (point.current != null) return error.InvalidIncompleteTrendPoint;
@@ -200,6 +215,7 @@ pub fn renderTrend(output: *std.Io.Writer, value: TrendFigure) !void {
                 point.current_href,
                 point.label,
                 point.current_incomplete,
+                point.current_highlighted,
                 pointX(index, value.points.len, left, width),
                 try pointY(number, minimum, maximum, top, height),
             );
@@ -212,6 +228,7 @@ pub fn renderTrend(output: *std.Io.Writer, value: TrendFigure) !void {
                 else
                     point.comparison_interval_label,
                 false,
+                point.comparison_highlighted,
                 pointX(index, value.points.len, left, width),
                 try pointY(number, minimum, maximum, top, height),
             );
@@ -227,46 +244,67 @@ pub fn renderTrend(output: *std.Io.Writer, value: TrendFigure) !void {
         }
         try output.writeAll("</svg>");
     }
-    try exactStart(output, value.id, value.title);
-    try output.writeAll("<thead><tr><th scope=\"col\">");
-    try output.writeAll(if (value.show_comparison) "Current interval" else "Interval");
-    try output.writeAll("</th><th scope=\"col\">");
-    try components.text(output, value.current_label);
-    try output.writeAll("</th>");
-    if (value.show_comparison) {
-        try output.writeAll("<th scope=\"col\">Comparison interval</th><th scope=\"col\">");
-        try components.text(output, value.comparison_label);
-        try output.writeAll("</th>");
-    }
-    try output.writeAll("</tr></thead><tbody>");
-    for (value.points) |point| {
-        try output.writeAll("<tr><th scope=\"row\" data-label=\"");
+    if (value.render_exact_table) {
+        try exactStart(output, value.id, value.title);
+        try output.writeAll("<thead><tr><th scope=\"col\">");
         try output.writeAll(if (value.show_comparison) "Current interval" else "Interval");
-        try output.writeAll("\">");
-        try intervalLink(output, point.label, point.current_href, point.current_incomplete);
-        try output.writeAll("</th><td data-label=\"");
-        try components.attribute(output, value.current_label);
-        try output.writeAll("\">");
-        try optionalTrendValue(output, point.current, point.current_formatted, value.scale);
-        try output.writeAll("</td>");
+        try output.writeAll("</th><th scope=\"col\">");
+        try components.text(output, value.current_label);
+        try output.writeAll("</th>");
         if (value.show_comparison) {
-            try output.writeAll("<td data-label=\"Comparison interval\">");
+            try output.writeAll("<th scope=\"col\">Comparison interval</th><th scope=\"col\">");
+            try components.text(output, value.comparison_label);
+            try output.writeAll("</th>");
+        }
+        try output.writeAll("</tr></thead><tbody>");
+        for (value.points) |point| {
+            try output.writeAll("<tr><th scope=\"row\" data-label=\"");
+            try output.writeAll(if (value.show_comparison) "Current interval" else "Interval");
+            try output.writeAll("\">");
             try intervalLink(
                 output,
-                point.comparison_interval_label,
-                point.comparison_href,
-                false,
+                point.label,
+                point.current_href,
+                point.current_incomplete,
+                point.current_highlighted,
             );
-            try output.writeAll("</td><td data-label=\"");
-            try components.attribute(output, value.comparison_label);
+            try output.writeAll("</th><td data-label=\"");
+            try components.attribute(output, value.current_label);
             try output.writeAll("\">");
-            try optionalTrendValue(output, point.comparison, point.comparison_formatted, value.scale);
+            try optionalTrendValue(
+                output,
+                point.current,
+                point.current_formatted,
+                value.scale,
+            );
             try output.writeAll("</td>");
+            if (value.show_comparison) {
+                try output.writeAll("<td data-label=\"Comparison interval\">");
+                try intervalLink(
+                    output,
+                    point.comparison_interval_label,
+                    point.comparison_href,
+                    false,
+                    point.comparison_highlighted,
+                );
+                try output.writeAll("</td><td data-label=\"");
+                try components.attribute(output, value.comparison_label);
+                try output.writeAll("\">");
+                try optionalTrendValue(
+                    output,
+                    point.comparison,
+                    point.comparison_formatted,
+                    value.scale,
+                );
+                try output.writeAll("</td>");
+            }
+            try output.writeAll("</tr>");
         }
-        try output.writeAll("</tr>");
+        if (value.points.len == 0) {
+            try emptyTableRow(output, if (value.show_comparison) 4 else 2);
+        }
+        try exactEnd(output);
     }
-    if (value.points.len == 0) try emptyTableRow(output, if (value.show_comparison) 4 else 2);
-    try exactEnd(output);
     try output.writeAll("</figure>");
 }
 
@@ -589,6 +627,7 @@ fn renderTrendMarker(
     href: []const u8,
     interval: []const u8,
     incomplete: bool,
+    highlighted: bool,
     x: u32,
     y: u32,
 ) !void {
@@ -598,9 +637,20 @@ fn renderTrendMarker(
         try output.writeAll("\" tabindex=\"-1\" aria-label=\"Open interval ");
         try components.attribute(output, interval);
         if (incomplete) try output.writeAll(" (incomplete)");
+        if (highlighted) try output.writeAll(" (highlighted)");
         try output.writeAll(" in Analyze\">");
     }
-    if (incomplete) {
+    if (highlighted) {
+        try output.print(
+            "<path class=\"{s} chart-point-highlighted{s}\"",
+            .{ class, if (incomplete) " chart-point-incomplete" else "" },
+        );
+        if (href.len == 0) try output.writeAll(" aria-hidden=\"true\"");
+        try output.print(
+            " d=\"M {d} {d} L {d} {d} L {d} {d} L {d} {d} Z\"/>",
+            .{ x, y -| 7, x + 7, y, x, y + 7, x -| 7, y },
+        );
+    } else if (incomplete) {
         try output.print("<rect class=\"{s} chart-point-incomplete\"", .{class});
         if (href.len == 0) try output.writeAll(" aria-hidden=\"true\"");
         try output.print(
@@ -765,11 +815,27 @@ fn optionalTrendValue(
     }
 }
 
+pub fn writeExactTrendValue(
+    output: *std.Io.Writer,
+    value: ?i128,
+    formatted: []const u8,
+    scale: u8,
+) !void {
+    if (scale > 6) return error.InvalidTrendScale;
+    if (value != null or formatted.len == 0) {
+        return optionalTrendValue(output, value, formatted, scale);
+    }
+    try output.writeAll("Unavailable <span class=\"chart-formatted-value\">(");
+    try components.text(output, formatted);
+    try output.writeAll(")</span>");
+}
+
 fn intervalLink(
     output: *std.Io.Writer,
     label: []const u8,
     href: []const u8,
     incomplete: bool,
+    highlighted: bool,
 ) !void {
     if (label.len == 0) return output.writeAll("Unavailable");
     if (href.len != 0) {
@@ -781,6 +847,9 @@ fn intervalLink(
     if (href.len != 0) try output.writeAll("</a>");
     if (incomplete) {
         try output.writeAll(" <span class=\"trend-incomplete-marker\">Incomplete</span>");
+    }
+    if (highlighted) {
+        try output.writeAll(" <span class=\"trend-highlight-marker\">Highlighted</span>");
     }
 }
 
@@ -906,6 +975,7 @@ test "trend handles empty single constant gaps escaping and stable IDs" {
         .{ .label = "Day 3", .current = 7, .current_incomplete = true, .comparison = 4 },
     };
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
     try renderTrend(&output.writer, .{
         .id = "trend-fixture",
         .title = "Visitors <trend>",
@@ -945,6 +1015,51 @@ test "trend handles empty single constant gaps escaping and stable IDs" {
             .{ .label = "Last", .current = 2 },
         },
     }));
+
+    output.clearRetainingCapacity();
+    try renderTrend(&output.writer, .{
+        .id = "unavailable-incomplete",
+        .title = "Unavailable incomplete",
+        .summary = "The current interval remains visibly incomplete without a numeric point.",
+        .current_label = "Rate",
+        .points = &.{.{
+            .label = "Last",
+            .current = null,
+            .current_incomplete = true,
+            .current_highlighted = true,
+        }},
+    });
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        output.written(),
+        "trend-incomplete-marker\">Incomplete",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        output.written(),
+        "trend-highlight-marker\">Highlighted",
+    ) != null);
+
+    output.clearRetainingCapacity();
+    try renderTrend(&output.writer, .{
+        .id = "unavailable-comparison-highlight",
+        .title = "Unavailable comparison highlight",
+        .summary = "A generated comparison interval remains highlightable without geometry.",
+        .current_label = "Current",
+        .show_comparison = true,
+        .points = &.{.{
+            .label = "Current",
+            .comparison_interval_label = "Comparison",
+            .current = 1,
+            .comparison = null,
+            .comparison_highlighted = true,
+        }},
+    });
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        output.written(),
+        "trend-highlight-marker\">Highlighted",
+    ) != null);
 
     var single = std.Io.Writer.Allocating.init(std.testing.allocator);
     try renderTrend(&single.writer, .{
@@ -1004,6 +1119,33 @@ test "trend handles empty single constant gaps escaping and stable IDs" {
     const single_comparison_rendered = try single_comparison.toOwnedSlice();
     defer std.testing.allocator.free(single_comparison_rendered);
     try std.testing.expect(std.mem.indexOf(u8, single_comparison_rendered, "class=\"chart-compare-point\"") != null);
+}
+
+test "existing Trend unavailable copy stays plain and exact helper is explicit" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    const points = [_]TrendPoint{.{
+        .label = "2026-01-01",
+        .current = null,
+        .current_formatted = "0/0 source detail",
+    }};
+    try renderTrend(&output.writer, .{
+        .id = "unavailable-default",
+        .title = "Unavailable default",
+        .summary = "Existing consumers keep their established unavailable copy.",
+        .current_label = "Current",
+        .points = &points,
+    });
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "0/0 source detail") == null);
+
+    output.clearRetainingCapacity();
+    try writeExactTrendValue(
+        &output.writer,
+        null,
+        "0/0 source detail",
+        2,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "0/0 source detail") != null);
 }
 
 test "trend preserves signed exact values and bounded native interval links" {

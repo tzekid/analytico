@@ -26,6 +26,7 @@ fixture=$(mktemp -d "$PWD/.zig-cache/m6-e2e.XXXXXX")
 server_pid=
 caddy_pid=
 cleanup() {
+    cleanup_status=$?
     if [[ -n "$caddy_pid" ]] && kill -0 "$caddy_pid" 2>/dev/null; then
         kill -TERM "$caddy_pid" 2>/dev/null || true
         wait "$caddy_pid" 2>/dev/null || true
@@ -33,6 +34,10 @@ cleanup() {
     if [[ -n "$server_pid" ]] && kill -0 "$server_pid" 2>/dev/null; then
         kill -TERM "$server_pid" 2>/dev/null || true
         wait "$server_pid" 2>/dev/null || true
+    fi
+    if [[ "$cleanup_status" -ne 0 ]]; then
+        sed -n '1,240p' "$fixture/server.stderr" >&2 || true
+        sed -n '1,120p' "$fixture/caddy.stderr" >&2 || true
     fi
     rm -rf -- "$fixture"
 }
@@ -53,10 +58,14 @@ data="$fixture/data"
     --timezone UTC >/dev/null
 "$binary" site add "$data" broken "Broken Tracking" https://broken.example \
     --timezone UTC >/dev/null
+"$binary" site add "$data" currency "Currency Overflow" \
+    https://currency.example --timezone UTC >/dev/null
 site_id=$("$binary" site list "$data" |
     awk -F '\t' '$1 == "example" { print $2 }')
 broken_site_id=$("$binary" site list "$data" |
     awk -F '\t' '$1 == "broken" { print $2 }')
+currency_site_id=$("$binary" site list "$data" |
+    awk -F '\t' '$1 == "currency" { print $2 }')
 "$binary" goal add "$data" example Signup event signup >/dev/null
 "$binary" goal add "$data" example \
     '<script>alert(1)</script> "&' event escaped >/dev/null
@@ -89,6 +98,23 @@ start_server() {
 }
 
 start_server
+received_date=$(date -u +%F)
+received_end_date=$(date -u -d "$received_date + 1 day" +%F)
+occurred_ms=$(date -u +%s%3N)
+currencies=(AUD EUR GBP USD)
+for index in "${!currencies[@]}"; do
+    sequence=$((index + 1))
+    event_id=$(printf '00000000-0000-4000-8000-%012d' "$sequence")
+    currency_body=$(printf \
+        '{"v":2,"site":"%s","event_id":"%s","anonymous_id":"00000000-0000-4000-8000-000000000101","identity_quality":"persistent","session_id":"00000000-0000-4000-8000-000000000201","sequence":%s,"occurred_at_ms":%s,"type":"event","name":"purchase","value":{"amount":"1.00","currency":"%s"}}' \
+        "$currency_site_id" "$event_id" "$sequence" "$occurred_ms" \
+        "${currencies[$index]}")
+    test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+        -X POST "$upstream/v2/event" -H 'Content-Type: text/plain' \
+        -H 'Origin: https://currency.example' \
+        -H 'User-Agent: Mozilla/5.0 (X11; Linux x86_64) Chrome/140.0' \
+        --data-binary "$currency_body")" = 204
+done
 broken_body=$(printf \
     '{"v":1,"site":"%s","type":"pageview","path":"/rejected"}' \
     "$broken_site_id")
@@ -216,10 +242,25 @@ curl --silent --fail --cookie "$cookie" \
 css_gzip_bytes=$(gzip --stdout "$fixture/app.css" | wc -c)
 test "$html_gzip_bytes" -le 32768
 test "$css_gzip_bytes" -le 12288
+currency_overflow="$dashboard/admin/sites/currency/analyze?v=1&from=$received_date&to=$received_end_date&compare=none&mode=trend&interval=day&series=revenue"
+status=$(curl --silent --output "$fixture/currency-overflow.html" \
+    --write-out '%{http_code}' --cookie "$cookie" "$currency_overflow")
+test "$status" = 422
+grep -Fq 'Too many visual series' "$fixture/currency-overflow.html"
+maximum_trend="$dashboard/admin/sites/empty/analyze?v=1&from=2025-01-01&to=2026-02-04&compare=previous&mode=trend&interval=day&series=visitors&series=sessions&series=page-views"
+curl --silent --fail --cookie "$cookie" "$maximum_trend" \
+    >"$fixture/maximum-trend.html"
+test "$(grep -o 'class="chart-figure trend-figure"' \
+    "$fixture/maximum-trend.html" | wc -l)" = 3
+maximum_trend_gzip_bytes=$(gzip --stdout "$fixture/maximum-trend.html" | wc -c)
+test "$maximum_trend_gzip_bytes" -le 32768
 rss_before=$(awk '$1 == "VmRSS:" { print $2 }' "/proc/$server_pid/status")
-for _ in {1..100}; do
+typed_small="$dashboard/admin/sites/example/analyze?v=1&from=2025-01-01&to=2025-01-02&compare=previous&mode=trend&interval=day&series=visitors&series=sessions&series=page-views"
+for _ in {1..50}; do
     curl --silent --fail --cookie "$cookie" \
         "$overview" >/dev/null
+    curl --silent --fail --cookie "$cookie" \
+        "$typed_small" >/dev/null
 done
 rss_after=$(awk '$1 == "VmRSS:" { print $2 }' "/proc/$server_pid/status")
 rss_growth_kib=$((rss_after - rss_before))
@@ -258,6 +299,31 @@ kill -TERM "$server_pid"
 wait "$server_pid"
 server_pid=
 "$binary" m3 million "$data" "$site_id" >/dev/null
+start_server
+trend_query='v=1&from=2025-01-01&to=2025-01-12&compare=none&mode=trend&interval=day&series=visitors&series=sessions&series=page-views'
+trend_url="$dashboard/admin/sites/example/analyze?$trend_query"
+trend_fresh_process_seconds=$(curl --silent --fail --cookie "$cookie" \
+    --output "$fixture/trend-million-warm.html" \
+    --write-out '%{time_total}' "$trend_url")
+grep -Fq '<h2 id="analyze-trend-heading">Trend</h2>' \
+    "$fixture/trend-million-warm.html"
+test "$(grep -o 'class="chart-figure trend-figure"' \
+    "$fixture/trend-million-warm.html" | wc -l)" = 3
+trend_html_gzip_bytes=$(gzip --stdout "$fixture/trend-million-warm.html" | wc -c)
+test "$trend_html_gzip_bytes" -le 32768
+: >"$fixture/trend-million-seconds"
+for _ in {1..10}; do
+    read -r trend_status trend_seconds < <(curl --silent --output /dev/null \
+        --write-out '%{http_code} %{time_total}\n' --cookie "$cookie" \
+        "$trend_url")
+    test "$trend_status" = 200
+    awk -v elapsed="$trend_seconds" 'BEGIN { exit !(elapsed < 2.0) }'
+    printf '%s\n' "$trend_seconds" >>"$fixture/trend-million-seconds"
+done
+trend_p95_seconds=$(sort -n "$fixture/trend-million-seconds" | sed -n '10p')
+kill -TERM "$server_pid"
+wait "$server_pid"
+server_pid=
 start_server --report-timeout-ms 1
 status=$(curl --silent --output "$fixture/timeout.html" \
     --write-out '%{http_code}' --cookie "$cookie" \
@@ -266,12 +332,33 @@ test "$status" = 503
 grep -Fq 'Report timed out' "$fixture/timeout.html"
 grep -Fq 'Narrow the selected date range and retry' "$fixture/timeout.html"
 grep -Fq 'from=2025-01-01' "$fixture/timeout.html"
-test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
-    --cookie "$cookie" "$dashboard$css_path")" = 200
+status=$(curl --silent --output "$fixture/trend-timeout.html" \
+    --write-out '%{http_code}' --cookie "$cookie" "$trend_url")
+test "$status" = 503
+grep -Fq 'Analysis timed out' "$fixture/trend-timeout.html"
+grep -Fq 'shared server deadline' "$fixture/trend-timeout.html"
+grep -Fq 'series=visitors' "$fixture/trend-timeout.html"
+post_timeout_body=$(printf \
+    '{"v":2,"site":"%s","event_id":"ffffffff-ffff-4fff-8fff-fffffffffff1","anonymous_id":"ffffffff-ffff-4fff-8fff-fffffffffff2","identity_quality":"persistent","session_id":"ffffffff-ffff-4fff-8fff-fffffffffff3","sequence":1,"occurred_at_ms":%s,"type":"event","name":"post_timeout"}' \
+    "$site_id" "$(date -u +%s%3N)")
+for _ in 1 2; do
+    test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+        -X POST "$upstream/v2/event" -H 'Content-Type: text/plain' \
+        -H 'Origin: https://example.com' \
+        -H 'User-Agent: Mozilla/5.0 (X11; Linux x86_64) Chrome/140.0' \
+        --data-binary "$post_timeout_body")" = 204
+done
 
 cat "$fixture/browser.json"
 printf '{"html_gzip_bytes":%s,"css_gzip_bytes":%s,' \
     "$html_gzip_bytes" "$css_gzip_bytes"
 printf '"rss_growth_kib_after_100_views":%s,' "$rss_growth_kib"
-printf '"passkey_session":"enforced","csrf":"enforced","timeout_page":"rendered"}\n'
+printf '"trend_million_p95_seconds":%s,' "$trend_p95_seconds"
+printf '"trend_million_fresh_process_seconds":%s,' \
+    "$trend_fresh_process_seconds"
+printf '"trend_million_html_gzip_bytes":%s,' "$trend_html_gzip_bytes"
+printf '"maximum_trend_gzip_bytes":%s,' "$maximum_trend_gzip_bytes"
+printf '"passkey_session":"enforced","csrf":"enforced",'\
+'"timeout_page":"rendered",'\
+'"post_interrupt_store":"accepted-and-idempotent"}\n'
 echo "M6 server-rendered dashboard real-browser checks passed"

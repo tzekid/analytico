@@ -44,6 +44,7 @@ pub const Destination = enum {
 
 pub const Query = struct {
     site: []const u8 = "",
+    analysis_site_id: []const u8 = "",
     range: analysis.LocalDateRange,
     comparison: analysis.Comparison = .previous,
     kind: report.Kind = .overview,
@@ -55,6 +56,8 @@ pub const Query = struct {
     overview_metric: analysis.OverviewTrendMetric = .visitors,
     overview_currency: []const u8 = "",
     highlighted_interval: []const u8 = "",
+    analysis_interval: analysis.Interval = .auto,
+    analysis_series: []const analysis.Metric = &.{},
 };
 
 pub const ReportTimeBasis = enum {
@@ -80,6 +83,8 @@ pub const OverviewKpi = struct {
     direction: KpiDirection,
     definition: []const u8,
     target: KpiTarget,
+    analysis_metric: ?analysis.Metric = null,
+    legacy_focus_currency: []const u8 = "",
 };
 
 pub const OverviewKpis = struct {
@@ -141,6 +146,32 @@ pub const OverviewDetails = struct {
     protocol_v2_events: i64,
 };
 
+pub const AnalyzeTrendPoint = struct {
+    current_label: []const u8,
+    comparison_label: []const u8 = "",
+    current: ?analysis.Measure,
+    comparison: ?analysis.Measure = null,
+    current_incomplete: bool = false,
+    current_highlighted: bool = false,
+    comparison_highlighted: bool = false,
+};
+
+pub const AnalyzeTrendSeries = struct {
+    metric: analysis.Metric,
+    title: []const u8,
+    points: []const AnalyzeTrendPoint,
+    current_total: ?analysis.Measure,
+    comparison_total: ?analysis.Measure = null,
+    current_coverage: []const u8,
+    comparison_coverage: ?[]const u8 = null,
+};
+
+pub const AnalyzeTrend = struct {
+    series: []const AnalyzeTrendSeries,
+    no_events_ever: bool,
+    no_matches: bool,
+};
+
 pub const GoalDraft = struct {
     name: []const u8 = "",
     match_kind: []const u8 = "event",
@@ -175,6 +206,7 @@ pub const Page = struct {
     result: ?report.Result,
     overview_kpis: ?OverviewKpis = null,
     overview_details: ?OverviewDetails = null,
+    analyze_trend: ?AnalyzeTrend = null,
     collection_diagnostics: ?diagnostics.Snapshot = null,
     goals: []const meta.Goal,
     funnels: []const meta.Funnel,

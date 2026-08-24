@@ -52,6 +52,12 @@
   `start`/`end` links redirect to the canonical spelling. Existing metric-v1
   dashboard values remain visibly UTC compatibility data until their owning
   metric-v2 page issues replace them as one coherent range.
+- D37 and issue #28 make bare Analyze a typed metric-v2 Trend surface. One
+  canonical direct GET selects one through three bounded metric/event/goal
+  series, one site-local interval, and an optional exact highlighted bucket.
+  The server runs the ordinary finite plans under one deadline and renders SVG
+  plus exact tables without a client data request. Explicit legacy list-report
+  URLs remain usable until issue #29 supplies their typed Breakdown successor.
 
 ## 1. Product statement
 
