@@ -456,11 +456,13 @@ D40 keeps the D29 limits of 12 clauses, 20 OR values per clause, a 16 KiB URL,
 deadline. Metadata schema 7 permits at most 32 segments and 32 saved views per
 site. Only authenticated filter/saved-state form routes accept a 64 KiB body so
 form encoding can carry the already-bounded canonical JSON; the application and
-canonical Caddy matcher enforce the same ceiling. Only those saved-state
-mutation routes set `request_buffers 65536`, forcing Caddy to read the complete
-bounded body before upstream dispatch; the exact `max_size 65536` then returns
-413 for the first oversized byte instead of racing an application close. This
-is not generic or global request buffering. All other ordinary dashboard routes
+canonical Caddy matcher enforce the same ceiling. Inside only that route
+handle, a declared `Content-Length` above 65,536 returns 413 and a missing
+length returns 411 before proxy dispatch; the exact `max_size 65536` remains the
+read-time bound. Native URL-encoded browser forms always provide their finite
+length. The rejected 65,536- and 65,537-byte `request_buffers` candidates both
+still raced an early authenticated or unauthenticated upstream response into
+502, so no request buffering is retained. All other ordinary dashboard routes
 retain the 8 KiB application request-body ceiling; passkey routes retain
 Caddy's 192 KiB outer ceiling.
 

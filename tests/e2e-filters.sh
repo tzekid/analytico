@@ -148,6 +148,13 @@ for route in "${saved_state_paths[@]}"; do
         -H "Origin: $dashboard" --data-binary @"$fixture/body-64k" \
         "$dashboard$route")
     test "$body_64k_status" = 400
+    unauthenticated_64k_status=$(curl --silent \
+        --output "$fixture/body-64k-unauthenticated$route_name.html" \
+        --write-out '%{http_code}' \
+        -H 'Content-Type: application/x-www-form-urlencoded' \
+        -H "Origin: $dashboard" --data-binary @"$fixture/body-64k" \
+        "$dashboard$route")
+    test "$unauthenticated_64k_status" = 401
 done
 printf x >>"$fixture/body-64k"
 for route in "${saved_state_paths[@]}"; do
@@ -159,6 +166,20 @@ for route in "${saved_state_paths[@]}"; do
         -H "Origin: $dashboard" --data-binary @"$fixture/body-64k" \
         "$dashboard$route")
     test "$body_64k_plus_status" = 413
+    unauthenticated_64k_plus_status=$(curl --silent \
+        --output "$fixture/body-64k-plus-unauthenticated$route_name.html" \
+        --write-out '%{http_code}' \
+        -H 'Content-Type: application/x-www-form-urlencoded' \
+        -H "Origin: $dashboard" --data-binary @"$fixture/body-64k" \
+        "$dashboard$route")
+    test "$unauthenticated_64k_plus_status" = 413
+    missing_length_status=$(curl --silent \
+        --output "$fixture/body-missing-length$route_name.html" \
+        --write-out '%{http_code}' \
+        -H 'Content-Type: application/x-www-form-urlencoded' \
+        -H 'Content-Length:' -H 'Transfer-Encoding: chunked' \
+        --data-binary @"$fixture/body-64k" "$dashboard$route")
+    test "$missing_length_status" = 411
 done
 
 TMPDIR=/tmp NODE_PATH="$module_root" \
@@ -170,5 +191,8 @@ TMPDIR=/tmp NODE_PATH="$module_root" \
 cat "$fixture/browser.json"
 printf '{"origin":"enforced","csrf":"enforced",'
 printf '"saved_route_count":12,"saved_route_body_bytes":65536,'
-printf '"saved_route_plus_one_status":413}\n'
+printf '"saved_route_plus_one_status":413,'
+printf '"unauthenticated_exact_status":401,'
+printf '"unauthenticated_plus_one_status":413,'
+printf '"missing_content_length_status":411}\n'
 echo "Universal filters and saved state real-browser checks passed"
