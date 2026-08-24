@@ -108,8 +108,8 @@ ceiling; event migration 7 adds only the keyed, receipt-day network pseudonym.
 These are forward-only schema changes: stop the sole writer, create and verify
 a matched backup, run `migrate`, then start the candidate. An older binary must
 use a restored pre-migration database pair; switching only the executable is
-not rollback. Schema 7 adds no service-unit, environment, dependency, process,
-runtime data file, tracker, or Caddy change.
+not rollback. Event schema 7 adds no service-unit, environment, dependency,
+process, runtime data file, tracker, or Caddy change.
 
 DuckDB is configured before its configuration is locked: one query thread,
 128 MiB memory, 256 MiB temp limit, insertion-order preservation off,
@@ -395,7 +395,7 @@ admin reload. Verify old and new immutable tracker paths after the reload.
 Rollback restores the matched schema-5 pair, prior release symlink, and backed
 up Caddy configuration; switching only one component is forbidden.
 
-For the schema-7 deployment, repeat the stopped-writer procedure with a
+For the event-schema-7 deployment, repeat the stopped-writer procedure with a
 manifest recording metadata schema 4 and event schema 6. The exact schema-6
 binary must open the independently restored sibling and reproduce the chosen
 pre-migration reports. After migration, verify metadata 5/event 7, metric-v1
@@ -403,7 +403,7 @@ parity, traffic-quality version 5, strict-off parity, strict-on scope, keyed
 network-day privacy/anomaly evidence, daily-ceiling 429/idempotency behavior,
 and one authenticated native traffic-policy journey. Rollback restores the
 matched metadata-4/event-6 pair and prior release symlink. There is no tracker
-or Caddy change for schema 7.
+or Caddy change for event schema 7.
 
 For the metadata-schema-6 deployment, stop the sole writer and create a
 verified metadata-5/event-7 pair backup. Independently restore that backup and
@@ -425,8 +425,10 @@ a manifest recording metadata 6 and event 7. Independently restore that backup
 and prove the exact `a2d71c0` metadata-6 predecessor opens it and reproduces the
 selected reports before migration. The additive migration creates empty
 `segments` and `saved_views` tables and writes ledger 7 last; it does not alter
-site, policy, authentication, goal, funnel, event, identity, tracker, Caddy, or
-service-unit facts.
+site, policy, authentication, goal, funnel, event, identity, tracker, or
+service-unit facts. The complete #30 release separately changes Caddy only for
+the 12 saved-state mutation routes defined by D40; that configuration change is
+not part of the metadata migration.
 
 After migration, verify metadata 7/event 7, `doctor`, metric-v1 parity, exact
 saved-state CRUD and site isolation, one filtered Overview/Trend/Breakdown
@@ -434,9 +436,10 @@ journey, JavaScript-disabled apply/remove, and the filtered million-row gates.
 The exact deployed binary/library, one process/listener, health/readiness,
 public passkey boundary, and canonical deep-link return must resolve to the
 merged release. The release record includes artifact and backup-manifest
-hashes. Rollback stops the writer, restores the matched metadata-6/event-7 pair,
-proves the predecessor again, and only then switches the release symlink. The
-metadata-6 binary must never be started against the migrated metadata-7 file.
+hashes. Rollback stops the writer, restores the matched metadata-6/event-7
+pair and the backed-up predecessor Caddy configuration, proves the predecessor
+again, and only then switches the release symlink. The metadata-6 binary must
+never be started against the migrated metadata-7 file.
 
 ## 11. Retention and site deletion
 
