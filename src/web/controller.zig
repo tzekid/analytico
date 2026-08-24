@@ -1,6 +1,7 @@
 const std = @import("std");
 const analysis = @import("../analysis.zig");
 const calendar = @import("../calendar.zig");
+const diagnostics = @import("../diagnostics.zig");
 const domain = @import("../domain.zig");
 const report = @import("../report.zig");
 const timezone = @import("../timezone.zig");
@@ -56,6 +57,254 @@ pub const Field = struct {
     name: []const u8,
     value: []const u8,
 };
+
+pub const InstallQuery = struct {
+    started_at_utc_micros: i64,
+    event_count: i64,
+    after_received_at_utc_micros: i64,
+    after_event_id: []const u8,
+    signature: []const u8,
+    fragment: bool,
+};
+
+pub fn parseInstallQuery(
+    allocator: std.mem.Allocator,
+    target: []const u8,
+) !?InstallQuery {
+    const marker = std.mem.findScalar(u8, target, '?') orelse return null;
+    const encoded = target[marker + 1 ..];
+    if (encoded.len == 0 or encoded.len > analysis.maximum_url_bytes) {
+        return error.InvalidInstallQuery;
+    }
+    var started: ?[]const u8 = null;
+    var event_count: ?[]const u8 = null;
+    var after: ?[]const u8 = null;
+    var event: ?[]const u8 = null;
+    var signature: ?[]const u8 = null;
+    var fragment = false;
+    var count: usize = 0;
+    var parameters = std.mem.splitScalar(u8, encoded, '&');
+    while (parameters.next()) |parameter| {
+        if (parameter.len == 0) return error.InvalidInstallQuery;
+        count += 1;
+        if (count > 6) return error.TooManyInstallQueryFields;
+        const raw_name, const raw_value = std.mem.cutScalar(u8, parameter, '=') orelse
+            return error.InvalidInstallQuery;
+        const name = try decodeComponent(allocator, raw_name);
+        const value = try decodeComponent(allocator, raw_value);
+        if (value.len == 0) return error.InvalidInstallQuery;
+        if (std.mem.eql(u8, name, "started")) {
+            if (started != null) return error.DuplicateInstallQueryField;
+            started = value;
+        } else if (std.mem.eql(u8, name, "count")) {
+            if (event_count != null) return error.DuplicateInstallQueryField;
+            event_count = value;
+        } else if (std.mem.eql(u8, name, "after")) {
+            if (after != null) return error.DuplicateInstallQueryField;
+            after = value;
+        } else if (std.mem.eql(u8, name, "event")) {
+            if (event != null) return error.DuplicateInstallQueryField;
+            event = value;
+        } else if (std.mem.eql(u8, name, "sig")) {
+            if (signature != null) return error.DuplicateInstallQueryField;
+            signature = value;
+        } else if (std.mem.eql(u8, name, "fragment")) {
+            if (fragment) return error.DuplicateInstallQueryField;
+            if (!std.mem.eql(u8, value, "verification")) {
+                return error.InvalidInstallFragment;
+            }
+            fragment = true;
+        } else {
+            return error.UnknownInstallQueryField;
+        }
+    }
+    if (started == null or event_count == null or after == null or event == null or
+        signature == null)
+    {
+        return error.IncompleteInstallQuery;
+    }
+    const started_at_utc_micros = std.fmt.parseInt(i64, started.?, 10) catch
+        return error.InvalidInstallTimestamp;
+    const parsed_event_count = std.fmt.parseInt(i64, event_count.?, 10) catch
+        return error.InvalidInstallEventCount;
+    const after_received_at_utc_micros = std.fmt.parseInt(i64, after.?, 10) catch
+        return error.InvalidInstallTimestamp;
+    if (started_at_utc_micros <= 0 or parsed_event_count < 0 or
+        after_received_at_utc_micros < 0)
+    {
+        return error.InvalidInstallTimestamp;
+    }
+    try domain.validateUuid(event.?);
+    if (signature.?.len != 64) return error.InvalidInstallSignature;
+    for (signature.?) |byte| {
+        if (!(std.ascii.isDigit(byte) or (byte >= 'a' and byte <= 'f'))) {
+            return error.InvalidInstallSignature;
+        }
+    }
+    return .{
+        .started_at_utc_micros = started_at_utc_micros,
+        .event_count = parsed_event_count,
+        .after_received_at_utc_micros = after_received_at_utc_micros,
+        .after_event_id = event.?,
+        .signature = signature.?,
+        .fragment = fragment,
+    };
+}
+
+pub fn signInstallWatermark(
+    site_id: []const u8,
+    csrf_token: []const u8,
+    started_at_utc_micros: i64,
+    event_count: i64,
+    after_received_at_utc_micros: i64,
+    after_event_id: []const u8,
+) ![64]u8 {
+    try domain.validateUuid(site_id);
+    try domain.validateUuid(after_event_id);
+    if (csrf_token.len == 0 or started_at_utc_micros <= 0 or event_count < 0 or
+        after_received_at_utc_micros < 0)
+    {
+        return error.InvalidInstallWatermark;
+    }
+    var message_buffer: [192]u8 = undefined;
+    const message = try std.fmt.bufPrint(
+        &message_buffer,
+        "analytico-install-v1\n{s}\n{d}\n{d}\n{d}\n{s}",
+        .{
+            site_id,
+            started_at_utc_micros,
+            event_count,
+            after_received_at_utc_micros,
+            after_event_id,
+        },
+    );
+    const Hmac = std.crypto.auth.hmac.sha2.HmacSha256;
+    var digest: [Hmac.mac_length]u8 = undefined;
+    Hmac.create(&digest, message, csrf_token);
+    defer std.crypto.secureZero(u8, &digest);
+    return std.fmt.bytesToHex(digest, .lower);
+}
+
+pub fn verifyInstallWatermark(
+    query: InstallQuery,
+    site_id: []const u8,
+    csrf_token: []const u8,
+) !void {
+    const expected = try signInstallWatermark(
+        site_id,
+        csrf_token,
+        query.started_at_utc_micros,
+        query.event_count,
+        query.after_received_at_utc_micros,
+        query.after_event_id,
+    );
+    var actual: [64]u8 = undefined;
+    if (query.signature.len != actual.len) return error.InvalidInstallSignature;
+    @memcpy(&actual, query.signature);
+    if (!std.crypto.timing_safe.eql([64]u8, expected, actual)) {
+        return error.InvalidInstallSignature;
+    }
+}
+
+pub fn installEvent(
+    allocator: std.mem.Allocator,
+    source: events.InstallationEvent,
+) !model.InstallEvent {
+    if (source.protocol_version != 1 and source.protocol_version != 2) {
+        return error.InvalidInstallationEvent;
+    }
+    const event_type: []const u8 = switch (source.kind) {
+        1 => "Page view",
+        2 => "Custom event",
+        3 => "Engagement",
+        4 => "Identify",
+        else => return error.InvalidInstallationEvent,
+    };
+    return .{
+        .protocol_version = @intCast(source.protocol_version),
+        .event_type = event_type,
+        .event_name = source.event_name,
+        .path = source.path,
+        .received_at_utc = try formatUtcMicros(
+            allocator,
+            source.received_at_utc_micros,
+        ),
+    };
+}
+
+pub fn installGuidance(
+    summary: diagnostics.Summary,
+) ?model.InstallGuidance {
+    if (summary.outcome == .accepted) return null;
+    if (summary.outcome == .duplicate) return .{
+        .category = "Duplicate event",
+        .consequence = "The collector recognized an event already stored, so no new row confirmed this verification session.",
+        .correction = "Reload the tracked page or send a new event with a fresh event ID.",
+    };
+    if (summary.outcome == .store_failure) return .{
+        .category = "Collector storage unavailable",
+        .consequence = "The attempt reached this site but could not be committed.",
+        .correction = "Restore event-store readiness, then reload the tracked page and check again.",
+    };
+    return switch (summary.rejection_code) {
+        .origin_missing, .origin_not_allowed => .{
+            .category = "Origin not allowed",
+            .consequence = "The collector rejected the request before storing an event.",
+            .correction = "Match the tracked page's exact scheme, host, and port to one configured origin.",
+        },
+        .site_unknown, .site_disabled => .{
+            .category = "Site unavailable",
+            .consequence = "The collector did not accept the supplied site configuration.",
+            .correction = "Copy the exact Site ID from this page and confirm the site is enabled.",
+        },
+        .protocol_unsupported => .{
+            .category = "Unsupported protocol",
+            .consequence = "The request format cannot be accepted by this collector route.",
+            .correction = "Use the generated content-hashed tracker and do not compress its event request.",
+        },
+        .payload_too_large, .payload_invalid, .event_invalid => .{
+            .category = "Invalid payload",
+            .consequence = "The collector rejected malformed, oversized, or unsupported event data.",
+            .correction = "Use the generated tracker or the bounded v2 examples and remove unknown or oversized fields.",
+        },
+        .property_invalid, .property_type_conflict => .{
+            .category = "Invalid properties",
+            .consequence = "The event was not stored because its properties exceeded the flat typed contract.",
+            .correction = "Send at most 16 scalar properties with valid keys and bounded string values.",
+        },
+        .identity_invalid, .identity_conflict, .session_invalid => .{
+            .category = "Invalid identity or session",
+            .consequence = "The v2 identity/session envelope was rejected and no event was committed.",
+            .correction = "Use the generated tracker; call reset before switching a browser to another identified user.",
+        },
+        .timestamp_invalid => .{
+            .category = "Invalid event time",
+            .consequence = "The event time fell outside the collector's accepted receipt window.",
+            .correction = "Correct the tracked device clock and send a new event.",
+        },
+        .value_invalid => .{
+            .category = "Invalid value",
+            .consequence = "The exact amount/currency pair was rejected and no event was stored.",
+            .correction = "Send a bounded decimal-string amount together with a three-letter uppercase currency.",
+        },
+        .event_id_conflict => .{
+            .category = "Event ID conflict",
+            .consequence = "An existing event ID was reused with different normalized data.",
+            .correction = "Send the event once with a fresh UUID; do not reuse IDs across different events.",
+        },
+        .rate_limited => .{
+            .category = "Collection limit reached",
+            .consequence = "The collector refused this attempt without storing a new event.",
+            .correction = "Wait briefly or review the site's configured daily accepted-event ceiling.",
+        },
+        .store_unavailable, .disk_full => .{
+            .category = "Collector storage unavailable",
+            .consequence = "The collector could not durably commit the event.",
+            .correction = "Restore readiness and disk capacity, then send a new event.",
+        },
+        .none => null,
+    };
+}
 
 pub const FormContext = struct {
     range: analysis.LocalDateRange,
@@ -2986,4 +3235,92 @@ test "Overview accepted-event receipt formatting preserves the Unix epoch" {
         "1970-01-01 00:00 UTC",
         value,
     );
+}
+
+test "Install query is closed canonical and session-bound" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const site = "00000000-0000-4000-8000-000000000020";
+    const event = "00000000-0000-4000-8000-000000000021";
+    const signature = try signInstallWatermark(
+        site,
+        "fixture-csrf",
+        30,
+        2,
+        20,
+        event,
+    );
+    const target = try std.fmt.allocPrint(
+        allocator,
+        "/admin/sites/example/install?started=30&count=2&after=20&event={s}&sig={s}&fragment=verification",
+        .{ event, signature },
+    );
+    const parsed = (try parseInstallQuery(allocator, target)).?;
+    try std.testing.expectEqual(@as(i64, 30), parsed.started_at_utc_micros);
+    try std.testing.expectEqual(@as(i64, 2), parsed.event_count);
+    try std.testing.expectEqual(@as(i64, 20), parsed.after_received_at_utc_micros);
+    try std.testing.expectEqualStrings(event, parsed.after_event_id);
+    try std.testing.expect(parsed.fragment);
+    try verifyInstallWatermark(parsed, site, "fixture-csrf");
+    try std.testing.expectError(
+        error.InvalidInstallSignature,
+        verifyInstallWatermark(
+            parsed,
+            "00000000-0000-4000-8000-000000000022",
+            "fixture-csrf",
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidInstallSignature,
+        verifyInstallWatermark(parsed, site, "rotated-csrf"),
+    );
+
+    var tampered = parsed;
+    tampered.after_received_at_utc_micros += 1;
+    try std.testing.expectError(
+        error.InvalidInstallSignature,
+        verifyInstallWatermark(tampered, site, "fixture-csrf"),
+    );
+    try std.testing.expectError(
+        error.DuplicateInstallQueryField,
+        parseInstallQuery(
+            allocator,
+            "/admin/sites/example/install?started=1&started=2&count=0&after=0&event=00000000-0000-0000-0000-000000000000&sig=0000000000000000000000000000000000000000000000000000000000000000",
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidInstallQuery,
+        parseInstallQuery(
+            allocator,
+            "/admin/sites/example/install?started=&count=0&after=0&event=00000000-0000-0000-0000-000000000000&sig=0000000000000000000000000000000000000000000000000000000000000000",
+        ),
+    );
+    try std.testing.expectError(
+        error.UnknownInstallQueryField,
+        parseInstallQuery(
+            allocator,
+            "/admin/sites/example/install?started=1&count=0&after=0&event=00000000-0000-0000-0000-000000000000&sig=0000000000000000000000000000000000000000000000000000000000000000&private=yes",
+        ),
+    );
+}
+
+test "Install rejection guidance covers origin property and payload corrections" {
+    const cases = [_]struct {
+        code: diagnostics.RejectionCode,
+        category: []const u8,
+    }{
+        .{ .code = .origin_not_allowed, .category = "Origin not allowed" },
+        .{ .code = .property_invalid, .category = "Invalid properties" },
+        .{ .code = .payload_too_large, .category = "Invalid payload" },
+    };
+    for (cases) |case| {
+        var summary = diagnostics.Summary.init(.v2, 1);
+        summary.outcome = .rejected;
+        summary.rejection_code = case.code;
+        const guidance = installGuidance(summary).?;
+        try std.testing.expectEqualStrings(case.category, guidance.category);
+        try std.testing.expect(guidance.consequence.len != 0);
+        try std.testing.expect(guidance.correction.len != 0);
+    }
 }

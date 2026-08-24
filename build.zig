@@ -423,6 +423,17 @@ pub fn build(b: *std.Build) void {
         "Create the first site through passkey auth, real stores, Caddy, and Chromium",
     ).dependOn(&onboarding_e2e.step);
 
+    const installation_e2e = b.addSystemCommand(&.{
+        "bash",
+        "tests/e2e-installation.sh",
+    });
+    installation_e2e.addArtifactArg(app);
+    installation_e2e.step.dependOn(b.getInstallStep());
+    b.step(
+        "e2e-installation",
+        "Verify tracker installation through real stores, Caddy, Chromium, and scale",
+    ).dependOn(&installation_e2e.step);
+
     const metadata6_migration_e2e = b.addSystemCommand(&.{
         "bash",
         "scripts/run-metadata5-gate.sh",

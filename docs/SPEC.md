@@ -39,7 +39,10 @@
   bounded identity-mint warnings. D36 and issue #19 advance metadata to schema
   6 and add authenticated browser site creation through D19 durable autocommits,
   stored optional default currency, unique origin ownership, and an in-process
-  collection-policy refresh.
+  collection-policy refresh. D38 and issue #20 complete that handoff with the
+  canonical tracker snippet and a session-bound signed installation watermark;
+  committed success comes from DuckDB while recent safe rejection guidance
+  remains explicitly restart-scoped.
 - The server-rendered dashboard now uses the six-destination, site-scoped
   shell: Overview, Analyze, Journeys, Sessions, Live, and Settings. `/admin`
   and the bounded legacy `site`/`report` query form redirect to the closest
@@ -110,6 +113,14 @@ verified backups, upgrades the binary, and can restore the two embedded files.
   delete, not an explicit multi-write Turso transaction. Exact completed
   resubmission returns the existing site outcome; conflicting slug or origin
   remains a field error.
+- The authenticated Install route renders the exact current content-hashed
+  tracker and manual API examples. A bare GET starts a signed selected-site
+  verification session; ordinary GET refresh works without JavaScript and an
+  optional five-second visible/unpaused fragment poll stops after success.
+- Only a committed event after that exact watermark can confirm setup. The
+  page distinguishes protocol-v1 compatibility, protocol-v2 success, recent
+  restart-scoped rejection guidance, and unavailable collection without
+  exposing unrestricted collector input.
 - Treat all configured origins as operator-controlled input, not request input.
 
 ### F2. Page views
@@ -297,7 +308,9 @@ The M6 UI remains deliberately downstream of the product core:
 3. A deterministic renderer writes a full HTML response without I/O.
 4. Links and forms work with JavaScript disabled.
 5. M7 may enhance the same endpoints with body-level swaps of the same complete
-   server HTML; it does not introduce a fragment renderer or second state model.
+   server HTML; it does not introduce a second state model. D38 later adds one
+   bounded Install verification fragment rendered from the same typed model,
+   with the complete ordinary GET retained as the baseline.
 
 Issue #17 adds only a narrow output vocabulary over those typed models. Shared
 code covers context escaping, KPI/feedback/empty/form-error semantics, and five

@@ -111,6 +111,14 @@
     "purpose": "submit the native site form and complete the origin-bound self-exclusion handshake",
     "status": "accepted optional enhancement; native forms remain the dashboard baseline"
   },
+  "installation_enhancement": {
+    "source_bytes": 3891,
+    "sha256": "fe0cc47ba8d4a162047879064eb2cdeef4bbf122baf24ced3077f3579add42f9",
+    "content_hash_path": "/admin/install.fe0cc47b.js",
+    "third_party_dependencies": 0,
+    "purpose": "copy the generated tracker snippet and refresh one signed server-rendered verification fragment only while visible, waiting, and unpaused",
+    "status": "accepted optional Install-only enhancement; selectable copy and ordinary GET verification remain the native baseline"
+  },
   "passcay": {
     "version": "3.1.0",
     "commit": "a448bfa5613b68897e12de11e784a1d7721233a4",

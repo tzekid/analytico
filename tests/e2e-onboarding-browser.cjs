@@ -168,7 +168,12 @@ async function main() {
       }
     });
     await Promise.all([
-      page.waitForURL(`${origin}/admin/sites/browser-site/install`),
+      page.waitForURL((url) =>
+        url.origin === origin &&
+        url.pathname === "/admin/sites/browser-site/install" &&
+        url.searchParams.has("started") &&
+        url.searchParams.has("sig")
+      ),
       page.getByRole("button", { name: "Create site" }).click(),
     ]);
     assert.equal(modifyingOrigin, origin);
@@ -183,7 +188,10 @@ async function main() {
     assert.equal(await page.getByText("Browser Site", { exact: true }).count(), 1);
     assert.equal(await page.getByText("Europe/Berlin", { exact: true }).count(), 1);
     assert.equal(await page.getByText("EUR", { exact: true }).count(), 1);
-    assert.equal(await page.locator("script").count(), 0);
+    assert.equal(
+      await page.locator('script[src^="/admin/install."]').count(),
+      1,
+    );
     const siteId = await page.locator(".configuration-list code").first().textContent();
     assert.match(siteId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
 

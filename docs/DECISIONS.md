@@ -46,6 +46,7 @@ semantic, or application state model is consequential and must be added here.
 | D35 | Exact one-entry Overview result cache | Narrowly supersede D29's cache prohibition after measured cold SQL misses | Accepted for 1.0 issue #27 |
 | D36 | Browser site creation and metadata schema 6 | D19 durable autocommits, exact retry, stored settings, and unique origin ownership | Accepted for 1.0 issue #19 |
 | D37 | Bounded Analyze Trend query set | Preserve one-metric queries under one server-rendered shared-deadline envelope | Accepted for 1.0 issue #28 |
+| D38 | Installation verification state | Session-bound signed URL watermark plus durable event lookup and restart-scoped rejection guidance | Accepted for 1.0 issue #20 |
 
 ## D01. MVP interface
 
@@ -2144,3 +2145,146 @@ highlights; legacy list compatibility; one shared timeout and post-interrupt
 reuse; no startup data request; JavaScript-off desktop/mobile/keyboard behavior;
 bounded response/assets; repeated million-row three-series HTTP latency; and
 separately captured Debug and ReleaseSafe gates.
+
+## D38. Signed stateless installation-verification watermark
+
+**Status:** Accepted for Analytico 1.0 issue #20
+
+**Date:** 2026-08-24
+
+**Issue:** #20
+
+### Context
+
+After browser site creation, the authenticated Install destination must show
+the exact current tracker snippet and distinguish a newly accepted collector
+event from every row that existed before the owner began that verification.
+The result must survive ordinary fragment refreshes and a process restart, work
+through a normal GET with JavaScript disabled, and show bounded actionable
+rejection guidance without turning the process-local diagnostics ring into
+durable product truth.
+
+DuckDB already owns committed events. The issue-#21 diagnostics ring owns only
+200 safe process-local summaries and intentionally clears on restart. Turso has
+no installation-session entity. The current event table has receipt time and
+event ID but no monotonic installation sequence. Reusing only a receipt-time
+cutoff would leave an exact timestamp tie ambiguous; accepting an unsigned URL
+cutoff would let edited fields make an old row appear new.
+
+### State candidates
+
+| Candidate | Runtime and correctness | Maintenance, migration, and rollback |
+| --- | --- | --- |
+| Persist each verification session and result in Turso | Durable independently of browser history and can remember a named completion | Adds a schema, cleanup/expiry policy, write failure state, and cross-store reconciliation for one transient owner-only flow |
+| Use only the diagnostics ring and its correlation numbers | No query fields or new durable writes | Accepted truth disappears on restart or wrap; malformed attempts often have no validated site and must remain unattributed |
+| Carry an authenticated-session-bound signed watermark in the no-store URL and read committed success from DuckDB | A bare GET establishes one exact session; full GET and fragment GET reproduce it; restart preserves committed event truth; edited or cross-site fields fail before DuckDB | Adds no schema or background state; browser history retains only the current authenticated flow; code rollback makes the new URL inert |
+
+Select the signed stateless watermark. It contains a server clock sample for
+recent-diagnostic filtering and the selected site's latest committed
+`(received_at_utc_micros, event_id)` position. HMAC-SHA-256 binds the versioned
+field serialization to the site ID and the current passkey session's random
+CSRF secret. The signature is authorization-adjacent integrity only: every
+full and fragment request still requires the normal passkey session. A new
+bare Install GET always issues a new watermark; reloading its signed URL keeps
+that same verification session. Session rotation invalidates the old URL and
+the owner starts again from the bare route.
+
+The canonical full target uses the fixed order
+`?started=MICROS&count=ROWS&after=MICROS&event=UUID&sig=LOWERCASE_HEX`; the
+fragment target adds `&fragment=verification`. An empty event store uses count
+and receipt zero plus the all-zero UUID. The signed message is the unambiguous
+newline-delimited sequence `analytico-install-v1`, site ID, start receipt,
+selected-site row count, high-water receipt, and event ID. No decoded field may
+contain a newline, and the closed field grammars make length-prefixing
+unnecessary for this version.
+
+The success query selects the first committed selected-site protocol-v1 or
+protocol-v2 row strictly after the compound position. An exact duplicate adds
+no row and cannot confirm a new installation. A valid stored event remains
+collector acceptance even when its permanent traffic class excludes it from
+product metrics. Receipt-time clock rollback fails closed: it may delay
+confirmation but cannot make a pre-watermark row new. An exact receipt-time tie
+confirms only when its UUID sorts after the signed high-water UUID; a newly
+committed lower tie likewise fails closed until a later compound position is
+stored. Offline retention, migration, and site deletion continue to require the
+service to be stopped; they do not become concurrent installation state
+transitions.
+
+### Rendering and polling candidates
+
+| Candidate | First response and accessibility | Runtime and maintenance |
+| --- | --- | --- |
+| Timed full-page reload | Ordinary GET remains functional | Disrupts selection/focus, reloads the whole document, and does not meet the bounded-fragment contract |
+| HTMX polling plus a second clipboard/pause script | Reuses the accepted enhancement library | Loads the larger optional asset on a page that needs one small behavior and splits pause/copy ownership across two mechanisms |
+| Dedicated Install-only script over the same typed verification model | Complete HTML and manual GET are useful before the script runs; selectable text remains the copy fallback | One bounded same-origin fragment request every five seconds only while waiting, visible, and unpaused |
+
+Select the dedicated Install-only script. It adds clipboard copy with a
+selectable manual fallback and replaces only the server-rendered verification
+region. It schedules no data request at startup, stops after success or an
+explicit pause, suspends while the document is hidden, and resumes only when
+visible and unpaused. A normal **Check again** GET retains the signed fields and
+is the JavaScript-disabled baseline. The renderer receives a complete typed
+model and performs no database, clock, session, or network work.
+
+### Diagnostics, security, and failure behavior
+
+Only selected-site summaries whose server receipt time is at or after the
+verification start sample can supply recent guidance. Origin, property,
+identity/session, value, rate-limit, and attributable store failures map to a
+closed category, consequence, and correction. Protocol-only oversized or
+malformed attempts that lack a validated site remain absent from the selected
+site snapshot; static safe payload guidance covers that failure without
+weakening site isolation. The page labels ring-derived evidence as since
+process restart. That guidance never displays raw IP, user agent,
+identity/session/event ID, referrer, query, payload, property value, or
+unrestricted input.
+
+Install HTML and fragments are private/no-store and use
+`Referrer-Policy: no-referrer`, so the signed fields are not sent to same-origin
+assets. Query size/count, names, decimal integers, lowercase UUID, fragment
+mode, and fixed-length lowercase signature are validated before store access;
+duplicates, unknowns, empty values, bad signatures, and cross-site tokens
+return the normal bounded invalid-request response. The HMAC uses the standard
+library and the already required random session secret; no dependency, new
+key, network call, or persisted token is added. The authenticated URL visibly
+carries only the pre-session high-water event UUID, count, and receipt time;
+`no-store` and `no-referrer` limit their propagation. It never renders the new
+event UUID or any diagnostics identity, session, payload, query, referrer,
+user-agent, or property value.
+
+If the event store or policy is unavailable, the page keeps the generated
+snippet and reports collection/verification unavailable without claiming
+success. Fragment transport failure leaves the last honest server state in
+place and tells the owner to use manual refresh. Ring restart merely removes
+recent rejection guidance; it never removes a committed success. Memory is one
+bounded request model and the existing ring snapshot, with no cache or process
+table.
+
+### Consequences
+
+- Runtime adds selected-site read-only DuckDB statements: count/latest compound
+  position when a bare session starts, a count guard on each check, and the
+  first tied/later row only after that count increases. The million-row warm
+  fragment must remain below the existing 150 ms operational-fragment budget.
+- There is no Turso or DuckDB migration, backup-format change, deployment
+  component, background task, cache, or invalidation protocol.
+- Code rollback restores the placeholder Install page. Existing metadata,
+  events, tracker assets, collector routes, CLI snippets, and database-pair
+  rollback remain valid; signed new-page URLs have no meaning to the old code.
+- Issue #43 still owns the full Live recent-event/debugger list and its refresh
+  controls. Issue #20 consumes only one latest safe attributable setup outcome.
+  Issue #22 later owns broader Settings editing and does not replace this
+  verification state model.
+
+**Affected contracts:** `SPEC.md`, `ARCHITECTURE.md`, `PROTOCOL.md`,
+`OPERATIONS.md`, `PERFORMANCE.md`, `RELEASE_CONTRACT_1.0.md`, and issue #20.
+
+### Acceptance evidence
+
+Issue #20 must prove an old row and a duplicate cannot satisfy a newly issued
+watermark; v1 and v2 success states; actionable origin/property/payload
+guidance; bad/duplicate/tampered query rejection before DuckDB; clipboard and
+manual-copy behavior; JavaScript-off manual GET; visible/unpaused five-second
+polling and stop behavior; no startup data request; real immutable tracker page
+collection; million-row fragment latency; bounded HTML/assets/RSS; Debug and
+ReleaseSafe gates; and the normal release/deployment verification.

@@ -248,11 +248,19 @@ The collector also owns the process-local 200-slot diagnostics ring documented
 in `PROTOCOL.md`. `serve_stopped` reports only closed retained-outcome, wrap,
 snapshot, and returned-row counters from that ring. The authenticated dashboard
 boundary exposes a typed site-filtered snapshot seam, but issue #21 deliberately
-adds no visible recent list, manual refresh control, polling, pause/hidden
-behavior, or stale-state UI; those remain owned by issue #43.
+adds no Live recent list, manual refresh control, polling, pause/hidden
+behavior, or stale-state UI. D38 and issue #20 consume only one latest safe
+post-watermark outcome for bounded Install correction guidance. Issue #43 owns
+the full Live list and its refresh behavior.
 
 Ring wrap overwrites the oldest summary and restart clears every slot. No backup
 contains the ring, and logs never expand a summary into input-derived strings.
+Install verification success instead reads the first committed selected-site
+event after a session-bound signed DuckDB high-water position. The signed
+private/no-store fields require the same passkey session, are not persisted,
+and are suppressed from Referrer headers. A bare Install GET starts a new
+verification session; the normal **Check again** GET remains the recovery and
+JavaScript-disabled path.
 
 ## 8. Backup
 

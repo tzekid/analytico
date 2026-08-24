@@ -9,6 +9,7 @@ const events = @import("../store/events.zig");
 const meta = @import("../store/meta.zig");
 const report = @import("../report.zig");
 const timezone = @import("../timezone.zig");
+const tracker_asset = @import("../tracker_asset.zig");
 const controller = @import("controller.zig");
 const model = @import("model.zig");
 const render = @import("render.zig");
@@ -135,6 +136,21 @@ pub fn handle(
         }
         return true;
     }
+    if (std.mem.eql(u8, path, render.install_js_path)) {
+        if (!std.mem.eql(u8, request.method, "GET")) {
+            try methodNotAllowed(output, "GET");
+        } else {
+            try response.write(
+                output,
+                200,
+                "text/javascript; charset=utf-8",
+                "Cache-Control: private, max-age=31536000, immutable\r\n" ++
+                    "X-Content-Type-Options: nosniff\r\n",
+                render.install_js,
+            );
+        }
+        return true;
+    }
     if (std.mem.eql(u8, path, "/admin") or
         std.mem.eql(u8, path, "/admin/"))
     {
@@ -167,7 +183,7 @@ pub fn handle(
         if (!std.mem.eql(u8, request.method, "GET")) {
             try methodNotAllowed(output, "GET");
         } else {
-            try getInstall(dependencies, output, site_slug);
+            try getInstall(dependencies, request, output, site_slug);
         }
         return true;
     }
@@ -377,6 +393,7 @@ fn postSite(
 
 fn getInstall(
     dependencies: Dependencies,
+    request: request_mod.Request,
     output: *std.Io.Writer,
     site_slug: []const u8,
 ) !void {
@@ -394,23 +411,242 @@ fn getInstall(
         },
         else => return err,
     };
+    const parsed = controller.parseInstallQuery(
+        dependencies.allocator,
+        request.target,
+    ) catch {
+        try invalidInstallPage(output, site.slug);
+        return;
+    };
+    var collection_available = dependencies.collection_available;
+    const query = if (parsed) |provided| query: {
+        controller.verifyInstallWatermark(
+            provided,
+            site.id,
+            dependencies.csrf_token,
+        ) catch {
+            try invalidInstallPage(output, site.slug);
+            return;
+        };
+        if (!(try isCanonicalInstallTarget(
+            dependencies.allocator,
+            request.target,
+            site.slug,
+            provided,
+        ))) {
+            try redirectToInstallQuery(
+                dependencies.allocator,
+                output,
+                site.slug,
+                provided,
+            );
+            return;
+        }
+        break :query provided;
+    } else {
+        const started_at_utc_micros = currentMicros() catch {
+            try writeError(output, .{
+                .status = 503,
+                .title = "Clock unavailable",
+                .message = "The server could not safely start installation verification. Restore the server clock and reload this page.",
+                .return_url = "/admin",
+            });
+            return;
+        };
+        const watermark = dependencies.events.installationWatermark(
+            dependencies.allocator,
+            site.id,
+        ) catch unavailable: {
+            collection_available = false;
+            break :unavailable events.InstallationWatermark{
+                .event_count = std.math.maxInt(i64),
+                .received_at_utc_micros = std.math.maxInt(i64),
+                .event_id = "00000000-0000-0000-0000-000000000000",
+            };
+        };
+        const signature = try controller.signInstallWatermark(
+            site.id,
+            dependencies.csrf_token,
+            started_at_utc_micros,
+            watermark.event_count,
+            watermark.received_at_utc_micros,
+            watermark.event_id,
+        );
+        const issued = controller.InstallQuery{
+            .started_at_utc_micros = started_at_utc_micros,
+            .event_count = watermark.event_count,
+            .after_received_at_utc_micros = watermark.received_at_utc_micros,
+            .after_event_id = watermark.event_id,
+            .signature = try dependencies.allocator.dupe(u8, &signature),
+            .fragment = false,
+        };
+        try redirectToInstallQuery(
+            dependencies.allocator,
+            output,
+            site.slug,
+            issued,
+        );
+        return;
+    };
+
+    const stored_event = dependencies.events.firstInstallationEventAfter(
+        dependencies.allocator,
+        site.id,
+        .{
+            .event_count = query.event_count,
+            .received_at_utc_micros = query.after_received_at_utc_micros,
+            .event_id = query.after_event_id,
+        },
+    ) catch unavailable: {
+        collection_available = false;
+        break :unavailable null;
+    };
+    const event = if (stored_event) |source|
+        try controller.installEvent(dependencies.allocator, source)
+    else
+        null;
+    var guidance: ?model.InstallGuidance = null;
+    if (event == null) if (dependencies.diagnostics) |lookup| {
+        const snapshot = try lookup.get(dependencies.allocator, site.id);
+        for (snapshot.summaries) |summary| {
+            if (summary.received_at_utc_micros < query.started_at_utc_micros) {
+                continue;
+            }
+            if (summary.outcome == .accepted) break;
+            guidance = controller.installGuidance(summary);
+            if (guidance != null) break;
+        }
+    };
+    const verification = model.InstallVerification{
+        .site_slug = site.slug,
+        .watermark = .{
+            .started_at_utc_micros = query.started_at_utc_micros,
+            .event_count = query.event_count,
+            .after_received_at_utc_micros = query.after_received_at_utc_micros,
+            .after_event_id = query.after_event_id,
+            .signature = query.signature,
+        },
+        .event = event,
+        .guidance = guidance,
+        .collection_available = collection_available,
+    };
     var body = std.Io.Writer.Allocating.init(std.heap.page_allocator);
     defer body.deinit();
+    if (query.fragment) {
+        try render.installVerificationFragment(&body.writer, verification);
+        try response.write(
+            output,
+            200,
+            "text/html; charset=utf-8",
+            render.install_headers,
+            body.written(),
+        );
+        return;
+    }
     const policy_active = if (dependencies.site_calendar) |lookup|
         lookup.find(site.id) != null
     else
         false;
+    var snippet = std.Io.Writer.Allocating.init(dependencies.allocator);
+    try snippet.writer.print(
+        \\<script defer
+        \\  src="{s}{s}"
+        \\  data-site="{s}"
+        \\  data-spa="auto"
+        \\  data-engagement="true"></script>
+        \\<noscript>
+        \\  <img alt="" width="1" height="1"
+        \\    src="{s}/v1/p.gif?site={s}&amp;path=%2F">
+        \\</noscript>
+    , .{
+        dependencies.origin,
+        tracker_asset.current_path,
+        site.id,
+        dependencies.origin,
+        site.id,
+    });
     try render.installPage(&body.writer, .{
         .site = site,
+        .collector_origin = dependencies.origin,
+        .tracker_path = tracker_asset.current_path,
+        .tracker_protocol_version = tracker_asset.protocol_version,
+        .snippet = snippet.written(),
         .policy_active = policy_active,
-        .collection_available = dependencies.collection_available,
+        .verification = verification,
     });
     try response.write(
         output,
         200,
         "text/html; charset=utf-8",
-        render.headers,
+        render.install_headers,
         body.written(),
+    );
+}
+
+fn invalidInstallPage(output: *std.Io.Writer, site_slug: []const u8) !void {
+    var return_buffer: [96]u8 = undefined;
+    const return_url = try std.fmt.bufPrint(
+        &return_buffer,
+        "/admin/sites/{s}/install",
+        .{site_slug},
+    );
+    try writeError(output, .{
+        .status = 400,
+        .title = "Invalid installation verification",
+        .message = "The verification URL has an invalid, duplicate, incomplete, expired-session, or unsupported field. Start a new verification from the bare Install page.",
+        .return_url = return_url,
+    });
+}
+
+fn writeInstallTarget(
+    output: *std.Io.Writer,
+    site_slug: []const u8,
+    query: controller.InstallQuery,
+) !void {
+    try output.print(
+        "/admin/sites/{s}/install?started={d}&count={d}&after={d}&event={s}&sig={s}",
+        .{
+            site_slug,
+            query.started_at_utc_micros,
+            query.event_count,
+            query.after_received_at_utc_micros,
+            query.after_event_id,
+            query.signature,
+        },
+    );
+    if (query.fragment) try output.writeAll("&fragment=verification");
+}
+
+fn isCanonicalInstallTarget(
+    allocator: std.mem.Allocator,
+    target: []const u8,
+    site_slug: []const u8,
+    query: controller.InstallQuery,
+) !bool {
+    var expected = std.Io.Writer.Allocating.init(allocator);
+    try writeInstallTarget(&expected.writer, site_slug, query);
+    return std.mem.eql(u8, target, expected.written());
+}
+
+fn redirectToInstallQuery(
+    allocator: std.mem.Allocator,
+    output: *std.Io.Writer,
+    site_slug: []const u8,
+    query: controller.InstallQuery,
+) !void {
+    var location = std.Io.Writer.Allocating.init(allocator);
+    try writeInstallTarget(&location.writer, site_slug, query);
+    var headers = std.Io.Writer.Allocating.init(allocator);
+    try headers.writer.print(
+        "Cache-Control: no-store\r\nLocation: {s}\r\n",
+        .{location.written()},
+    );
+    try response.write(
+        output,
+        303,
+        "text/plain; charset=utf-8",
+        headers.written(),
+        "see other\n",
     );
 }
 

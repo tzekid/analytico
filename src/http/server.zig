@@ -13,6 +13,7 @@ const dashboard_render = @import("../web/render.zig");
 const auth_http = @import("../auth/http.zig");
 const auth_store = @import("../auth/store.zig");
 const timezone = @import("../timezone.zig");
+const tracker_asset = @import("../tracker_asset.zig");
 
 const tracker_v1 = @embedFile("tracker.v1.min.js");
 const tracker_v1_br = @embedFile("tracker.v1.min.js.br");
@@ -41,7 +42,6 @@ const tracker_v2_sessions_path = "/tracker.78135195.js";
 const tracker_v2_identify_path = "/tracker.d9e94247.js";
 const tracker_v2_spa_path = "/tracker.81c3b777.js";
 const tracker_v2_exclusion_path = "/tracker.6de111c9.js";
-const tracker_v2_path = "/tracker.bc506cfe.js";
 const transparent_gif =
     "GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff" ++
     "!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00" ++
@@ -437,7 +437,7 @@ fn handle(context: *Context, stream: std.Io.net.Stream) !void {
         std.mem.eql(u8, path, tracker_v2_identify_path) or
         std.mem.eql(u8, path, tracker_v2_spa_path) or
         std.mem.eql(u8, path, tracker_v2_exclusion_path) or
-        std.mem.eql(u8, path, tracker_v2_path))
+        std.mem.eql(u8, path, tracker_asset.current_path))
     {
         if (!std.mem.eql(u8, request.method, "GET")) {
             try methodNotAllowed(output, "GET");
@@ -448,7 +448,7 @@ fn handle(context: *Context, stream: std.Io.net.Stream) !void {
                 std.mem.eql(u8, path, tracker_v2_identify_path) or
                 std.mem.eql(u8, path, tracker_v2_spa_path) or
                 std.mem.eql(u8, path, tracker_v2_exclusion_path) or
-                std.mem.eql(u8, path, tracker_v2_path);
+                std.mem.eql(u8, path, tracker_asset.current_path);
             const use_v1 = std.mem.eql(u8, path, tracker_v1_path);
             const use_v2_anonymous = std.mem.eql(u8, path, tracker_v2_anonymous_path);
             const use_v2_sessions = std.mem.eql(u8, path, tracker_v2_sessions_path);

@@ -8,6 +8,7 @@ const events = @import("store/events.zig");
 const reports = @import("store/reports.zig");
 const auth_cli = @import("auth/cli.zig");
 const timezone = @import("timezone.zig");
+const tracker_asset = @import("tracker_asset.zig");
 
 pub fn run(
     allocator: std.mem.Allocator,
@@ -477,7 +478,7 @@ fn siteCommand(
         const site_id = try store.siteIdBySlug(allocator, args[4]);
         try output.print(
             \\<!-- Analytico tracker -->
-            \\<script defer src="{s}/tracker.bc506cfe.js" data-site="{s}" data-spa="auto" data-engagement="true"></script>
+            \\<script defer src="{s}{s}" data-site="{s}" data-spa="auto" data-engagement="true"></script>
             \\<noscript>
             \\  <img alt="" width="1" height="1" src="{s}/v1/p.gif?site={s}&amp;path=%2F">
             \\</noscript>
@@ -489,6 +490,7 @@ fn siteCommand(
             \\
         , .{
             collector,
+            tracker_asset.current_path,
             site_id,
             collector,
             site_id,

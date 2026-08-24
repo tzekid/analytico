@@ -77,6 +77,17 @@ compensation; only after the complete stored outcome does the composition root
 replace the in-memory collection-policy snapshot. No JavaScript state, API
 refetch, or database call enters the renderer.
 
+D38 completes the Install destination without a third durable state store. A
+bare authenticated GET samples the selected site's row count and latest
+compound DuckDB event position, then issues session-bound HMAC-signed URL
+fields. Full GET and
+the optional bounded verification fragment load the first committed event after
+that position plus one safe selected-site, restart-scoped diagnostic outcome.
+The dedicated Install script owns only copy and visible/unpaused five-second
+refresh; the same typed model and normal GET remain authoritative with
+JavaScript disabled. No tracker configuration request, client router, cache,
+background process, or renderer I/O is introduced.
+
 An interface is introduced only when a second real implementation or a
 deterministic test seam needs the same semantics. Until then, functions accept
 the concrete store or a narrow function pointer owned by the caller.
