@@ -2584,25 +2584,37 @@ renderers perform no allocation or I/O.
 The accepted 32 KiB saved JSON cannot fit the general 8 KiB body limit after
 form encoding. Only the authenticated filter/saved-state routes receive a
 64 KiB body ceiling and a specialized bounded field parser; the canonical
-saved-state matcher mirrors that exact ceiling. Only those mutation routes set
-`request_buffers 65536`, which forces complete bounded validation before
-upstream dispatch; the exact `max_size 65536` supplies 413 for the first
-oversized byte. No generic or global request buffering is introduced. Every
-other route keeps its existing application limit, and passkey routes retain
-their 192 KiB outer proxy ceiling. Stored/query values remain behind the
-passkey owner boundary, are context-safely escaped, are never logged as raw
-query strings, and never become SQL structure. Bounded exact string values may
-retain percent-encoded control bytes present in legacy observed dimensions so
+saved-state matcher mirrors that exact ceiling. Inside only that route handle,
+declared `Content-Length` above 65,536 returns 413 and a missing length returns
+411 before proxy dispatch; exact `max_size 65536` remains the read-time bound.
+Native URL-encoded browser forms provide their finite length. Pre-reading
+65,536 or 65,537 bytes was rejected after each candidate still raced an early
+authenticated or unauthenticated upstream response into 502. No generic or
+global request buffering is retained. Every other route keeps its existing
+application limit, and passkey routes retain their 192 KiB outer proxy ceiling.
+Stored/query values remain behind the passkey owner boundary, are
+context-safely escaped, are never logged as raw query strings, and never become
+SQL structure. Bounded exact string values may retain percent-encoded control
+bytes present in legacy observed dimensions so
 every rendered Breakdown row remains filterable; suggestion search itself
 remains control-free.
 
-Schema 7 is metadata-only; event schema 7, tracker, Caddy, process topology,
-and backup format do not change. Deployment stops the sole writer, backs up
-and independently restores the exact metadata-6/event-7 pair, proves the
-`a2d71c0` predecessor opens the restored pair, then migrates and verifies the
-candidate. The old binary must refuse migrated metadata. Rollback stops the
-writer, restores the matched pair, and only then switches to the predecessor;
-switching the executable alone is forbidden.
+The proxy boundary was selected from these measured candidates:
+
+| Candidate | Result |
+| --- | --- |
+| `max_size 65536` alone | Bounds Caddy's body read but can race an early upstream close into 502 |
+| Saved-state-only `request_buffers` at 65,536 or 65,537 bytes | Still produced a measured authenticated or unauthenticated 502; rejected |
+| Saved-state-only declared-length preflight plus `max_size 65536` | Returns 413 before dispatch above the declared limit, 411 when length is absent, preserves exact-limit requests, and retains the read-time bound; selected |
+
+Schema 7 is metadata-only; event schema 7, tracker, process topology, and backup
+format do not change. Caddy changes only for the 12 saved-state mutation paths
+described above. Deployment stops the sole writer, backs up and independently
+restores the exact metadata-6/event-7 pair, proves the `a2d71c0` predecessor
+opens the restored pair, then migrates and verifies the candidate. The old
+binary must refuse migrated metadata. Rollback stops the writer, restores the
+matched pair, and only then switches to the predecessor; switching the
+executable alone is forbidden.
 
 ### Consequences and acceptance evidence
 

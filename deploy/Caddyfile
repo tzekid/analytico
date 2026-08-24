@@ -34,8 +34,17 @@ analytics.example {
 	}
 
 	handle @analytico_saved_state {
+		@analytico_saved_state_too_large {
+			expression <<CEL
+				{http.request.header.Content-Length} != "" &&
+				int({http.request.header.Content-Length}) > 65536
+				CEL
+		}
+		respond @analytico_saved_state_too_large 413
+		@analytico_saved_state_missing_length header !Content-Length
+		respond @analytico_saved_state_missing_length 411
+
 		reverse_proxy 127.0.0.1:4318 {
-			request_buffers 65536
 			header_up X-Forwarded-Proto {scheme}
 
 			transport http {
