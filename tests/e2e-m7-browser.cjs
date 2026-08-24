@@ -15,14 +15,11 @@ if (!origin || !sessionToken) {
 const dates = "from=2025-01-01&to=2025-01-02&compare=previous";
 
 function route(site, destination, query = "") {
-  let state = query;
-  if (destination === "analyze") {
-    if (!state.includes("report=")) state += "&report=pages";
-    if (!state.includes("sort=")) state += "&sort=count";
-    if (!state.includes("limit=")) state += "&limit=25";
-    if (!state.includes("page=")) state += "&page=1";
-  }
-  return `${origin}/admin/sites/${site}/${destination}?${dates}${state}`;
+  return `${origin}/admin/sites/${site}/${destination}?${dates}${query}`;
+}
+
+function breakdownRoute(site, metric, dimension) {
+  return `${origin}/admin/sites/${site}/analyze?v=1&from=2025-01-01&to=2025-01-02&compare=none&mode=breakdown&metric=${metric}&dimension=${dimension}&interval=auto&sort=value-desc&page=1&limit=25`;
 }
 
 async function launch() {
@@ -170,9 +167,17 @@ async function normal() {
 
     await page.locator('.primary-navigation a:has-text("Analyze")').click();
     await page.waitForFunction(() =>
-      document.querySelector('.report-tabs a[aria-current="page"]')?.textContent === "Pages",
+      document.querySelector("#analyze-trend-heading")?.textContent === "Trend",
     );
-    await page.route("**/admin/sites/*/analyze?*report=pages*", async (route) => {
+    await page.getByRole("link", { name: "Open Breakdown", exact: true }).click();
+    await page.waitForFunction(() =>
+      document.querySelector('#breakdown-preset-pages[aria-current="page"]')?.textContent === "Pages",
+    );
+    await page.getByRole("link", { name: "Entries", exact: true }).click();
+    await page.waitForFunction(() =>
+      document.querySelector('#breakdown-preset-entries[aria-current="page"]')?.textContent === "Entries",
+    );
+    await page.route("**/admin/sites/*/analyze?*mode=breakdown*dimension=page*", async (route) => {
       if (route.request().headers()["hx-request"] === "true") {
         await new Promise((resolve) => setTimeout(resolve, 250));
       }
@@ -182,7 +187,8 @@ async function normal() {
     await pagesLink.focus();
     const pagesResponse = page.waitForResponse(
       (candidate) =>
-        candidate.url().includes("report=pages") &&
+        candidate.url().includes("mode=breakdown") &&
+        candidate.url().includes("dimension=page") &&
         candidate.request().headers()["hx-request"] === "true",
       { timeout: 5000 },
     );
@@ -203,12 +209,13 @@ async function normal() {
     assert.equal(loadingRegionVisible, true);
     assert.equal(loadingRegionText, "Updating view…");
     await page.waitForFunction(() =>
-      document.querySelector('.report-tabs a[aria-current="page"]')?.textContent === "Pages",
+      document.querySelector('#breakdown-preset-pages[aria-current="page"]')?.textContent === "Pages",
     );
-    assert.match(page.url(), /report=pages/);
+    assert.match(page.url(), /mode=breakdown/);
+    assert.match(page.url(), /dimension=page/);
     assert.equal(
       await page.evaluate(() => document.activeElement?.id),
-      "report-nav-pages",
+      "breakdown-preset-pages",
     );
     assert.equal(enhanced.at(-1).method, "GET");
     assert.equal(enhanced.at(-1).type, "full");
@@ -217,23 +224,24 @@ async function normal() {
     await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
     await eventsLink.evaluate((element) => element.click());
     await page.waitForFunction(() =>
-      document.querySelector('.report-tabs a[aria-current="page"]')?.textContent === "Events",
+      document.querySelector('#breakdown-preset-events[aria-current="page"]')?.textContent === "Events",
     );
-    assert.match(page.url(), /report=events/);
+    assert.match(page.url(), /metric=custom-events/);
+    assert.match(page.url(), /dimension=event-name/);
     assert.equal(await page.evaluate(() => localStorage.length), 0);
     assert.equal(await page.evaluate(() => sessionStorage.length), 0);
     assert.equal(await page.evaluate(() => window.scrollY), 0);
 
     await page.goBack();
     await page.waitForFunction(() =>
-      document.querySelector('.report-tabs a[aria-current="page"]')?.textContent === "Pages",
+      document.querySelector('#breakdown-preset-pages[aria-current="page"]')?.textContent === "Pages",
     );
-    assert.match(page.url(), /report=pages/);
+    assert.match(page.url(), /dimension=page/);
     await page.goForward();
     await page.waitForFunction(() =>
-      document.querySelector('.report-tabs a[aria-current="page"]')?.textContent === "Events",
+      document.querySelector('#breakdown-preset-events[aria-current="page"]')?.textContent === "Events",
     );
-    assert.match(page.url(), /report=events/);
+    assert.match(page.url(), /dimension=event-name/);
 
     await page.goto(route("example", "journeys/goals"), {
       waitUntil: "load",
@@ -300,7 +308,11 @@ async function normal() {
 
     await page.locator('.primary-navigation a:has-text("Analyze")').click();
     await page.waitForFunction(() =>
-      document.querySelector('.report-tabs a[aria-current="page"]')?.textContent === "Pages",
+      document.querySelector("#analyze-trend-heading")?.textContent === "Trend",
+    );
+    await page.getByRole("link", { name: "Open Breakdown", exact: true }).click();
+    await page.waitForFunction(() =>
+      document.querySelector('#breakdown-preset-pages[aria-current="page"]')?.textContent === "Pages",
     );
     await context.setOffline(true);
     const titleBeforeOffline = await page.locator("#report h2").textContent();
@@ -312,9 +324,9 @@ async function normal() {
     await context.setOffline(false);
     await page.getByRole("link", { name: "Sources", exact: true }).click();
     await page.waitForFunction(() =>
-      document.querySelector('.report-tabs a[aria-current="page"]')?.textContent === "Sources",
+      document.querySelector('#breakdown-preset-sources[aria-current="page"]')?.textContent === "Sources",
     );
-    assert.match(page.url(), /report=sources/);
+    assert.match(page.url(), /dimension=referrer/);
     assert.ok(expectedConsoleErrors.length >= 1);
 
     await context.close();
@@ -362,12 +374,12 @@ async function fallbackContext(browser, behavior) {
   page.on("request", (request) => {
     if (request.resourceType() === "document") documents.push(request.url());
   });
-  await page.goto(route("example", "analyze", "&report=events"), {
+  await page.goto(breakdownRoute("example", "custom-events", "event-name"), {
     waitUntil: "load",
   });
   await page.getByRole("link", { name: "Pages", exact: true }).click();
   await page.waitForLoadState("load");
-  assert.match(page.url(), /report=pages/);
+  assert.match(page.url(), /dimension=page/);
   assert.equal(documents.length, 2);
   await context.close();
 }

@@ -47,6 +47,7 @@ semantic, or application state model is consequential and must be added here.
 | D36 | Browser site creation and metadata schema 6 | D19 durable autocommits, exact retry, stored settings, and unique origin ownership | Accepted for 1.0 issue #19 |
 | D37 | Bounded Analyze Trend query set | Preserve one-metric queries under one server-rendered shared-deadline envelope | Accepted for 1.0 issue #28 |
 | D38 | Installation verification state | Session-bound signed URL watermark plus durable event lookup and restart-scoped rejection guidance | Accepted for 1.0 issue #20 |
+| D39 | Server-rendered Analyze Breakdown | Extend the single D29 query with bounded aggregate-label search and a shared-deadline typed property catalog | Accepted for 1.0 issue #29 |
 
 ## D01. MVP interface
 
@@ -2090,8 +2091,8 @@ returns separate rows for every observed currency. Those two handoff shapes
 therefore keep the existing explicit non-filtering Analyze compatibility
 callout with the same range/highlight instead of inventing an undocumented
 metric or currency query dimension. Explicit legacy `report=` list URLs remain
-the working metric-v1 compatibility surface until issue #29; bare Analyze opens
-typed Trend.
+the working metric-v1 compatibility surface only until D39 translates them once
+to typed Breakdown presets; bare Analyze opens typed Trend.
 
 The page distinguishes a site with no stored event from a valid selection with
 no matching row in the range by using the existing selected-site event bounds.
@@ -2128,7 +2129,7 @@ compatible.
 - There is no schema, backup-format, deployment-component, or data rollback
   change. Code rollback removes the additive typed route and restores bare
   Analyze to the retained metric-v1 page-presets path.
-- #29 later translates the explicit legacy list presets to typed Breakdown.
+- D39 and #29 translate the explicit legacy list presets to typed Breakdown.
   #30 later extends the visible shared context with nonempty filters, segments,
   and saved views. #31 later consumes the canonical state for real exports and
   detail routes.
@@ -2288,3 +2289,169 @@ manual-copy behavior; JavaScript-off manual GET; visible/unpaused five-second
 polling and stop behavior; no startup data request; real immutable tracker page
 collection; million-row fragment latency; bounded HTML/assets/RSS; Debug and
 ReleaseSafe gates; and the normal release/deployment verification.
+
+## D39. Extend the single metric-v2 query for server-rendered Breakdown
+
+**Status:** Accepted for Analytico 1.0 issue #29
+
+**Date:** 2026-08-24
+
+**Issue:** #29
+
+**Extends:** D29's single-metric `AnalysisQuery` and finite compiler. This
+decision narrowly supersedes D29's cache prohibition for one sampled property-
+suggestion catalog entry only. D35 remains limited to the fixed Overview
+result, and D37 remains the Trend-only multi-series browser envelope.
+
+### Context
+
+D29 already represents and executes one metric grouped by one standard or
+explicitly typed event-property dimension. It returns exact typed measures,
+stable sort/page/limit state, next-page state, exact bucket cardinality, and
+identity completeness. The browser still renders explicit metric-v1
+`report=` lists, however, and the D29 grammar has no result-label search even
+though the accepted Breakdown product contract requires bounded server search.
+
+The older property-query helper discovers types in an occurrence-UTC window
+under a pre-D34 traffic relation. Reusing it beside a site-local metric-v2
+result could show a property or type that the selected result cannot contain.
+The old five-field campaign tuple likewise has no accepted D29 dimension; new
+canonical state deliberately selects exactly one UTM field.
+
+### Query-state candidates
+
+| Candidate | Runtime and correctness | Maintenance, compatibility, and rollback |
+| --- | --- | --- |
+| Keep metric-v1 list routes and replace only their store calls | Small browser diff | Retains report-kind product branching, cannot express custom properties or canonical search, and leaves two visible analysis models |
+| Add a second browser-only Breakdown envelope | Could leave D29 serialization untouched | Duplicates a complete single-query model and parser, complicates saved/export consumers, and creates a second state boundary without a second metric |
+| Render one D29 query directly and add one optional bounded search scalar | Search, sort, pagination, and saved/export handoff share the same validated state; the finite compiler binds one extra value | Small compatible grammar extension; rollback removes the route and optional field without touching data |
+
+Select the direct D29 query. `search` is empty or a control-free valid UTF-8
+value of at most 256 bytes. It is valid only for Breakdown. The compiler groups
+the typed metric first, then applies a case-insensitive substring match to the
+result label with one bound parameter before stable ordering and pagination.
+It never interpolates a value, identifier, function, or sort expression.
+Cardinality is the exact number of matching typed buckets before pagination;
+an empty search therefore preserves the full exact cardinality, while a
+nonempty search reports its own exact matched cardinality. Search participates
+in canonical URL and saved JSON because it changes the result. Its omission is
+the compatible representation of the pre-D39 empty state, so query schema 1
+does not need a speculative version bump before saved views exist.
+
+### Property-catalog candidates
+
+| Candidate | Semantic fit | Runtime and maintenance |
+| --- | --- | --- |
+| Reuse the occurrence-UTC property helper | Conflicts with site-local dates and current strict product eligibility | No new statement, but produces a misleading builder |
+| Require an unassisted property name and type | The eventual query remains exact | Hides observed conflicts and makes the accepted type-discovery behavior unusable |
+| Expand every eligible event into an exact uncached catalog | Shows every type in the range | The million fixture expands 12 million key rows and cannot satisfy the request deadline |
+| Query a recent bounded sample on every request | Keeps suggestion work finite and the exact result unchanged | A 2,000-event cold sample is safe but still consumes material repeated latency |
+| Retain one recent sampled catalog for 30 seconds | Keeps suggestions site/range/policy specific while the exact result always runs | One bounded arena and full semantic key; suggestions may lag collection by at most 30 seconds |
+| Add a property projection/EAV table | Makes cold discovery consistently cheap | Adds a migration, write path, restore/rollback semantics, and stored derived state before the POC needs it |
+
+Select the recent bounded sample plus one short-lived entry. The cold statement
+reads the latest 2,000 eligible custom-event canonical JSON documents directly,
+returns at most 100 bytewise-ordered property names plus string/integer/decimal/
+boolean/null type rows and counts within that sample, and exposes truncation
+metadata. The UI labels the sample, 30-second update window, and sampled counts;
+the user may directly enter a property outside it. Missing remains an explicit
+selectable scalar state rather than an observed JSON key type. The user must
+choose one exact scalar type; a name with multiple sampled types is visibly a
+conflict, never coerced. A selected null or missing query still runs the exact
+metric query and renders its distinct typed bucket.
+
+The Store retains at most one catalog arena. Its length-prefixed key covers
+site, selected local dates, strict mode, and every active goal ID, selector
+kind/value, predicate property/type/operator, and predicate value. A key miss or
+30-second expiry runs the bounded catalog under the result's remaining shared
+deadline; a hit deep-copies it into the request allocator. Event inserts do not
+evict this suggestion-only entry, because doing so would make active collection
+eliminate every useful hit. Expiry, key change, eviction, restart, or code
+rollback removes it. No exact Breakdown row, measure, or cardinality is cached.
+
+On a catalog miss, the exact Breakdown result and bounded catalog execute
+sequentially on the one writable DuckDB owner under one shared existing
+interrupt budget. A zero-cardinality result also runs one selected-site
+`LIMIT 1` presence probe under that same remaining budget so the server can
+distinguish no events from no matches without a count/min/max scan after the
+deadline. Event/property-only plans may omit session facts only when
+their metric, dimension, selector, and empty filter cannot consume them;
+session dimensions, engagement/rate metrics, and nonempty filters retain the
+full accepted plan. This is a measured narrow optimization boundary, not a
+second semantic engine.
+
+### Browser and compatibility behavior
+
+Bare Analyze continues to open D37 Trend. A normal native link opens the
+canonical Page views by Page Breakdown preset. One GET builder selects the
+metric, optional exact event or saved goal, one dimension, explicit property
+name/type where applicable, sort, search, and page size. It redirects accepted
+builder state to the existing canonical D29 component. Native date, builder,
+search, sort, and pagination controls work without JavaScript; optional HTMX
+uses the same complete route and browser history. The first response contains
+the property catalog, cardinality/truncation state, typed result, in-cell bar,
+and exact table. There is no startup data request, client state, result cache,
+projection, EAV table, migration, dependency, or entity-detail placeholder.
+Existing typed selector predicates in a direct canonical URL are preserved by
+both native context and builder forms and disclosed as preserved state; #30
+owns their visible editing surface. Direct browser state with a page selector
+or non-visitor conversion basis rejects before execution because the #29
+builder cannot preserve those otherwise-valid core D29 combinations.
+
+Known metric-v1 list URLs translate once to typed presets: Page views by Page;
+Sessions by Landing page, Exit page, Referrer, each selected UTM dimension,
+Country, Browser, Operating system, or Device; and Custom events by Event name.
+Count sort maps to descending typed value, label sort to ascending label, and
+page/limit remain bounded. The legacy combined five-field `campaign=all`
+state redirects visibly to Sessions by UTM campaign. It is not silently
+preserved as an undocumented dimension; explicit source/medium/campaign/term/
+content states map exactly. Metric-v1 CLI/report SQL and output remain frozen.
+
+### Consequences
+
+- Runtime always includes one exact ordinary Breakdown result, conditionally
+  includes one `LIMIT 1` site-presence probe for a zero-cardinality result, and
+  includes one bounded catalog query on a key miss. All share one deadline. The
+  uncached all-row catalog timed out after the exact result had completed in
+  559 ms even with more than 9.4 seconds remaining. A 10,000-event sample still
+  cost 479–635 ms per catalog query. A 2,000-event sample made the cold path
+  safe, but full property p95 was 843 ms and ordinary p95 was 397 ms. With the
+  exact keyed 30-second entry, the post-YAGNI ReleaseSafe million-row candidate
+  measured the cold path at 829 ms, property p50/p95/p99 at 484/528/528 ms,
+  ordinary p95 at 97 ms, and exact high-cardinality search at 333 ms. The
+  repeated measurements are warm catalog-hit calls after one explicit cold
+  warmup; they are not represented as cold SQL. A later miss follows the
+  documented order before a projection or migration is proposed.
+- Input work remains bounded by the existing 16 KiB/32-field URL, 400-day
+  range, 100-row page, latest 2,000 eligible catalog events, 100-property
+  catalog, one 30-second process entry, 2,000 ms deadline, and the new 256-byte
+  search value. Values are bound and rendered only through the existing
+  context-safe HTML helpers.
+- Exact table cells retain count, rate numerator/denominator, or exact decimal
+  amount/currency/value-count. Bar geometry is derived and cannot replace the
+  source components. High cardinality is a visible exact warning, never silent
+  truncation or hundreds of bars.
+- There is no Turso/DuckDB schema, backup format, process, network, dependency,
+  durable state, or security-boundary change. Cache memory contains only the
+  bounded selected-site property suggestions and full semantic key; it is never
+  logged or shared across keys. Code rollback removes the entry, restores the
+  D37 Trend route and previous explicit list compatibility, and leaves schema-7
+  data plus the frozen metric-v1 CLI readable.
+- #30 owns filters, segments, and saved-view persistence. #31 owns entity
+  detail routes and export responses. #44 and #46 retain the broader mobile
+  and representative mixed-fixture acceptance passes.
+
+**Affected contracts:** `SPEC.md`, `ARCHITECTURE.md`, `DATA_MODEL.md`,
+`ANALYSIS_QUERY.md`, `DESIGN_SYSTEM.md`, `PERFORMANCE.md`,
+`RELEASE_CONTRACT_1.0.md`, and issue #29.
+
+### Acceptance evidence
+
+Issue #29 must prove canonical search round trips and adversarial bounds;
+every current list preset and compatibility redirect; exact property string,
+integer, decimal, boolean, null, and missing states plus visible type conflict;
+bound high-cardinality search and exact matched cardinality; stable tie/page
+behavior; exact table/bar equivalence; timeout and post-interrupt reuse; real
+on-disk million-row Breakdown/catalog latency; JavaScript-off and enhanced
+desktop/mobile browser behavior; no startup data request; metric-v1 CLI
+preservation; and separate Debug and ReleaseSafe gates.

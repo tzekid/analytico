@@ -89,7 +89,13 @@ are not passes.
   series from its canonical direct GET, keeps one request deadline, preserves
   exact rate/amount components and currencies, marks generated
   highlight/incomplete buckets visibly, and retains explicit metric-v1 list
-  compatibility until issue #29.
+  compatibility through D39's one-redirect typed presets.
+- The D39 Analyze Breakdown route reproduces one canonical single-metric query,
+  applies only bound aggregate-label search, shares one deadline with its
+  labeled latest-2,000-event, 30-second property suggestion catalog, exposes
+  exact result cardinality and raw measure components, keeps its conditional
+  empty-site presence check inside that deadline, and preserves metric-v1
+  CLI output without a second browser report engine or result cache.
 - D34 query classification is reversible, default-off parity is exact, every
   documented human-evidence veto wins, strict mode uses one shared product
   predicate, and traffic-quality v5 exposes bounded contradiction/cap/anomaly

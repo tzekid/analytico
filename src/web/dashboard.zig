@@ -788,6 +788,27 @@ fn getLegacyPage(
         });
         return;
     };
+    if (query.kind.isList()) {
+        const breakdown = controller.translateLegacyBreakdown(
+            query,
+            selected.id,
+        ) catch {
+            try writeError(output, .{
+                .status = 400,
+                .title = "Invalid analysis request",
+                .message = "The legacy list state could not be translated to a typed Breakdown preset.",
+            });
+            return;
+        };
+        try redirectToCanonical(
+            dependencies.allocator,
+            output,
+            .analyze,
+            breakdown,
+            "",
+        );
+        return;
+    }
     try redirectToCanonical(
         dependencies.allocator,
         output,
@@ -948,6 +969,15 @@ fn getAnalyzePage(
     output: *std.Io.Writer,
     route: Route,
 ) !void {
+    if (rawQueryFieldEquals(request.target, "mode", "breakdown")) {
+        return getBreakdownPage(
+            dependencies,
+            request,
+            output,
+            route,
+            if (hasRawQueryField(request.target, "v")) .canonical else .builder,
+        );
+    }
     const legacy = controller.parseQuery(
         dependencies.allocator,
         request.target,
@@ -966,11 +996,26 @@ fn getAnalyzePage(
     )) |translated| {
         return getTrendPage(dependencies, request, output, route, translated);
     }
+    if (legacy.report_set and legacy.kind.isList()) {
+        return getBreakdownPage(
+            dependencies,
+            request,
+            output,
+            route,
+            .{ .legacy = legacy },
+        );
+    }
     if (legacy.report_set or legacy.overview_selection_set) {
         return getPage(dependencies, request, output, route);
     }
     return getTrendPage(dependencies, request, output, route, null);
 }
+
+const BreakdownInput = union(enum) {
+    canonical,
+    builder,
+    legacy: controller.ParsedQuery,
+};
 
 fn hasRawQueryField(target: []const u8, expected: []const u8) bool {
     const marker = std.mem.findScalar(u8, target, '?') orelse return false;
@@ -980,6 +1025,245 @@ fn hasRawQueryField(target: []const u8, expected: []const u8) bool {
         if (std.mem.eql(u8, name, expected)) return true;
     }
     return false;
+}
+
+fn rawQueryFieldEquals(
+    target: []const u8,
+    expected_name: []const u8,
+    expected_value: []const u8,
+) bool {
+    const marker = std.mem.findScalar(u8, target, '?') orelse return false;
+    var parameters = std.mem.splitScalar(u8, target[marker + 1 ..], '&');
+    while (parameters.next()) |parameter| {
+        const name, const value = std.mem.cutScalar(u8, parameter, '=') orelse
+            continue;
+        if (std.mem.eql(u8, name, expected_name) and
+            std.mem.eql(u8, value, expected_value)) return true;
+    }
+    return false;
+}
+
+fn getBreakdownPage(
+    dependencies: Dependencies,
+    request: request_mod.Request,
+    output: *std.Io.Writer,
+    route: Route,
+    input: BreakdownInput,
+) !void {
+    const now = currentSeconds() catch {
+        try writeError(output, .{
+            .status = 503,
+            .title = "Clock unavailable",
+            .message = "The server could not determine a safe analysis calendar.",
+        });
+        return;
+    };
+    const sites = try dependencies.metadata.listSites(dependencies.allocator);
+    if (sites.len == 0) {
+        try writeFirstRun(output, dependencies.collection_available);
+        return;
+    }
+    const selected = controller.resolveSite(sites, route.site) catch {
+        try writeError(output, .{
+            .status = 404,
+            .title = "Analysis not found",
+            .message = "The selected site no longer exists.",
+        });
+        return;
+    };
+    const site_calendar = dependencies.site_calendar orelse {
+        try calendarUnavailable(output);
+        return;
+    };
+    const selected_calendar = site_calendar.find(selected.id) orelse {
+        try calendarUnavailable(output);
+        return;
+    };
+    const default_range = calendar.rangeForPreset(
+        selected_calendar.zone,
+        now,
+        .last_30_days,
+    ) catch {
+        try calendarUnavailable(output);
+        return;
+    };
+    const default_breakdown = analysis.presetQuery(
+        .pages,
+        selected.id,
+        default_range.view(),
+    );
+    const default_query = controller.finishBreakdownQuery(
+        default_breakdown,
+        selected.slug,
+    ) catch unreachable;
+    const query = switch (input) {
+        .canonical => value: {
+            const marker = std.mem.findScalar(u8, request.target, '?') orelse {
+                try invalidBreakdownQueryPage(
+                    dependencies.allocator,
+                    output,
+                    400,
+                    default_query,
+                );
+                return;
+            };
+            const breakdown = analysis.parseCanonicalUrl(
+                dependencies.allocator,
+                selected.id,
+                request.target[marker + 1 ..],
+            ) catch |err| {
+                try invalidBreakdownQueryPage(
+                    dependencies.allocator,
+                    output,
+                    if (err == error.UnsupportedMetricDimension) 422 else 400,
+                    default_query,
+                );
+                return;
+            };
+            break :value controller.finishBreakdownQuery(
+                breakdown,
+                selected.slug,
+            ) catch |err| {
+                try invalidBreakdownQueryPage(
+                    dependencies.allocator,
+                    output,
+                    if (err == error.UnsupportedMetricDimension) 422 else 400,
+                    default_query,
+                );
+                return;
+            };
+        },
+        .builder => value: {
+            const parsed = controller.parseBreakdownBuilder(
+                dependencies.allocator,
+                request.target,
+            ) catch |err| {
+                try invalidBreakdownQueryPage(
+                    dependencies.allocator,
+                    output,
+                    if (err == error.UnsupportedMetricDimension) 422 else 400,
+                    default_query,
+                );
+                return;
+            };
+            break :value controller.finishBreakdownBuilder(
+                parsed,
+                selected.slug,
+                selected.id,
+            ) catch |err| {
+                try invalidBreakdownQueryPage(
+                    dependencies.allocator,
+                    output,
+                    if (err == error.UnsupportedMetricDimension) 422 else 400,
+                    default_query,
+                );
+                return;
+            };
+        },
+        .legacy => |parsed| value: {
+            if (parsed.site.len != 0) {
+                try invalidBreakdownQueryPage(
+                    dependencies.allocator,
+                    output,
+                    400,
+                    default_query,
+                );
+                return;
+            }
+            const legacy = controller.finishQuery(
+                parsed,
+                selected.slug,
+                &default_range,
+                .previous,
+            ) catch {
+                try invalidBreakdownQueryPage(
+                    dependencies.allocator,
+                    output,
+                    400,
+                    default_query,
+                );
+                return;
+            };
+            break :value controller.translateLegacyBreakdown(
+                legacy,
+                selected.id,
+            ) catch {
+                try invalidBreakdownQueryPage(
+                    dependencies.allocator,
+                    output,
+                    400,
+                    default_query,
+                );
+                return;
+            };
+        },
+    };
+    if (input != .canonical or !try isCanonicalTarget(
+        dependencies.allocator,
+        request.target,
+        .analyze,
+        query,
+        "",
+    )) {
+        try redirectToCanonical(
+            dependencies.allocator,
+            output,
+            .analyze,
+            query,
+            "",
+        );
+        return;
+    }
+    const resolved_calendar = calendar.resolve(
+        selected_calendar.zone,
+        selected_calendar.timezone_name,
+        now,
+        query.range,
+        .none,
+    ) catch {
+        try invalidBreakdownQueryPage(
+            dependencies.allocator,
+            output,
+            400,
+            default_query,
+        );
+        return;
+    };
+    const loaded = controller.loadBreakdownPage(
+        dependencies.allocator,
+        dependencies.metadata,
+        dependencies.events,
+        query,
+        resolved_calendar,
+        dependencies.csrf_token,
+        dependencies.report_timeout_ms,
+    ) catch |err| {
+        if (err == error.ReportTimeout) {
+            try writeError(output, .{
+                .status = 503,
+                .title = "Report timed out",
+                .message = "The Breakdown result, conditional empty-site check, and property catalog exceeded their shared server deadline. Narrow the selected date range and retry.",
+                .return_url = request.target,
+            });
+        } else if (err == error.SiteNotFound or err == error.GoalNotFound) {
+            try writeError(output, .{
+                .status = 404,
+                .title = "Analysis not found",
+                .message = "The selected site or goal no longer exists.",
+            });
+        } else if (isInvalidInput(err)) {
+            try invalidBreakdownQueryPage(
+                dependencies.allocator,
+                output,
+                if (err == error.UnsupportedMetricDimension) 422 else 400,
+                default_query,
+            );
+        } else {
+            return err;
+        }
+        return;
+    };
+    try writePage(output, 200, loaded);
 }
 
 fn getTrendPage(
@@ -1612,6 +1896,28 @@ fn invalidTrendQueryPage(
     });
 }
 
+fn invalidBreakdownQueryPage(
+    allocator: std.mem.Allocator,
+    output: *std.Io.Writer,
+    status: u16,
+    default_query: model.Query,
+) !void {
+    var reset = std.Io.Writer.Allocating.init(allocator);
+    try canonicalUrl(&reset.writer, .analyze, default_query);
+    try writeError(output, .{
+        .status = status,
+        .title = if (status == 422)
+            "Unsupported Breakdown combination"
+        else
+            "Invalid analysis request",
+        .message = if (status == 422)
+            "New and returning visitors cannot be grouped by an event property. Choose Visitors or another standard dimension."
+        else
+            "The URL has an invalid, duplicate, incomplete, or unsupported metric, subject, dimension, property type, search, sort, page, or limit field.",
+        .return_url = reset.written(),
+    });
+}
+
 fn calendarUnavailable(output: *std.Io.Writer) !void {
     try writeError(output, .{
         .status = 503,
@@ -1638,6 +1944,16 @@ fn canonicalUrl(
         .live => "/live",
         .settings => "/settings/general",
     });
+    if (destination == .analyze and query.analysis_breakdown != null) {
+        const parameters = try analysis.canonicalUrl(
+            std.heap.page_allocator,
+            query.analysis_breakdown.?,
+        );
+        defer std.heap.page_allocator.free(parameters);
+        try output.writeByte('?');
+        try output.writeAll(parameters);
+        return;
+    }
     if (destination == .analyze and query.analysis_series.len != 0) {
         const parameters = try analysis.canonicalTrendSetUrl(
             std.heap.page_allocator,
@@ -1725,6 +2041,7 @@ fn isInvalidInput(err: anyerror) bool {
         error.OverviewMetricNotApplicable,
         error.OverviewHighlightNotApplicable,
         error.AnalysisOptionsNotApplicable,
+        error.InvalidBreakdownMetric,
         error.InvalidAnalysisSite,
         error.InvalidAnalyzeTrendResult,
         error.InvalidTrendSeries,

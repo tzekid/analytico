@@ -58,6 +58,7 @@ pub const Query = struct {
     highlighted_interval: []const u8 = "",
     analysis_interval: analysis.Interval = .auto,
     analysis_series: []const analysis.Metric = &.{},
+    analysis_breakdown: ?analysis.Query = null,
 };
 
 pub const ReportTimeBasis = enum {
@@ -172,6 +173,17 @@ pub const AnalyzeTrend = struct {
     no_matches: bool,
 };
 
+pub const AnalyzeBreakdown = struct {
+    rows: []const analysis.BreakdownRow,
+    next_page: ?u32,
+    cardinality: i64,
+    coverage: []const u8,
+    properties: []const analysis.ObservedPropertyType,
+    property_count: i64,
+    properties_truncated: bool,
+    no_events_ever: bool,
+};
+
 pub const GoalDraft = struct {
     name: []const u8 = "",
     match_kind: []const u8 = "event",
@@ -207,6 +219,7 @@ pub const Page = struct {
     overview_kpis: ?OverviewKpis = null,
     overview_details: ?OverviewDetails = null,
     analyze_trend: ?AnalyzeTrend = null,
+    analyze_breakdown: ?AnalyzeBreakdown = null,
     collection_diagnostics: ?diagnostics.Snapshot = null,
     goals: []const meta.Goal,
     funnels: []const meta.Funnel,

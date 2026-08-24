@@ -23,6 +23,27 @@ function route(site, destination, query = "") {
   return `${origin}/admin/sites/${site}/${destination}?${dates}${state}`;
 }
 
+async function submitPredicateForm(page, button) {
+  const [request] = await Promise.all([
+    page.waitForRequest((candidate) =>
+      candidate.isNavigationRequest() &&
+      new URL(candidate.url()).pathname.endsWith("/analyze")),
+    button.press("Enter"),
+  ]);
+  assert.equal(
+    new URL(request.url()).searchParams.get("p"),
+    "plan~is~string~Pro",
+  );
+  let finalRequest = request;
+  while (finalRequest.redirectedTo() !== null) {
+    finalRequest = finalRequest.redirectedTo();
+  }
+  const response = await finalRequest.response();
+  assert.notEqual(response, null);
+  await page.waitForLoadState("load");
+  return response;
+}
+
 async function main() {
   const options = {
     headless: true,
@@ -141,7 +162,7 @@ async function main() {
     }
     assert.equal(
       await page.getByRole("link", { name: "Devices", exact: true }).getAttribute("href"),
-      "/admin/sites/example/analyze?from=2025-01-01&to=2025-01-02&compare=previous&report=devices&sort=count&limit=25&page=1",
+      "/admin/sites/example/analyze?v=1&from=2025-01-01&to=2025-01-02&compare=none&mode=breakdown&metric=sessions&dimension=device&interval=auto&sort=value-desc&page=1&limit=25",
     );
     const overviewText = await page.locator("#report").innerText();
     assert.equal(
@@ -399,7 +420,18 @@ async function main() {
       devicesLink.click(),
     ]).then(([navigation]) => navigation);
     assert.equal(response.status(), 200);
-    assert.equal(await page.getByRole("heading", { name: "Devices", exact: true }).count(), 1);
+    assert.equal(await page.getByRole("heading", { name: "Breakdown", exact: true }).count(), 1);
+    assert.equal(
+      await page.getByRole("link", { name: "Devices", exact: true }).getAttribute("aria-current"),
+      "page",
+    );
+    const standardBreakdownBuilder = page.locator("form.breakdown-builder");
+    response = await Promise.all([
+      page.waitForNavigation({ waitUntil: "load" }),
+      standardBreakdownBuilder.getByRole("button", { name: "Run Breakdown" }).click(),
+    ]).then(([navigation]) => navigation);
+    assert.equal(response.status(), 200);
+    assert.equal(new URL(page.url()).searchParams.get("dimension"), "device");
     await page.goBack({ waitUntil: "load" });
 
     response = await page.goto(route("empty", "overview"), { waitUntil: "load" });
@@ -436,6 +468,20 @@ async function main() {
     assert.equal(
       await page.getByRole("option", { name: "No saved goals available" }).count(),
       3,
+    );
+    const emptyBreakdown = `${origin}/admin/sites/empty/analyze?v=1&from=2025-01-01&to=2025-01-02&compare=none&mode=breakdown&metric=custom-events&dimension=event-name&interval=auto&sort=value-desc&page=1&limit=25`;
+    response = await page.goto(emptyBreakdown, { waitUntil: "load" });
+    assert.equal(response.status(), 200);
+    assert.equal(
+      await page.getByRole("heading", { name: "No events received yet" }).count(),
+      1,
+    );
+    const noMatchBreakdown = `${origin}/admin/sites/example/analyze?v=1&from=2025-01-01&to=2025-01-02&compare=none&mode=breakdown&metric=event-count&selector=event&selector-value=never&dimension=event-name&interval=auto&sort=value-desc&page=1&limit=25`;
+    response = await page.goto(noMatchBreakdown, { waitUntil: "load" });
+    assert.equal(response.status(), 200);
+    assert.equal(
+      await page.getByRole("heading", { name: "No matching buckets" }).count(),
+      1,
     );
     const todayUtc = new Date().toISOString().slice(0, 10);
     const tomorrowUtc = new Date(
@@ -508,11 +554,11 @@ async function main() {
       { waitUntil: "load" },
     );
     assert.equal(response.status(), 200);
-    const mobileTable = page.locator(".mobile-records table").first();
+    const mobileTable = page.locator("table.breakdown-table");
     assert.equal(await mobileTable.locator("caption").count(), 1);
     assert.equal(
       await mobileTable.locator('thead th[scope="col"]').count(),
-      3,
+      2,
     );
     const mobileRows = await mobileTable.locator("tbody tr").count();
     assert.ok(mobileRows > 0);
@@ -529,6 +575,180 @@ async function main() {
       await mobileTable.locator("progress.cell-bar").count(),
       mobileRows,
     );
+
+    const propertyBase = `${origin}/admin/sites/properties/analyze?v=1&from=${todayUtc}&to=${todayUtc}&compare=none&mode=breakdown&metric=custom-events&dimension=event-property&property=high&property-type=string&interval=auto&sort=value-desc&page=1&limit=25`;
+    const breakdownRequests = [];
+    const captureBreakdownRequest = (request) =>
+      breakdownRequests.push(request.resourceType());
+    page.on("request", captureBreakdownRequest);
+    response = await page.goto(propertyBase, { waitUntil: "load" });
+    page.off("request", captureBreakdownRequest);
+    assert.equal(response.status(), 200);
+    assert.equal(await page.getByRole("heading", { name: "Breakdown", exact: true }).count(), 1);
+    assert.equal(await page.locator(".breakdown-cardinality").textContent(), "Exact matching buckets: 105");
+    assert.equal(await page.locator(".breakdown-table tbody tr").count(), 25);
+    assert.equal(await page.locator(".breakdown-table progress.cell-bar").count(), 25);
+    assert.equal(
+      await page.getByText(
+        "High-cardinality result: 105 exact matching buckets. This page is bounded to 25 rows; use search or pagination.",
+        { exact: true },
+      ).count(),
+      1,
+    );
+    assert.equal(breakdownRequests.filter((kind) => kind === "fetch").length, 0);
+    assert.equal(breakdownRequests.filter((kind) => kind === "xhr").length, 0);
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
+
+    const predicateBreakdown = propertyBase
+      .replace("metric=custom-events", "metric=event-count&selector=event&selector-value=property_probe")
+      .concat("&p=plan~is~string~Pro");
+    response = await page.goto(predicateBreakdown, { waitUntil: "load" });
+    assert.equal(response.status(), 200);
+    assert.equal(await page.locator(".breakdown-cardinality").textContent(), "Exact matching buckets: 53");
+    assert.match(
+      await page.locator(".analysis-builder-help").innerText(),
+      /1 typed subject predicate\(s\).*preserved/,
+    );
+    const predicateMobileContext = page.locator("details.mobile-context");
+    await predicateMobileContext.locator(":scope > summary").click();
+    const predicateContext = predicateMobileContext.locator("form.range-filter");
+    assert.equal(
+      await predicateContext.locator('input[name="p"]').inputValue(),
+      "plan~is~string~Pro",
+    );
+    await predicateContext.locator('input[name="from"]').fill(todayUtc);
+    await predicateContext.locator('input[name="to"]').fill(todayUtc);
+    response = await submitPredicateForm(
+      page,
+      predicateContext.getByRole("button", { name: "Update context" }),
+    );
+    assert.equal(response.status(), 200);
+    assert.equal(new URL(page.url()).searchParams.get("p"), "plan~is~string~Pro");
+    assert.equal(await page.locator(".breakdown-cardinality").textContent(), "Exact matching buckets: 53");
+    const predicateBuilder = page.locator("form.breakdown-builder");
+    response = await submitPredicateForm(
+      page,
+      predicateBuilder.getByRole("button", { name: "Run Breakdown" }),
+    );
+    assert.equal(response.status(), 200);
+    assert.equal(new URL(page.url()).searchParams.get("p"), "plan~is~string~Pro");
+    assert.equal(await page.locator(".breakdown-cardinality").textContent(), "Exact matching buckets: 53");
+
+    response = await page.goto(propertyBase, { waitUntil: "load" });
+    assert.equal(response.status(), 200);
+
+    const propertyContext = page.locator("details.mobile-context");
+    await propertyContext.locator(":scope > summary").click();
+    const propertyPresets = propertyContext.locator("details.date-presets");
+    await propertyPresets.locator(":scope > summary").click();
+    response = await Promise.all([
+      page.waitForNavigation({ waitUntil: "load" }),
+      propertyPresets.getByRole("link", { name: "Yesterday", exact: true }).click(),
+    ]).then(([navigation]) => navigation);
+    assert.equal(response.status(), 200);
+    const propertyYesterday = new URL(page.url());
+    assert.equal(propertyYesterday.searchParams.get("mode"), "breakdown");
+    assert.equal(propertyYesterday.searchParams.get("metric"), "custom-events");
+    assert.equal(propertyYesterday.searchParams.get("property"), "high");
+    assert.notEqual(propertyYesterday.searchParams.get("from"), todayUtc);
+    await page.goBack({ waitUntil: "load" });
+    assert.equal(page.url(), propertyBase);
+
+    const catalogDisclosure = page.locator("details.property-catalog");
+    await catalogDisclosure.locator(":scope > summary").click();
+    assert.equal(await catalogDisclosure.isVisible(), true);
+    assert.match(await catalogDisclosure.innerText(), /latest 2,000 eligible custom events/);
+    assert.match(await catalogDisclosure.innerText(), /may update within 30 seconds/);
+    const mixedTypes = await catalogDisclosure
+      .locator('tbody tr:has(th:text-is("mixed")) td[data-label="Type"]')
+      .allTextContents();
+    assert.deepEqual(mixedTypes.sort(), ["boolean", "decimal", "integer", "null", "string"]);
+    if (process.env.ANALYTICO_BREAKDOWN_MOBILE_SCREENSHOT_PATH) {
+      await page.screenshot({
+        path: process.env.ANALYTICO_BREAKDOWN_MOBILE_SCREENSHOT_PATH,
+        fullPage: true,
+      });
+    }
+
+    const breakdownBuilder = page.locator("form.breakdown-builder");
+    await breakdownBuilder.locator('select[name="metric"]').selectOption("custom-events");
+    await breakdownBuilder.locator('select[name="dimension"]').selectOption("event-property");
+    await breakdownBuilder.locator('input[name="property"]').fill("high");
+    await breakdownBuilder.locator('select[name="property-type"]').selectOption("string");
+    await breakdownBuilder.locator('input[name="search"]').fill("Value-10");
+    await breakdownBuilder.locator('select[name="sort"]').selectOption("label-asc");
+    await breakdownBuilder.locator('select[name="limit"]').selectOption("10");
+    response = await Promise.all([
+      page.waitForNavigation({ waitUntil: "load" }),
+      breakdownBuilder.getByRole("button", { name: "Run Breakdown" }).press("Enter"),
+    ]).then(([navigation]) => navigation);
+    assert.equal(response.status(), 200);
+    assert.equal(response.request().redirectedFrom() !== null, true);
+    const searchedBreakdown = new URL(page.url());
+    assert.equal(searchedBreakdown.searchParams.get("search"), "Value-10");
+    assert.equal(searchedBreakdown.searchParams.get("sort"), "label-asc");
+    assert.equal(await page.locator(".breakdown-cardinality").textContent(), "Exact matching buckets: 5");
+    assert.deepEqual(
+      await page.locator(".breakdown-table tbody th[scope=row]").allTextContents(),
+      ["Value-100", "Value-101", "Value-102", "Value-103", "Value-104"],
+    );
+
+    const pagedBreakdown = propertyBase
+      .replace("property-type=string", "property-type=string&search=Value-10")
+      .replace("sort=value-desc", "sort=label-asc")
+      .replace("limit=25", "limit=2");
+    response = await page.goto(pagedBreakdown, { waitUntil: "load" });
+    assert.equal(response.status(), 200);
+    assert.deepEqual(
+      await page.locator(".breakdown-table tbody th[scope=row]").allTextContents(),
+      ["Value-100", "Value-101"],
+    );
+    const breakdownNext = page.locator('a[rel="next"]');
+    assert.equal(await breakdownNext.count(), 1);
+    await breakdownNext.focus();
+    response = await Promise.all([
+      page.waitForNavigation({ waitUntil: "load" }),
+      page.keyboard.press("Enter"),
+    ]).then(([navigation]) => navigation);
+    assert.equal(response.status(), 200);
+    assert.match(page.url(), /[?&]page=2(?:&|$)/);
+    assert.deepEqual(
+      await page.locator(".breakdown-table tbody th[scope=row]").allTextContents(),
+      ["Value-102", "Value-103"],
+    );
+
+    const nullBreakdown = propertyBase
+      .replace("property=high", "property=mixed")
+      .replace("property-type=string", "property-type=null");
+    response = await page.goto(nullBreakdown, { waitUntil: "load" });
+    assert.equal(response.status(), 200);
+    assert.equal(await page.locator(".breakdown-table tbody th[scope=row]").textContent(), "(null)");
+    assert.match(await page.locator(".breakdown-table tbody tr").innerText(), /21/);
+
+    const missingBreakdown = propertyBase
+      .replace("property=high", "property=optional")
+      .replace("property-type=string", "property-type=missing");
+    response = await page.goto(missingBreakdown, { waitUntil: "load" });
+    assert.equal(response.status(), 200);
+    assert.equal(await page.locator(".breakdown-table tbody th[scope=row]").textContent(), "(missing)");
+    assert.match(await page.locator(".breakdown-table tbody tr").innerText(), /52/);
+
+    const currencyBreakdown = `${origin}/admin/sites/currency/analyze?v=1&from=${todayUtc}&to=${todayUtc}&compare=none&mode=breakdown&metric=revenue&dimension=event-name&interval=auto&sort=label-asc&page=1&limit=25`;
+    response = await page.goto(currencyBreakdown, { waitUntil: "load" });
+    assert.equal(response.status(), 200);
+    const currencyRows = page.locator(".breakdown-table tbody tr");
+    assert.equal(await currencyRows.count(), 4);
+    assert.deepEqual(
+      await currencyRows.locator(".chart-formatted-value").allTextContents(),
+      [
+        "(AUD 1.000000 / 1 values)",
+        "(EUR 1.000000 / 1 values)",
+        "(GBP 1.000000 / 1 values)",
+        "(USD 1.000000 / 1 values)",
+      ],
+    );
+    assert.equal(await currencyRows.locator("progress.cell-bar").count(), 4);
+
     response = await page.goto(
       route("example", "journeys/funnels", "&subject=Journey"),
       { waitUntil: "load" },
@@ -556,6 +776,16 @@ async function main() {
     if (process.env.ANALYTICO_ANALYZE_SCREENSHOT_PATH) {
       await page.screenshot({
         path: process.env.ANALYTICO_ANALYZE_SCREENSHOT_PATH,
+        fullPage: true,
+      });
+    }
+    response = await page.goto(propertyBase, { waitUntil: "load" });
+    assert.equal(response.status(), 200);
+    assert.equal(await page.locator(".breakdown-table tbody tr").count(), 25);
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
+    if (process.env.ANALYTICO_BREAKDOWN_SCREENSHOT_PATH) {
+      await page.screenshot({
+        path: process.env.ANALYTICO_BREAKDOWN_SCREENSHOT_PATH,
         fullPage: true,
       });
     }
@@ -746,32 +976,48 @@ async function main() {
     ]);
     await assertMetric(page, "Page views", "8");
 
-    const reports = [
-      "pages",
-      "entries",
-      "exits",
-      "sources",
-      "campaigns&campaign=source",
-      "countries",
-      "browsers",
-      "operating-systems",
-      "devices",
-      "events",
-      "traffic-quality",
-      "goal&subject=Signup",
-      "funnel&subject=Journey",
+    const legacyBreakdowns = [
+      ["pages", "page-views", "page"],
+      ["entries", "sessions", "landing-page"],
+      ["exits", "sessions", "exit-page"],
+      ["sources", "sessions", "referrer"],
+      ["campaigns&campaign=source", "sessions", "utm-source"],
+      ["campaigns&campaign=medium", "sessions", "utm-medium"],
+      ["campaigns&campaign=campaign", "sessions", "utm-campaign"],
+      ["campaigns&campaign=term", "sessions", "utm-term"],
+      ["campaigns&campaign=content", "sessions", "utm-content"],
+      ["campaigns&campaign=all", "sessions", "utm-campaign"],
+      ["countries", "sessions", "country"],
+      ["browsers", "sessions", "browser"],
+      ["operating-systems", "sessions", "operating-system"],
+      ["devices", "sessions", "device"],
+      ["events", "custom-events", "event-name"],
     ];
-    for (const report of reports) {
-      const reportUrl = report === "traffic-quality"
-        ? route("example", "live")
-        : report.startsWith("goal")
-          ? route("example", "journeys/goals", "&subject=Signup")
-          : report.startsWith("funnel")
-            ? route("example", "journeys/funnels", "&subject=Journey")
-            : route("example", "analyze", `&report=${report}`);
+    for (const [legacy, metric, dimension] of legacyBreakdowns) {
+      response = await page.goto(
+        route("example", "analyze", `&report=${legacy}`),
+        { waitUntil: "load" },
+      );
+      assert.equal(response.status(), 200, legacy);
+      assert.equal(response.request().redirectedFrom() !== null, true, legacy);
+      const canonical = new URL(page.url());
+      assert.equal(canonical.searchParams.get("v"), "1", legacy);
+      assert.equal(canonical.searchParams.get("compare"), "none", legacy);
+      assert.equal(canonical.searchParams.get("mode"), "breakdown", legacy);
+      assert.equal(canonical.searchParams.get("metric"), metric, legacy);
+      assert.equal(canonical.searchParams.get("dimension"), dimension, legacy);
+      assert.equal(await page.locator("#report").count(), 1, legacy);
+    }
+
+    const reports = [
+      route("example", "live"),
+      route("example", "journeys/goals", "&subject=Signup"),
+      route("example", "journeys/funnels", "&subject=Journey"),
+    ];
+    for (const reportUrl of reports) {
       response = await page.goto(reportUrl, { waitUntil: "load" });
-      assert.equal(response.status(), 200, report);
-      assert.equal(await page.locator("#report").count(), 1, report);
+      assert.equal(response.status(), 200, reportUrl);
+      assert.equal(await page.locator("#report").count(), 1, reportUrl);
     }
 
     response = await page.goto(
@@ -779,7 +1025,7 @@ async function main() {
       { waitUntil: "load" },
     );
     assert.equal(response.status(), 200);
-    assert.equal(await page.locator("tbody tr").count(), 1);
+    assert.equal(await page.locator(".breakdown-table tbody tr").count(), 1);
     const next = page.locator('a[rel="next"]');
     assert.equal(await next.count(), 1);
     response = await Promise.all([

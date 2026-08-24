@@ -120,6 +120,19 @@ A result that would exceed three visual series returns an explicit bounded
 state rather than truncating currencies or emitting an oversized chart/table
 page.
 
+Issue #29 uses the existing mobile-record table and in-cell proportional bar
+rather than adding a chart grammar. The first response contains native
+Trend/Breakdown mode links, a normal GET builder, bounded observed property
+types, search/sort/page controls, exact cardinality or high-cardinality text,
+and the complete typed rows. Count, ratio source components, and exact decimal
+amount/currency/value-count remain printed; derived bar width is supplementary.
+Properties with multiple observed types show each type explicitly, and null and
+missing use distinct text labels. The catalog says that its names, types, and
+counts come from the latest 2,000 eligible custom events, may update within 30
+seconds, and do not replace exact result cardinality; direct property input
+remains visible. At mobile width each row retains its dimension/type/metric
+context without requiring horizontal navigation or JavaScript.
+
 Server validation renders one focused error summary and associates only the
 affected form fields with that summary while preserving submitted values.
 Notices use restrained status semantics, errors use alerts, and loading is

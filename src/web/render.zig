@@ -76,6 +76,8 @@ pub fn page(output: *std.Io.Writer, value: model.Page) !void {
         .analyze => {
             if (value.analyze_trend != null) {
                 try analyzeTrendSection(output, value);
+            } else if (value.analyze_breakdown != null) {
+                try analyzeBreakdownSection(output, value);
             } else {
                 try reportNavigation(output, value);
                 try reportSection(output, value);
@@ -569,7 +571,10 @@ fn primaryNavigation(
     inline for (std.meta.tags(model.Destination)) |destination| {
         var destination_query = value.query;
         var default_analysis_series = [_]analysis.Metric{.{ .kind = .visitors }};
-        if (destination == .analyze and destination_query.analysis_series.len == 0) {
+        if (destination == .analyze and
+            destination_query.analysis_series.len == 0 and
+            destination_query.analysis_breakdown == null)
+        {
             destination_query.kind = .overview;
             destination_query.analysis_interval = .auto;
             destination_query.analysis_series = &default_analysis_series;
@@ -625,6 +630,12 @@ fn contextControls(output: *std.Io.Writer, value: model.Page) !void {
         var adjusted = value.query;
         adjusted.range = option.range.?.view();
         adjusted.highlighted_interval = "";
+        if (adjusted.analysis_breakdown) |breakdown_state| {
+            var breakdown = breakdown_state;
+            breakdown.range = adjusted.range;
+            breakdown.page = 1;
+            adjusted.analysis_breakdown = breakdown;
+        }
         try output.writeAll("<a href=\"");
         try canonicalUrl(output, value.destination, adjusted, adjusted.page);
         if (option.preset == context.selected_preset) {
@@ -642,7 +653,8 @@ fn contextControls(output: *std.Io.Writer, value: model.Page) !void {
     try output.writeAll("\"></label><label><span>To</span><input type=\"date\" name=\"to\" required value=\"");
     try attribute(output, value.query.range.end);
     try output.writeAll("\"></label><label><span>Compare</span><select name=\"compare\">");
-    inline for (std.meta.tags(@TypeOf(value.query.comparison))) |comparison| {
+    for (std.meta.tags(@TypeOf(value.query.comparison))) |comparison| {
+        if (value.query.analysis_breakdown != null and comparison != .none) continue;
         try output.writeAll("<option value=\"");
         try attribute(output, comparison.name());
         if (comparison == value.query.comparison) {
@@ -682,7 +694,58 @@ fn contextControls(output: *std.Io.Writer, value: model.Page) !void {
 }
 
 fn destinationHiddenFields(output: *std.Io.Writer, value: model.Page) !void {
-    if (value.destination == .analyze and value.query.analysis_series.len != 0) {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    if (value.destination == .analyze and value.query.analysis_breakdown != null) {
+        const breakdown = value.query.analysis_breakdown.?;
+        try output.writeAll(
+            "<input type=\"hidden\" name=\"v\" value=\"1\">" ++
+                "<input type=\"hidden\" name=\"mode\" value=\"breakdown\">" ++
+                "<input type=\"hidden\" name=\"metric\" value=\"",
+        );
+        try attribute(output, breakdown.metric.kind.name());
+        try output.writeAll("\">");
+        if (breakdown.metric.conversion_basis) |basis| {
+            try output.writeAll("<input type=\"hidden\" name=\"conversion-basis\" value=\"");
+            try attribute(output, basis.name());
+            try output.writeAll("\">");
+        }
+        if (breakdown.metric.selector) |selector| {
+            try output.writeAll("<input type=\"hidden\" name=\"selector\" value=\"");
+            try attribute(output, selector.kind.name());
+            try output.writeAll("\"><input type=\"hidden\" name=\"selector-value\" value=\"");
+            try attribute(output, selector.value);
+            try output.writeAll("\">");
+            for (selector.predicates) |predicate| {
+                const encoded = try analysis.canonicalPredicate(
+                    allocator,
+                    predicate,
+                );
+                try output.writeAll("<input type=\"hidden\" name=\"p\" value=\"");
+                try attribute(output, encoded);
+                try output.writeAll("\">");
+            }
+        }
+        try output.writeAll("<input type=\"hidden\" name=\"dimension\" value=\"");
+        try attribute(output, breakdown.dimension.?.kind.name());
+        try output.writeAll("\">");
+        if (breakdown.dimension.?.property_ref) |reference| {
+            try output.writeAll("<input type=\"hidden\" name=\"property\" value=\"");
+            try attribute(output, reference.name);
+            try output.writeAll("\"><input type=\"hidden\" name=\"property-type\" value=\"");
+            try attribute(output, reference.scalar_type.name());
+            try output.writeAll("\">");
+        }
+        if (breakdown.search.len != 0) {
+            try output.writeAll("<input type=\"hidden\" name=\"search\" value=\"");
+            try attribute(output, breakdown.search);
+            try output.writeAll("\">");
+        }
+        try output.writeAll("<input type=\"hidden\" name=\"interval\" value=\"auto\"><input type=\"hidden\" name=\"sort\" value=\"");
+        try attribute(output, breakdown.sort.name());
+        try output.print("\"><input type=\"hidden\" name=\"page\" value=\"1\"><input type=\"hidden\" name=\"limit\" value=\"{d}\">", .{breakdown.limit});
+    } else if (value.destination == .analyze and value.query.analysis_series.len != 0) {
         try output.writeAll("<input type=\"hidden\" name=\"interval\" value=\"");
         try attribute(output, value.query.analysis_interval.name());
         try output.writeAll("\">");
@@ -733,7 +796,8 @@ fn destinationHiddenFields(output: *std.Io.Writer, value: model.Page) !void {
         try attribute(output, @tagName(value.query.sort));
         try output.writeAll("\">");
     }
-    if ((value.destination == .analyze and value.query.analysis_series.len == 0) or
+    if ((value.destination == .analyze and value.query.analysis_series.len == 0 and
+        value.query.analysis_breakdown == null) or
         (value.destination == .live and value.query.limit != report.default_limit))
     {
         try output.writeAll("<input type=\"hidden\" name=\"limit\" value=\"");
@@ -825,16 +889,19 @@ fn analyzeTrendSection(output: *std.Io.Writer, value: model.Page) !void {
             "<p class=\"muted\">One to three typed metric queries share this request's deadline. Exact currencies remain separate.</p></div>" ++
             "<a class=\"button button-secondary\" href=\"",
     );
-    var legacy = value.query;
-    legacy.analysis_series = &.{};
-    legacy.analysis_interval = .auto;
-    legacy.highlighted_interval = "";
-    legacy.kind = .pages;
-    legacy.sort = .count;
-    legacy.limit = report.default_limit;
-    legacy.page = 1;
-    try canonicalUrl(output, .analyze, legacy, 1);
-    try output.writeAll("\">Open Breakdown presets</a></div>");
+    const breakdown = analysis.presetQuery(
+        .pages,
+        value.query.analysis_site_id,
+        value.query.range,
+    );
+    var breakdown_query = value.query;
+    breakdown_query.comparison = .none;
+    breakdown_query.analysis_series = &.{};
+    breakdown_query.analysis_interval = .auto;
+    breakdown_query.highlighted_interval = "";
+    breakdown_query.analysis_breakdown = breakdown;
+    try canonicalUrl(output, .analyze, breakdown_query, 1);
+    try output.writeAll("\">Open Breakdown</a></div>");
 
     try output.writeAll("<form class=\"panel analysis-builder\" method=\"get\" action=\"");
     try canonicalPath(output, .analyze, value.query);
@@ -985,6 +1052,384 @@ fn analyzeTrendSection(output: *std.Io.Writer, value: model.Page) !void {
     }
     try renderAnalyzeExactTable(output, allocator, value, trend);
     try output.writeAll("</section>");
+}
+
+const BreakdownPreset = struct {
+    preset: analysis.Preset,
+    label: []const u8,
+};
+
+const breakdown_presets = [_]BreakdownPreset{
+    .{ .preset = .pages, .label = "Pages" },
+    .{ .preset = .entries, .label = "Entries" },
+    .{ .preset = .exits, .label = "Exits" },
+    .{ .preset = .sources, .label = "Sources" },
+    .{ .preset = .campaigns_source, .label = "UTM source" },
+    .{ .preset = .campaigns_medium, .label = "UTM medium" },
+    .{ .preset = .campaigns_campaign, .label = "UTM campaign" },
+    .{ .preset = .campaigns_term, .label = "UTM term" },
+    .{ .preset = .campaigns_content, .label = "UTM content" },
+    .{ .preset = .countries, .label = "Countries" },
+    .{ .preset = .browsers, .label = "Browsers" },
+    .{ .preset = .operating_systems, .label = "OS" },
+    .{ .preset = .devices, .label = "Devices" },
+    .{ .preset = .events, .label = "Events" },
+};
+
+fn analyzeBreakdownSection(output: *std.Io.Writer, value: model.Page) !void {
+    const view = value.analyze_breakdown orelse return error.MissingAnalyzeBreakdown;
+    const query = value.query.analysis_breakdown orelse
+        return error.MissingAnalyzeBreakdown;
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try output.writeAll(
+        "<section id=\"report\" aria-labelledby=\"analyze-breakdown-heading\">" ++
+            "<div class=\"analysis-heading\"><div>" ++
+            "<h2 id=\"analyze-breakdown-heading\">Breakdown</h2>" ++
+            "<p class=\"muted\">One typed metric grouped by one dimension. Search, sort, and pagination are server-owned.</p></div>" ++
+            "<a class=\"button button-secondary\" href=\"",
+    );
+    var trend_query = value.query;
+    const trend_series = [_]analysis.Metric{.{ .kind = .visitors }};
+    trend_query.analysis_breakdown = null;
+    trend_query.analysis_series = &trend_series;
+    trend_query.analysis_interval = .auto;
+    trend_query.comparison = .none;
+    try canonicalUrl(output, .analyze, trend_query, 1);
+    try output.writeAll("\">Open Trend</a></div><nav class=\"report-tabs breakdown-presets\" aria-label=\"Breakdown presets\">");
+    for (breakdown_presets) |item| {
+        var preset_query = value.query;
+        const preset = analysis.presetQuery(
+            item.preset,
+            value.query.analysis_site_id,
+            value.query.range,
+        );
+        preset_query.analysis_breakdown = preset;
+        try output.writeAll("<a id=\"breakdown-preset-");
+        try attribute(output, @tagName(item.preset));
+        try output.writeAll("\" href=\"");
+        try canonicalUrl(output, .analyze, preset_query, 1);
+        if (breakdownPresetSelected(query, preset)) {
+            try output.writeAll("\" aria-current=\"page\">");
+        } else {
+            try output.writeAll("\">");
+        }
+        try text(output, item.label);
+        try output.writeAll("</a>");
+    }
+    try output.writeAll("</nav><form class=\"panel analysis-builder breakdown-builder\" method=\"get\" action=\"");
+    try canonicalPath(output, .analyze, value.query);
+    try output.writeAll(
+        "\"><input type=\"hidden\" name=\"builder\" value=\"1\">" ++
+            "<input type=\"hidden\" name=\"mode\" value=\"breakdown\">" ++
+            "<input type=\"hidden\" name=\"from\" value=\"",
+    );
+    try attribute(output, query.range.start);
+    try output.writeAll("\"><input type=\"hidden\" name=\"to\" value=\"");
+    try attribute(output, query.range.end);
+    try output.writeAll("\"><label>Metric<select name=\"metric\">");
+    inline for (std.meta.tags(analysis.MetricKind)) |kind| {
+        try output.writeAll("<option value=\"");
+        try attribute(output, kind.name());
+        try output.writeByte('"');
+        if (kind == query.metric.kind) try output.writeAll(" selected");
+        try output.writeByte('>');
+        try text(output, analysisMetricLabel(kind));
+        try output.writeAll("</option>");
+    }
+    try output.writeAll("</select></label><label>Exact event <span class=\"muted\">(when applicable)</span><input name=\"event\" maxlength=\"64\" autocomplete=\"off\" value=\"");
+    if (query.metric.selector) |selector| {
+        if (selector.kind == .exact_event) try attribute(output, selector.value);
+    }
+    try output.writeAll("\"></label><label>Saved goal <span class=\"muted\">(when applicable)</span><select name=\"goal\"><option value=\"\">None</option>");
+    for (value.goals) |goal| {
+        try output.writeAll("<option value=\"");
+        try attribute(output, goal.id);
+        try output.writeByte('"');
+        if (query.metric.selector) |selector| {
+            if (selector.kind == .saved_goal and
+                std.mem.eql(u8, selector.value, goal.id))
+            {
+                try output.writeAll(" selected");
+            }
+        }
+        try output.writeByte('>');
+        try text(output, goal.name);
+        try output.writeAll("</option>");
+    }
+    try output.writeAll("</select></label><label>Dimension<select name=\"dimension\">");
+    inline for (std.meta.tags(analysis.DimensionKind)) |kind| {
+        try output.writeAll("<option value=\"");
+        try attribute(output, kind.name());
+        try output.writeByte('"');
+        if (kind == query.dimension.?.kind) try output.writeAll(" selected");
+        try output.writeByte('>');
+        try text(output, dimensionLabel(kind));
+        try output.writeAll("</option>");
+    }
+    try output.writeAll("</select></label><label>Event property <span class=\"muted\">(for Property dimension)</span><input name=\"property\" list=\"breakdown-property-names\" maxlength=\"64\" autocomplete=\"off\" value=\"");
+    if (query.dimension.?.property_ref) |reference| try attribute(output, reference.name);
+    try output.writeAll("\"></label><datalist id=\"breakdown-property-names\">");
+    var previous_property: []const u8 = "";
+    for (view.properties) |entry| {
+        if (std.mem.eql(u8, previous_property, entry.name)) continue;
+        try output.writeAll("<option value=\"");
+        try attribute(output, entry.name);
+        try output.writeAll("\"></option>");
+        previous_property = entry.name;
+    }
+    try output.writeAll("</datalist><label>Property type<select name=\"property-type\">");
+    inline for (std.meta.tags(analysis.ScalarType)) |scalar_type| {
+        try output.writeAll("<option value=\"");
+        try attribute(output, scalar_type.name());
+        try output.writeByte('"');
+        if (query.dimension.?.property_ref != null and
+            query.dimension.?.property_ref.?.scalar_type == scalar_type)
+        {
+            try output.writeAll(" selected");
+        }
+        try output.writeByte('>');
+        try text(output, humanize(scalar_type.name()));
+        try output.writeAll("</option>");
+    }
+    try output.writeAll("</select></label><label>Search labels<input type=\"search\" name=\"search\" maxlength=\"256\" value=\"");
+    try attribute(output, query.search);
+    try output.writeAll("\"></label><label>Sort<select name=\"sort\">");
+    inline for (std.meta.tags(analysis.Sort)) |sort| {
+        try output.writeAll("<option value=\"");
+        try attribute(output, sort.name());
+        try output.writeByte('"');
+        if (sort == query.sort) try output.writeAll(" selected");
+        try output.writeByte('>');
+        try text(output, breakdownSortLabel(sort));
+        try output.writeAll("</option>");
+    }
+    try output.writeAll("</select></label><label>Rows<select name=\"limit\">");
+    inline for (.{ 10, 25, 50, 100 }) |limit| {
+        try output.print("<option value=\"{d}\"", .{limit});
+        if (limit == query.limit) try output.writeAll(" selected");
+        try output.print(">{d}</option>", .{limit});
+    }
+    try output.writeAll("</select></label>");
+    if (query.metric.selector) |selector| for (selector.predicates) |predicate| {
+        const encoded = try analysis.canonicalPredicate(allocator, predicate);
+        try output.writeAll("<input type=\"hidden\" name=\"p\" value=\"");
+        try attribute(output, encoded);
+        try output.writeAll("\">");
+    };
+    try output.writeAll("<p class=\"field-help analysis-builder-help\">Event metrics require one exact event; conversion metrics require one saved goal. A property with multiple observed types requires one explicit type. Missing is distinct from null.");
+    if (query.metric.selector) |selector| if (selector.predicates.len != 0) {
+        try output.print(
+            " {d} typed subject predicate(s) from this canonical query will be preserved.",
+            .{selector.predicates.len},
+        );
+    };
+    try output.writeAll("</p><button type=\"submit\">Run Breakdown</button></form>");
+
+    try renderPropertyCatalog(output, view);
+    if (view.no_events_ever) {
+        const install_url = try std.fmt.allocPrint(
+            allocator,
+            "/admin/sites/{s}/install",
+            .{value.query.site},
+        );
+        try components.emptyState(output, .{
+            .id = "breakdown-no-events",
+            .title = "No events received yet",
+            .message = "Install the tracker and accept an event before running a Breakdown.",
+            .action_url = install_url,
+            .action_label = "Open installation",
+        });
+    } else if (view.rows.len == 0) {
+        try components.emptyState(output, .{
+            .id = "breakdown-no-matches",
+            .title = "No matching buckets",
+            .message = "The site has events, but no typed dimension label matches this query and search.",
+        });
+    }
+    if (view.cardinality > query.limit) {
+        const warning = try std.fmt.allocPrint(
+            allocator,
+            "High-cardinality result: {d} exact matching buckets. This page is bounded to {d} rows; use search or pagination.",
+            .{ view.cardinality, query.limit },
+        );
+        try components.feedback(output, .{ .kind = .warning, .message = warning });
+    }
+    try output.writeAll("<p class=\"coverage-note\">");
+    try text(output, view.coverage);
+    try output.writeAll("</p><p class=\"breakdown-cardinality\"><strong>Exact matching buckets:</strong> ");
+    try output.print("{d}</p>", .{view.cardinality});
+    try renderBreakdownTable(output, allocator, value, view, query);
+    try output.writeAll("</section>");
+}
+
+fn breakdownPresetSelected(
+    selected: analysis.Query,
+    preset: analysis.Query,
+) bool {
+    return analysis.metricsEqual(selected.metric, preset.metric) and
+        selected.dimension.?.kind == preset.dimension.?.kind and
+        selected.dimension.?.property_ref == null and
+        selected.search.len == 0 and selected.sort == .value_desc and
+        selected.page == 1 and selected.limit == 25;
+}
+
+fn renderPropertyCatalog(
+    output: *std.Io.Writer,
+    view: model.AnalyzeBreakdown,
+) !void {
+    try output.print(
+        "<details class=\"management property-catalog\"><summary>Observed event properties <span class=\"muted\">{d} names",
+        .{view.property_count},
+    );
+    if (view.properties_truncated) try output.writeAll(" · first 100 shown");
+    try output.writeAll("</span></summary><p class=\"muted\">Suggestions use the latest 2,000 eligible custom events in this site-local range and may update within 30 seconds. Counts are exact for that sample, not the complete result range. Each row is one observed scalar type. Repeated names are type conflicts; choose one type. Missing is selectable but is not an observed JSON type. A property outside the sample can still be entered directly.</p><div class=\"table-scroll mobile-records\"><table><caption>Sampled custom-event property types in this site-local range</caption><thead><tr><th scope=\"col\">Property</th><th scope=\"col\">Type</th><th scope=\"col\">Sample events</th></tr></thead><tbody>");
+    for (view.properties) |entry| {
+        try output.writeAll("<tr><th scope=\"row\" data-label=\"Property\">");
+        try text(output, entry.name);
+        try output.writeAll("</th><td data-label=\"Type\">");
+        try text(output, humanize(entry.scalar_type.name()));
+        try output.print("</td><td data-label=\"Sample events\">{d}</td></tr>", .{entry.event_count});
+    }
+    if (view.properties.len == 0) {
+        try output.writeAll("<tr><td colspan=\"3\">No event properties were observed in this range.</td></tr>");
+    }
+    try output.writeAll("</tbody></table></div></details>");
+}
+
+fn renderBreakdownTable(
+    output: *std.Io.Writer,
+    allocator: std.mem.Allocator,
+    page_value: model.Page,
+    view: model.AnalyzeBreakdown,
+    query: analysis.Query,
+) !void {
+    const values = try allocator.alloc(AnalyzeChartMeasure, view.rows.len);
+    for (values, view.rows) |*target, row| {
+        target.* = try analyzeChartMeasure(allocator, row.measure, query.metric.kind);
+    }
+    const property_dimension = query.dimension.?.kind == .event_property;
+    try output.writeAll("<div class=\"table-scroll mobile-records\"><table class=\"breakdown-table\"><caption>");
+    try text(output, analysisMetricLabel(query.metric.kind));
+    try output.writeAll(" by ");
+    try text(output, dimensionLabel(query.dimension.?.kind));
+    try output.writeAll(" — exact values for the selected site-local range</caption><thead><tr><th scope=\"col\">");
+    try text(output, dimensionLabel(query.dimension.?.kind));
+    if (property_dimension) try output.writeAll("</th><th scope=\"col\">Type");
+    try output.writeAll("</th><th scope=\"col\">");
+    try text(output, analysisMetricLabel(query.metric.kind));
+    try output.writeAll("</th></tr></thead><tbody>");
+    for (view.rows, values, 0..) |row, chart_value, row_index| {
+        try output.writeAll("<tr><th scope=\"row\" data-label=\"");
+        try attribute(output, dimensionLabel(query.dimension.?.kind));
+        try output.writeAll("\">");
+        try text(output, row.label.value);
+        try output.writeAll("</th>");
+        if (property_dimension) {
+            try output.writeAll("<td data-label=\"Type\">");
+            try text(output, humanize(row.label.scalar_type.?.name()));
+            try output.writeAll("</td>");
+        }
+        try output.writeAll("<td data-label=\"");
+        try attribute(output, analysisMetricLabel(query.metric.kind));
+        try output.writeAll("\"><span class=\"cell-number\">");
+        try charts.writeExactTrendValue(
+            output,
+            chart_value.value,
+            chart_value.formatted,
+            metricScale(query.metric.kind),
+        );
+        try output.writeAll("</span>");
+        const maximum = breakdownBarMaximum(view.rows, values, row_index);
+        if (chart_value.value) |number| if (number >= 0 and maximum > 0) {
+            try output.print(
+                "<progress class=\"cell-bar\" max=\"{d}\" value=\"{d}\" aria-label=\"",
+                .{ maximum, number },
+            );
+            try attribute(output, row.label.value);
+            try output.writeAll(" — ");
+            try attribute(output, analysisMetricLabel(query.metric.kind));
+            try output.writeAll(" proportional bar\"></progress>");
+        };
+        try output.writeAll("</td></tr>");
+    }
+    if (view.rows.len == 0) {
+        try output.print(
+            "<tr><td colspan=\"{d}\">No matching buckets.</td></tr>",
+            .{@as(u8, if (property_dimension) 3 else 2)},
+        );
+    }
+    try output.writeAll("</tbody></table></div><nav aria-label=\"Breakdown pagination\">");
+    if (query.page > 1) {
+        try output.writeAll("<a rel=\"prev\" href=\"");
+        try canonicalUrl(output, .analyze, page_value.query, query.page - 1);
+        try output.writeAll("\">Previous</a>");
+    }
+    if (view.next_page) |next_page| {
+        try output.writeAll("<a rel=\"next\" href=\"");
+        try canonicalUrl(output, .analyze, page_value.query, next_page);
+        try output.writeAll("\">Next</a>");
+    }
+    try output.writeAll("</nav>");
+}
+
+fn breakdownBarMaximum(
+    rows: []const analysis.BreakdownRow,
+    values: []const AnalyzeChartMeasure,
+    selected: usize,
+) i128 {
+    const selected_currency: ?[]const u8 = switch (rows[selected].measure) {
+        .amount => |amount| amount.currency,
+        else => null,
+    };
+    var maximum: i128 = 0;
+    for (rows, values) |row, value| {
+        const comparable = if (selected_currency) |currency| switch (row.measure) {
+            .amount => |amount| std.mem.eql(u8, currency, amount.currency),
+            else => false,
+        } else switch (row.measure) {
+            .amount => false,
+            else => true,
+        };
+        if (comparable) if (value.value) |number| {
+            if (number > maximum) maximum = number;
+        };
+    }
+    return maximum;
+}
+
+fn dimensionLabel(kind: analysis.DimensionKind) []const u8 {
+    return switch (kind) {
+        .page => "Page",
+        .landing_page => "Landing page",
+        .exit_page => "Exit page",
+        .hostname => "Hostname",
+        .channel => "Channel",
+        .referrer => "Referrer",
+        .utm_source => "UTM source",
+        .utm_medium => "UTM medium",
+        .utm_campaign => "UTM campaign",
+        .utm_term => "UTM term",
+        .utm_content => "UTM content",
+        .country => "Country",
+        .language => "Language",
+        .device => "Device",
+        .browser => "Browser",
+        .operating_system => "Operating system",
+        .event_name => "Event name",
+        .event_property => "Event property",
+    };
+}
+
+fn breakdownSortLabel(sort: analysis.Sort) []const u8 {
+    return switch (sort) {
+        .value_desc => "Value, high to low",
+        .value_asc => "Value, low to high",
+        .label_asc => "Label, A to Z",
+        .label_desc => "Label, Z to A",
+    };
 }
 
 fn renderAnalyzeExactTable(
@@ -1221,8 +1666,8 @@ fn analyzeChartMeasure(
                 .value = sum,
                 .formatted = try std.fmt.allocPrint(
                     allocator,
-                    "{s} {s}",
-                    .{ amount.currency, amount.decimal },
+                    "{s} {s} / {d} values",
+                    .{ amount.currency, amount.decimal, amount.value_count },
                 ),
             };
         },
@@ -2314,6 +2759,27 @@ fn queryUrl(
     adjusted.kind = kind;
     adjusted.subject = subject;
     adjusted.page = page_number;
+    if (kind.isList()) {
+        adjusted.comparison = .none;
+        adjusted.analysis_series = &.{};
+        adjusted.analysis_interval = .auto;
+        adjusted.highlighted_interval = "";
+        const mapped = analysis.presetForCurrentReport(
+            kind,
+            adjusted.campaign_dimension,
+        );
+        const preset: analysis.Preset = switch (mapped) {
+            .analysis => |value| value,
+            .campaign_tuple => .campaigns_campaign,
+            else => return error.InvalidBreakdownPreset,
+        };
+        adjusted.analysis_breakdown = analysis.presetQuery(
+            preset,
+            adjusted.analysis_site_id,
+            adjusted.range,
+        );
+        return canonicalUrl(output, .analyze, adjusted, page_number);
+    }
     const destination: model.Destination = switch (kind) {
         .overview => .overview,
         .pages,
@@ -2371,6 +2837,7 @@ fn canonicalUrlSeparated(
             adjusted.subject = "";
         },
         .analyze => if (adjusted.analysis_series.len == 0 and
+            adjusted.analysis_breakdown == null and
             !adjusted.kind.isList())
         {
             adjusted.kind = .pages;
@@ -2391,6 +2858,24 @@ fn canonicalUrlSeparated(
     }
     adjusted.page = page_number;
     try canonicalPath(output, destination, adjusted);
+    if (destination == .analyze and adjusted.analysis_breakdown != null) {
+        var breakdown = adjusted.analysis_breakdown.?;
+        breakdown.page = page_number;
+        const parameters = try analysis.canonicalUrl(
+            std.heap.page_allocator,
+            breakdown,
+        );
+        defer std.heap.page_allocator.free(parameters);
+        try output.writeByte('?');
+        var parts = std.mem.splitScalar(u8, parameters, '&');
+        var first = true;
+        while (parts.next()) |part| {
+            if (!first) try output.writeAll(separator);
+            first = false;
+            try output.writeAll(part);
+        }
+        return;
+    }
     if (destination == .analyze and adjusted.analysis_series.len != 0) {
         const parameters = try analysis.canonicalTrendSetUrl(
             std.heap.page_allocator,
@@ -2683,6 +3168,63 @@ test "Analyze chart coordinates retain exact rate and average components" {
     try std.testing.expectEqualStrings(
         "exact sum EUR 10.000000 / 3 values",
         average.formatted,
+    );
+
+    const revenue = try analyzeChartMeasure(
+        allocator,
+        .{ .amount = .{
+            .decimal = "10.000000",
+            .currency = "EUR",
+            .value_count = 3,
+        } },
+        .revenue,
+    );
+    try std.testing.expectEqual(@as(?i128, 10_000_000), revenue.value);
+    try std.testing.expectEqualStrings(
+        "EUR 10.000000 / 3 values",
+        revenue.formatted,
+    );
+}
+
+test "Breakdown bars never compare unlike currencies" {
+    const rows = [_]analysis.BreakdownRow{
+        .{
+            .label = .{ .value = "A" },
+            .measure = .{ .amount = .{
+                .decimal = "10.000000",
+                .currency = "EUR",
+                .value_count = 1,
+            } },
+        },
+        .{
+            .label = .{ .value = "B" },
+            .measure = .{ .amount = .{
+                .decimal = "20.000000",
+                .currency = "USD",
+                .value_count = 1,
+            } },
+        },
+        .{
+            .label = .{ .value = "C" },
+            .measure = .{ .amount = .{
+                .decimal = "5.000000",
+                .currency = "EUR",
+                .value_count = 1,
+            } },
+        },
+    };
+    const values = [_]AnalyzeChartMeasure{
+        .{ .value = 10_000_000 },
+        .{ .value = 20_000_000 },
+        .{ .value = 5_000_000 },
+    };
+    try std.testing.expectEqual(
+        @as(i128, 10_000_000),
+        breakdownBarMaximum(&rows, &values, 0),
+    );
+    try std.testing.expectEqual(
+        @as(i128, 20_000_000),
+        breakdownBarMaximum(&rows, &values, 1),
     );
 }
 

@@ -135,6 +135,7 @@ pub const LegacyMigrationEvidence = struct {
 pub const Store = struct {
     database: duckdb.Database,
     overview_result_cache: ?OverviewResultCache = null,
+    property_catalog_cache: ?PropertyCatalogCache = null,
 
     pub fn open(allocator: std.mem.Allocator, path: []const u8) !Store {
         return .{ .database = try duckdb.Database.open(allocator, path) };
@@ -156,27 +157,32 @@ pub const Store = struct {
 
     pub fn deinit(self: *Store) void {
         if (self.overview_result_cache) |*cache| cache.deinit();
+        if (self.property_catalog_cache) |*cache| cache.deinit();
         self.database.deinit();
     }
 
     pub fn migrate(self: *Store) !void {
         try self.migrateThrough(schema_version);
         self.invalidateAnalysisCache();
+        self.invalidatePropertyCatalogCache();
     }
 
     pub fn migrateFixtureV4(self: *Store) !void {
         try self.migrateThrough(4);
         self.invalidateAnalysisCache();
+        self.invalidatePropertyCatalogCache();
     }
 
     pub fn migrateFixtureV5(self: *Store) !void {
         try self.migrateThrough(5);
         self.invalidateAnalysisCache();
+        self.invalidatePropertyCatalogCache();
     }
 
     pub fn migrateFixtureV6(self: *Store) !void {
         try self.migrateThrough(6);
         self.invalidateAnalysisCache();
+        self.invalidatePropertyCatalogCache();
     }
 
     fn migrateThrough(self: *Store, target: i64) !void {
@@ -2286,6 +2292,11 @@ pub const Store = struct {
         self.overview_result_cache = null;
     }
 
+    fn invalidatePropertyCatalogCache(self: *Store) void {
+        if (self.property_catalog_cache) |*cache| cache.deinit();
+        self.property_catalog_cache = null;
+    }
+
     fn eventDigest(
         self: *Store,
         allocator: std.mem.Allocator,
@@ -2360,6 +2371,17 @@ pub const OverviewResultCache = struct {
     result: analysis.OverviewResult,
 
     pub fn deinit(self: *OverviewResultCache) void {
+        self.arena.deinit();
+    }
+};
+
+pub const PropertyCatalogCache = struct {
+    arena: std.heap.ArenaAllocator,
+    key: []const u8,
+    catalog: analysis.PropertyCatalog,
+    expires_at_nanos: i128,
+
+    pub fn deinit(self: *PropertyCatalogCache) void {
         self.arena.deinit();
     }
 };

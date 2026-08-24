@@ -483,6 +483,136 @@ test "site creation permits only exact HTTP loopback origins" {
     }
 }
 
+test "Breakdown builder and legacy lists produce one typed query" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const parsed = try parseBreakdownBuilder(
+        allocator,
+        "/admin/sites/example/analyze?builder=1&mode=breakdown&from=2026-01-01&to=2026-01-02&metric=event-count&event=signup&goal=&dimension=event-property&property=plan&property-type=string&search=Pro+plan&sort=label-asc&limit=50&p=plan%7Eis%7Estring%7EPro",
+    );
+    const built = try finishBreakdownBuilder(
+        parsed,
+        "example",
+        "00000000-0000-4000-8000-000000000024",
+    );
+    try std.testing.expectEqualStrings(
+        "Pro plan",
+        built.analysis_breakdown.?.search,
+    );
+    try std.testing.expectEqual(
+        analysis.DimensionKind.event_property,
+        built.analysis_breakdown.?.dimension.?.kind,
+    );
+    try std.testing.expectEqual(
+        analysis.Sort.label_asc,
+        built.analysis_breakdown.?.sort,
+    );
+    try std.testing.expectEqual(@as(u16, 50), built.analysis_breakdown.?.limit);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        built.analysis_breakdown.?.metric.selector.?.predicates.len,
+    );
+    try std.testing.expectEqualStrings(
+        "plan",
+        built.analysis_breakdown.?.metric.selector.?.predicates[0].property_ref.name,
+    );
+    const standard = try finishBreakdownBuilder(
+        try parseBreakdownBuilder(
+            allocator,
+            "/admin/sites/example/analyze?builder=1&mode=breakdown&from=2026-01-01&to=2026-01-02&metric=sessions&event=&goal=&dimension=device&property=&property-type=string&search=&sort=value-desc&limit=25",
+        ),
+        "example",
+        "00000000-0000-4000-8000-000000000024",
+    );
+    try std.testing.expectEqual(
+        analysis.DimensionKind.device,
+        standard.analysis_breakdown.?.dimension.?.kind,
+    );
+    try std.testing.expectError(
+        error.InvalidAnalysisScalarType,
+        finishBreakdownBuilder(
+            try parseBreakdownBuilder(
+                allocator,
+                "/admin/sites/example/analyze?builder=1&mode=breakdown&from=2026-01-01&to=2026-01-02&metric=sessions&event=&goal=&dimension=device&property=&property-type=wat&search=&sort=value-desc&limit=25",
+            ),
+            "example",
+            "00000000-0000-4000-8000-000000000024",
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidAnalysisPercentEncoding,
+        parseBreakdownBuilder(
+            allocator,
+            "/admin/sites/example/analyze?builder=1&mode=breakdown&from=2026-01-01&to=2026-01-02&metric=event-count&event=signup&goal=&dimension=event-property&property=plan&property-type=string&search=&sort=value-desc&limit=25&p=plan%7eis%7estring%7ePro",
+        ),
+    );
+
+    const translated = try translateLegacyBreakdown(.{
+        .site = "example",
+        .range = .{ .start = "2026-01-01", .end = "2026-01-02" },
+        .comparison = .previous,
+        .kind = .campaigns,
+        .campaign_dimension = .all,
+        .sort = .label,
+        .limit = 10,
+        .page = 3,
+    }, "00000000-0000-4000-8000-000000000024");
+    try std.testing.expectEqual(
+        analysis.DimensionKind.utm_campaign,
+        translated.analysis_breakdown.?.dimension.?.kind,
+    );
+    try std.testing.expectEqual(analysis.Comparison.none, translated.comparison);
+    try std.testing.expectEqual(analysis.Sort.label_asc, translated.analysis_breakdown.?.sort);
+    try std.testing.expectEqual(@as(u32, 3), translated.analysis_breakdown.?.page);
+
+    var filtered = built.analysis_breakdown.?;
+    const filter_values = [_][]const u8{"signup"};
+    const filters = [_]analysis.Clause{.{
+        .scope = .event,
+        .field = .{ .kind = .event_name },
+        .operator = .is,
+        .scalar_type = .string,
+        .values = &filter_values,
+    }};
+    filtered.filters = .{ .clauses = &filters };
+    try std.testing.expectError(
+        error.AnalysisOptionsNotApplicable,
+        finishBreakdownQuery(filtered, "example"),
+    );
+
+    var segmented = built.analysis_breakdown.?;
+    segmented.segment_id = "00000000-0000-4000-8000-000000000030";
+    try std.testing.expectError(
+        error.AnalysisOptionsNotApplicable,
+        finishBreakdownQuery(segmented, "example"),
+    );
+
+    var page_selector = built.analysis_breakdown.?;
+    page_selector.metric = .{
+        .kind = .revenue,
+        .selector = .{ .kind = .exact_page, .value = "/pricing" },
+    };
+    try std.testing.expectError(
+        error.InvalidBreakdownMetric,
+        finishBreakdownQuery(page_selector, "example"),
+    );
+
+    var session_conversion = built.analysis_breakdown.?;
+    session_conversion.metric = .{
+        .kind = .conversion_rate,
+        .selector = .{
+            .kind = .saved_goal,
+            .value = "00000000-0000-4000-8000-000000000030",
+        },
+        .conversion_basis = .session,
+    };
+    try std.testing.expectError(
+        error.InvalidBreakdownMetric,
+        finishBreakdownQuery(session_conversion, "example"),
+    );
+}
+
 fn validSiteTimezone(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -788,7 +918,7 @@ pub fn parseTrendQuery(
         }
         try series.append(
             allocator,
-            try browserTrendMetric(metric_name, event_name, goal_id),
+            try browserMetric(metric_name, event_name, goal_id),
         );
     }
     parsed.series = if (series.items.len == 0)
@@ -840,7 +970,7 @@ fn defaultTrendSeries(allocator: std.mem.Allocator) ![]const analysis.Metric {
     return series;
 }
 
-fn browserTrendMetric(
+fn browserMetric(
     metric_name: []const u8,
     event_name: []const u8,
     goal_id: []const u8,
@@ -897,6 +1027,209 @@ fn builderField(name: []const u8, prefix: []const u8) ?usize {
 fn setParsedOnce(target: *?[]const u8, value: []const u8) !void {
     if (target.* != null) return error.DuplicateQueryField;
     target.* = value;
+}
+
+pub const ParsedBreakdownBuilder = struct {
+    from: []const u8,
+    to: []const u8,
+    metric: []const u8,
+    event: []const u8 = "",
+    goal: []const u8 = "",
+    dimension: []const u8,
+    property_name: []const u8 = "",
+    property_type: []const u8 = "",
+    predicates: []const analysis.PropertyPredicate = &.{},
+    search: []const u8 = "",
+    sort: analysis.Sort = .value_desc,
+    limit: u16 = 25,
+};
+
+pub fn parseBreakdownBuilder(
+    allocator: std.mem.Allocator,
+    target: []const u8,
+) !ParsedBreakdownBuilder {
+    const marker = std.mem.findScalar(u8, target, '?') orelse
+        return error.IncompleteBreakdownBuilder;
+    const encoded = target[marker + 1 ..];
+    if (encoded.len == 0 or encoded.len > analysis.maximum_url_bytes) {
+        return error.InvalidBreakdownBuilder;
+    }
+    var builder: ?[]const u8 = null;
+    var mode: ?[]const u8 = null;
+    var from: ?[]const u8 = null;
+    var to: ?[]const u8 = null;
+    var metric: ?[]const u8 = null;
+    var event: ?[]const u8 = null;
+    var goal: ?[]const u8 = null;
+    var dimension: ?[]const u8 = null;
+    var property_name: ?[]const u8 = null;
+    var property_type: ?[]const u8 = null;
+    var predicates: std.ArrayList(analysis.PropertyPredicate) = .empty;
+    var search: ?[]const u8 = null;
+    var sort: ?[]const u8 = null;
+    var limit: ?[]const u8 = null;
+    var count: usize = 0;
+    var parameters = std.mem.splitScalar(u8, encoded, '&');
+    while (parameters.next()) |parameter| {
+        if (parameter.len == 0) return error.InvalidBreakdownBuilder;
+        count += 1;
+        if (count > analysis.maximum_url_parameters) {
+            return error.TooManyQueryFields;
+        }
+        const raw_name, const raw_value = std.mem.cutScalar(u8, parameter, '=') orelse
+            return error.InvalidBreakdownBuilder;
+        const name = try decodeComponent(allocator, raw_name);
+        const value = try decodeComponent(allocator, raw_value);
+        if (std.mem.eql(u8, name, "builder")) {
+            try setParsedOnce(&builder, value);
+        } else if (std.mem.eql(u8, name, "mode")) {
+            try setParsedOnce(&mode, value);
+        } else if (std.mem.eql(u8, name, "from")) {
+            try setParsedOnce(&from, value);
+        } else if (std.mem.eql(u8, name, "to")) {
+            try setParsedOnce(&to, value);
+        } else if (std.mem.eql(u8, name, "metric")) {
+            try setParsedOnce(&metric, value);
+        } else if (std.mem.eql(u8, name, "event")) {
+            try setParsedOnce(&event, value);
+        } else if (std.mem.eql(u8, name, "goal")) {
+            try setParsedOnce(&goal, value);
+        } else if (std.mem.eql(u8, name, "dimension")) {
+            try setParsedOnce(&dimension, value);
+        } else if (std.mem.eql(u8, name, "property")) {
+            try setParsedOnce(&property_name, value);
+        } else if (std.mem.eql(u8, name, "property-type")) {
+            try setParsedOnce(&property_type, value);
+        } else if (std.mem.eql(u8, name, "p")) {
+            if (predicates.items.len >= analysis.maximum_selector_predicates) {
+                return error.TooManySelectorPredicates;
+            }
+            try predicates.append(
+                allocator,
+                try analysis.parseFormPredicate(allocator, raw_value),
+            );
+        } else if (std.mem.eql(u8, name, "search")) {
+            try setParsedOnce(&search, value);
+        } else if (std.mem.eql(u8, name, "sort")) {
+            try setParsedOnce(&sort, value);
+        } else if (std.mem.eql(u8, name, "limit")) {
+            try setParsedOnce(&limit, value);
+        } else {
+            return error.UnknownQueryField;
+        }
+    }
+    if (!std.mem.eql(u8, builder orelse return error.IncompleteBreakdownBuilder, "1") or
+        !std.mem.eql(u8, mode orelse return error.IncompleteBreakdownBuilder, "breakdown"))
+    {
+        return error.InvalidBreakdownBuilder;
+    }
+    const parsed_limit = if (limit) |value|
+        std.fmt.parseInt(u16, value, 10) catch return error.InvalidAnalysisLimit
+    else
+        25;
+    return .{
+        .from = from orelse return error.IncompleteBreakdownBuilder,
+        .to = to orelse return error.IncompleteBreakdownBuilder,
+        .metric = metric orelse return error.IncompleteBreakdownBuilder,
+        .event = event orelse "",
+        .goal = goal orelse "",
+        .dimension = dimension orelse return error.IncompleteBreakdownBuilder,
+        .property_name = property_name orelse "",
+        .property_type = property_type orelse "",
+        .predicates = try predicates.toOwnedSlice(allocator),
+        .search = search orelse "",
+        .sort = if (sort) |value| try analysis.Sort.parse(value) else .value_desc,
+        .limit = parsed_limit,
+    };
+}
+
+pub fn finishBreakdownBuilder(
+    parsed: ParsedBreakdownBuilder,
+    site_slug: []const u8,
+    site_id: []const u8,
+) !model.Query {
+    const dimension_kind = try analysis.DimensionKind.parse(parsed.dimension);
+    const property_ref: ?analysis.PropertyRef = if (dimension_kind == .event_property)
+        .{
+            .name = parsed.property_name,
+            .scalar_type = try analysis.ScalarType.parse(parsed.property_type),
+        }
+    else value: {
+        if (parsed.property_name.len != 0) {
+            return error.UnexpectedAnalysisProperty;
+        }
+        if (parsed.property_type.len != 0) {
+            _ = try analysis.ScalarType.parse(parsed.property_type);
+        }
+        break :value null;
+    };
+    var metric = try browserMetric(parsed.metric, parsed.event, parsed.goal);
+    if (parsed.predicates.len != 0) {
+        var selector = metric.selector orelse return error.UnexpectedSelectorValue;
+        selector.predicates = parsed.predicates;
+        metric.selector = selector;
+    }
+    const breakdown = analysis.Query{
+        .site_id = site_id,
+        .range = .{ .start = parsed.from, .end = parsed.to },
+        .comparison = .none,
+        .mode = .breakdown,
+        .metric = metric,
+        .dimension = .{ .kind = dimension_kind, .property_ref = property_ref },
+        .search = parsed.search,
+        .sort = parsed.sort,
+        .limit = parsed.limit,
+    };
+    try breakdown.validate();
+    const query = model.Query{
+        .site = site_slug,
+        .analysis_site_id = site_id,
+        .range = breakdown.range,
+        .comparison = .none,
+        .analysis_breakdown = breakdown,
+    };
+    try validateQuery(query);
+    return query;
+}
+
+pub fn finishBreakdownQuery(
+    breakdown: analysis.Query,
+    site_slug: []const u8,
+) !model.Query {
+    try breakdown.validate();
+    const query = model.Query{
+        .site = site_slug,
+        .analysis_site_id = breakdown.site_id,
+        .range = breakdown.range,
+        .comparison = .none,
+        .analysis_breakdown = breakdown,
+    };
+    try validateQuery(query);
+    return query;
+}
+
+pub fn translateLegacyBreakdown(
+    legacy: model.Query,
+    site_id: []const u8,
+) !model.Query {
+    if (!legacy.kind.isList()) return error.InvalidLegacyBreakdown;
+    const mapped = analysis.presetForCurrentReport(
+        legacy.kind,
+        legacy.campaign_dimension,
+    );
+    const preset: analysis.Preset = switch (mapped) {
+        .analysis => |value| value,
+        .campaign_tuple => .campaigns_campaign,
+        else => return error.InvalidLegacyBreakdown,
+    };
+    var breakdown = analysis.presetQuery(preset, site_id, legacy.range);
+    breakdown.sort = switch (legacy.sort) {
+        .count => .value_desc,
+        .label => .label_asc,
+    };
+    breakdown.page = legacy.page;
+    breakdown.limit = legacy.limit;
+    return finishBreakdownQuery(breakdown, legacy.site);
 }
 
 pub fn loadPage(
@@ -1212,6 +1545,83 @@ pub fn loadTrendPage(
         .report_time_basis = .none,
         .result = null,
         .analyze_trend = view,
+        .goals = goals,
+        .funnels = funnels,
+        .self_exclusion_origins = policy.origins,
+        .excluded_networks = policy.excluded_networks,
+        .strict_mode = policy.strict_mode,
+        .daily_event_ceiling = policy.daily_event_ceiling,
+        .csrf_token = csrf_token,
+    };
+}
+
+pub fn loadBreakdownPage(
+    allocator: std.mem.Allocator,
+    metadata: *meta.Store,
+    event_store: *events.Store,
+    query_input: model.Query,
+    calendar_context: calendar.Context,
+    csrf_token: []const u8,
+    report_timeout_ms: u32,
+) !model.Page {
+    var query = query_input;
+    const sites = try metadata.listSites(allocator);
+    if (sites.len == 0) return error.SiteNotFound;
+    const selected = try resolveSite(sites, query.site);
+    query.site = selected.slug;
+    query.analysis_site_id = selected.id;
+    var breakdown = query.analysis_breakdown orelse
+        return error.MissingAnalyzeBreakdown;
+    if (!std.mem.eql(u8, breakdown.site_id, selected.id)) {
+        return error.InvalidAnalysisSite;
+    }
+    try validateQuery(query);
+
+    const goals = try metadata.listGoals(allocator, selected.slug);
+    const funnels = try metadata.listFunnels(allocator, selected.slug);
+    const policy = try metadata.sitePolicy(allocator, selected.id);
+    if (breakdown.metric.selector) |selector| {
+        if (selector.kind == .saved_goal and goalById(goals, selector.value) == null) {
+            return error.GoalNotFound;
+        }
+    }
+    const resolved_goals = try resolveAnalysisGoals(allocator, goals);
+    breakdown.site_id = selected.id;
+    const executed = analysis_store.executeBreakdownPage(
+        allocator,
+        event_store,
+        .{
+            .query = breakdown,
+            .active_goals = resolved_goals,
+            .strict_traffic_mode = policy.strict_mode,
+            .timeout_ms = report_timeout_ms,
+        },
+    ) catch |err| {
+        if (err == error.AnalysisTimeout) return error.ReportTimeout;
+        return err;
+    };
+    return .{
+        .destination = .analyze,
+        .sites = sites,
+        .selected_site = selected,
+        .query = query,
+        .calendar_context = calendar_context,
+        .report_time_basis = .none,
+        .result = null,
+        .analyze_breakdown = .{
+            .rows = executed.breakdown.rows,
+            .next_page = executed.breakdown.next_page,
+            .cardinality = executed.breakdown.cardinality,
+            .coverage = try coverageText(
+                allocator,
+                executed.breakdown.completeness,
+                "Current",
+            ),
+            .properties = executed.properties.entries,
+            .property_count = executed.properties.property_count,
+            .properties_truncated = executed.properties.truncated,
+            .no_events_ever = !executed.site_has_events,
+        },
         .goals = goals,
         .funnels = funnels,
         .self_exclusion_origins = policy.origins,
@@ -2245,6 +2655,29 @@ pub fn verifyCsrf(form: Form, expected: []const u8) !void {
 pub fn validateQuery(query: model.Query) !void {
     try domain.validateSlug(query.site);
     query.range.validate() catch return error.InvalidReportRange;
+    if (query.analysis_breakdown) |breakdown| {
+        if (query.analysis_series.len != 0 or
+            query.kind != .overview or query.subject.len != 0 or
+            query.campaign_dimension != .all or query.sort != .count or
+            query.limit != report.default_limit or query.page != 1 or
+            query.overview_metric != .visitors or
+            query.overview_currency.len != 0 or
+            query.highlighted_interval.len != 0 or
+            query.analysis_interval != .auto or
+            !std.mem.eql(u8, query.analysis_site_id, breakdown.site_id) or
+            !std.mem.eql(u8, query.range.start, breakdown.range.start) or
+            !std.mem.eql(u8, query.range.end, breakdown.range.end) or
+            query.comparison != .none or breakdown.comparison != .none or
+            breakdown.mode != .breakdown or
+            breakdown.filters.clauses.len != 0 or
+            breakdown.segment_id != null)
+        {
+            return error.AnalysisOptionsNotApplicable;
+        }
+        try breakdown.validate();
+        try analysis.validateBrowserBreakdownMetric(breakdown.metric);
+        return;
+    }
     if (query.analysis_series.len != 0) {
         domain.validateUuid(query.analysis_site_id) catch
             return error.InvalidAnalysisSite;

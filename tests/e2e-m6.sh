@@ -60,12 +60,16 @@ data="$fixture/data"
     --timezone UTC >/dev/null
 "$binary" site add "$data" currency "Currency Overflow" \
     https://currency.example --timezone UTC >/dev/null
+"$binary" site add "$data" properties "Property Breakdown" \
+    https://properties-ui.example --timezone UTC >/dev/null
 site_id=$("$binary" site list "$data" |
     awk -F '\t' '$1 == "example" { print $2 }')
 broken_site_id=$("$binary" site list "$data" |
     awk -F '\t' '$1 == "broken" { print $2 }')
 currency_site_id=$("$binary" site list "$data" |
     awk -F '\t' '$1 == "currency" { print $2 }')
+property_site_id=$("$binary" site list "$data" |
+    awk -F '\t' '$1 == "properties" { print $2 }')
 "$binary" goal add "$data" example Signup event signup >/dev/null
 "$binary" goal add "$data" example \
     '<script>alert(1)</script> "&' event escaped >/dev/null
@@ -101,6 +105,30 @@ start_server
 received_date=$(date -u +%F)
 received_end_date=$(date -u -d "$received_date + 1 day" +%F)
 occurred_ms=$(date -u +%s%3N)
+for index in {0..104}; do
+    case $((index % 5)) in
+        0) mixed='"alpha"' ;;
+        1) mixed='42' ;;
+        2) mixed='42.500000' ;;
+        3) mixed='true' ;;
+        4) mixed='null' ;;
+    esac
+    optional=
+    if (( index % 2 == 0 )); then
+        optional=',"optional":"present"'
+    fi
+    property_body=$(printf \
+        '{"v":2,"site":"%s","event_id":"00000000-0000-4000-9000-%012d","anonymous_id":"00000000-0000-4000-9000-000000000201","identity_quality":"persistent","session_id":"00000000-0000-4000-9000-000000000301","sequence":%d,"occurred_at_ms":%s,"type":"event","name":"property_probe","properties":{"high":"Value-%03d","plan":"%s","mixed":%s,"nullable":null%s}}' \
+        "$property_site_id" "$((index + 1))" "$index" "$occurred_ms" \
+        "$index" "$([[ $((index % 2)) == 0 ]] && printf Pro || printf Free)" \
+        "$mixed" "$optional")
+    test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+        -X POST "$upstream/v2/event" -H 'Content-Type: text/plain' \
+        -H 'Origin: https://properties-ui.example' \
+        -H "X-Forwarded-For: 198.18.$index.1" \
+        -H 'User-Agent: Mozilla/5.0 (X11; Linux x86_64) Chrome/140.0' \
+        --data-binary "$property_body")" = 204
+done
 currencies=(AUD EUR GBP USD)
 for index in "${!currencies[@]}"; do
     sequence=$((index + 1))
@@ -174,7 +202,7 @@ curl --silent --fail --cookie "$cookie" \
 cmp "$fixture/page-one.html" "$fixture/page-two.html"
 while IFS='|' read -r path label extra; do
     route_page="$fixture/route-${label,,}.html"
-    curl --silent --fail --cookie "$cookie" \
+    curl --silent --fail --location --cookie "$cookie" \
         "$dashboard/admin/sites/example/$path?$dates$extra" \
         >"$route_page"
     grep -Fq "<h1>$label</h1>" "$route_page"
@@ -182,7 +210,7 @@ while IFS='|' read -r path label extra; do
     grep -Fq "<span class=\"nav-label\">$label</span>" "$route_page"
 done <<'ROUTES'
 overview|Overview|
-analyze|Analyze|&report=pages&sort=count&limit=25&page=1
+analyze|Analyze|
 journeys/goals|Journeys|
 sessions|Sessions|
 live|Live|
@@ -210,18 +238,18 @@ grep -Fq 'Invalid calendar or report state' "$fixture/invalid-calendar.html"
 grep -Fq 'Reset to the site' "$fixture/invalid-calendar.html"
 status=$(curl --silent --output "$fixture/invalid-highlight.html" \
     --write-out '%{http_code}' --cookie "$cookie" \
-    "$dashboard/admin/sites/example/analyze?$dates&report=pages&sort=count&limit=25&page=1&focus=sessions&highlight=2025-01-03T00%3A00")
+    "$dashboard/admin/sites/example/analyze?v=1&$dates&mode=trend&interval=hour&series=sessions&highlight=2025-01-03T00%3A00")
 test "$status" = 400
 grep -Fq 'Invalid report request' "$fixture/invalid-highlight.html"
 status=$(curl --silent --output "$fixture/malformed-highlight.html" \
     --write-out '%{http_code}' --cookie "$cookie" \
-    "$dashboard/admin/sites/example/analyze?$dates&report=pages&sort=count&limit=25&page=1&focus=sessions&highlight=2025-01-01T00%3A30")
+    "$dashboard/admin/sites/example/analyze?v=1&$dates&mode=trend&interval=hour&series=sessions&highlight=2025-01-01T00%3A30")
 test "$status" = 400
-grep -Fq 'Invalid calendar or report state' "$fixture/malformed-highlight.html"
+grep -Fq 'Invalid analysis request' "$fixture/malformed-highlight.html"
 test "$(curl --silent --output /dev/null --write-out '%{redirect_url}' \
     --cookie "$cookie" \
     "$dashboard/admin?site=example&start=2025-01-01&end=2025-01-02&report=pages")" = \
-    "$dashboard/admin/sites/example/analyze?$dates&report=pages&sort=count&limit=25&page=1"
+    "$dashboard/admin/sites/example/analyze?v=1&from=2025-01-01&to=2025-01-02&compare=none&mode=breakdown&metric=page-views&dimension=page&interval=auto&sort=value-desc&page=1&limit=25"
 test "$(curl --silent --output /dev/null --write-out '%{redirect_url}' \
     --cookie "$cookie" \
     "$dashboard/admin?site=example&start=2025-01-01&end=2025-01-02&report=goal&subject=Signup")" = \
@@ -338,6 +366,14 @@ test "$status" = 503
 grep -Fq 'Analysis timed out' "$fixture/trend-timeout.html"
 grep -Fq 'shared server deadline' "$fixture/trend-timeout.html"
 grep -Fq 'series=visitors' "$fixture/trend-timeout.html"
+breakdown_timeout_url="$dashboard/admin/sites/example/analyze?v=1&from=2025-01-01&to=2025-01-12&compare=none&mode=breakdown&metric=page-views&dimension=page&interval=auto&sort=value-desc&page=1&limit=25"
+status=$(curl --silent --output "$fixture/breakdown-timeout.html" \
+    --write-out '%{http_code}' --cookie "$cookie" "$breakdown_timeout_url")
+test "$status" = 503
+grep -Fq 'Report timed out' "$fixture/breakdown-timeout.html"
+grep -Fq 'Breakdown result, conditional empty-site check, and property catalog exceeded their shared server deadline' \
+    "$fixture/breakdown-timeout.html"
+grep -Fq 'mode=breakdown' "$fixture/breakdown-timeout.html"
 post_timeout_body=$(printf \
     '{"v":2,"site":"%s","event_id":"ffffffff-ffff-4fff-8fff-fffffffffff1","anonymous_id":"ffffffff-ffff-4fff-8fff-fffffffffff2","identity_quality":"persistent","session_id":"ffffffff-ffff-4fff-8fff-fffffffffff3","sequence":1,"occurred_at_ms":%s,"type":"event","name":"post_timeout"}' \
     "$site_id" "$(date -u +%s%3N)")
