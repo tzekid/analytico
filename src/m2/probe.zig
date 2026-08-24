@@ -1,9 +1,11 @@
 const std = @import("std");
+const analysis = @import("../analysis.zig");
 const domain = @import("../domain.zig");
 const property = @import("../property.zig");
 const rate_limit = @import("../http/rate_limit.zig");
 const duckdb = @import("../store/duckdb.zig");
 const events = @import("../store/events.zig");
+const analysis_store = @import("../store/analysis.zig");
 const properties = @import("../store/properties.zig");
 
 const benchmark_site_id = "00000000-0000-4000-8000-000000000f10";
@@ -457,6 +459,112 @@ pub fn propertyMillion(
         window,
         property.max_result_rows,
     );
+    const typed_execution = analysis.Execution{ .query = .{
+        .site_id = benchmark_site_id,
+        .range = .{ .start = "2026-01-01", .end = "2026-01-01" },
+        .mode = .breakdown,
+        .metric = .{ .kind = .custom_events },
+        .dimension = .{
+            .kind = .event_property,
+            .property_ref = .{ .name = "plan", .scalar_type = .string },
+        },
+        .limit = analysis.maximum_limit,
+    } };
+    const typed_cold_started = std.Io.Clock.awake.now(io).nanoseconds;
+    _ = try analysis_store.executeBreakdownPage(
+        allocator,
+        &store,
+        typed_execution,
+    );
+    const typed_cold_ms: i64 = @intCast(@divTrunc(
+        std.Io.Clock.awake.now(io).nanoseconds - typed_cold_started,
+        std.time.ns_per_ms,
+    ));
+    var typed_samples: [10]i64 = undefined;
+    var typed_page: analysis.BreakdownPageResult = undefined;
+    for (&typed_samples) |*sample| {
+        const started = std.Io.Clock.awake.now(io).nanoseconds;
+        typed_page = try analysis_store.executeBreakdownPage(
+            allocator,
+            &store,
+            typed_execution,
+        );
+        sample.* = @intCast(@divTrunc(
+            std.Io.Clock.awake.now(io).nanoseconds - started,
+            std.time.ns_per_ms,
+        ));
+    }
+    std.mem.sort(i64, &typed_samples, {}, std.sort.asc(i64));
+
+    var ordinary_execution = typed_execution;
+    ordinary_execution.query.dimension = .{ .kind = .event_name };
+    _ = try analysis_store.executeBreakdownPage(
+        allocator,
+        &store,
+        ordinary_execution,
+    );
+    var ordinary_samples: [10]i64 = undefined;
+    for (&ordinary_samples) |*sample| {
+        const started = std.Io.Clock.awake.now(io).nanoseconds;
+        _ = try analysis_store.executeBreakdownPage(
+            allocator,
+            &store,
+            ordinary_execution,
+        );
+        sample.* = @intCast(@divTrunc(
+            std.Io.Clock.awake.now(io).nanoseconds - started,
+            std.time.ns_per_ms,
+        ));
+    }
+    std.mem.sort(i64, &ordinary_samples, {}, std.sort.asc(i64));
+
+    var search_execution = typed_execution;
+    search_execution.query.dimension.?.property_ref = .{
+        .name = "high",
+        .scalar_type = .string,
+    };
+    search_execution.query.search = "h09999";
+    const search_started = std.Io.Clock.awake.now(io).nanoseconds;
+    const searched = try analysis_store.executeBreakdownPage(
+        allocator,
+        &store,
+        search_execution,
+    );
+    const search_ms: i64 = @intCast(@divTrunc(
+        std.Io.Clock.awake.now(io).nanoseconds - search_started,
+        std.time.ns_per_ms,
+    ));
+
+    var missing_execution = typed_execution;
+    missing_execution.query.dimension.?.property_ref = .{
+        .name = "optional",
+        .scalar_type = .missing,
+    };
+    const missing = try analysis_store.executeBreakdownPage(
+        allocator,
+        &store,
+        missing_execution,
+    );
+    var null_execution = typed_execution;
+    null_execution.query.dimension.?.property_ref = .{
+        .name = "nullable",
+        .scalar_type = .null,
+    };
+    const null_value = try analysis_store.executeBreakdownPage(
+        allocator,
+        &store,
+        null_execution,
+    );
+    var mixed_types: usize = 0;
+    var sampled_plan_events: i64 = 0;
+    for (typed_page.properties.entries) |entry| {
+        if (std.mem.eql(u8, entry.name, "mixed")) mixed_types += 1;
+        if (std.mem.eql(u8, entry.name, "plan") and
+            entry.scalar_type == .string)
+        {
+            sampled_plan_events = entry.event_count;
+        }
+    }
     const filters = .{
         .string = try properties.countMatching(
             allocator,
@@ -520,6 +628,24 @@ pub fn propertyMillion(
             .bucket_count = high_breakdown.bucket_count,
             .truncated = high_breakdown.truncated,
             .elapsed_ms = high_ms,
+        },
+        .metric_v2_breakdown = .{
+            .rows = typed_page.breakdown.rows.len,
+            .cardinality = typed_page.breakdown.cardinality,
+            .property_count = typed_page.properties.property_count,
+            .mixed_types = mixed_types,
+            .sampled_plan_events = sampled_plan_events,
+            .samples = typed_samples.len,
+            .cold_ms = typed_cold_ms,
+            .p50_ms = typed_samples[4],
+            .p95_ms = typed_samples[9],
+            .p99_ms = typed_samples[9],
+            .ordinary_p95_ms = ordinary_samples[9],
+            .search_rows = searched.breakdown.rows.len,
+            .search_cardinality = searched.breakdown.cardinality,
+            .search_ms = search_ms,
+            .missing_events = missing.breakdown.rows[0].measure.count,
+            .null_events = null_value.breakdown.rows[0].measure.count,
         },
     };
     try std.json.Stringify.value(result, .{}, output);

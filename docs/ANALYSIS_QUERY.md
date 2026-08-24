@@ -19,6 +19,7 @@ sessions, profiles, or Live traffic.
 - At most 16 exact currency series and 6,400 Trend rows; overflow is a typed
   failure rather than silent truncation.
 - Interactive limit: 1–100 rows; page: 1–1,000,000.
+- Breakdown search: empty or at most 256 control-free UTF-8 bytes.
 - FilterSet: `all` mode, at most 12 clauses and 20 OR values per clause.
 - EventSelector: at most three typed property predicates.
 - Execution context: at most 32 resolved active-goal selectors.
@@ -83,6 +84,7 @@ An `AnalysisQuery` contains:
 - optional dimension;
 - interval: `auto`, `hour`, `day`, `week`, or `month`;
 - FilterSet and optional segment UUID;
+- optional Breakdown result-label search;
 - sort, page, and limit.
 
 Metrics are closed to:
@@ -230,18 +232,20 @@ literal fragments selected by closed enums. It must:
 5. bind every site, date, entity, property pointer, filter value, selector
    value, limit, and offset;
 6. enforce the configured deadline through DuckDB interrupt;
-7. bound rows and return exact cardinality/truncation metadata.
+7. apply optional bound aggregate-label search before stable ordering and
+   pagination;
+8. bound rows and return exact cardinality/truncation metadata.
 
 Request values, enum names parsed from requests, SQL identifiers, functions,
 sort expressions, and JSON paths are never interpolated. A compiler test must
 prove adversarial values appear in bindings but not compiled SQL.
 
-Except for D35's one exact, mutation-invalidated complete Overview-result entry,
-no cache, rollup, projection, EAV table, background worker, extension, or new
-dependency is accepted by this contract. A measured miss follows the
-optimization order in `PERFORMANCE.md` and requires a later decision where
-consequential. D35 does not authorize caching ordinary `AnalysisQuery`
-results.
+Except for D35's one exact, mutation-invalidated complete Overview-result entry
+and D39's one short-lived sampled property-suggestion catalog entry, no cache,
+rollup, projection, EAV table, background worker, extension, or new dependency
+is accepted by this contract. A measured miss follows the optimization order
+in `PERFORMANCE.md` and requires a later decision where consequential. Neither
+exception authorizes caching an ordinary `AnalysisQuery` result.
 
 When a segment ID is present, the controller composes the resolved segment and
 ad-hoc clauses into FilterSet and marks the execution context resolved. An
@@ -253,15 +257,16 @@ arena.
 
 Canonical saved JSON uses a fixed field order, explicit schema/metric versions,
 enum names from this contract, sorted clauses, sorted/deduplicated values, and
-no transient page number. Unknown fields, duplicate logical fields, invalid
-UTF-8, noncanonical numbers, and out-of-bound arrays reject.
+no transient page number. Optional Breakdown search follows dimension in that
+fixed order and is absent when empty. Unknown fields, duplicate logical fields,
+invalid UTF-8, noncanonical numbers, and out-of-bound arrays reject.
 
 Canonical URL state is a query component, not a full route. The site lives in
 the route and is not duplicated. Scalar parameters occur once in this order:
 
 ```text
 v,from,to,compare,mode,metric,conversion-basis,selector,selector-value,dimension,
-property,property-type,interval,segment,sort,page,limit
+property,property-type,search,interval,segment,sort,page,limit
 ```
 
 Absent optional fields are omitted. Selector predicates use repeated `p=` and
@@ -270,6 +275,12 @@ sequence of scope, field, optional property name, operator, scalar type, and
 values. Each component is percent-encoded independently; the parser splits
 `&`, `=`, and `~` before percent-decoding, so encoded delimiters cannot alter
 structure. Percent escapes use uppercase hex and spaces use `%20`, never `+`.
+
+The #29 native GET forms may encode the structural `~` bytes in repeated `p=`
+values once as `%7E` while encoding component escapes as `%25`. The parser
+accepts exactly that one well-formed browser layer and redirects to the raw-`~`
+canonical spelling. Missing separators, lowercase/noncanonical escapes, extra
+encoding layers, and malformed components reject before DuckDB.
 
 Canonicalization orders and deduplicates selector predicates and filters by
 their encoded bytes.
@@ -390,7 +401,69 @@ instant. Future local hours are not rendered or accepted as highlights;
 comparison hours remain complete. Day, week, and month series retain their
 final current bucket and mark it incomplete.
 
-## 8. Analyze Trend browser consumer
+## 8. Analyze Breakdown browser consumer
+
+Issue #29 renders one ordinary D29 query directly; it does not add a
+Breakdown-set envelope or retain report-kind SQL as a second product model.
+Bare Analyze remains D37 Trend. A native mode link opens the canonical Page
+views by Page preset, and accepted builder state redirects to the canonical
+single-query component.
+
+The optional `search` field is valid only in Breakdown, is at most 256 bytes,
+and contains no control characters. It performs a case-insensitive substring
+match against the typed aggregate label after grouping and before stable
+sort/page/limit. The value is bound. Exact cardinality is the number of matching
+buckets before pagination; with no search it is the complete bucket
+cardinality. Search affects saved/result state and therefore participates in
+canonical URL and JSON. Empty search is omitted, preserving pre-D39 schema-1
+state.
+
+The page also loads at most 100 bytewise-ordered custom-event property names
+and their observed scalar types/counts from the latest 2,000 eligible custom
+events in the selected range. Discovery uses the same selected site,
+site-local range, product traffic relation, strict classifier, active-goal veto
+context, and shared request deadline as the result. The sample bound and its
+counts are labeled; direct typed input remains available for a property outside
+the sample. Missing is a selectable typed absence, not an observed JSON type. A
+multi-type property is visibly a conflict and requires one explicit type; no
+coercion occurs.
+
+The Store retains at most one sampled property catalog for 30 seconds. Its
+length-prefixed key covers the selected site and local dates, strict mode, and
+every active goal selector, predicate, type, operator, and value. A key miss or
+expiry runs the bounded catalog statement under the result's remaining shared
+deadline; a hit deep-copies the bounded catalog. Event inserts intentionally do
+not evict this suggestion-only entry, so active collection cannot turn every
+request into a cold catalog rebuild. The exact Breakdown result and exact
+cardinality are always queried and never come from this cache. When exact
+cardinality is zero, one `LIMIT 1` selected-site event-presence probe under the
+same remaining deadline distinguishes an empty installation from a valid
+no-match result; the controller performs no post-deadline event-bounds scan.
+
+Known legacy list URLs redirect to typed presets. Explicit campaign source,
+medium, campaign, term, and content states map exactly. The old combined
+`campaign=all` tuple visibly maps to Sessions by UTM campaign rather than
+expanding the closed dimension inventory. Metric-v1 CLI/report output remains
+unchanged.
+
+The server-rendered result includes the native builder, bounded catalog,
+search/sort controls, exact matched cardinality, high-cardinality warning,
+stable pagination, in-cell proportional bars, and an exact typed table in the
+first response. Count, ratio numerator/denominator, and exact amount/currency/
+value-count components remain visible. No filter/segment/save/export/entity
+placeholder, client fetch, result cache, projection, EAV table, migration, or
+new dependency is introduced.
+
+Direct canonical subjects may already contain D29 typed predicates. Native
+date and Breakdown-builder submissions preserve those bounded repeated fields
+and state their presence; they never silently broaden the subject. #30 owns a
+visible predicate/filter editor. The #29 browser consumer accepts only the
+builder's exact-event or saved-goal subject shapes and visitor-basis
+conversion metrics; other valid core D29 selector/basis combinations reject
+before execution rather than becoming state the visible builder cannot
+preserve.
+
+## 9. Analyze Trend browser consumer
 
 Issue #28 keeps the single-query canonical grammar above as the saved/query
 compiler boundary and adds the D37 browser-only Trend-set envelope over one
@@ -485,7 +558,7 @@ dead setup URL before that route exists. A selected-site rejection with no
 accepted event is a distinct tracking-broken state and links to the same Live
 evidence.
 
-## 9. Acceptance evidence
+## 10. Acceptance evidence
 
 Issue #24 must provide:
 
@@ -498,3 +571,9 @@ Issue #24 must provide:
 - current metric-v1 report regression/parity evidence without output changes;
 - timeout/interrupt and post-interrupt connection reuse;
 - Debug and ReleaseSafe execution through the real binary.
+
+Issue #29 additionally proves the D39 browser consumer: every current list
+preset/redirect, canonical search bounds, stable pagination, typed property
+null/missing/conflict behavior, exact cardinality and source components,
+million-row result-plus-catalog latency, and JavaScript-off/enhanced mobile
+browser operation.

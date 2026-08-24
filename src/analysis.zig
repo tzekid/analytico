@@ -20,6 +20,9 @@ pub const maximum_json_bytes: usize = 32 * 1024;
 pub const maximum_url_parameters: u8 = 32;
 pub const maximum_timeout_ms: u32 = 2_000;
 pub const maximum_filter_value_bytes: usize = 1_024;
+pub const maximum_search_bytes: usize = 256;
+pub const maximum_property_names: u16 = 100;
+pub const maximum_property_catalog_events: u32 = 2_000;
 
 pub const LocalDateRange = struct {
     start: []const u8,
@@ -654,9 +657,15 @@ pub fn parseTrendSeries(
 }
 
 fn validateBrowserTrendMetric(metric: Metric) !void {
+    try validateBrowserMetric(metric, false);
+}
+
+fn validateBrowserMetric(metric: Metric, allow_predicates: bool) !void {
     try metric.validate();
     if (metric.selector) |selector| {
-        if (selector.predicates.len != 0) return error.InvalidTrendSeries;
+        if (!allow_predicates and selector.predicates.len != 0) {
+            return error.InvalidTrendSeries;
+        }
     }
     switch (metric.kind) {
         .event_count, .event_visitors => if (metric.selector.?.kind != .exact_event) {
@@ -678,6 +687,11 @@ fn validateBrowserTrendMetric(metric: Metric) !void {
 
 pub fn validateTrendSeries(metric: Metric) !void {
     try validateBrowserTrendMetric(metric);
+}
+
+pub fn validateBrowserBreakdownMetric(metric: Metric) !void {
+    validateBrowserMetric(metric, true) catch
+        return error.InvalidBreakdownMetric;
 }
 
 pub const Ratio = struct {
@@ -890,6 +904,24 @@ pub const BreakdownResult = struct {
     completeness: Completeness,
 };
 
+pub const ObservedPropertyType = struct {
+    name: []const u8,
+    scalar_type: ScalarType,
+    event_count: i64,
+};
+
+pub const PropertyCatalog = struct {
+    entries: []const ObservedPropertyType,
+    property_count: i64,
+    truncated: bool,
+};
+
+pub const BreakdownPageResult = struct {
+    breakdown: BreakdownResult,
+    properties: PropertyCatalog,
+    site_has_events: bool,
+};
+
 pub const Result = union(Mode) {
     trend: TrendResult,
     breakdown: BreakdownResult,
@@ -905,6 +937,7 @@ pub const Query = struct {
     interval: Interval = .auto,
     filters: FilterSet = .{},
     segment_id: ?[]const u8 = null,
+    search: []const u8 = "",
     sort: Sort = .value_desc,
     page: u32 = 1,
     limit: u16 = 25,
@@ -915,6 +948,7 @@ pub const Query = struct {
         try self.metric.validate();
         try self.filters.validate();
         if (self.segment_id) |id| try domain.validateUuid(id);
+        try validateSearch(self.search);
         if (self.page == 0 or self.page > maximum_page) {
             return error.InvalidAnalysisPage;
         }
@@ -924,6 +958,7 @@ pub const Query = struct {
         switch (self.mode) {
             .trend => {
                 if (self.dimension != null) return error.TrendHasDimension;
+                if (self.search.len != 0) return error.TrendHasSearch;
                 if (self.page != 1 or self.limit != 25 or
                     self.sort != .value_desc)
                 {
@@ -933,6 +968,12 @@ pub const Query = struct {
             .breakdown => {
                 try (self.dimension orelse
                     return error.BreakdownMissingDimension).validate();
+                if ((self.metric.kind == .new_visitors or
+                    self.metric.kind == .returning_visitors) and
+                    self.dimension.?.kind == .event_property)
+                {
+                    return error.UnsupportedMetricDimension;
+                }
                 if (self.interval != .auto) {
                     return error.BreakdownHasInterval;
                 }
@@ -957,6 +998,20 @@ pub const Query = struct {
         return @intCast(value);
     }
 };
+
+fn validateSearch(value: []const u8) !void {
+    if (value.len > maximum_search_bytes or !std.unicode.utf8ValidateSlice(value)) {
+        return error.InvalidAnalysisSearch;
+    }
+    for (value, 0..) |byte, index| {
+        if (byte < 0x20 or byte == 0x7f) return error.InvalidAnalysisSearch;
+        if (byte == 0xc2 and index + 1 < value.len and
+            value[index + 1] >= 0x80 and value[index + 1] <= 0x9f)
+        {
+            return error.InvalidAnalysisSearch;
+        }
+    }
+}
 
 pub const ResolvedGoal = struct {
     id: []const u8,
@@ -1339,6 +1394,7 @@ const JsonState = struct {
     conversion_basis: ?[]const u8 = null,
     selector: ?JsonSelector = null,
     dimension: ?JsonDimension = null,
+    search: ?[]const u8 = null,
     interval: []const u8,
     segment: ?[]const u8 = null,
     sort: []const u8,
@@ -1391,12 +1447,13 @@ pub fn canonicalJson(
             null,
         .selector = selector,
         .dimension = dimension,
+        .search = if (query.search.len == 0) null else query.search,
         .interval = query.interval.name(),
         .segment = query.segment_id,
         .sort = query.sort.name(),
         .limit = query.limit,
         .filters = filters,
-    }, .{}, &output.writer);
+    }, .{ .emit_null_optional_fields = false }, &output.writer);
     const encoded = try output.toOwnedSlice();
     if (encoded.len > maximum_json_bytes) {
         allocator.free(encoded);
@@ -1455,6 +1512,7 @@ pub fn parseCanonicalJson(
                 null,
         },
         .dimension = dimension,
+        .search = state.search orelse "",
         .interval = try Interval.parse(state.interval),
         .filters = .{
             .clauses = try parseClauses(allocator, state.filters),
@@ -1508,6 +1566,9 @@ pub fn canonicalUrl(
             );
         }
     }
+    if (query.search.len != 0) {
+        try writeParameter(&output.writer, &first, "search", query.search);
+    }
     try writeParameter(&output.writer, &first, "interval", query.interval.name());
     if (query.segment_id) |id| {
         try writeParameter(&output.writer, &first, "segment", id);
@@ -1550,6 +1611,7 @@ const UrlParts = struct {
     dimension: ?[]const u8 = null,
     property_name: ?[]const u8 = null,
     property_type: ?[]const u8 = null,
+    search: ?[]const u8 = null,
     interval: ?[]const u8 = null,
     segment: ?[]const u8 = null,
     sort: ?[]const u8 = null,
@@ -1589,7 +1651,7 @@ pub fn parseCanonicalUrl(
         } else if (std.mem.eql(u8, key, "p")) {
             try predicates.append(
                 allocator,
-                try parsePredicate(allocator, raw_value),
+                try parseFormPredicate(allocator, raw_value),
             );
         } else {
             const value = try percentDecode(allocator, raw_value);
@@ -1646,6 +1708,7 @@ pub fn parseCanonicalUrl(
                 null,
         },
         .dimension = dimension,
+        .search = parts.search orelse "",
         .interval = try Interval.parse(
             parts.interval orelse return error.MissingAnalysisUrlField,
         ),
@@ -1667,6 +1730,28 @@ pub fn parseCanonicalUrl(
     return query;
 }
 
+pub fn parseFormPredicate(
+    allocator: std.mem.Allocator,
+    raw_value: []const u8,
+) !PropertyPredicate {
+    return parsePredicate(
+        allocator,
+        try formGrammarValue(allocator, raw_value),
+    );
+}
+
+fn formGrammarValue(
+    allocator: std.mem.Allocator,
+    raw_value: []const u8,
+) ![]const u8 {
+    if (std.mem.findScalar(u8, raw_value, '~') != null) return raw_value;
+    const decoded = try percentDecode(allocator, raw_value);
+    if (std.mem.findScalar(u8, decoded, '~') == null) {
+        return error.InvalidAnalysisUrl;
+    }
+    return decoded;
+}
+
 fn encodedClauses(
     allocator: std.mem.Allocator,
     clauses: []const Clause,
@@ -1684,7 +1769,7 @@ fn encodedPredicates(
 ) ![]const []const u8 {
     const encoded = try allocator.alloc([]const u8, predicates.len);
     for (predicates, 0..) |predicate, index| {
-        encoded[index] = try encodePredicate(allocator, predicate);
+        encoded[index] = try canonicalPredicate(allocator, predicate);
     }
     return sortUnique(encoded);
 }
@@ -1724,11 +1809,13 @@ fn encodeClause(allocator: std.mem.Allocator, clause: Clause) ![]u8 {
     return output.toOwnedSlice();
 }
 
-fn encodePredicate(
+pub fn canonicalPredicate(
     allocator: std.mem.Allocator,
     predicate: PropertyPredicate,
 ) ![]u8 {
     try predicate.validate();
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
     var output = std.Io.Writer.Allocating.init(allocator);
     errdefer output.deinit();
     try writeGrammarComponent(&output.writer, predicate.property_ref.name, false);
@@ -1739,12 +1826,29 @@ fn encodePredicate(
         true,
     );
     try writeSortedValues(
-        allocator,
+        scratch.allocator(),
         &output.writer,
         predicate.property_ref.scalar_type,
         predicate.values,
     );
     return output.toOwnedSlice();
+}
+
+test "canonical predicate owns only its returned slice" {
+    const values = [_][]const u8{ "14.250000", "7.000000" };
+    const predicate = PropertyPredicate{
+        .property_ref = .{ .name = "amount", .scalar_type = .decimal },
+        .operator = .is,
+        .values = &values,
+    };
+    for (0..64) |_| {
+        const encoded = try canonicalPredicate(std.testing.allocator, predicate);
+        try std.testing.expectEqualStrings(
+            "amount~is~decimal~14.250000~7.000000",
+            encoded,
+        );
+        std.testing.allocator.free(encoded);
+    }
 }
 
 fn writeSortedValues(
@@ -1916,6 +2020,7 @@ fn setUrlPart(parts: *UrlParts, key: []const u8, value: []const u8) !void {
     if (std.mem.eql(u8, key, "property-type")) {
         return setOnce(&parts.property_type, value);
     }
+    if (std.mem.eql(u8, key, "search")) return setOnce(&parts.search, value);
     if (std.mem.eql(u8, key, "interval")) return setOnce(&parts.interval, value);
     if (std.mem.eql(u8, key, "segment")) return setOnce(&parts.segment, value);
     if (std.mem.eql(u8, key, "sort")) return setOnce(&parts.sort, value);
@@ -2416,6 +2521,133 @@ test "canonical URL normalizes equivalent typed query state" {
     try std.testing.expectEqualStrings(encoded, normalized);
 }
 
+test "canonical parser accepts one browser form encoding of grammar separators" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const query = try parseCanonicalUrl(
+        arena.allocator(),
+        "00000000-0000-4000-8000-000000000024",
+        "v=1&from=2026-01-01&to=2026-01-31&compare=none&mode=breakdown" ++
+            "&metric=event-count&selector=event&selector-value=signup" ++
+            "&dimension=event-property&property=plan&property-type=string" ++
+            "&interval=auto&sort=value-desc&page=1&limit=25" ++
+            "&p=amount%7Egte%7Edecimal%7E14.25",
+    );
+    try std.testing.expectEqual(@as(usize, 1), query.metric.selector.?.predicates.len);
+    try std.testing.expectEqualStrings(
+        "amount",
+        query.metric.selector.?.predicates[0].property_ref.name,
+    );
+    const canonical = try canonicalUrl(std.testing.allocator, query);
+    defer std.testing.allocator.free(canonical);
+    try std.testing.expect(
+        std.mem.indexOf(u8, canonical, "p=amount~gte~decimal~14.250000") != null,
+    );
+
+    const encoded_data = try parseCanonicalUrl(
+        arena.allocator(),
+        "00000000-0000-4000-8000-000000000024",
+        "v=1&from=2026-01-01&to=2026-01-31&compare=none&mode=breakdown" ++
+            "&metric=event-count&selector=event&selector-value=signup" ++
+            "&dimension=event-property&property=plan&property-type=string" ++
+            "&interval=auto&sort=value-desc&page=1&limit=25" ++
+            "&p=plan%7Eis%7Estring%7Epro%2520%2526%2520%257E%2520plan",
+    );
+    try std.testing.expectEqualStrings(
+        "pro & ~ plan",
+        encoded_data.metric.selector.?.predicates[0].values[0],
+    );
+    const encoded_data_canonical = try canonicalUrl(
+        std.testing.allocator,
+        encoded_data,
+    );
+    defer std.testing.allocator.free(encoded_data_canonical);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        encoded_data_canonical,
+        "p=plan~is~string~pro%20%26%20%7E%20plan",
+    ) != null);
+
+    const prefix = "v=1&from=2026-01-01&to=2026-01-31&compare=none&mode=breakdown" ++
+        "&metric=event-count&selector=event&selector-value=signup" ++
+        "&dimension=event-property&property=plan&property-type=string" ++
+        "&interval=auto&sort=value-desc&page=1&limit=25&p=";
+    try std.testing.expectError(
+        error.InvalidAnalysisUrl,
+        parseCanonicalUrl(
+            arena.allocator(),
+            "00000000-0000-4000-8000-000000000024",
+            prefix ++ "amount%257Egte%257Edecimal%257E14.25",
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidAnalysisPercentEncoding,
+        parseCanonicalUrl(
+            arena.allocator(),
+            "00000000-0000-4000-8000-000000000024",
+            prefix ++ "amount%7egte%7edecimal%7e14.25",
+        ),
+    );
+}
+
+test "Breakdown search is canonical bounded and mode specific" {
+    const allocator = std.testing.allocator;
+    var query = presetQuery(
+        .pages,
+        "00000000-0000-4000-8000-000000000024",
+        .{ .start = "2026-02-01", .end = "2026-02-07" },
+    );
+    query.search = "Pricing & plans";
+    const encoded = try canonicalUrl(allocator, query);
+    defer allocator.free(encoded);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        encoded,
+        "dimension=page&search=Pricing%20%26%20plans&interval=auto",
+    ) != null);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const parsed = try parseCanonicalUrl(
+        arena.allocator(),
+        query.site_id,
+        encoded,
+    );
+    try std.testing.expectEqualStrings(query.search, parsed.search);
+    const json = try canonicalJson(allocator, query);
+    defer allocator.free(json);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        json,
+        "\"search\":\"Pricing & plans\"",
+    ) != null);
+
+    var trend = presetQuery(.overview_visitors, query.site_id, query.range);
+    trend.search = "visitor";
+    try std.testing.expectError(error.TrendHasSearch, trend.validate());
+    var invalid = query;
+    invalid.search = "line\nbreak";
+    try std.testing.expectError(error.InvalidAnalysisSearch, invalid.validate());
+    invalid.search = "next\xc2\x85line";
+    try std.testing.expectError(error.InvalidAnalysisSearch, invalid.validate());
+    const too_long = try allocator.alloc(u8, maximum_search_bytes + 1);
+    defer allocator.free(too_long);
+    @memset(too_long, 'x');
+    invalid.search = too_long;
+    try std.testing.expectError(error.InvalidAnalysisSearch, invalid.validate());
+
+    var unsupported = query;
+    unsupported.metric = .{ .kind = .new_visitors };
+    unsupported.dimension = .{
+        .kind = .event_property,
+        .property_ref = .{ .name = "plan", .scalar_type = .string },
+    };
+    try std.testing.expectError(
+        error.UnsupportedMetricDimension,
+        unsupported.validate(),
+    );
+}
+
 test "canonical saved JSON excludes transient page and round trips" {
     const allocator = std.testing.allocator;
     var query = presetQuery(
@@ -2428,6 +2660,9 @@ test "canonical saved JSON excludes transient page and round trips" {
     const encoded = try canonicalJson(allocator, query);
     defer allocator.free(encoded);
     try std.testing.expect(std.mem.find(u8, encoded, "\"page\":") == null);
+    try std.testing.expect(std.mem.find(u8, encoded, "\"search\":") == null);
+    try std.testing.expect(std.mem.find(u8, encoded, "\"selector\":") == null);
+    try std.testing.expect(std.mem.find(u8, encoded, "\"segment\":") == null);
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();

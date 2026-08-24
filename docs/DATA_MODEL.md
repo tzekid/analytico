@@ -792,6 +792,16 @@ explicit session/person filter scopes, and exact value/currency groups. They do
 not add a projection, EAV table, rollup, cache table, or migration. Existing
 metric-v1 queries continue to read their UTC visitor-day compatibility columns.
 
+D39 adds no event fact or projection. Its browser property catalog reads the
+latest 2,000 eligible schema-7 custom-event JSON documents under the same
+site-local product/strict relation and shared deadline as the selected
+Breakdown. One process-local entry may retain that sampled catalog for 30
+seconds; it is suggestion state, not an analytics fact, and exact results are
+never cached. One optional bound search matches aggregate labels before stable
+pagination; exact result cardinality is the matching typed bucket count. Null
+and missing remain distinct explicit scalar states, and conflicting observed
+types are displayed rather than coerced.
+
 `METRIC_SEMANTICS_V2.md` and D30 define the additive traffic-quality diagnostic
 bridge. D31 version 2 adds explicit stored exclusions. D32 version 3 reports
 schema-5 classes, classifier coverage, bounded rule totals, and the one-release

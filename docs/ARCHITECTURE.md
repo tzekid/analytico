@@ -165,7 +165,15 @@ queries, executes them sequentially under one shared interrupt budget, and
 shares only the set's identical empty-filter identity coverage. It returns
 owned typed results to the server renderer. Bare Analyze and the known
 Overview point handoff use that metric-v2 path. Explicit metric-v1 `report=`
-list URLs remain separate compatibility routes until their #29 replacement.
+list URLs remain accepted only as one-redirect compatibility inputs. Decision
+D39 makes the #29 Breakdown route render one ordinary D29 query directly,
+including one bound aggregate-label search. Its bounded site-local property
+catalog samples the latest 2,000 eligible custom events and shares one
+interrupt budget with the exact result. D39 permits one site/range/policy/goal-
+keyed sampled-catalog entry for 30 seconds, but no result cache, second query
+model, projection, migration, or frontend data request. The old
+combined campaign tuple redirects visibly to the canonical UTM-campaign
+dimension, while explicit legacy UTM fields map exactly.
 
 The serving process configures one query thread, a bounded memory limit, a
 bounded temporary directory, no community extensions, and no external file or

@@ -59,8 +59,12 @@
   canonical direct GET selects one through three bounded metric/event/goal
   series, one site-local interval, and an optional exact highlighted bucket.
   The server runs the ordinary finite plans under one deadline and renders SVG
-  plus exact tables without a client data request. Explicit legacy list-report
-  URLs remain usable until issue #29 supplies their typed Breakdown successor.
+  plus exact tables without a client data request. D39 and issue #29 add the
+  typed single-query Breakdown successor: bounded search, sort, pagination,
+  standard and explicit property dimensions, a labeled latest-2,000-event
+  property suggestion catalog with one 30-second process entry, exact result
+  cardinality/table/bar output, and one-redirect legacy list presets. Metric-v1 CLI output remains
+  frozen; the browser does not retain it as a second analysis system.
 
 ## 1. Product statement
 

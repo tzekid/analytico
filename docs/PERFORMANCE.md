@@ -299,6 +299,36 @@ stand in for this route. A failure follows the existing optimization order; it
 does not authorize a cache, projection, rollup, thread, worker, larger deadline,
 memory change, or client fetch.
 
+Issue #29 adds no `AnalysisQuery` result cache. One exact metric-v2 Breakdown
+result and, on a miss, one sampled property/type catalog execute under one
+shared two-second interrupt budget. A zero-cardinality result uses one
+selected-site `LIMIT 1` event-presence probe under the same remaining budget;
+there is no post-deadline count/min/max scan. The catalog reads the latest
+2,000 eligible custom events and the Store retains at most one complete
+site/range/strict/goal-keyed sample for 30 seconds. Inserts do not evict this
+suggestion-only entry; the rendered page labels the sample, update window, and
+sampled counts. The exact result and cardinality always execute.
+
+The first exact all-row catalog expanded 12 million property rows and timed out
+after the result query completed in 559 ms, even with a temporary diagnostic
+budget leaving more than 9.4 seconds. A 10,000-event prefilter still measured
+479–635 ms per catalog query. A 2,000-event uncached sample kept the cold path
+inside the interactive deadline but measured full property p50/p95/p99 at
+751/843/843 ms and ordinary p95 at 397 ms. These are retained rejected results.
+They justify D39's package-prescribed short catalog cache, not a result cache or
+projection.
+
+The million-property fixture performs one explicit cold warmup and ten complete
+catalog-hit calls. The exact post-YAGNI ReleaseSafe candidate measured a cold
+path at 829 ms, property p50/p95/p99 at 484/528/528 ms, ordinary p95 at 97 ms,
+and exact high-cardinality search at 333 ms. The sampled `plan` type count was
+exactly 2,000. The blocking gates remain ordinary below 400 ms p95 and property
+result plus catalog below 700 ms p95; they were not widened. Event/property-only
+plans may omit session facts only when the metric, dimension, selector, and
+empty filter cannot consume them. A later miss preserves this evidence and
+follows the SQL/column/prefilter order before a projection, rollup, dependency,
+memory change, larger deadline, or client fetch is considered.
+
 The first Debug million-row three-series route candidate failed with an honest
 503 at the unchanged two-second deadline. The measured plans were rebuilding
 the full session-facts relation and identical empty-filter identity coverage
@@ -445,6 +475,7 @@ These apply only when the dashboard exists:
 | Install verification fragment p95 over 1,000,000 events | < 150 ms |
 | Largest server-rendered table page | 100 rows |
 | Trend points per rendered series | ≤ 400 |
+| Breakdown/property catalog | ≤ 100 rows / latest 2,000 eligible events / ≤ 100 property names / one 30-second entry |
 | Funnel steps | 2–8 |
 | Path plot | 3–5 columns; ≤ 10 nodes per column; ≤ 400 edges |
 | Retention matrix | ≤ 12 cohorts × 12 visible periods |

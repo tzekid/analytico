@@ -163,5 +163,25 @@ jq -e '
     .trait_breakdown.rows[0].event_count == 1
 ' <<<"$result" >/dev/null
 
+mkdir -p "$fixture/million"
+million_result=$("$binary" m2 property-million "$fixture/million")
+jq -e '
+    .metric_v2_breakdown.rows == 4 and
+    .metric_v2_breakdown.cardinality == 4 and
+    .metric_v2_breakdown.property_count == 12 and
+    .metric_v2_breakdown.mixed_types == 4 and
+    .metric_v2_breakdown.sampled_plan_events == 2000 and
+    .metric_v2_breakdown.samples == 10 and
+    .metric_v2_breakdown.cold_ms < 2000 and
+    .metric_v2_breakdown.p95_ms < 700 and
+    .metric_v2_breakdown.ordinary_p95_ms < 400 and
+    .metric_v2_breakdown.search_rows == 10 and
+    .metric_v2_breakdown.search_cardinality == 10 and
+    .metric_v2_breakdown.search_ms < 2000 and
+    .metric_v2_breakdown.missing_events == 500000 and
+    .metric_v2_breakdown.null_events == 1000000
+' <<<"$million_result" >/dev/null
+
 printf '%s\n' "$result"
+printf '%s\n' "$million_result"
 echo "typed property real-HTTP and on-disk DuckDB checks passed"

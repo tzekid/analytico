@@ -144,20 +144,29 @@ pub fn execute(
     event_store: *events.Store,
     execution: analysis.Execution,
 ) !analysis.Result {
-    const compiled = try compile(allocator, execution);
     var budget = deadline.Budget.init(execution.timeout_ms);
+    return executeWithBudget(allocator, event_store, execution, &budget);
+}
+
+fn executeWithBudget(
+    allocator: std.mem.Allocator,
+    event_store: *events.Store,
+    execution: analysis.Execution,
+    budget: *deadline.Budget,
+) !analysis.Result {
+    const compiled = try compile(allocator, execution);
     const completeness = try executeCoverage(
         allocator,
         &event_store.database,
         compiled.coverage,
-        &budget,
+        budget,
     );
     const comparison_completeness = if (compiled.comparison_coverage) |plan|
         try executeCoverage(
             allocator,
             &event_store.database,
             plan,
-            &budget,
+            budget,
         )
     else
         null;
@@ -165,14 +174,23 @@ pub fn execute(
         allocator,
         &event_store.database,
         compiled.primary_rows,
-        &budget,
+        budget,
     );
+    const empty_page_cardinality: ?i64 = if (execution.query.mode == .breakdown and
+        execution.query.page > 1 and primary.len == 0)
+        try executeCardinality(
+            &event_store.database,
+            try compileBreakdownCardinality(allocator, execution),
+            budget,
+        )
+    else
+        null;
     const comparison = if (compiled.comparison_rows) |plan|
         try executeRows(
             allocator,
             &event_store.database,
             plan,
-            &budget,
+            budget,
         )
     else
         null;
@@ -188,7 +206,7 @@ pub fn execute(
                     allocator,
                     &event_store.database,
                     plan,
-                    &budget,
+                    budget,
                 )
             else
                 null,
@@ -197,7 +215,7 @@ pub fn execute(
                 allocator,
                 &event_store.database,
                 compiled.primary_total.?,
-                &budget,
+                budget,
             ),
             .interval = compiled.interval,
             .completeness = completeness,
@@ -207,8 +225,143 @@ pub fn execute(
             execution.query,
             primary,
             completeness,
+            empty_page_cardinality,
         ) },
     };
+}
+
+pub fn executeBreakdownPage(
+    allocator: std.mem.Allocator,
+    event_store: *events.Store,
+    execution: analysis.Execution,
+) !analysis.BreakdownPageResult {
+    try execution.validate();
+    if (execution.query.mode != .breakdown) return error.InvalidBreakdownPageQuery;
+    const catalog_key = try propertyCatalogCacheKey(allocator, execution);
+    var budget = deadline.Budget.init(execution.timeout_ms);
+    const result = try executeWithBudget(
+        allocator,
+        event_store,
+        execution,
+        &budget,
+    );
+    var site_has_events = result.breakdown.cardinality != 0;
+    if (!site_has_events) {
+        const presence = try executeCardinality(
+            &event_store.database,
+            try compileSiteEventPresence(allocator, execution.query.site_id),
+            &budget,
+        );
+        if (presence > 1) return error.InvalidAnalysisResult;
+        site_has_events = presence == 1;
+    }
+    const cached_catalog = if (event_store.property_catalog_cache) |cache|
+        if (std.mem.eql(u8, cache.key, catalog_key) and
+            cache.expires_at_nanos > (monotonicNanos() orelse cache.expires_at_nanos))
+            try clonePropertyCatalog(allocator, cache.catalog)
+        else
+            null
+    else
+        null;
+    const properties = cached_catalog orelse catalog: {
+        const decoded = try executePropertyCatalog(
+            allocator,
+            &event_store.database,
+            try compilePropertyCatalog(allocator, execution),
+            &budget,
+        );
+        try cachePropertyCatalog(event_store, catalog_key, decoded);
+        break :catalog decoded;
+    };
+    return .{
+        .breakdown = result.breakdown,
+        .properties = properties,
+        .site_has_events = site_has_events,
+    };
+}
+
+const property_catalog_cache_milliseconds: i64 = 30_000;
+
+fn propertyCatalogCacheKey(
+    allocator: std.mem.Allocator,
+    execution: analysis.Execution,
+) ![]const u8 {
+    var key = std.Io.Writer.Allocating.init(allocator);
+    errdefer key.deinit();
+    try key.writer.writeAll("property-catalog-v1|metric-v2|");
+    try cacheKeySlice(&key.writer, execution.query.site_id);
+    try cacheKeySlice(&key.writer, execution.query.range.start);
+    try cacheKeySlice(&key.writer, execution.query.range.end);
+    try key.writer.print("strict={d}|goals={d}|", .{
+        @intFromBool(execution.strict_traffic_mode),
+        execution.active_goals.len,
+    });
+    for (execution.active_goals) |goal| {
+        try cacheKeySlice(&key.writer, goal.id);
+        try cacheKeySlice(&key.writer, @tagName(goal.selector.kind));
+        try cacheKeySlice(&key.writer, goal.selector.value);
+        try key.writer.print("predicates={d}|", .{goal.selector.predicates.len});
+        for (goal.selector.predicates) |predicate| {
+            try cacheKeySlice(&key.writer, predicate.property_ref.name);
+            try cacheKeySlice(
+                &key.writer,
+                predicate.property_ref.scalar_type.name(),
+            );
+            try cacheKeySlice(&key.writer, predicate.operator.name());
+            try key.writer.print("values={d}|", .{predicate.values.len});
+            for (predicate.values) |value| {
+                try cacheKeySlice(&key.writer, value);
+            }
+        }
+    }
+    return key.toOwnedSlice();
+}
+
+fn cachePropertyCatalog(
+    event_store: *events.Store,
+    key: []const u8,
+    catalog: analysis.PropertyCatalog,
+) !void {
+    const now = monotonicNanos() orelse return;
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    errdefer arena.deinit();
+    const allocator = arena.allocator();
+    const owned_key = try allocator.dupe(u8, key);
+    const owned_catalog = try clonePropertyCatalog(allocator, catalog);
+    if (event_store.property_catalog_cache) |*prior| prior.deinit();
+    event_store.property_catalog_cache = .{
+        .arena = arena,
+        .key = owned_key,
+        .catalog = owned_catalog,
+        .expires_at_nanos = now +
+            @as(i128, property_catalog_cache_milliseconds) * std.time.ns_per_ms,
+    };
+}
+
+fn clonePropertyCatalog(
+    allocator: std.mem.Allocator,
+    source: analysis.PropertyCatalog,
+) !analysis.PropertyCatalog {
+    const entries = try allocator.alloc(
+        analysis.ObservedPropertyType,
+        source.entries.len,
+    );
+    for (entries, source.entries) |*target, entry| target.* = .{
+        .name = try allocator.dupe(u8, entry.name),
+        .scalar_type = entry.scalar_type,
+        .event_count = entry.event_count,
+    };
+    return .{
+        .entries = entries,
+        .property_count = source.property_count,
+        .truncated = source.truncated,
+    };
+}
+
+fn monotonicNanos() ?i128 {
+    var timestamp: std.os.linux.timespec = undefined;
+    if (std.os.linux.clock_gettime(.MONOTONIC, &timestamp) != 0) return null;
+    return @as(i128, timestamp.sec) * std.time.ns_per_s + timestamp.nsec;
 }
 
 pub fn executeTrendSet(
@@ -1627,6 +1780,21 @@ fn executeTotals(
     return totals;
 }
 
+fn executeCardinality(
+    database: *duckdb.Database,
+    plan: StatementPlan,
+    budget: *deadline.Budget,
+) !i64 {
+    var result = try executePlan(database, plan, budget);
+    defer result.deinit();
+    if (result.columnCount() != 1 or result.rowCount() != 1) {
+        return error.InvalidAnalysisResult;
+    }
+    const cardinality = result.int64(0, 0);
+    if (cardinality < 0) return error.InvalidAnalysisResult;
+    return cardinality;
+}
+
 fn executeCoverage(
     allocator: std.mem.Allocator,
     database: *duckdb.Database,
@@ -1664,6 +1832,45 @@ fn executeCoverage(
             null
         else
             try result.text(allocator, 3, 0),
+    };
+}
+
+fn executePropertyCatalog(
+    allocator: std.mem.Allocator,
+    database: *duckdb.Database,
+    plan: StatementPlan,
+    budget: *deadline.Budget,
+) !analysis.PropertyCatalog {
+    var result = try executePlan(database, plan, budget);
+    defer result.deinit();
+    if (result.columnCount() != 4) return error.InvalidPropertyCatalog;
+    const entries = try allocator.alloc(
+        analysis.ObservedPropertyType,
+        result.rowCount(),
+    );
+    for (entries, 0..) |*entry, index| {
+        entry.* = .{
+            .name = try result.text(allocator, 0, index),
+            .scalar_type = try propertyScalarType(result.int64(1, index)),
+            .event_count = result.int64(2, index),
+        };
+    }
+    const property_count = if (entries.len == 0) 0 else result.int64(3, 0);
+    return .{
+        .entries = entries,
+        .property_count = property_count,
+        .truncated = property_count > analysis.maximum_property_names,
+    };
+}
+
+fn propertyScalarType(code: i64) !analysis.ScalarType {
+    return switch (code) {
+        1 => .string,
+        2 => .integer,
+        3 => .decimal,
+        4 => .boolean,
+        5 => .null,
+        else => error.InvalidPropertyCatalog,
     };
 }
 
@@ -1720,6 +1927,7 @@ fn breakdownResult(
     query: analysis.Query,
     primary: []const DecodedRow,
     completeness: analysis.Completeness,
+    empty_page_cardinality: ?i64,
 ) !analysis.BreakdownResult {
     const decoded = @min(primary.len, @as(usize, query.limit));
     const rows = try allocator.alloc(analysis.BreakdownRow, decoded);
@@ -1735,7 +1943,10 @@ fn breakdownResult(
             .measure = source.measure,
         };
     }
-    const cardinality = if (primary.len == 0) 0 else primary[0].cardinality;
+    const cardinality = if (primary.len == 0)
+        empty_page_cardinality orelse 0
+    else
+        primary[0].cardinality;
     return .{
         .rows = rows,
         .next_page = if (primary.len > decoded) query.page + 1 else null,
@@ -1785,20 +1996,11 @@ fn compileRows(
     interval: analysis.Interval,
 ) !StatementPlan {
     var builder = Builder.init(allocator);
-    try writeCommon(&builder, execution, range);
-    try builder.write(", metric_rows AS (SELECT ");
-    if (execution.query.mode == .trend) {
-        try writeBucket(&builder, interval, "e");
-    } else {
-        try writeDimension(&builder, execution.query.dimension.?, "e", "s");
+    try writeMetricRows(&builder, execution, range, interval);
+    try builder.write(" SELECT label, measure_kind, numerator, denominator, amount, currency, count(*) OVER ()::BIGINT AS cardinality FROM metric_rows");
+    if (execution.query.mode == .breakdown and execution.query.search.len != 0) {
+        try writeBreakdownSearch(&builder, execution.query.search);
     }
-    try builder.write(" AS label, ");
-    try writeMeasure(&builder, execution, range, "e", "s");
-    try writeMetricSource(&builder, execution);
-    try writeMetricWhere(&builder, execution, "e", "s");
-    try builder.write(" GROUP BY 1");
-    if (isAmount(execution.query.metric.kind)) try builder.write(", e.value_currency");
-    try builder.write(") SELECT label, measure_kind, numerator, denominator, amount, currency, count(*) OVER ()::BIGINT AS cardinality FROM metric_rows");
     try writeOrder(&builder, execution.query);
     if (execution.query.mode == .breakdown) {
         try builder.write(" LIMIT ");
@@ -1809,6 +2011,62 @@ fn compileRows(
         try builder.write(" LIMIT ");
         try builder.bindInteger(@as(i64, analysis.maximum_trend_rows) + 1);
     }
+    return builder.finish();
+}
+
+fn writeMetricRows(
+    builder: *Builder,
+    execution: analysis.Execution,
+    range: analysis.LocalDateRange,
+    interval: analysis.Interval,
+) !void {
+    try writeCommon(builder, execution, range);
+    try builder.write(", metric_rows AS (SELECT ");
+    if (execution.query.mode == .trend) {
+        try writeBucket(builder, interval, "e");
+    } else {
+        try writeDimension(builder, execution.query.dimension.?, "e", "s");
+    }
+    try builder.write(" AS label, ");
+    try writeMeasure(builder, execution, range, "e", "s");
+    try writeMetricSource(builder, execution);
+    try writeMetricWhere(builder, execution, "e", "s");
+    try builder.write(" GROUP BY 1");
+    if (isAmount(execution.query.metric.kind)) try builder.write(", e.value_currency");
+    try builder.write(")");
+}
+
+fn writeBreakdownSearch(builder: *Builder, search: []const u8) !void {
+    try builder.write(" WHERE contains(lower(label), lower(");
+    try builder.bindText(search);
+    try builder.write("))");
+}
+
+fn compileBreakdownCardinality(
+    allocator: std.mem.Allocator,
+    execution: analysis.Execution,
+) !StatementPlan {
+    if (execution.query.mode != .breakdown) return error.InvalidBreakdownPageQuery;
+    var builder = Builder.init(allocator);
+    try writeMetricRows(&builder, execution, execution.query.range, .auto);
+    try builder.write(" SELECT count(*)::BIGINT FROM metric_rows");
+    if (execution.query.search.len != 0) {
+        try writeBreakdownSearch(&builder, execution.query.search);
+    }
+    return builder.finish();
+}
+
+fn compileSiteEventPresence(
+    allocator: std.mem.Allocator,
+    site_id: []const u8,
+) !StatementPlan {
+    var builder = Builder.init(allocator);
+    try builder.write(
+        "SELECT count(*)::BIGINT FROM" ++
+            " (SELECT 1 FROM events WHERE site_id = ",
+    );
+    try builder.bindText(site_id);
+    try builder.write(" LIMIT 1)");
     return builder.finish();
 }
 
@@ -1858,13 +2116,86 @@ fn compileCoverage(
     return builder.finish();
 }
 
+fn compilePropertyCatalog(
+    allocator: std.mem.Allocator,
+    execution: analysis.Execution,
+) !StatementPlan {
+    var builder = Builder.init(allocator);
+    if (execution.strict_traffic_mode) {
+        var goals: [analysis.maximum_active_goals]traffic.Goal = undefined;
+        for (execution.active_goals, 0..) |goal, index| goals[index] = .{
+            .kind = switch (goal.selector.kind) {
+                .exact_event => .event,
+                .exact_page => .path,
+                .page_prefix => .prefix,
+                .saved_goal => return error.UnresolvedGoalSelector,
+            },
+            .value = goal.selector.value,
+        };
+        try builder.write("WITH ");
+        try builder.appendTraffic(try traffic.classifierFragment(
+            allocator,
+            execution.query.site_id,
+            goals[0..execution.active_goals.len],
+            true,
+        ));
+        try builder.write(", property_events AS (");
+    } else {
+        try builder.write("WITH property_events AS (");
+    }
+    try builder.write(
+        "SELECT properties_json AS document FROM events e WHERE e.site_id = ",
+    );
+    try builder.bindText(execution.query.site_id);
+    try builder.write(" AND e.site_local_date BETWEEN CAST(");
+    try builder.bindText(execution.query.range.start);
+    try builder.write(" AS DATE) AND CAST(");
+    try builder.bindText(execution.query.range.end);
+    try builder.write(
+        " AS DATE) AND e.kind = 2 AND e.traffic_class IN (1, 5)",
+    );
+    if (execution.strict_traffic_mode) try builder.write(
+        " AND e.session_id NOT IN (SELECT session_id" ++
+            " FROM d34_current_suspected_sessions)",
+    );
+    try builder.write(
+        " ORDER BY e.received_at_utc_micros DESC, e.event_id DESC LIMIT ",
+    );
+    try builder.bindInteger(analysis.maximum_property_catalog_events);
+    try builder.write(
+        "), expanded AS (SELECT document," ++
+            " UNNEST(json_keys(document)) AS property_name" ++
+            " FROM property_events), typed AS (SELECT property_name," ++
+            " CASE json_type(document, '/' || property_name)" ++
+            " WHEN 'VARCHAR' THEN 1 WHEN 'BIGINT' THEN 2" ++
+            " WHEN 'UBIGINT' THEN 2 WHEN 'DOUBLE' THEN 3" ++
+            " WHEN 'DECIMAL' THEN 3 WHEN 'BOOLEAN' THEN 4" ++
+            " WHEN 'NULL' THEN 5 ELSE 0 END AS type_code" ++
+            " FROM expanded), grouped AS (SELECT property_name, type_code," ++
+            " count(*)::BIGINT AS event_count FROM typed" ++
+            " WHERE type_code <> 0 GROUP BY property_name, type_code)," ++
+            " names AS (SELECT DISTINCT property_name FROM grouped)," ++
+            " selected AS (SELECT property_name," ++
+            " (SELECT count(*) FROM names)::BIGINT AS property_count" ++
+            " FROM names ORDER BY property_name LIMIT ",
+    );
+    try builder.bindInteger(analysis.maximum_property_names);
+    try builder.write(
+        ") SELECT grouped.property_name, grouped.type_code," ++
+            " grouped.event_count, selected.property_count" ++
+            " FROM grouped JOIN selected USING (property_name)" ++
+            " ORDER BY grouped.property_name, grouped.type_code",
+    );
+    return builder.finish();
+}
+
 fn writeCommon(
     builder: *Builder,
     execution: analysis.Execution,
     range: analysis.LocalDateRange,
 ) !void {
     if (!needsSessionFacts(execution)) {
-        return writeSimpleTrendCommon(builder, execution, range);
+        return writeSimpleCommon(builder, execution, range);
     }
     if (execution.strict_traffic_mode) {
         var goals: [analysis.maximum_active_goals]traffic.Goal = undefined;
@@ -1998,19 +2329,37 @@ fn writeCommon(
 }
 
 fn needsSessionFacts(execution: analysis.Execution) bool {
-    if (execution.query.mode != .trend or
-        execution.query.filters.clauses.len != 0 or
+    if (execution.query.filters.clauses.len != 0 or
         execution.query.segment_id != null)
     {
         return true;
     }
-    return switch (execution.query.metric.kind) {
+    if (switch (execution.query.metric.kind) {
         .engaged_sessions, .engagement_rate, .bounce_rate => true,
         else => false,
+    }) return true;
+    if (execution.query.mode == .trend) return false;
+    return switch (execution.query.dimension.?.kind) {
+        .landing_page,
+        .exit_page,
+        .channel,
+        .referrer,
+        .utm_source,
+        .utm_medium,
+        .utm_campaign,
+        .utm_term,
+        .utm_content,
+        .country,
+        .language,
+        .device,
+        .browser,
+        .operating_system,
+        => true,
+        .page, .hostname, .event_name, .event_property => false,
     };
 }
 
-fn writeSimpleTrendCommon(
+fn writeSimpleCommon(
     builder: *Builder,
     execution: analysis.Execution,
     range: analysis.LocalDateRange,
@@ -3000,6 +3349,115 @@ test "compiler binds property pointers and filter values without SQL interpolati
     try std.testing.expect(planContainsText(compiled.primary_rows, "/plan"));
 }
 
+test "Breakdown search and catalog context remain bound SQL inputs" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const adversarial = "x'); SELECT * FROM identity_links; --";
+    const site = "00000000-0000-4000-8000-000000000024";
+    const start = "2026-01-01";
+    const end = "2026-01-02";
+    const execution = analysis.Execution{ .query = .{
+        .site_id = site,
+        .range = .{ .start = start, .end = end },
+        .mode = .breakdown,
+        .metric = .{ .kind = .custom_events },
+        .dimension = .{ .kind = .event_name },
+        .search = adversarial,
+    } };
+    const compiled = try compile(allocator, execution);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        compiled.primary_rows.sql,
+        adversarial,
+    ) == null);
+    try std.testing.expect(planContainsText(compiled.primary_rows, adversarial));
+
+    const catalog = try compilePropertyCatalog(allocator, execution);
+    inline for (.{ site, start, end }) |value| {
+        try std.testing.expect(std.mem.indexOf(u8, catalog.sql, value) == null);
+        try std.testing.expect(planContainsText(catalog, value));
+    }
+}
+
+test "property catalog cache key separates every semantic input" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const values_a = [_][]const u8{ "ab", "c" };
+    const values_b = [_][]const u8{ "a", "bc" };
+    const predicates_a = [_]analysis.PropertyPredicate{.{
+        .property_ref = .{ .name = "plan", .scalar_type = .string },
+        .operator = .is,
+        .values = &values_a,
+    }};
+    const predicates_b = [_]analysis.PropertyPredicate{.{
+        .property_ref = .{ .name = "plan", .scalar_type = .string },
+        .operator = .is,
+        .values = &values_b,
+    }};
+    const goals_a = [_]analysis.ResolvedGoal{.{
+        .id = "00000000-0000-4000-8000-000000000029",
+        .selector = .{
+            .kind = .exact_event,
+            .value = "purchase",
+            .predicates = &predicates_a,
+        },
+    }};
+    const goals_b = [_]analysis.ResolvedGoal{.{
+        .id = "00000000-0000-4000-8000-000000000029",
+        .selector = .{
+            .kind = .exact_event,
+            .value = "purchase",
+            .predicates = &predicates_b,
+        },
+    }};
+    const base = analysis.Execution{
+        .query = .{
+            .site_id = "00000000-0000-4000-8000-000000000024",
+            .range = .{ .start = "2026-01-01", .end = "2026-01-02" },
+            .mode = .breakdown,
+            .metric = .{ .kind = .custom_events },
+            .dimension = .{ .kind = .event_name },
+        },
+        .active_goals = &goals_a,
+        .strict_traffic_mode = true,
+    };
+    const key = try propertyCatalogCacheKey(allocator, base);
+
+    var changed_values = base;
+    changed_values.active_goals = &goals_b;
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        key,
+        try propertyCatalogCacheKey(allocator, changed_values),
+    ));
+
+    var changed_range = base;
+    changed_range.query.range.end = "2026-01-03";
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        key,
+        try propertyCatalogCacheKey(allocator, changed_range),
+    ));
+
+    var changed_policy = base;
+    changed_policy.strict_traffic_mode = false;
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        key,
+        try propertyCatalogCacheKey(allocator, changed_policy),
+    ));
+
+    var changed_site = base;
+    changed_site.query.site_id = "00000000-0000-4000-8000-000000000025";
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        key,
+        try propertyCatalogCacheKey(allocator, changed_site),
+    ));
+}
+
 test "declared maximum filters selectors and active goals still compile bounded" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -3343,6 +3801,182 @@ test "metric v2 executes against a real on-disk schema four store" {
                 },
             },
         });
+    }
+
+    try event_store.database.exec(
+        \\INSERT INTO events
+        \\SELECT template.* REPLACE (
+        \\  CAST(md5('breakdown-' || CAST(i AS VARCHAR)) AS UUID) AS event_id,
+        \\  1767398500000000 + i AS received_at_utc_micros,
+        \\  1767398500000000 + i AS occurred_at_utc_micros,
+        \\  2 AS kind, 'property_probe' AS event_name,
+        \\  CAST(i + 20 AS UINTEGER) AS sequence,
+        \\  ('{"high":"Value-' || lpad(CAST(i AS VARCHAR), 3, '0') || '"' ||
+        \\    CASE i WHEN 0 THEN ',"typed":"7"'
+        \\      WHEN 1 THEN ',"typed":7'
+        \\      WHEN 2 THEN ',"typed":7.500000'
+        \\      WHEN 3 THEN ',"typed":true'
+        \\      WHEN 4 THEN ',"typed":null'
+        \\      ELSE '' END || '}') AS properties_json,
+        \\  repeat('b', 64) AS event_payload_digest
+        \\) FROM events template CROSS JOIN range(105) rows(i)
+        \\WHERE template.event_id =
+        \\  CAST('00000000-0000-4000-8000-000000000104' AS UUID)
+    );
+    const high_page = try executeBreakdownPage(
+        query_allocator,
+        &event_store,
+        .{ .query = .{
+            .site_id = site,
+            .range = range,
+            .mode = .breakdown,
+            .metric = .{ .kind = .custom_events },
+            .dimension = .{
+                .kind = .event_property,
+                .property_ref = .{ .name = "high", .scalar_type = .string },
+            },
+            .search = "value-10",
+            .limit = 2,
+        } },
+    );
+    try std.testing.expectEqual(@as(i64, 5), high_page.breakdown.cardinality);
+    try std.testing.expectEqual(@as(usize, 2), high_page.breakdown.rows.len);
+    try std.testing.expectEqual(@as(?u32, 2), high_page.breakdown.next_page);
+    try std.testing.expect(high_page.site_has_events);
+    try std.testing.expectEqualStrings(
+        "Value-100",
+        high_page.breakdown.rows[0].label.value,
+    );
+    try std.testing.expectEqualStrings(
+        "Value-101",
+        high_page.breakdown.rows[1].label.value,
+    );
+    const beyond = (try execute(
+        query_allocator,
+        &event_store,
+        .{ .query = .{
+            .site_id = site,
+            .range = range,
+            .mode = .breakdown,
+            .metric = .{ .kind = .custom_events },
+            .dimension = .{
+                .kind = .event_property,
+                .property_ref = .{ .name = "high", .scalar_type = .string },
+            },
+            .search = "value-10",
+            .page = 100,
+            .limit = 2,
+        } },
+    )).breakdown;
+    try std.testing.expectEqual(@as(usize, 0), beyond.rows.len);
+    try std.testing.expectEqual(@as(i64, 5), beyond.cardinality);
+    try std.testing.expectEqual(@as(?u32, null), beyond.next_page);
+
+    const no_match_page = try executeBreakdownPage(
+        query_allocator,
+        &event_store,
+        .{ .query = .{
+            .site_id = site,
+            .range = range,
+            .mode = .breakdown,
+            .metric = .{
+                .kind = .event_count,
+                .selector = .{ .kind = .exact_event, .value = "never" },
+            },
+            .dimension = .{ .kind = .event_name },
+        } },
+    );
+    try std.testing.expectEqual(@as(i64, 0), no_match_page.breakdown.cardinality);
+    try std.testing.expect(no_match_page.site_has_events);
+    try std.testing.expect(high_page.properties.property_count >= 4);
+    var typed_types: usize = 0;
+    for (high_page.properties.entries) |entry| {
+        if (std.mem.eql(u8, entry.name, "typed")) typed_types += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 5), typed_types);
+
+    const other_site = "00000000-0000-4000-8000-000000000025";
+    try event_store.database.exec(
+        \\INSERT INTO events
+        \\SELECT template.* REPLACE (
+        \\  CAST('00000000-0000-4000-8000-000000000205' AS UUID) AS event_id,
+        \\  CAST('00000000-0000-4000-8000-000000000025' AS UUID) AS site_id,
+        \\  'other_probe' AS event_name,
+        \\  '{"other_only":"yes"}' AS properties_json,
+        \\  repeat('c', 64) AS event_payload_digest
+        \\) FROM events template WHERE template.event_id =
+        \\  CAST('00000000-0000-4000-8000-000000000104' AS UUID)
+    );
+    const other_page = try executeBreakdownPage(
+        query_allocator,
+        &event_store,
+        .{ .query = .{
+            .site_id = other_site,
+            .range = range,
+            .mode = .breakdown,
+            .metric = .{ .kind = .custom_events },
+            .dimension = .{
+                .kind = .event_property,
+                .property_ref = .{ .name = "other_only", .scalar_type = .string },
+            },
+        } },
+    );
+    try std.testing.expectEqual(@as(i64, 1), other_page.breakdown.cardinality);
+    try std.testing.expectEqual(@as(usize, 1), other_page.properties.entries.len);
+    try std.testing.expectEqualStrings(
+        "other_only",
+        other_page.properties.entries[0].name,
+    );
+
+    const empty_page = try executeBreakdownPage(
+        query_allocator,
+        &event_store,
+        .{ .query = .{
+            .site_id = "00000000-0000-4000-8000-000000000026",
+            .range = range,
+            .mode = .breakdown,
+            .metric = .{ .kind = .custom_events },
+            .dimension = .{ .kind = .event_name },
+        } },
+    );
+    try std.testing.expectEqual(@as(i64, 0), empty_page.breakdown.cardinality);
+    try std.testing.expect(!empty_page.site_has_events);
+    try std.testing.expectEqual(@as(usize, 0), empty_page.properties.entries.len);
+
+    inline for (.{
+        analysis.ScalarType.string,
+        analysis.ScalarType.integer,
+        analysis.ScalarType.decimal,
+        analysis.ScalarType.boolean,
+        analysis.ScalarType.null,
+        analysis.ScalarType.missing,
+    }) |scalar_type| {
+        const typed = (try execute(
+            query_allocator,
+            &event_store,
+            .{ .query = .{
+                .site_id = site,
+                .range = range,
+                .mode = .breakdown,
+                .metric = .{ .kind = .custom_events },
+                .dimension = .{
+                    .kind = .event_property,
+                    .property_ref = .{
+                        .name = "typed",
+                        .scalar_type = scalar_type,
+                    },
+                },
+            } },
+        )).breakdown;
+        try std.testing.expectEqual(@as(usize, 1), typed.rows.len);
+        try std.testing.expectEqual(scalar_type, typed.rows[0].label.scalar_type.?);
+        switch (typed.rows[0].measure) {
+            .count => |count| try std.testing.expectEqual(
+                if (scalar_type == .missing) @as(i64, 103) else 1,
+                count,
+            ),
+            else => return error.InvalidAnalysisMeasure,
+        }
     }
 }
 
