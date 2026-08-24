@@ -2607,14 +2607,15 @@ The proxy boundary was selected from these measured candidates:
 | Saved-state-only `request_buffers` at 65,536 or 65,537 bytes | Still produced a measured authenticated or unauthenticated 502; rejected |
 | Saved-state-only declared-length preflight plus `max_size 65536` | Returns 413 before dispatch above the declared limit, 411 when length is absent, preserves exact-limit requests, and retains the read-time bound; selected |
 
-Schema 7 is metadata-only; event schema 7, tracker, process topology, and backup
-format do not change. Caddy changes only for the 12 saved-state mutation paths
-described above. Deployment stops the sole writer, backs up and independently
-restores the exact metadata-6/event-7 pair, proves the `a2d71c0` predecessor
-opens the restored pair, then migrates and verifies the candidate. The old
-binary must refuse migrated metadata. Rollback stops the writer, restores the
-matched pair, and only then switches to the predecessor; switching the
-executable alone is forbidden.
+The metadata-schema-7 migration is metadata-only; event schema 7, tracker,
+process topology, and backup format do not change. The complete #30 release
+changes Caddy only for the 12 saved-state mutation paths described above.
+Deployment stops the sole writer, backs up and independently restores the
+exact metadata-6/event-7 pair, proves the `a2d71c0` predecessor opens the
+restored pair, then migrates and verifies the candidate. The old binary must
+refuse migrated metadata. Rollback stops the writer, restores the matched pair
+and the backed-up predecessor Caddy configuration, and only then switches to
+the predecessor; switching the executable alone is forbidden.
 
 ### Consequences and acceptance evidence
 
