@@ -187,6 +187,40 @@ pub fn handle(
         }
         return true;
     }
+    if (savedViewForPath(path)) |saved| {
+        if (!std.mem.eql(u8, request.method, "GET")) {
+            try methodNotAllowed(output, "GET");
+        } else {
+            const target = controller.loadSavedView(
+                dependencies.allocator,
+                dependencies.metadata,
+                saved.site,
+                saved.id,
+            ) catch |err| {
+                var return_url = std.Io.Writer.Allocating.init(dependencies.allocator);
+                defer return_url.deinit();
+                try return_url.writer.print(
+                    "/admin/sites/{s}/analyze",
+                    .{saved.site},
+                );
+                try writeError(output, .{
+                    .status = if (err == error.SavedViewNotFound) 404 else 422,
+                    .title = "Saved view unavailable",
+                    .message = "This saved view is missing, corrupt, belongs to another site, or references state that is no longer valid. Return to the site, open Saved views, and delete or recreate the affected view.",
+                    .return_url = return_url.written(),
+                });
+                return true;
+            };
+            try redirectToCanonical(
+                dependencies.allocator,
+                output,
+                target.destination,
+                target.query,
+                "",
+            );
+        }
+        return true;
+    }
     if (routeFor(path)) |route| {
         if (!std.mem.eql(u8, request.method, "GET")) {
             try methodNotAllowed(output, "GET");
@@ -199,6 +233,14 @@ pub fn handle(
         }
         return true;
     }
+    if (analysisActionFor(path)) |action| {
+        if (!std.mem.eql(u8, request.method, "POST")) {
+            try methodNotAllowed(output, "POST");
+        } else {
+            try postAnalysisAction(dependencies, request, output, action);
+        }
+        return true;
+    }
     const action = actionFor(path) orelse return false;
     if (!std.mem.eql(u8, request.method, "POST")) {
         try methodNotAllowed(output, "POST");
@@ -206,6 +248,24 @@ pub fn handle(
     }
     try postAction(dependencies, request, output, action);
     return true;
+}
+
+const SavedViewPath = struct {
+    site: []const u8,
+    id: []const u8,
+};
+
+fn savedViewForPath(path: []const u8) ?SavedViewPath {
+    const prefix = "/admin/sites/";
+    if (!std.mem.startsWith(u8, path, prefix)) return null;
+    const site, const suffix = std.mem.cutScalar(u8, path[prefix.len..], '/') orelse
+        return null;
+    const view_prefix = "saved-views/";
+    if (!std.mem.startsWith(u8, suffix, view_prefix)) return null;
+    const id = suffix[view_prefix.len..];
+    domain.validateSlug(site) catch return null;
+    domain.validateUuid(id) catch return null;
+    return .{ .site = site, .id = id };
 }
 
 fn installSiteForPath(path: []const u8) ?[]const u8 {
@@ -227,6 +287,45 @@ const Action = enum {
     delete_excluded_network,
     update_traffic_policy,
 };
+
+const AnalysisAction = enum {
+    apply_filter,
+    suggest_filter,
+    remove_filter,
+    create_segment,
+    update_segment,
+    rename_segment,
+    duplicate_segment,
+    delete_segment,
+    create_saved_view,
+    duplicate_saved_view,
+    rename_saved_view,
+    delete_saved_view,
+};
+
+fn analysisActionFor(path: []const u8) ?AnalysisAction {
+    if (std.mem.eql(u8, path, "/admin/filters/apply")) return .apply_filter;
+    if (std.mem.eql(u8, path, "/admin/filters/suggest")) return .suggest_filter;
+    if (std.mem.eql(u8, path, "/admin/filters/remove")) return .remove_filter;
+    if (std.mem.eql(u8, path, "/admin/segments")) return .create_segment;
+    if (std.mem.eql(u8, path, "/admin/segments/update")) return .update_segment;
+    if (std.mem.eql(u8, path, "/admin/segments/rename")) return .rename_segment;
+    if (std.mem.eql(u8, path, "/admin/segments/duplicate")) {
+        return .duplicate_segment;
+    }
+    if (std.mem.eql(u8, path, "/admin/segments/delete")) return .delete_segment;
+    if (std.mem.eql(u8, path, "/admin/saved-views")) return .create_saved_view;
+    if (std.mem.eql(u8, path, "/admin/saved-views/duplicate")) {
+        return .duplicate_saved_view;
+    }
+    if (std.mem.eql(u8, path, "/admin/saved-views/rename")) {
+        return .rename_saved_view;
+    }
+    if (std.mem.eql(u8, path, "/admin/saved-views/delete")) {
+        return .delete_saved_view;
+    }
+    return null;
+}
 
 const Route = struct {
     site: []const u8,
@@ -933,6 +1032,20 @@ fn getPage(
                 .message = "The report exceeded its server deadline. Narrow the selected date range and retry.",
                 .return_url = request.target,
             });
+        } else if (err == error.StaleFilterProperty) {
+            try staleFilterPage(
+                dependencies.allocator,
+                output,
+                route.destination,
+                query,
+            );
+        } else if (isStaleSegmentError(err)) {
+            try staleSegmentPage(
+                dependencies.allocator,
+                output,
+                route.destination,
+                query,
+            );
         } else if (err == error.SiteNotFound or err == error.GoalNotFound or
             err == error.FunnelNotFound)
         {
@@ -1245,6 +1358,20 @@ fn getBreakdownPage(
                 .message = "The Breakdown result, conditional empty-site check, and property catalog exceeded their shared server deadline. Narrow the selected date range and retry.",
                 .return_url = request.target,
             });
+        } else if (err == error.StaleFilterProperty) {
+            try staleFilterPage(
+                dependencies.allocator,
+                output,
+                .analyze,
+                query,
+            );
+        } else if (isStaleSegmentError(err)) {
+            try staleSegmentPage(
+                dependencies.allocator,
+                output,
+                .analyze,
+                query,
+            );
         } else if (err == error.SiteNotFound or err == error.GoalNotFound) {
             try writeError(output, .{
                 .status = 404,
@@ -1319,12 +1446,38 @@ fn getTrendPage(
         .kind = .overview,
         .analysis_series = &default_series,
     };
-    const parsed = translated orelse controller.parseTrendQuery(
-        dependencies.allocator,
-        request.target,
-    ) catch {
-        try invalidTrendQueryPage(dependencies.allocator, output, default_query);
-        return;
+    const parsed = translated orelse parsed: {
+        if (hasRawQueryField(request.target, "v")) {
+            const marker = std.mem.findScalar(u8, request.target, '?') orelse {
+                try invalidTrendQueryPage(dependencies.allocator, output, default_query);
+                return;
+            };
+            const canonical = analysis.parseCanonicalTrendSetUrl(
+                dependencies.allocator,
+                selected.id,
+                request.target[marker + 1 ..],
+            ) catch {
+                try invalidTrendQueryPage(dependencies.allocator, output, default_query);
+                return;
+            };
+            break :parsed controller.ParsedTrendQuery{
+                .from = canonical.set.range.start,
+                .to = canonical.set.range.end,
+                .comparison = canonical.set.comparison,
+                .interval = canonical.set.interval,
+                .series = canonical.set.series,
+                .highlighted_interval = canonical.highlight,
+                .filters = canonical.set.filters,
+                .segment_id = canonical.set.segment_id,
+            };
+        }
+        break :parsed controller.parseTrendQuery(
+            dependencies.allocator,
+            request.target,
+        ) catch {
+            try invalidTrendQueryPage(dependencies.allocator, output, default_query);
+            return;
+        };
     };
     const query = controller.finishTrendQuery(
         parsed,
@@ -1393,6 +1546,20 @@ fn getTrendPage(
                 .message = "The analysis exceeded its shared server deadline. Narrow the selected date range or reduce the series and retry.",
                 .return_url = request.target,
             });
+        } else if (err == error.StaleFilterProperty) {
+            try staleFilterPage(
+                dependencies.allocator,
+                output,
+                .analyze,
+                query,
+            );
+        } else if (isStaleSegmentError(err)) {
+            try staleSegmentPage(
+                dependencies.allocator,
+                output,
+                .analyze,
+                query,
+            );
         } else if (err == error.TooManyAnalyzeTrendSeries) {
             try writeError(output, .{
                 .status = 422,
@@ -1442,6 +1609,344 @@ fn legacyDestination(kind: report.Kind) model.Destination {
         .goal, .funnel => .journeys,
         .traffic_quality => .live,
     };
+}
+
+fn postAnalysisAction(
+    dependencies: Dependencies,
+    request: request_mod.Request,
+    output: *std.Io.Writer,
+    action: AnalysisAction,
+) !void {
+    if (!validFormContentType(try request.header("content-type"))) {
+        try writeError(output, .{
+            .status = 415,
+            .title = "Unsupported form",
+            .message = "Use a normal URL-encoded HTML form.",
+        });
+        return;
+    }
+    if (!try sameOrigin(request, dependencies.origin)) {
+        try writeError(output, .{
+            .status = 403,
+            .title = "Forbidden",
+            .message = "The saved analysis form did not come from this dashboard origin.",
+        });
+        return;
+    }
+    const form = controller.Form.parseSavedState(
+        dependencies.allocator,
+        request.body,
+    ) catch {
+        try writeError(output, .{
+            .status = 400,
+            .title = "Invalid saved analysis form",
+            .message = "The submitted state was malformed or exceeded its bounded size.",
+        });
+        return;
+    };
+    controller.verifyCsrf(form, dependencies.csrf_token) catch {
+        try writeError(output, .{
+            .status = 403,
+            .title = "Forbidden",
+            .message = "The form token was missing or stale. Reload and try again.",
+        });
+        return;
+    };
+    const needs_state = switch (action) {
+        .apply_filter,
+        .suggest_filter,
+        .remove_filter,
+        .create_segment,
+        .update_segment,
+        .rename_segment,
+        .duplicate_segment,
+        .create_saved_view,
+        => true,
+        .delete_segment => form.optional("state") != null,
+        .duplicate_saved_view,
+        .rename_saved_view,
+        .delete_saved_view,
+        => false,
+    };
+    var target: ?controller.AnalysisTarget = if (needs_state)
+        controller.analysisTargetFromForm(
+            dependencies.allocator,
+            dependencies.metadata,
+            form,
+        ) catch |err| {
+            try analysisMutationError(output, err);
+            return;
+        }
+    else
+        null;
+    if (action == .suggest_filter) {
+        const suggested = controller.suggestionsFromForm(
+            dependencies.allocator,
+            dependencies.metadata,
+            dependencies.events,
+            form,
+            dependencies.report_timeout_ms,
+        ) catch |err| {
+            try analysisMutationError(output, err);
+            return;
+        };
+        var page = loadAnalysisTargetPage(
+            dependencies,
+            suggested.target,
+        ) catch |err| {
+            try analysisMutationError(output, err);
+            return;
+        };
+        page.filter_suggestions = suggested.suggestions;
+        try writePage(output, 200, page);
+        return;
+    }
+    const now: i64 = switch (action) {
+        .create_segment,
+        .update_segment,
+        .rename_segment,
+        .duplicate_segment,
+        .create_saved_view,
+        .duplicate_saved_view,
+        .rename_saved_view,
+        => currentMicros() catch {
+            try writeError(output, .{
+                .status = 503,
+                .title = "Clock unavailable",
+                .message = "The server could not safely timestamp this saved state.",
+            });
+            return;
+        },
+        else => 0,
+    };
+    switch (action) {
+        .apply_filter => target = controller.applyFilterFromForm(
+            dependencies.allocator,
+            dependencies.metadata,
+            form,
+        ) catch |err| {
+            try analysisMutationError(output, err);
+            return;
+        },
+        .suggest_filter => unreachable,
+        .remove_filter => target = controller.removeFilterFromForm(
+            dependencies.allocator,
+            dependencies.metadata,
+            form,
+        ) catch |err| {
+            try analysisMutationError(output, err);
+            return;
+        },
+        .create_segment => controller.createSegmentFromForm(
+            dependencies.allocator,
+            dependencies.io,
+            dependencies.metadata,
+            form,
+            now,
+        ) catch |err| {
+            try analysisMutationError(output, err);
+            return;
+        },
+        .update_segment => controller.updateSegmentFromForm(
+            dependencies.allocator,
+            dependencies.metadata,
+            form,
+            now,
+        ) catch |err| {
+            try analysisMutationError(output, err);
+            return;
+        },
+        .rename_segment => controller.renameSegmentFromForm(
+            dependencies.allocator,
+            dependencies.metadata,
+            form,
+            now,
+        ) catch |err| {
+            try analysisMutationError(output, err);
+            return;
+        },
+        .duplicate_segment => controller.duplicateSegmentFromForm(
+            dependencies.allocator,
+            dependencies.io,
+            dependencies.metadata,
+            form,
+            now,
+        ) catch |err| {
+            try analysisMutationError(output, err);
+            return;
+        },
+        .delete_segment => target = controller.deleteSegmentFromForm(
+            dependencies.allocator,
+            dependencies.metadata,
+            form,
+        ) catch |err| {
+            try analysisMutationError(output, err);
+            return;
+        },
+        .create_saved_view => controller.createSavedViewFromForm(
+            dependencies.allocator,
+            dependencies.io,
+            dependencies.metadata,
+            form,
+            now,
+        ) catch |err| {
+            try analysisMutationError(output, err);
+            return;
+        },
+        .duplicate_saved_view => controller.duplicateSavedViewFromForm(
+            dependencies.allocator,
+            dependencies.io,
+            dependencies.metadata,
+            form,
+            now,
+        ) catch |err| {
+            try analysisMutationError(output, err);
+            return;
+        },
+        .rename_saved_view => controller.renameSavedViewFromForm(
+            dependencies.allocator,
+            dependencies.metadata,
+            form,
+            now,
+        ) catch |err| {
+            try analysisMutationError(output, err);
+            return;
+        },
+        .delete_saved_view => controller.deleteSavedViewFromForm(
+            dependencies.allocator,
+            dependencies.metadata,
+            form,
+        ) catch |err| {
+            try analysisMutationError(output, err);
+            return;
+        },
+    }
+    if (target) |resolved| {
+        try redirectToCanonical(
+            dependencies.allocator,
+            output,
+            resolved.destination,
+            resolved.query,
+            "",
+        );
+        return;
+    }
+    const site = try form.required("site");
+    if (action == .duplicate_saved_view or action == .rename_saved_view) {
+        const id = try form.required("id");
+        var location = std.Io.Writer.Allocating.init(dependencies.allocator);
+        defer location.deinit();
+        try location.writer.print(
+            "/admin/sites/{s}/saved-views/{s}",
+            .{ site, id },
+        );
+        try redirectLocal(output, location.written());
+    } else {
+        var location = std.Io.Writer.Allocating.init(dependencies.allocator);
+        defer location.deinit();
+        try location.writer.print("/admin/sites/{s}/overview", .{site});
+        try redirectLocal(output, location.written());
+    }
+}
+
+fn redirectLocal(output: *std.Io.Writer, location: []const u8) !void {
+    var headers = std.Io.Writer.Allocating.init(std.heap.page_allocator);
+    defer headers.deinit();
+    try headers.writer.print(
+        "Cache-Control: no-store\r\nLocation: {s}\r\n",
+        .{location},
+    );
+    try response.write(
+        output,
+        303,
+        "text/plain; charset=utf-8",
+        headers.written(),
+        "See Other\n",
+    );
+}
+
+fn loadAnalysisTargetPage(
+    dependencies: Dependencies,
+    target: controller.AnalysisTarget,
+) !model.Page {
+    const sites = try dependencies.metadata.listSites(dependencies.allocator);
+    const selected = try controller.resolveSite(sites, target.query.site);
+    const lookup = dependencies.site_calendar orelse
+        return error.SiteCalendarUnavailable;
+    const selected_calendar = lookup.find(selected.id) orelse
+        return error.SiteCalendarUnavailable;
+    const context = try calendar.resolve(
+        selected_calendar.zone,
+        selected_calendar.timezone_name,
+        try currentSeconds(),
+        target.query.range,
+        target.query.comparison,
+    );
+    if (target.destination == .overview) {
+        var page = try controller.loadPage(
+            dependencies.allocator,
+            dependencies.metadata,
+            dependencies.events,
+            .overview,
+            target.query,
+            context,
+            selected_calendar.zone,
+            dependencies.csrf_token,
+            "",
+            dependencies.report_timeout_ms,
+        );
+        const diagnostics = dependencies.diagnostics orelse
+            return error.MissingDiagnosticsLookup;
+        page.collection_diagnostics = try diagnostics.get(
+            dependencies.allocator,
+            selected.id,
+        );
+        return page;
+    }
+    if (target.query.analysis_breakdown != null) {
+        return controller.loadBreakdownPage(
+            dependencies.allocator,
+            dependencies.metadata,
+            dependencies.events,
+            target.query,
+            context,
+            dependencies.csrf_token,
+            dependencies.report_timeout_ms,
+        );
+    }
+    try controller.validateTrendHighlight(
+        dependencies.allocator,
+        target.query,
+        context,
+        selected_calendar.zone,
+    );
+    return controller.loadTrendPage(
+        dependencies.allocator,
+        dependencies.metadata,
+        dependencies.events,
+        target.query,
+        context,
+        selected_calendar.zone,
+        dependencies.csrf_token,
+        dependencies.report_timeout_ms,
+    );
+}
+
+fn analysisMutationError(output: *std.Io.Writer, err: anyerror) !void {
+    std.log.warn("analysis state mutation rejected: {s}", .{@errorName(err)});
+    if (err == error.AnalysisTimeout or err == error.ReportTimeout) {
+        try writeError(output, .{
+            .status = 503,
+            .title = "Analysis timed out",
+            .message = "The filter preview or analysis exceeded its shared server deadline. Narrow the date range or preceding filters and retry.",
+        });
+        return;
+    }
+    try writeError(output, .{
+        .status = 422,
+        .title = "Saved analysis state was not changed",
+        .message = "The filter, segment, or saved view is invalid, stale, duplicated, over its bound, or belongs to another site. Reload the analysis and correct the highlighted state.",
+    });
 }
 
 fn postAction(
@@ -1944,6 +2449,32 @@ fn canonicalUrl(
         .live => "/live",
         .settings => "/settings/general",
     });
+    if (destination == .overview) {
+        try output.writeAll("?v=1&from=");
+        try urlComponent(output, query.range.start);
+        try output.writeAll("&to=");
+        try urlComponent(output, query.range.end);
+        try output.writeAll("&compare=");
+        try urlComponent(output, query.comparison.name());
+        try output.writeAll("&metric=");
+        if (query.overview_metric == .revenue) {
+            try output.writeAll("revenue-");
+            try urlComponent(output, query.overview_currency);
+        } else {
+            try urlComponent(output, query.overview_metric.name());
+        }
+        const suffix = try analysis.canonicalFilterUrlSuffix(
+            std.heap.page_allocator,
+            query.analysis_segment_id,
+            query.analysis_filters,
+        );
+        defer std.heap.page_allocator.free(suffix);
+        if (suffix.len != 0) {
+            try output.writeByte('&');
+            try output.writeAll(suffix);
+        }
+        return;
+    }
     if (destination == .analyze and query.analysis_breakdown != null) {
         const parameters = try analysis.canonicalUrl(
             std.heap.page_allocator,
@@ -1963,6 +2494,8 @@ fn canonicalUrl(
                 .comparison = query.comparison,
                 .interval = query.analysis_interval,
                 .series = query.analysis_series,
+                .filters = query.analysis_filters,
+                .segment_id = query.analysis_segment_id,
             },
             query.highlighted_interval,
         );
@@ -2053,6 +2586,57 @@ fn isInvalidInput(err: anyerror) bool {
         => true,
         else => false,
     };
+}
+
+fn isStaleSegmentError(err: anyerror) bool {
+    return switch (err) {
+        error.SegmentNotFound,
+        error.StaleSegmentState,
+        error.StaleSegmentProperty,
+        error.TooManyAnalysisClauses,
+        => true,
+        else => false,
+    };
+}
+
+fn staleFilterPage(
+    allocator: std.mem.Allocator,
+    output: *std.Io.Writer,
+    destination: model.Destination,
+    query: model.Query,
+) !void {
+    var reset = query;
+    reset.analysis_filters = .{};
+    if (reset.analysis_breakdown) |*breakdown| breakdown.filters = .{};
+    var return_url = std.Io.Writer.Allocating.init(allocator);
+    defer return_url.deinit();
+    try canonicalUrl(&return_url.writer, destination, reset);
+    try writeError(output, .{
+        .status = 422,
+        .title = "Filter is stale",
+        .message = "An ad-hoc property filter references a property that this site no longer collects. Remove the stale ad-hoc filters, then inspect or recreate the affected saved view.",
+        .return_url = return_url.written(),
+    });
+}
+
+fn staleSegmentPage(
+    allocator: std.mem.Allocator,
+    output: *std.Io.Writer,
+    destination: model.Destination,
+    query: model.Query,
+) !void {
+    var reset = query;
+    reset.analysis_segment_id = null;
+    if (reset.analysis_breakdown) |*breakdown| breakdown.segment_id = null;
+    var return_url = std.Io.Writer.Allocating.init(allocator);
+    defer return_url.deinit();
+    try canonicalUrl(&return_url.writer, destination, reset);
+    try writeError(output, .{
+        .status = 422,
+        .title = "Saved segment is stale",
+        .message = "The selected segment is missing, corrupt, over the composed filter bound, or references a property that is no longer collected. Remove it, inspect the remaining ad-hoc filters, and choose or recreate a valid segment.",
+        .return_url = return_url.written(),
+    });
 }
 
 fn isFormError(err: anyerror) bool {
@@ -2149,7 +2733,7 @@ test "canonical dashboard URL preserves Overview trend handoff state" {
     overview.highlighted_interval = "";
     try canonicalUrl(&output.writer, .overview, overview);
     try std.testing.expectEqualStrings(
-        "/admin/sites/example/overview?from=2025-01-01&to=2025-01-02&compare=previous&metric=revenue-EUR",
+        "/admin/sites/example/overview?v=1&from=2025-01-01&to=2025-01-02&compare=previous&metric=revenue-EUR",
         output.written(),
     );
 }

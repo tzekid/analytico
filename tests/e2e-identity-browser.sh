@@ -185,7 +185,7 @@ then
 fi
 
 doctor=$("$binary" doctor "$fixture_dir")
-[[ "$doctor" == ok\ metadata=v6\ events=v7\ sites=2\ * ]]
+[[ "$doctor" == ok\ metadata=v7\ events=v7\ sites=2\ * ]]
 [[ "$doctor" == *key=ok ]]
 
 if grep -aE '(prior-user|blocked)' \

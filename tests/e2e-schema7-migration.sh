@@ -80,9 +80,9 @@ verified="$fixture/verified-schema6"
 test "$("$previous" doctor "$verified")" = \
     "ok metadata=v4 events=v6 sites=1 goals=0 funnels=0 stored_events=1 key=ok"
 test "$("$current" migrate "$live" "$backup")" = \
-    "migrated metadata=v6 events=v7"
+    "migrated metadata=v7 events=v7"
 test "$("$current" doctor "$live")" = \
-    "ok metadata=v6 events=v7 sites=1 goals=0 funnels=0 stored_events=1 key=ok"
+    "ok metadata=v7 events=v7 sites=1 goals=0 funnels=0 stored_events=1 key=ok"
 inspect=$("$current" m2 v2-inspect "$live" "$site_id" \
     00000000-0000-4000-8000-000000000b01)
 jq -e '.event_schema_version == 7 and (has("network_day_id") | not)' \
@@ -163,9 +163,9 @@ if wait "$migration_pid" 2>/dev/null; then
 fi
 migration_pid=
 test "$("$current" migrate "$million" "$million_backup")" = \
-    "migrated metadata=v6 events=v7"
+    "migrated metadata=v7 events=v7"
 test "$("$current" doctor "$million")" = \
-    "ok metadata=v6 events=v7 sites=1 goals=0 funnels=0 stored_events=1000000 key=ok"
+    "ok metadata=v7 events=v7 sites=1 goals=0 funnels=0 stored_events=1000000 key=ok"
 million_after_evidence=$("$current" m3 legacy-evidence "$million")
 test "$(jq -r .event_migration_version <<<"$million_after_evidence")" = 7
 test "$(jq -r .rows <<<"$million_after_evidence")" = 1000000
@@ -174,7 +174,7 @@ test "$(jq -r .preserved_fingerprint <<<"$million_after_evidence")" = \
 test "$("$current" report "$million" million \
     2025-01-01 2025-01-12 overview --format json)" = "$million_before"
 test "$("$current" migrate "$million" "$million_backup")" = \
-    "migrated metadata=v6 events=v7"
+    "migrated metadata=v7 events=v7"
 million_rollback="$fixture/million-rollback"
 "$previous" restore "$million_backup" "$million_rollback" --verify >/dev/null
 test "$("$previous" doctor "$million_rollback")" = \

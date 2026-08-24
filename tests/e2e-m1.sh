@@ -24,14 +24,14 @@ expect_failure() {
 }
 
 init_output=$("$binary" init "$fixture_dir")
-test "$init_output" = "initialized metadata=v6 events=v7 key=created"
+test "$init_output" = "initialized metadata=v7 events=v7 key=created"
 test -s "$fixture_dir/meta.db"
 test -s "$fixture_dir/events.duckdb"
 test "$(stat -c '%a' "$fixture_dir/visitor.key")" = "600"
 test "$(stat -c '%s' "$fixture_dir/visitor.key")" = "32"
 key_hash=$(sha256sum "$fixture_dir/visitor.key" | cut -d' ' -f1)
 test "$("$binary" init "$fixture_dir")" = \
-    "initialized metadata=v6 events=v7 key=existing"
+    "initialized metadata=v7 events=v7 key=existing"
 test "$(sha256sum "$fixture_dir/visitor.key" | cut -d' ' -f1)" = "$key_hash"
 
 site_output=$(
@@ -127,7 +127,7 @@ event_output=$("$binary" event add "$fixture_dir" example pageview \
 [[ "$event_output" == "event committed "* ]]
 doctor=$("$binary" doctor "$fixture_dir")
 test "$doctor" = \
-    "ok metadata=v6 events=v7 sites=1 goals=3 funnels=1 stored_events=1 key=ok"
+    "ok metadata=v7 events=v7 sites=1 goals=3 funnels=1 stored_events=1 key=ok"
 expect_failure "$binary" event add "$fixture_dir" example pageview \
     'not-a-path' 1700000000000001 2023-11-14 203.0.113.42 Firefox Linux desktop
 test "$("$binary" doctor "$fixture_dir")" = "$doctor"
@@ -144,6 +144,6 @@ expect_failure "$binary" site delete "$fixture_dir" example --confirm Wrong
 test "$("$binary" site delete "$fixture_dir" example --confirm example)" = \
     "site deleted example"
 test "$("$binary" doctor "$fixture_dir")" = \
-    "ok metadata=v6 events=v7 sites=0 goals=0 funnels=0 stored_events=0 key=ok"
+    "ok metadata=v7 events=v7 sites=0 goals=0 funnels=0 stored_events=0 key=ok"
 
 echo "M1 durable-domain real-process end-to-end checks passed"

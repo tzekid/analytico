@@ -420,6 +420,24 @@ collection under the refreshed policy. Rollback restores the matched
 metadata-5/event-7 pair before starting the prior binary. There is no DuckDB,
 tracker, Caddy, process, or dependency change for metadata schema 6.
 
+For the metadata-schema-7 deployment, repeat the stopped-writer procedure with
+a manifest recording metadata 6 and event 7. Independently restore that backup
+and prove the exact `a2d71c0` metadata-6 predecessor opens it and reproduces the
+selected reports before migration. The additive migration creates empty
+`segments` and `saved_views` tables and writes ledger 7 last; it does not alter
+site, policy, authentication, goal, funnel, event, identity, tracker, Caddy, or
+service-unit facts.
+
+After migration, verify metadata 7/event 7, `doctor`, metric-v1 parity, exact
+saved-state CRUD and site isolation, one filtered Overview/Trend/Breakdown
+journey, JavaScript-disabled apply/remove, and the filtered million-row gates.
+The exact deployed binary/library, one process/listener, health/readiness,
+public passkey boundary, and canonical deep-link return must resolve to the
+merged release. The release record includes artifact and backup-manifest
+hashes. Rollback stops the writer, restores the matched metadata-6/event-7 pair,
+proves the predecessor again, and only then switches the release symlink. The
+metadata-6 binary must never be started against the migrated metadata-7 file.
+
 ## 11. Retention and site deletion
 
 Run maintenance with the service stopped:
@@ -482,7 +500,8 @@ zig build e2e-m0 e2e-m1 e2e-m2 e2e-timezone e2e-properties \
   e2e-schema6-migration e2e-schema7-migration e2e-heuristics \
   e2e-exclusion e2e-legacy-migration \
   e2e-m2-browser e2e-identity-browser e2e-tracker-browser e2e-m3 e2e-m4 \
-  e2e-m6 e2e-m7 e2e-passkey-p1 \
+  e2e-m6 e2e-m7 e2e-filters e2e-passkey-p1 \
+  e2e-metadata7-migration \
   -Doptimize=ReleaseSafe -Dturso-native-path=<exact-prefix>
 zig build bench-properties \
   -Doptimize=ReleaseSafe -Dturso-native-path=<exact-prefix>
@@ -495,6 +514,8 @@ zig build e2e-release-full \
 `e2e-release-full` checks the outer and inner checksums, private DuckDB linkage,
 Caddy syntax, systemd security, and a fresh real-data report from the extracted
 archive, then runs the complete packaged real-process set including classifier,
-traffic-quality, and exact schema-4, schema-5, plus schema-6 predecessor
-migration evidence. Large
-event/browser fixtures are acceptance tooling only and are not shipped.
+traffic-quality, universal filters, and exact schema-4, schema-5, schema-6,
+plus metadata-6 predecessors. The named `e2e-filters` and
+`e2e-metadata7-migration` gates run independently above and again inside this
+full packaged qualification. Large event/browser fixtures are acceptance
+tooling only and are not shipped.

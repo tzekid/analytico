@@ -43,8 +43,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-server_port=$((47000 + ($$ % 700)))
-proxy_port=$((48000 + ($$ % 700)))
+server_port=${ANALYTICO_TEST_SERVER_PORT:-$((47000 + ($$ % 700)))}
+proxy_port=${ANALYTICO_TEST_PROXY_PORT:-$((48000 + ($$ % 700)))}
 upstream="http://127.0.0.1:$server_port"
 dashboard="http://localhost:$proxy_port"
 data="$fixture/data"
@@ -190,7 +190,7 @@ cookie="analytico_session=$session_cookie"
 
 range='site=example&start=2025-01-01&end=2025-01-02&report=overview'
 dates='from=2025-01-01&to=2025-01-02&compare=previous'
-overview="$dashboard/admin/sites/example/overview?$dates"
+overview="$dashboard/admin/sites/example/overview?v=1&$dates&metric=visitors"
 test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
     --cookie "$cookie" "$dashboard/admin?$range")" = 303
 test "$(curl --silent --output /dev/null --write-out '%{redirect_url}' \
@@ -228,8 +228,8 @@ test "$(curl --silent --output /dev/null --write-out '%{redirect_url}' \
     "$dashboard/admin/sites/example/overview?start=2025-01-01&end=2025-01-02")" = "$overview"
 default_location=$(curl --silent --output /dev/null --write-out '%{redirect_url}' \
     --cookie "$cookie" "$dashboard/admin/sites/example/overview")
-[[ "$default_location" == "$dashboard/admin/sites/example/overview?from="* ]]
-[[ "$default_location" == *'&to='*'&compare=previous' ]]
+[[ "$default_location" == "$dashboard/admin/sites/example/overview?v=1&from="* ]]
+[[ "$default_location" == *'&to='*'&compare=previous&metric=visitors' ]]
 status=$(curl --silent --output "$fixture/invalid-calendar.html" \
     --write-out '%{http_code}' --cookie "$cookie" \
     "$dashboard/admin/sites/example/overview?from=2025-01-01")

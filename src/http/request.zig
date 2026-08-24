@@ -6,6 +6,7 @@ pub const max_header_bytes = 16 * 1024;
 pub const max_body_bytes = 8 * 1024;
 pub const max_v2_body_bytes = 16 * 1024;
 pub const max_auth_body_bytes = 192 * 1024;
+pub const max_saved_state_body_bytes = 64 * 1024;
 
 pub const Header = struct {
     name: []const u8,
@@ -184,10 +185,27 @@ fn bodyLimit(target: []const u8) usize {
     return if (std.mem.startsWith(u8, path, "/admin/auth/") or
         std.mem.eql(u8, path, "/admin/security/passkeys/verify"))
         max_auth_body_bytes
+    else if (isSavedStatePath(path))
+        max_saved_state_body_bytes
     else if (std.mem.eql(u8, path, "/v2/event"))
         max_v2_body_bytes
     else
         max_body_bytes;
+}
+
+fn isSavedStatePath(path: []const u8) bool {
+    return std.mem.eql(u8, path, "/admin/filters/apply") or
+        std.mem.eql(u8, path, "/admin/filters/suggest") or
+        std.mem.eql(u8, path, "/admin/filters/remove") or
+        std.mem.eql(u8, path, "/admin/segments") or
+        std.mem.eql(u8, path, "/admin/segments/update") or
+        std.mem.eql(u8, path, "/admin/segments/rename") or
+        std.mem.eql(u8, path, "/admin/segments/duplicate") or
+        std.mem.eql(u8, path, "/admin/segments/delete") or
+        std.mem.eql(u8, path, "/admin/saved-views") or
+        std.mem.eql(u8, path, "/admin/saved-views/duplicate") or
+        std.mem.eql(u8, path, "/admin/saved-views/rename") or
+        std.mem.eql(u8, path, "/admin/saved-views/delete");
 }
 
 fn trimLine(line: []const u8) []const u8 {
@@ -228,4 +246,34 @@ test "request observation retains only a known collection target" {
     try std.testing.expectEqual(CollectionTarget.pixel, collectionTarget("/v1/p.gif?private=query"));
     try std.testing.expectEqual(CollectionTarget.none, collectionTarget("/v1/eventual"));
     try std.testing.expectEqual(CollectionTarget.none, collectionTarget("/admin/sites/example/live"));
+}
+
+test "only authenticated analysis state routes receive the 64 KiB form bound" {
+    inline for (.{
+        "/admin/filters/apply",
+        "/admin/filters/suggest",
+        "/admin/filters/remove",
+        "/admin/segments",
+        "/admin/segments/update",
+        "/admin/segments/rename",
+        "/admin/segments/duplicate",
+        "/admin/segments/delete",
+        "/admin/saved-views",
+        "/admin/saved-views/duplicate",
+        "/admin/saved-views/rename",
+        "/admin/saved-views/delete",
+    }) |target| {
+        try std.testing.expectEqual(
+            @as(usize, max_saved_state_body_bytes),
+            bodyLimit(target),
+        );
+    }
+    inline for (.{
+        "/admin/goals",
+        "/admin/sites/example/overview",
+        "/admin/segments-elsewhere",
+        "/v1/event",
+    }) |target| {
+        try std.testing.expectEqual(@as(usize, max_body_bytes), bodyLimit(target));
+    }
 }

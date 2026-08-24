@@ -59,6 +59,8 @@ pub const Query = struct {
     analysis_interval: analysis.Interval = .auto,
     analysis_series: []const analysis.Metric = &.{},
     analysis_breakdown: ?analysis.Query = null,
+    analysis_filters: analysis.FilterSet = .{},
+    analysis_segment_id: ?[]const u8 = null,
 };
 
 pub const ReportTimeBasis = enum {
@@ -114,12 +116,16 @@ pub const OverviewContentRow = struct {
     page_views: i64,
     visitors: i64,
     share_basis_points: u16,
+    filter_url: []const u8 = "",
+    exclude_url: []const u8 = "",
 };
 
 pub const OverviewAcquisitionRow = struct {
     label: []const u8,
     sessions: i64,
     conversion: analysis.Ratio,
+    filter_url: []const u8 = "",
+    exclude_url: []const u8 = "",
 };
 
 pub const OverviewConversionRow = struct {
@@ -131,6 +137,8 @@ pub const OverviewConversionRow = struct {
 pub const OverviewAudienceRow = struct {
     label: []const u8,
     sessions: i64,
+    filter_url: []const u8 = "",
+    exclude_url: []const u8 = "",
 };
 
 pub const OverviewDetails = struct {
@@ -174,7 +182,7 @@ pub const AnalyzeTrend = struct {
 };
 
 pub const AnalyzeBreakdown = struct {
-    rows: []const analysis.BreakdownRow,
+    rows: []const AnalyzeBreakdownRow,
     next_page: ?u32,
     cardinality: i64,
     coverage: []const u8,
@@ -182,6 +190,42 @@ pub const AnalyzeBreakdown = struct {
     property_count: i64,
     properties_truncated: bool,
     no_events_ever: bool,
+};
+
+pub const AnalyzeBreakdownRow = struct {
+    data: analysis.BreakdownRow,
+    filter_url: []const u8,
+    exclude_url: []const u8,
+};
+
+pub const FilterSuggestions = struct {
+    values: []const FilterSuggestion,
+    has_more: bool,
+    scope: analysis.Scope,
+    field: analysis.Field,
+    scalar_type: analysis.ScalarType,
+    operator: analysis.Operator,
+    search: []const u8,
+    builder_values: []const u8,
+};
+
+pub const FilterSuggestion = struct {
+    value: []const u8,
+    filter_url: []const u8,
+    exclude_url: []const u8,
+};
+
+pub const FilterChip = struct {
+    label: []const u8,
+    remove_url: []const u8,
+};
+
+pub const SegmentOption = struct {
+    id: []const u8,
+    name: []const u8,
+    url: []const u8,
+    updated_at_utc: []const u8,
+    selected: bool,
 };
 
 pub const GoalDraft = struct {
@@ -223,6 +267,16 @@ pub const Page = struct {
     collection_diagnostics: ?diagnostics.Snapshot = null,
     goals: []const meta.Goal,
     funnels: []const meta.Funnel,
+    saved_views: []const meta.SavedView = &.{},
+    selected_segment_name: []const u8 = "",
+    analysis_state_kind: []const u8 = "",
+    analysis_state_json: []const u8 = "",
+    analysis_filter_parameters: []const []const u8 = &.{},
+    analysis_predicate_parameters: []const []const u8 = &.{},
+    filter_suggestions: ?FilterSuggestions = null,
+    filter_chips: []const FilterChip = &.{},
+    segment_options: []const SegmentOption = &.{},
+    clear_segment_url: []const u8 = "",
     self_exclusion_origins: []const []u8,
     excluded_networks: []const []u8,
     strict_mode: bool = false,

@@ -18,11 +18,27 @@ pub const Form = struct {
         allocator: std.mem.Allocator,
         body: []const u8,
     ) !Form {
-        if (body.len > 8 * 1024) return error.FormTooLarge;
+        return parseBounded(allocator, body, 8 * 1024, 24);
+    }
+
+    pub fn parseSavedState(
+        allocator: std.mem.Allocator,
+        body: []const u8,
+    ) !Form {
+        return parseBounded(allocator, body, 64 * 1024, 32);
+    }
+
+    fn parseBounded(
+        allocator: std.mem.Allocator,
+        body: []const u8,
+        maximum_bytes: usize,
+        maximum_fields: usize,
+    ) !Form {
+        if (body.len > maximum_bytes) return error.FormTooLarge;
         var fields: std.ArrayList(Field) = .empty;
         var pairs = std.mem.splitScalar(u8, body, '&');
         while (pairs.next()) |pair| {
-            if (fields.items.len >= 24) return error.TooManyFormFields;
+            if (fields.items.len >= maximum_fields) return error.TooManyFormFields;
             const raw_name, const raw_value = std.mem.cutScalar(u8, pair, '=') orelse
                 return error.InvalidFormEncoding;
             const name = try decodeComponent(allocator, raw_name);
@@ -489,7 +505,7 @@ test "Breakdown builder and legacy lists produce one typed query" {
     const allocator = arena.allocator();
     const parsed = try parseBreakdownBuilder(
         allocator,
-        "/admin/sites/example/analyze?builder=1&mode=breakdown&from=2026-01-01&to=2026-01-02&metric=event-count&event=signup&goal=&dimension=event-property&property=plan&property-type=string&search=Pro+plan&sort=label-asc&limit=50&p=plan%7Eis%7Estring%7EPro",
+        "/admin/sites/example/analyze?builder=1&mode=breakdown&from=2026-01-01&to=2026-01-02&metric=event-count&event=signup&goal=&dimension=event-property&property=plan&property-type=string&search=Pro+plan&sort=label-asc&limit=50&p=plan%7Eis%7Estring%7EPro&segment=00000000-0000-4000-8000-000000000030&f=event%7Epage%7Eis%7Estring%7E%252Fpricing",
     );
     const built = try finishBreakdownBuilder(
         parsed,
@@ -516,6 +532,14 @@ test "Breakdown builder and legacy lists produce one typed query" {
     try std.testing.expectEqualStrings(
         "plan",
         built.analysis_breakdown.?.metric.selector.?.predicates[0].property_ref.name,
+    );
+    try std.testing.expectEqualStrings(
+        "00000000-0000-4000-8000-000000000030",
+        built.analysis_breakdown.?.segment_id.?,
+    );
+    try std.testing.expectEqualStrings(
+        "/pricing",
+        built.analysis_breakdown.?.filters.clauses[0].values[0],
     );
     const standard = try finishBreakdownBuilder(
         try parseBreakdownBuilder(
@@ -576,16 +600,24 @@ test "Breakdown builder and legacy lists produce one typed query" {
         .values = &filter_values,
     }};
     filtered.filters = .{ .clauses = &filters };
-    try std.testing.expectError(
-        error.AnalysisOptionsNotApplicable,
-        finishBreakdownQuery(filtered, "example"),
-    );
+    const filtered_query = try finishBreakdownQuery(filtered, "example");
+    try std.testing.expect(analysis.filterSetsEqual(
+        filtered_query.analysis_filters,
+        filtered.filters,
+    ));
 
-    var segmented = built.analysis_breakdown.?;
+    var segmented = filtered;
     segmented.segment_id = "00000000-0000-4000-8000-000000000030";
+    const segmented_query = try finishBreakdownQuery(segmented, "example");
+    try std.testing.expectEqualStrings(
+        segmented.segment_id.?,
+        segmented_query.analysis_segment_id.?,
+    );
+    var inconsistent = segmented_query;
+    inconsistent.analysis_filters = .{};
     try std.testing.expectError(
         error.AnalysisOptionsNotApplicable,
-        finishBreakdownQuery(segmented, "example"),
+        validateQuery(inconsistent),
     );
 
     var page_selector = built.analysis_breakdown.?;
@@ -645,6 +677,8 @@ pub const ParsedQuery = struct {
     overview_currency: []const u8 = "",
     overview_selection_set: bool = false,
     highlighted_interval: []const u8 = "",
+    filters: analysis.FilterSet = .{},
+    segment_id: ?[]const u8 = null,
 };
 
 pub fn parseQuery(
@@ -668,11 +702,22 @@ pub fn parseQuery(
         }
     }
     var seen: std.ArrayList([]const u8) = .empty;
+    var filters: std.ArrayList(analysis.Clause) = .empty;
     var pairs = std.mem.splitScalar(u8, encoded, '&');
     while (pairs.next()) |pair| {
         if (pair.len == 0) continue;
         const raw_name, const raw_value = std.mem.cutScalar(u8, pair, '=') orelse
             return error.InvalidQuery;
+        if (std.mem.eql(u8, raw_name, "f")) {
+            if (filters.items.len >= analysis.maximum_clauses) {
+                return error.TooManyAnalysisClauses;
+            }
+            try filters.append(
+                allocator,
+                try analysis.parseFormClause(allocator, raw_value),
+            );
+            continue;
+        }
         const name = try decodeComponent(allocator, raw_name);
         const value = try decodeComponent(allocator, raw_value);
         for (seen.items) |existing| {
@@ -730,10 +775,19 @@ pub fn parseQuery(
         } else if (std.mem.eql(u8, name, "highlight")) {
             if (!validOverviewHighlight(value)) return error.InvalidOverviewHighlight;
             query.highlighted_interval = value;
+        } else if (std.mem.eql(u8, name, "v")) {
+            if (!std.mem.eql(u8, value, "1")) {
+                return error.UnsupportedAnalysisQueryVersion;
+            }
+        } else if (std.mem.eql(u8, name, "segment")) {
+            try domain.validateUuid(value);
+            query.segment_id = value;
         } else {
             return error.UnknownQueryField;
         }
     }
+    query.filters = .{ .clauses = try filters.toOwnedSlice(allocator) };
+    try query.filters.validate();
     return query;
 }
 
@@ -766,6 +820,8 @@ pub fn finishQuery(
         .overview_metric = parsed.overview_metric,
         .overview_currency = parsed.overview_currency,
         .highlighted_interval = parsed.highlighted_interval,
+        .analysis_filters = parsed.filters,
+        .analysis_segment_id = parsed.segment_id,
     };
     try validateQuery(query);
     return query;
@@ -796,6 +852,8 @@ pub fn translateOverviewTrendHandoff(
         .comparison = parsed.comparison,
         .series = series,
         .highlighted_interval = parsed.highlighted_interval,
+        .filters = parsed.filters,
+        .segment_id = parsed.segment_id,
     };
 }
 
@@ -806,6 +864,8 @@ pub const ParsedTrendQuery = struct {
     interval: analysis.Interval = .auto,
     series: []const analysis.Metric = &.{},
     highlighted_interval: []const u8 = "",
+    filters: analysis.FilterSet = .{},
+    segment_id: ?[]const u8 = null,
 };
 
 pub fn parseTrendQuery(
@@ -826,6 +886,7 @@ pub fn parseTrendQuery(
     var interval_seen = false;
     var highlight_seen = false;
     var canonical_series: std.ArrayList(analysis.Metric) = .empty;
+    var filters: std.ArrayList(analysis.Clause) = .empty;
     var builder_metric: [analysis.maximum_series]?[]const u8 = @splat(null);
     var builder_event: [analysis.maximum_series]?[]const u8 = @splat(null);
     var builder_goal: [analysis.maximum_series]?[]const u8 = @splat(null);
@@ -842,6 +903,16 @@ pub fn parseTrendQuery(
         const raw_name, const raw_value = std.mem.cutScalar(u8, parameter, '=') orelse
             return error.InvalidTrendQuery;
         if (raw_name.len == 0) return error.InvalidTrendQuery;
+        if (std.mem.eql(u8, raw_name, "f")) {
+            if (filters.items.len >= analysis.maximum_clauses) {
+                return error.TooManyAnalysisClauses;
+            }
+            try filters.append(
+                allocator,
+                try analysis.parseFormClause(allocator, raw_value),
+            );
+            continue;
+        }
         const name = try decodeComponent(allocator, raw_name);
         if (std.mem.eql(u8, name, "series")) {
             canonical_seen = true;
@@ -879,6 +950,8 @@ pub fn parseTrendQuery(
                 return error.InvalidOverviewHighlight;
             }
             parsed.highlighted_interval = value;
+        } else if (std.mem.eql(u8, name, "segment")) {
+            try setParsedOnce(&parsed.segment_id, value);
         } else if (builderField(name, "metric-")) |slot| {
             builder_seen = true;
             try setParsedOnce(&builder_metric[slot], value);
@@ -892,6 +965,7 @@ pub fn parseTrendQuery(
             return error.UnknownQueryField;
         }
     }
+    parsed.filters = .{ .clauses = try filters.toOwnedSlice(allocator) };
     if (canonical_seen and builder_seen) return error.MixedTrendQueryShape;
     if (canonical_seen) {
         if (!std.mem.eql(u8, version orelse return error.IncompleteTrendQuery, "1") or
@@ -959,6 +1033,8 @@ pub fn finishTrendQuery(
         .highlighted_interval = parsed.highlighted_interval,
         .analysis_interval = parsed.interval,
         .analysis_series = parsed.series,
+        .analysis_filters = parsed.filters,
+        .analysis_segment_id = parsed.segment_id,
     };
     try validateQuery(query);
     return query;
@@ -1039,6 +1115,8 @@ pub const ParsedBreakdownBuilder = struct {
     property_name: []const u8 = "",
     property_type: []const u8 = "",
     predicates: []const analysis.PropertyPredicate = &.{},
+    filters: analysis.FilterSet = .{},
+    segment_id: ?[]const u8 = null,
     search: []const u8 = "",
     sort: analysis.Sort = .value_desc,
     limit: u16 = 25,
@@ -1065,6 +1143,8 @@ pub fn parseBreakdownBuilder(
     var property_name: ?[]const u8 = null;
     var property_type: ?[]const u8 = null;
     var predicates: std.ArrayList(analysis.PropertyPredicate) = .empty;
+    var filters: std.ArrayList(analysis.Clause) = .empty;
+    var segment_id: ?[]const u8 = null;
     var search: ?[]const u8 = null;
     var sort: ?[]const u8 = null;
     var limit: ?[]const u8 = null;
@@ -1078,6 +1158,16 @@ pub fn parseBreakdownBuilder(
         }
         const raw_name, const raw_value = std.mem.cutScalar(u8, parameter, '=') orelse
             return error.InvalidBreakdownBuilder;
+        if (std.mem.eql(u8, raw_name, "f")) {
+            if (filters.items.len >= analysis.maximum_clauses) {
+                return error.TooManyAnalysisClauses;
+            }
+            try filters.append(
+                allocator,
+                try analysis.parseFormClause(allocator, raw_value),
+            );
+            continue;
+        }
         const name = try decodeComponent(allocator, raw_name);
         const value = try decodeComponent(allocator, raw_value);
         if (std.mem.eql(u8, name, "builder")) {
@@ -1108,6 +1198,8 @@ pub fn parseBreakdownBuilder(
                 allocator,
                 try analysis.parseFormPredicate(allocator, raw_value),
             );
+        } else if (std.mem.eql(u8, name, "segment")) {
+            try setParsedOnce(&segment_id, value);
         } else if (std.mem.eql(u8, name, "search")) {
             try setParsedOnce(&search, value);
         } else if (std.mem.eql(u8, name, "sort")) {
@@ -1137,6 +1229,8 @@ pub fn parseBreakdownBuilder(
         .property_name = property_name orelse "",
         .property_type = property_type orelse "",
         .predicates = try predicates.toOwnedSlice(allocator),
+        .filters = .{ .clauses = try filters.toOwnedSlice(allocator) },
+        .segment_id = segment_id,
         .search = search orelse "",
         .sort = if (sort) |value| try analysis.Sort.parse(value) else .value_desc,
         .limit = parsed_limit,
@@ -1176,6 +1270,8 @@ pub fn finishBreakdownBuilder(
         .mode = .breakdown,
         .metric = metric,
         .dimension = .{ .kind = dimension_kind, .property_ref = property_ref },
+        .filters = parsed.filters,
+        .segment_id = parsed.segment_id,
         .search = parsed.search,
         .sort = parsed.sort,
         .limit = parsed.limit,
@@ -1187,6 +1283,8 @@ pub fn finishBreakdownBuilder(
         .range = breakdown.range,
         .comparison = .none,
         .analysis_breakdown = breakdown,
+        .analysis_filters = breakdown.filters,
+        .analysis_segment_id = breakdown.segment_id,
     };
     try validateQuery(query);
     return query;
@@ -1203,6 +1301,8 @@ pub fn finishBreakdownQuery(
         .range = breakdown.range,
         .comparison = .none,
         .analysis_breakdown = breakdown,
+        .analysis_filters = breakdown.filters,
+        .analysis_segment_id = breakdown.segment_id,
     };
     try validateQuery(query);
     return query;
@@ -1279,6 +1379,36 @@ pub fn loadPage(
     const goals = try metadata.listGoals(allocator, selected.slug);
     const funnels = try metadata.listFunnels(allocator, selected.slug);
     const collection_policy = try metadata.sitePolicy(allocator, selected.id);
+    const segments: []const meta.Segment = if (destination == .overview)
+        try metadata.listSegments(allocator, selected.slug)
+    else
+        &.{};
+    const resolved_filters = if (destination == .overview)
+        try resolveFilters(
+            allocator,
+            metadata,
+            collection_policy,
+            selected.slug,
+            query.analysis_filters,
+            query.analysis_segment_id,
+        )
+    else
+        ResolvedFilters{
+            .filters = query.analysis_filters,
+            .segment_resolved = false,
+        };
+    const state = if (destination == .overview)
+        try analysisState(allocator, destination, query)
+    else
+        AnalysisState{ .kind = "", .json = "" };
+    const grammar = if (destination == .overview)
+        try analysisGrammarParameters(allocator, query)
+    else
+        AnalysisGrammarParameters{ .filters = &.{}, .predicates = &.{} };
+    const filter_navigation = if (destination == .overview)
+        try buildFilterNavigation(allocator, destination, query, segments)
+    else
+        FilterNavigation{ .chips = &.{}, .segments = &.{} };
     if (query.kind == .goal and query.subject.len == 0 and goals.len != 0) {
         query.subject = goals[0].name;
     }
@@ -1373,6 +1503,9 @@ pub fn loadPage(
                 else
                     null,
                 .active_goals = resolved_goals,
+                .filters = resolved_filters.filters,
+                .segment_id = query.analysis_segment_id,
+                .segment_resolved = resolved_filters.segment_resolved,
                 .strict_traffic_mode = collection_policy.strict_mode,
                 .daily_event_ceiling = collection_policy.daily_event_ceiling,
                 .timeout_ms = report_timeout_ms,
@@ -1392,6 +1525,7 @@ pub fn loadPage(
             allocator,
             overview,
             goals,
+            query,
         );
         break :value try buildOverviewKpis(
             allocator,
@@ -1412,6 +1546,14 @@ pub fn loadPage(
         .overview_details = overview_details,
         .goals = goals,
         .funnels = funnels,
+        .selected_segment_name = resolved_filters.segment_name,
+        .analysis_state_kind = state.kind,
+        .analysis_state_json = state.json,
+        .analysis_filter_parameters = grammar.filters,
+        .analysis_predicate_parameters = grammar.predicates,
+        .filter_chips = filter_navigation.chips,
+        .segment_options = filter_navigation.segments,
+        .clear_segment_url = filter_navigation.clear_segment_url,
         .self_exclusion_origins = collection_policy.origins,
         .excluded_networks = collection_policy.excluded_networks,
         .strict_mode = collection_policy.strict_mode,
@@ -1441,7 +1583,25 @@ pub fn loadTrendPage(
 
     const goals = try metadata.listGoals(allocator, selected.slug);
     const funnels = try metadata.listFunnels(allocator, selected.slug);
+    const segments = try metadata.listSegments(allocator, selected.slug);
+    const saved_views = try metadata.listSavedViews(allocator, selected.slug);
     const policy = try metadata.sitePolicy(allocator, selected.id);
+    const resolved_filters = try resolveFilters(
+        allocator,
+        metadata,
+        policy,
+        selected.slug,
+        query.analysis_filters,
+        query.analysis_segment_id,
+    );
+    const state = try analysisState(allocator, .analyze, query);
+    const grammar = try analysisGrammarParameters(allocator, query);
+    const filter_navigation = try buildFilterNavigation(
+        allocator,
+        .analyze,
+        query,
+        segments,
+    );
     for (query.analysis_series) |metric| if (metric.selector) |selector| {
         if (selector.kind == .saved_goal and goalById(goals, selector.value) == null) {
             return error.GoalNotFound;
@@ -1455,6 +1615,8 @@ pub fn loadTrendPage(
             .comparison = query.comparison,
             .interval = query.analysis_interval,
             .series = query.analysis_series,
+            .filters = resolved_filters.filters,
+            .segment_id = query.analysis_segment_id,
         },
         .comparison_range = if (calendar_context.comparison_range) |*range|
             range.view()
@@ -1462,6 +1624,7 @@ pub fn loadTrendPage(
             null,
         .active_goals = resolved_goals,
         .strict_traffic_mode = policy.strict_mode,
+        .segment_resolved = resolved_filters.segment_resolved,
         .timeout_ms = report_timeout_ms,
     };
     const executed = analysis_store.executeTrendSet(
@@ -1547,6 +1710,15 @@ pub fn loadTrendPage(
         .analyze_trend = view,
         .goals = goals,
         .funnels = funnels,
+        .saved_views = saved_views,
+        .selected_segment_name = resolved_filters.segment_name,
+        .analysis_state_kind = state.kind,
+        .analysis_state_json = state.json,
+        .analysis_filter_parameters = grammar.filters,
+        .analysis_predicate_parameters = grammar.predicates,
+        .filter_chips = filter_navigation.chips,
+        .segment_options = filter_navigation.segments,
+        .clear_segment_url = filter_navigation.clear_segment_url,
         .self_exclusion_origins = policy.origins,
         .excluded_networks = policy.excluded_networks,
         .strict_mode = policy.strict_mode,
@@ -1579,13 +1751,32 @@ pub fn loadBreakdownPage(
 
     const goals = try metadata.listGoals(allocator, selected.slug);
     const funnels = try metadata.listFunnels(allocator, selected.slug);
+    const segments = try metadata.listSegments(allocator, selected.slug);
+    const saved_views = try metadata.listSavedViews(allocator, selected.slug);
     const policy = try metadata.sitePolicy(allocator, selected.id);
+    const resolved_filters = try resolveFilters(
+        allocator,
+        metadata,
+        policy,
+        selected.slug,
+        breakdown.filters,
+        breakdown.segment_id,
+    );
+    const state = try analysisState(allocator, .analyze, query);
+    const grammar = try analysisGrammarParameters(allocator, query);
+    const filter_navigation = try buildFilterNavigation(
+        allocator,
+        .analyze,
+        query,
+        segments,
+    );
     if (breakdown.metric.selector) |selector| {
         if (selector.kind == .saved_goal and goalById(goals, selector.value) == null) {
             return error.GoalNotFound;
         }
     }
     const resolved_goals = try resolveAnalysisGoals(allocator, goals);
+    breakdown.filters = resolved_filters.filters;
     breakdown.site_id = selected.id;
     const executed = analysis_store.executeBreakdownPage(
         allocator,
@@ -1594,6 +1785,7 @@ pub fn loadBreakdownPage(
             .query = breakdown,
             .active_goals = resolved_goals,
             .strict_traffic_mode = policy.strict_mode,
+            .segment_resolved = resolved_filters.segment_resolved,
             .timeout_ms = report_timeout_ms,
         },
     ) catch |err| {
@@ -1609,7 +1801,11 @@ pub fn loadBreakdownPage(
         .report_time_basis = .none,
         .result = null,
         .analyze_breakdown = .{
-            .rows = executed.breakdown.rows,
+            .rows = try buildBreakdownRows(
+                allocator,
+                query,
+                executed.breakdown.rows,
+            ),
             .next_page = executed.breakdown.next_page,
             .cardinality = executed.breakdown.cardinality,
             .coverage = try coverageText(
@@ -1624,6 +1820,15 @@ pub fn loadBreakdownPage(
         },
         .goals = goals,
         .funnels = funnels,
+        .saved_views = saved_views,
+        .selected_segment_name = resolved_filters.segment_name,
+        .analysis_state_kind = state.kind,
+        .analysis_state_json = state.json,
+        .analysis_filter_parameters = grammar.filters,
+        .analysis_predicate_parameters = grammar.predicates,
+        .filter_chips = filter_navigation.chips,
+        .segment_options = filter_navigation.segments,
+        .clear_segment_url = filter_navigation.clear_segment_url,
         .self_exclusion_origins = policy.origins,
         .excluded_networks = policy.excluded_networks,
         .strict_mode = policy.strict_mode,
@@ -2134,6 +2339,7 @@ fn buildOverviewDetails(
     allocator: std.mem.Allocator,
     overview: analysis.OverviewResult,
     goals: []const meta.Goal,
+    query: model.Query,
 ) !model.OverviewDetails {
     const details = overview.details orelse return error.MissingOverviewDetails;
     if (details.trend.metric == .revenue) {
@@ -2176,6 +2382,13 @@ fn buildOverviewDetails(
         {
             return error.InvalidOverviewDetails;
         }
+        const urls = try filterUrlsForClause(allocator, .overview, query, .{
+            .scope = .event,
+            .field = .{ .kind = .page },
+            .operator = .is,
+            .scalar_type = .string,
+            .values = &.{source.path},
+        });
         target.* = .{
             .label = source.path,
             .page_views = source.page_views,
@@ -2187,6 +2400,8 @@ fn buildOverviewDetails(
                     @as(i128, source.page_views) * 10_000,
                     overview.page_views.current,
                 )),
+            .filter_url = urls.filter,
+            .exclude_url = urls.exclude,
         };
     }
 
@@ -2195,6 +2410,20 @@ fn buildOverviewDetails(
         details.acquisition.len,
     );
     for (acquisition, details.acquisition) |*target, source| {
+        const clause = analysis.Clause{
+            .scope = .session,
+            .field = .{ .kind = .referrer },
+            .operator = if (std.mem.eql(u8, source.source, "Direct"))
+                .absent
+            else
+                .is,
+            .scalar_type = .string,
+            .values = if (std.mem.eql(u8, source.source, "Direct"))
+                &.{}
+            else
+                &.{source.source},
+        };
+        const urls = try filterUrlsForClause(allocator, .overview, query, clause);
         target.* = .{
             .label = source.source,
             .sessions = source.sessions,
@@ -2202,6 +2431,8 @@ fn buildOverviewDetails(
                 .numerator = source.converting_sessions,
                 .denominator = source.sessions,
             },
+            .filter_url = urls.filter,
+            .exclude_url = urls.exclude,
         };
     }
 
@@ -2226,10 +2457,21 @@ fn buildOverviewDetails(
     }
 
     const audience = try allocator.alloc(model.OverviewAudienceRow, details.audience.len);
-    for (audience, details.audience) |*target, source| target.* = .{
-        .label = source.country,
-        .sessions = source.sessions,
-    };
+    for (audience, details.audience) |*target, source| {
+        const urls = try filterUrlsForClause(allocator, .overview, query, .{
+            .scope = .session,
+            .field = .{ .kind = .country },
+            .operator = .is,
+            .scalar_type = .string,
+            .values = &.{source.country},
+        });
+        target.* = .{
+            .label = source.country,
+            .sessions = source.sessions,
+            .filter_url = urls.filter,
+            .exclude_url = urls.exclude,
+        };
+    }
     return .{
         .trend = .{
             .metric = details.trend.metric,
@@ -2669,8 +2911,8 @@ pub fn validateQuery(query: model.Query) !void {
             !std.mem.eql(u8, query.range.end, breakdown.range.end) or
             query.comparison != .none or breakdown.comparison != .none or
             breakdown.mode != .breakdown or
-            breakdown.filters.clauses.len != 0 or
-            breakdown.segment_id != null)
+            !analysis.filterSetsEqual(query.analysis_filters, breakdown.filters) or
+            !optionalSlicesEqual(query.analysis_segment_id, breakdown.segment_id))
         {
             return error.AnalysisOptionsNotApplicable;
         }
@@ -2703,11 +2945,15 @@ pub fn validateQuery(query: model.Query) !void {
         {
             return error.InvalidOverviewHighlight;
         }
+        try query.analysis_filters.validate();
+        if (query.analysis_segment_id) |id| try domain.validateUuid(id);
         return;
     }
     if (query.analysis_interval != .auto) {
         return error.AnalysisOptionsNotApplicable;
     }
+    try query.analysis_filters.validate();
+    if (query.analysis_segment_id) |id| try domain.validateUuid(id);
     if (!query.kind.isPaginated() and
         (query.sort != .count or query.limit != report.default_limit or
             query.page != 1))
@@ -2730,6 +2976,1086 @@ pub fn validateQuery(query: model.Query) !void {
     if (!query.kind.isList() and query.highlighted_interval.len != 0) {
         return error.OverviewHighlightNotApplicable;
     }
+}
+
+fn optionalSlicesEqual(left: ?[]const u8, right: ?[]const u8) bool {
+    if ((left == null) != (right == null)) return false;
+    if (left) |value| return std.mem.eql(u8, value, right.?);
+    return true;
+}
+
+const ResolvedFilters = struct {
+    filters: analysis.FilterSet,
+    segment_resolved: bool,
+    segment_name: []const u8 = "",
+};
+
+const AnalysisState = struct {
+    kind: []const u8,
+    json: []const u8,
+};
+
+const AnalysisGrammarParameters = struct {
+    filters: []const []const u8,
+    predicates: []const []const u8,
+};
+
+fn analysisGrammarParameters(
+    allocator: std.mem.Allocator,
+    query: model.Query,
+) !AnalysisGrammarParameters {
+    const filters = targetFilters(query).clauses;
+    const encoded_filters = try allocator.alloc([]const u8, filters.len);
+    for (filters, 0..) |filter, index| {
+        encoded_filters[index] = try analysis.canonicalClause(allocator, filter);
+    }
+    const predicates = if (query.analysis_breakdown) |breakdown|
+        if (breakdown.metric.selector) |selector| selector.predicates else &.{}
+    else
+        &.{};
+    const encoded_predicates = try allocator.alloc([]const u8, predicates.len);
+    for (predicates, 0..) |predicate, index| {
+        encoded_predicates[index] = try analysis.canonicalPredicate(
+            allocator,
+            predicate,
+        );
+    }
+    return .{
+        .filters = encoded_filters,
+        .predicates = encoded_predicates,
+    };
+}
+
+fn analysisState(
+    allocator: std.mem.Allocator,
+    destination: model.Destination,
+    query: model.Query,
+) !AnalysisState {
+    if (destination == .overview) return .{
+        .kind = "overview",
+        .json = try analysis.canonicalFilterJson(
+            allocator,
+            query.analysis_filters,
+        ),
+    };
+    if (destination == .analyze and query.analysis_breakdown != null) {
+        return .{
+            .kind = "breakdown",
+            .json = try analysis.canonicalJson(
+                allocator,
+                query.analysis_breakdown.?,
+            ),
+        };
+    }
+    if (destination == .analyze and query.analysis_series.len != 0) {
+        return .{
+            .kind = "trend",
+            .json = try analysis.canonicalTrendSetJson(allocator, .{
+                .site_id = query.analysis_site_id,
+                .range = query.range,
+                .comparison = query.comparison,
+                .interval = query.analysis_interval,
+                .series = query.analysis_series,
+                .filters = query.analysis_filters,
+                .segment_id = query.analysis_segment_id,
+            }),
+        };
+    }
+    return .{ .kind = "", .json = "" };
+}
+
+const FilterNavigation = struct {
+    chips: []const model.FilterChip,
+    segments: []const model.SegmentOption,
+    clear_segment_url: []const u8 = "",
+};
+
+fn buildFilterNavigation(
+    allocator: std.mem.Allocator,
+    destination: model.Destination,
+    query: model.Query,
+    saved_segments: []const meta.Segment,
+) !FilterNavigation {
+    const filters = targetFilters(query);
+    const chips = try allocator.alloc(model.FilterChip, filters.clauses.len);
+    for (chips, filters.clauses, 0..) |*chip, clause, removed_index| {
+        var label = std.Io.Writer.Allocating.init(allocator);
+        errdefer label.deinit();
+        try label.writer.print("{s} · {s}", .{
+            clause.scope.name(),
+            clause.field.kind.name(),
+        });
+        if (clause.field.property_ref) |reference| {
+            try label.writer.print(":{s}:{s}", .{
+                reference.name,
+                reference.scalar_type.name(),
+            });
+        }
+        try label.writer.print(" · {s}", .{clause.operator.name()});
+        if (clause.values.len != 0) {
+            try label.writer.writeAll(" · ");
+            for (clause.values, 0..) |value, index| {
+                if (index != 0) try label.writer.writeAll(" or ");
+                try label.writer.writeAll(value);
+            }
+        }
+        const remaining = try allocator.alloc(
+            analysis.Clause,
+            filters.clauses.len - 1,
+        );
+        @memcpy(remaining[0..removed_index], filters.clauses[0..removed_index]);
+        @memcpy(
+            remaining[removed_index..],
+            filters.clauses[removed_index + 1 ..],
+        );
+        var adjusted = query;
+        setTargetFilters(&adjusted, .{ .clauses = remaining });
+        chip.* = .{
+            .label = try label.toOwnedSlice(),
+            .remove_url = try canonicalAnalysisUrl(
+                allocator,
+                destination,
+                adjusted,
+            ),
+        };
+    }
+    const segments = try allocator.alloc(
+        model.SegmentOption,
+        saved_segments.len,
+    );
+    for (segments, saved_segments) |*option, segment| {
+        var adjusted = query;
+        setTargetSegment(&adjusted, segment.id);
+        const url = canonicalAnalysisUrl(
+            allocator,
+            destination,
+            adjusted,
+        ) catch |err| switch (err) {
+            error.AnalysisUrlTooLong => "",
+            else => return err,
+        };
+        option.* = .{
+            .id = segment.id,
+            .name = segment.name,
+            .url = url,
+            .updated_at_utc = try formatUtcMicros(
+                allocator,
+                segment.updated_at_utc_micros,
+            ),
+            .selected = if (query.analysis_segment_id) |selected|
+                std.mem.eql(u8, selected, segment.id)
+            else
+                false,
+        };
+    }
+    const clear = if (query.analysis_segment_id != null) clear: {
+        var adjusted = query;
+        setTargetSegment(&adjusted, null);
+        break :clear try canonicalAnalysisUrl(allocator, destination, adjusted);
+    } else "";
+    return .{
+        .chips = chips,
+        .segments = segments,
+        .clear_segment_url = clear,
+    };
+}
+
+fn canonicalAnalysisUrl(
+    allocator: std.mem.Allocator,
+    destination: model.Destination,
+    query: model.Query,
+) ![]const u8 {
+    var output = std.Io.Writer.Allocating.init(allocator);
+    errdefer output.deinit();
+    try output.writer.print("/admin/sites/{s}/", .{query.site});
+    if (destination == .overview) {
+        try output.writer.writeAll("overview?");
+        const parameters = try analysis.canonicalOverviewUrl(
+            allocator,
+            query.range,
+            query.comparison,
+            query.overview_metric,
+            query.overview_currency,
+            query.analysis_segment_id,
+            query.analysis_filters,
+        );
+        defer allocator.free(parameters);
+        try output.writer.writeAll(parameters);
+        return output.toOwnedSlice();
+    }
+    if (destination != .analyze) return error.InvalidFilterDestination;
+    try output.writer.writeAll("analyze?");
+    if (query.analysis_breakdown) |breakdown| {
+        const parameters = try analysis.canonicalUrl(allocator, breakdown);
+        defer allocator.free(parameters);
+        try output.writer.writeAll(parameters);
+    } else {
+        const parameters = try analysis.canonicalTrendSetUrl(
+            allocator,
+            .{
+                .site_id = query.analysis_site_id,
+                .range = query.range,
+                .comparison = query.comparison,
+                .interval = query.analysis_interval,
+                .series = query.analysis_series,
+                .filters = query.analysis_filters,
+                .segment_id = query.analysis_segment_id,
+            },
+            query.highlighted_interval,
+        );
+        defer allocator.free(parameters);
+        try output.writer.writeAll(parameters);
+    }
+    return output.toOwnedSlice();
+}
+
+const FilterUrls = struct {
+    filter: []const u8,
+    exclude: []const u8,
+};
+
+fn filterUrlsForClause(
+    allocator: std.mem.Allocator,
+    destination: model.Destination,
+    query: model.Query,
+    filter_clause: analysis.Clause,
+) !FilterUrls {
+    if (targetFilters(query).clauses.len >= analysis.maximum_clauses) {
+        return .{ .filter = "", .exclude = "" };
+    }
+    try filter_clause.validate();
+    var exclude_clause = filter_clause;
+    exclude_clause.operator = switch (filter_clause.operator) {
+        .is => .is_not,
+        .is_not => .is,
+        .absent => .exists,
+        .exists => .absent,
+        .is_true => .is_false,
+        .is_false => .is_true,
+        .contains => .not_contains,
+        .not_contains => .contains,
+        else => return error.UnsupportedClickFilterOperator,
+    };
+    try exclude_clause.validate();
+    var filtered = query;
+    setTargetFilters(&filtered, try analysis.composeFilterSets(
+        allocator,
+        targetFilters(query),
+        .{ .clauses = &.{filter_clause} },
+    ));
+    if (filtered.analysis_breakdown) |*breakdown| breakdown.page = 1;
+    var excluded = query;
+    setTargetFilters(&excluded, try analysis.composeFilterSets(
+        allocator,
+        targetFilters(query),
+        .{ .clauses = &.{exclude_clause} },
+    ));
+    if (excluded.analysis_breakdown) |*breakdown| breakdown.page = 1;
+    const filter_url = canonicalAnalysisUrl(
+        allocator,
+        destination,
+        filtered,
+    ) catch |err| switch (err) {
+        error.AnalysisUrlTooLong => return .{ .filter = "", .exclude = "" },
+        else => return err,
+    };
+    const exclude_url = canonicalAnalysisUrl(
+        allocator,
+        destination,
+        excluded,
+    ) catch |err| switch (err) {
+        error.AnalysisUrlTooLong => {
+            allocator.free(filter_url);
+            return .{ .filter = "", .exclude = "" };
+        },
+        else => {
+            allocator.free(filter_url);
+            return err;
+        },
+    };
+    return .{ .filter = filter_url, .exclude = exclude_url };
+}
+
+fn buildBreakdownRows(
+    allocator: std.mem.Allocator,
+    query: model.Query,
+    rows: []const analysis.BreakdownRow,
+) ![]const model.AnalyzeBreakdownRow {
+    const breakdown = query.analysis_breakdown orelse
+        return error.MissingAnalyzeBreakdown;
+    const dimension = breakdown.dimension.?;
+    const field_kind: analysis.FieldKind = switch (dimension.kind) {
+        .page => .page,
+        .hostname => .hostname,
+        .event_name => .event_name,
+        .landing_page => .landing_page,
+        .exit_page => .exit_page,
+        .channel => .channel,
+        .referrer => .referrer,
+        .utm_source => .utm_source,
+        .utm_medium => .utm_medium,
+        .utm_campaign => .utm_campaign,
+        .utm_term => .utm_term,
+        .utm_content => .utm_content,
+        .country => .country,
+        .language => .language,
+        .device => .device,
+        .browser => .browser,
+        .operating_system => .operating_system,
+        .event_property => .event_property,
+    };
+    const scope: analysis.Scope = switch (dimension.kind) {
+        .page, .hostname, .event_name, .event_property => .event,
+        else => .session,
+    };
+    const result = try allocator.alloc(model.AnalyzeBreakdownRow, rows.len);
+    for (result, rows) |*target, row| {
+        const scalar_type = row.label.scalar_type orelse .string;
+        const missing = std.mem.eql(u8, row.label.value, "(not set)") or
+            std.mem.eql(u8, row.label.value, "(missing)");
+        const is_null = std.mem.eql(u8, row.label.value, "(null)");
+        const clause = analysis.Clause{
+            .scope = scope,
+            .field = .{
+                .kind = field_kind,
+                .property_ref = if (dimension.property_ref) |reference| .{
+                    .name = reference.name,
+                    .scalar_type = if (missing) .missing else if (is_null) .null else scalar_type,
+                } else null,
+            },
+            .operator = if (missing and dimension.property_ref == null)
+                .absent
+            else
+                .is,
+            .scalar_type = if (missing and dimension.property_ref != null)
+                .missing
+            else if (is_null)
+                .null
+            else
+                scalar_type,
+            .values = if (missing or is_null) &.{} else &.{row.label.value},
+        };
+        const urls = try filterUrlsForClause(allocator, .analyze, query, clause);
+        target.* = .{
+            .data = row,
+            .filter_url = urls.filter,
+            .exclude_url = urls.exclude,
+        };
+    }
+    return result;
+}
+
+fn resolveFilters(
+    allocator: std.mem.Allocator,
+    metadata: *meta.Store,
+    policy: meta.SitePolicy,
+    site_slug: []const u8,
+    ad_hoc: analysis.FilterSet,
+    segment_id: ?[]const u8,
+) !ResolvedFilters {
+    try ad_hoc.validate();
+    for (ad_hoc.clauses) |clause| {
+        if (clause.field.property_ref) |reference| {
+            if (!policy.allowsProperty(reference.name)) {
+                return error.StaleFilterProperty;
+            }
+        }
+    }
+    const id = segment_id orelse return .{
+        .filters = ad_hoc,
+        .segment_resolved = false,
+    };
+    const segment = try metadata.segmentById(allocator, site_slug, id);
+    const stored = analysis.parseExactCanonicalFilterJson(
+        allocator,
+        segment.canonical_filter_json,
+    ) catch return error.StaleSegmentState;
+    for (stored.clauses) |clause| {
+        if (clause.field.property_ref) |reference| {
+            if (!policy.allowsProperty(reference.name)) {
+                return error.StaleSegmentProperty;
+            }
+        }
+    }
+    return .{
+        .filters = try analysis.composeFilterSets(allocator, stored, ad_hoc),
+        .segment_resolved = true,
+        .segment_name = segment.name,
+    };
+}
+
+pub const AnalysisTarget = struct {
+    destination: model.Destination,
+    query: model.Query,
+};
+
+pub fn analysisTargetFromForm(
+    allocator: std.mem.Allocator,
+    metadata: *meta.Store,
+    form: Form,
+) !AnalysisTarget {
+    const site_slug = try form.required("site");
+    const configuration = try metadata.siteConfigurationBySlug(
+        allocator,
+        site_slug,
+    );
+    const kind = try form.required("state_kind");
+    const encoded = try form.required("state");
+    if (std.mem.eql(u8, kind, "overview")) {
+        const filters = try analysis.parseExactCanonicalFilterJson(
+            allocator,
+            encoded,
+        );
+        const selection = try parseOverviewMetric(try form.required("metric"));
+        const segment_value = form.optional("segment") orelse "";
+        const query = model.Query{
+            .site = site_slug,
+            .analysis_site_id = configuration.id,
+            .range = .{
+                .start = try form.required("from"),
+                .end = try form.required("to"),
+            },
+            .comparison = try analysis.Comparison.parse(
+                try form.required("compare"),
+            ),
+            .overview_metric = selection.metric,
+            .overview_currency = selection.currency,
+            .analysis_filters = filters,
+            .analysis_segment_id = if (segment_value.len == 0)
+                null
+            else
+                segment_value,
+        };
+        try validateQuery(query);
+        return .{ .destination = .overview, .query = query };
+    }
+    if (std.mem.eql(u8, kind, "trend")) {
+        const set = try analysis.parseExactCanonicalTrendSetJson(
+            allocator,
+            encoded,
+        );
+        if (!std.mem.eql(u8, set.site_id, configuration.id)) {
+            return error.InvalidAnalysisSite;
+        }
+        const query = model.Query{
+            .site = site_slug,
+            .analysis_site_id = configuration.id,
+            .range = set.range,
+            .comparison = set.comparison,
+            .analysis_interval = set.interval,
+            .analysis_series = set.series,
+            .analysis_filters = set.filters,
+            .analysis_segment_id = set.segment_id,
+        };
+        try validateQuery(query);
+        return .{ .destination = .analyze, .query = query };
+    }
+    if (std.mem.eql(u8, kind, "breakdown")) {
+        const breakdown = try analysis.parseExactCanonicalJson(
+            allocator,
+            encoded,
+        );
+        if (!std.mem.eql(u8, breakdown.site_id, configuration.id) or
+            breakdown.mode != .breakdown)
+        {
+            return error.InvalidAnalysisSite;
+        }
+        return .{
+            .destination = .analyze,
+            .query = try finishBreakdownQuery(breakdown, site_slug),
+        };
+    }
+    return error.InvalidAnalysisStateKind;
+}
+
+pub fn applyFilterFromForm(
+    allocator: std.mem.Allocator,
+    metadata: *meta.Store,
+    form: Form,
+) !AnalysisTarget {
+    var target = try analysisTargetFromForm(allocator, metadata, form);
+    const clause = try clauseFromForm(allocator, form);
+    const addition = analysis.FilterSet{ .clauses = &.{clause} };
+    const filters = try analysis.composeFilterSets(
+        allocator,
+        targetFilters(target.query),
+        addition,
+    );
+    setTargetFilters(&target.query, filters);
+    try validateQuery(target.query);
+    return target;
+}
+
+pub fn suggestionsFromForm(
+    allocator: std.mem.Allocator,
+    metadata: *meta.Store,
+    event_store: *events.Store,
+    form: Form,
+    timeout_ms: u32,
+) !struct { target: AnalysisTarget, suggestions: model.FilterSuggestions } {
+    const target = try analysisTargetFromForm(allocator, metadata, form);
+    const scope = try analysis.Scope.parse(try form.required("scope"));
+    const scalar_type = try analysis.ScalarType.parse(
+        try form.required("scalar_type"),
+    );
+    const field_kind = try analysis.FieldKind.parse(try form.required("field"));
+    const property_name = form.optional("property") orelse "";
+    const field = analysis.Field{
+        .kind = field_kind,
+        .property_ref = if (field_kind.requiresProperty()) .{
+            .name = property_name,
+            .scalar_type = scalar_type,
+        } else null,
+    };
+    if (!field_kind.requiresProperty() and property_name.len != 0) {
+        return error.UnexpectedAnalysisProperty;
+    }
+    const policy = try metadata.sitePolicy(
+        allocator,
+        target.query.analysis_site_id,
+    );
+    if (field.property_ref) |reference| {
+        if (!policy.allowsProperty(reference.name)) {
+            return error.StaleFilterProperty;
+        }
+    }
+    const resolved = try resolveFilters(
+        allocator,
+        metadata,
+        policy,
+        target.query.site,
+        targetFilters(target.query),
+        target.query.analysis_segment_id,
+    );
+    const goals = try metadata.listGoals(allocator, target.query.site);
+    const resolved_goals = try resolveAnalysisGoals(allocator, goals);
+    var query = if (target.query.analysis_breakdown) |breakdown|
+        breakdown
+    else if (target.query.analysis_series.len != 0)
+        (analysis.TrendSet{
+            .site_id = target.query.analysis_site_id,
+            .range = target.query.range,
+            .comparison = target.query.comparison,
+            .interval = target.query.analysis_interval,
+            .series = target.query.analysis_series,
+        }).query(target.query.analysis_series[0])
+    else
+        analysis.Query{
+            .site_id = target.query.analysis_site_id,
+            .range = target.query.range,
+            .comparison = target.query.comparison,
+            .mode = .trend,
+            .metric = .{ .kind = .visitors },
+            .interval = .auto,
+        };
+    query.comparison = .none;
+    query.filters = resolved.filters;
+    query.segment_id = target.query.analysis_segment_id;
+    const search = form.optional("search") orelse "";
+    const operator = try analysis.Operator.parse(try form.required("operator"));
+    const builder_values = form.optional("values") orelse "";
+    if (builder_values.len >
+        @as(usize, analysis.maximum_values) * analysis.maximum_filter_value_bytes or
+        !std.unicode.utf8ValidateSlice(builder_values))
+    {
+        return error.InvalidAnalysisValue;
+    }
+    const result = try analysis_store.executeSuggestions(
+        allocator,
+        event_store,
+        .{
+            .execution = .{
+                .query = query,
+                .active_goals = resolved_goals,
+                .strict_traffic_mode = policy.strict_mode,
+                .segment_resolved = resolved.segment_resolved,
+                .timeout_ms = timeout_ms,
+            },
+            .scope = scope,
+            .field = field,
+            .scalar_type = scalar_type,
+            .search = search,
+        },
+    );
+    const options = try allocator.alloc(model.FilterSuggestion, result.values.len);
+    for (options, result.values) |*option, value| {
+        const urls = try filterUrlsForClause(
+            allocator,
+            target.destination,
+            target.query,
+            .{
+                .scope = scope,
+                .field = field,
+                .operator = .is,
+                .scalar_type = scalar_type,
+                .values = &.{value},
+            },
+        );
+        option.* = .{
+            .value = value,
+            .filter_url = urls.filter,
+            .exclude_url = urls.exclude,
+        };
+    }
+    return .{
+        .target = target,
+        .suggestions = .{
+            .values = options,
+            .has_more = result.has_more,
+            .scope = scope,
+            .field = field,
+            .scalar_type = scalar_type,
+            .operator = operator,
+            .search = search,
+            .builder_values = builder_values,
+        },
+    };
+}
+
+pub fn removeFilterFromForm(
+    allocator: std.mem.Allocator,
+    metadata: *meta.Store,
+    form: Form,
+) !AnalysisTarget {
+    var target = try analysisTargetFromForm(allocator, metadata, form);
+    if (form.optional("remove_segment")) |value| {
+        if (!std.mem.eql(u8, value, "1") or target.query.analysis_segment_id == null) {
+            return error.InvalidSegmentRemoval;
+        }
+        setTargetSegment(&target.query, null);
+        return target;
+    }
+    const removed = try analysis.parseCanonicalClause(
+        allocator,
+        try form.required("clause"),
+    );
+    const current = targetFilters(target.query);
+    var found = false;
+    const clauses = try allocator.alloc(
+        analysis.Clause,
+        if (current.clauses.len == 0) 0 else current.clauses.len - 1,
+    );
+    var index: usize = 0;
+    for (current.clauses) |clause| {
+        if (!found and analysis.clausesEqual(clause, removed)) {
+            found = true;
+            continue;
+        }
+        if (index >= clauses.len) return error.FilterClauseNotFound;
+        clauses[index] = clause;
+        index += 1;
+    }
+    if (!found or index != clauses.len) return error.FilterClauseNotFound;
+    setTargetFilters(&target.query, .{ .clauses = clauses });
+    try validateQuery(target.query);
+    return target;
+}
+
+pub fn createSegmentFromForm(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    metadata: *meta.Store,
+    form: Form,
+    now_micros: i64,
+) !void {
+    const target = try analysisTargetFromForm(allocator, metadata, form);
+    const policy = try metadata.sitePolicy(
+        allocator,
+        target.query.analysis_site_id,
+    );
+    const resolved = try resolveFilters(
+        allocator,
+        metadata,
+        policy,
+        target.query.site,
+        targetFilters(target.query),
+        target.query.analysis_segment_id,
+    );
+    const encoded = try analysis.canonicalFilterJson(allocator, resolved.filters);
+    const id = try domain.randomUuid(io);
+    try metadata.addSegment(
+        allocator,
+        &id,
+        target.query.site,
+        try form.required("name"),
+        encoded,
+        now_micros,
+    );
+}
+
+pub fn updateSegmentFromForm(
+    allocator: std.mem.Allocator,
+    metadata: *meta.Store,
+    form: Form,
+    now_micros: i64,
+) !void {
+    const target = try analysisTargetFromForm(allocator, metadata, form);
+    const policy = try metadata.sitePolicy(
+        allocator,
+        target.query.analysis_site_id,
+    );
+    const resolved = try resolveFilters(
+        allocator,
+        metadata,
+        policy,
+        target.query.site,
+        targetFilters(target.query),
+        target.query.analysis_segment_id,
+    );
+    try metadata.updateSegmentState(
+        allocator,
+        target.query.site,
+        try form.required("id"),
+        try analysis.canonicalFilterJson(allocator, resolved.filters),
+        now_micros,
+    );
+}
+
+pub fn renameSegmentFromForm(
+    allocator: std.mem.Allocator,
+    metadata: *meta.Store,
+    form: Form,
+    now_micros: i64,
+) !void {
+    try metadata.renameSegment(
+        allocator,
+        try form.required("site"),
+        try form.required("id"),
+        try form.required("name"),
+        now_micros,
+    );
+}
+
+pub fn duplicateSegmentFromForm(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    metadata: *meta.Store,
+    form: Form,
+    now_micros: i64,
+) !void {
+    const site = try form.required("site");
+    const source = try metadata.segmentById(
+        allocator,
+        site,
+        try form.required("id"),
+    );
+    _ = try analysis.parseExactCanonicalFilterJson(
+        allocator,
+        source.canonical_filter_json,
+    );
+    const id = try domain.randomUuid(io);
+    try metadata.addSegment(
+        allocator,
+        &id,
+        site,
+        try form.required("name"),
+        source.canonical_filter_json,
+        now_micros,
+    );
+}
+
+pub fn deleteSegmentFromForm(
+    allocator: std.mem.Allocator,
+    metadata: *meta.Store,
+    form: Form,
+) !?AnalysisTarget {
+    var target: ?AnalysisTarget = if (form.optional("state") != null)
+        try analysisTargetFromForm(allocator, metadata, form)
+    else
+        null;
+    const id = try form.required("id");
+    try metadata.deleteSegment(
+        allocator,
+        try form.required("site"),
+        id,
+        try form.required("name"),
+    );
+    if (target) |*resolved| {
+        if (resolved.query.analysis_segment_id) |selected| {
+            if (std.mem.eql(u8, selected, id)) {
+                setTargetSegment(&resolved.query, null);
+            }
+        }
+    }
+    return target;
+}
+
+pub fn createSavedViewFromForm(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    metadata: *meta.Store,
+    form: Form,
+    now_micros: i64,
+) !void {
+    const target = try analysisTargetFromForm(allocator, metadata, form);
+    try validateSavedTargetState(
+        allocator,
+        metadata,
+        target.query.analysis_site_id,
+        target.query,
+    );
+    const encoded = try savedViewJson(allocator, target);
+    const id = try domain.randomUuid(io);
+    try metadata.addSavedView(
+        allocator,
+        &id,
+        target.query.site,
+        try form.required("name"),
+        encoded,
+        now_micros,
+    );
+}
+
+pub fn duplicateSavedViewFromForm(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    metadata: *meta.Store,
+    form: Form,
+    now_micros: i64,
+) !void {
+    const site = try form.required("site");
+    const source = try metadata.savedViewById(
+        allocator,
+        site,
+        try form.required("id"),
+    );
+    _ = try loadSavedView(allocator, metadata, site, source.id);
+    const id = try domain.randomUuid(io);
+    try metadata.addSavedView(
+        allocator,
+        &id,
+        site,
+        try form.required("name"),
+        source.canonical_query_json,
+        now_micros,
+    );
+}
+
+pub fn renameSavedViewFromForm(
+    allocator: std.mem.Allocator,
+    metadata: *meta.Store,
+    form: Form,
+    now_micros: i64,
+) !void {
+    try metadata.renameSavedView(
+        allocator,
+        try form.required("site"),
+        try form.required("id"),
+        try form.required("name"),
+        now_micros,
+    );
+}
+
+pub fn deleteSavedViewFromForm(
+    allocator: std.mem.Allocator,
+    metadata: *meta.Store,
+    form: Form,
+) !void {
+    try metadata.deleteSavedView(
+        allocator,
+        try form.required("site"),
+        try form.required("id"),
+        try form.required("name"),
+    );
+}
+
+pub fn loadSavedView(
+    allocator: std.mem.Allocator,
+    metadata: *meta.Store,
+    site_slug: []const u8,
+    id: []const u8,
+) !AnalysisTarget {
+    const configuration = try metadata.siteConfigurationBySlug(
+        allocator,
+        site_slug,
+    );
+    const view = try metadata.savedViewById(allocator, site_slug, id);
+    const parsed = try parseSavedViewJson(allocator, view.canonical_query_json);
+    switch (parsed) {
+        .trend => |set| {
+            if (!std.mem.eql(u8, set.site_id, configuration.id)) {
+                return error.StaleSavedViewSite;
+            }
+            const query = model.Query{
+                .site = site_slug,
+                .analysis_site_id = configuration.id,
+                .range = set.range,
+                .comparison = set.comparison,
+                .analysis_interval = set.interval,
+                .analysis_series = set.series,
+                .analysis_filters = set.filters,
+                .analysis_segment_id = set.segment_id,
+            };
+            try validateQuery(query);
+            try validateSavedTargetState(
+                allocator,
+                metadata,
+                configuration.id,
+                query,
+            );
+            return .{ .destination = .analyze, .query = query };
+        },
+        .breakdown => |query| {
+            if (!std.mem.eql(u8, query.site_id, configuration.id)) {
+                return error.StaleSavedViewSite;
+            }
+            const finished = try finishBreakdownQuery(query, site_slug);
+            try validateSavedTargetState(
+                allocator,
+                metadata,
+                configuration.id,
+                finished,
+            );
+            return .{
+                .destination = .analyze,
+                .query = finished,
+            };
+        },
+    }
+}
+
+fn validateSavedTargetState(
+    allocator: std.mem.Allocator,
+    metadata: *meta.Store,
+    site_id: []const u8,
+    query: model.Query,
+) !void {
+    const policy = try metadata.sitePolicy(allocator, site_id);
+    _ = try resolveFilters(
+        allocator,
+        metadata,
+        policy,
+        query.site,
+        targetFilters(query),
+        query.analysis_segment_id,
+    );
+    const goals = try metadata.listGoals(allocator, query.site);
+    if (query.analysis_breakdown) |breakdown| {
+        if (breakdown.metric.selector) |selector| {
+            try validateSavedSelectorProperties(policy, selector);
+            if (selector.kind == .saved_goal and
+                goalById(goals, selector.value) == null)
+            {
+                return error.GoalNotFound;
+            }
+        }
+    }
+    for (query.analysis_series) |metric| {
+        if (metric.selector) |selector| {
+            try validateSavedSelectorProperties(policy, selector);
+            if (selector.kind == .saved_goal and
+                goalById(goals, selector.value) == null)
+            {
+                return error.GoalNotFound;
+            }
+        }
+    }
+}
+
+fn validateSavedSelectorProperties(
+    policy: meta.SitePolicy,
+    selector: analysis.EventSelector,
+) !void {
+    for (selector.predicates) |predicate| {
+        if (!policy.allowsProperty(predicate.property_ref.name)) {
+            return error.StaleFilterProperty;
+        }
+    }
+}
+
+const SavedViewState = union(enum) {
+    trend: analysis.TrendSet,
+    breakdown: analysis.Query,
+};
+
+fn parseSavedViewJson(
+    allocator: std.mem.Allocator,
+    encoded: []const u8,
+) !SavedViewState {
+    if (analysis.parseExactCanonicalTrendSetJson(allocator, encoded)) |set| {
+        return .{ .trend = set };
+    } else |_| {}
+    const query = try analysis.parseExactCanonicalJson(allocator, encoded);
+    if (query.mode != .breakdown) return error.InvalidSavedViewState;
+    return .{ .breakdown = query };
+}
+
+fn savedViewJson(
+    allocator: std.mem.Allocator,
+    target: AnalysisTarget,
+) ![]const u8 {
+    if (target.destination != .analyze) return error.UnsupportedSavedViewSurface;
+    if (target.query.analysis_breakdown) |query| {
+        return analysis.canonicalJson(allocator, query);
+    }
+    return analysis.canonicalTrendSetJson(allocator, .{
+        .site_id = target.query.analysis_site_id,
+        .range = target.query.range,
+        .comparison = target.query.comparison,
+        .interval = target.query.analysis_interval,
+        .series = target.query.analysis_series,
+        .filters = target.query.analysis_filters,
+        .segment_id = target.query.analysis_segment_id,
+    });
+}
+
+fn clauseFromForm(
+    allocator: std.mem.Allocator,
+    form: Form,
+) !analysis.Clause {
+    const scalar_type = try analysis.ScalarType.parse(
+        try form.required("scalar_type"),
+    );
+    const field_kind = try analysis.FieldKind.parse(try form.required("field"));
+    const property_name = form.optional("property") orelse "";
+    const field = analysis.Field{
+        .kind = field_kind,
+        .property_ref = if (field_kind.requiresProperty()) .{
+            .name = property_name,
+            .scalar_type = scalar_type,
+        } else null,
+    };
+    if (!field_kind.requiresProperty() and property_name.len != 0) {
+        return error.UnexpectedAnalysisProperty;
+    }
+    var values: std.ArrayList([]const u8) = .empty;
+    var lines = std.mem.splitScalar(
+        u8,
+        form.optional("values") orelse "",
+        '\n',
+    );
+    while (lines.next()) |raw| {
+        const value = std.mem.trim(u8, raw, " \t\r");
+        if (value.len == 0) continue;
+        if (values.items.len >= analysis.maximum_values) {
+            return error.TooManyAnalysisValues;
+        }
+        try values.append(allocator, value);
+    }
+    const clause = analysis.Clause{
+        .scope = try analysis.Scope.parse(try form.required("scope")),
+        .field = field,
+        .operator = try analysis.Operator.parse(try form.required("operator")),
+        .scalar_type = scalar_type,
+        .values = try values.toOwnedSlice(allocator),
+    };
+    try clause.validate();
+    return clause;
+}
+
+fn targetFilters(query: model.Query) analysis.FilterSet {
+    if (query.analysis_breakdown) |breakdown| return breakdown.filters;
+    return query.analysis_filters;
+}
+
+fn setTargetFilters(query: *model.Query, filters: analysis.FilterSet) void {
+    query.analysis_filters = filters;
+    if (query.analysis_breakdown) |*breakdown| breakdown.filters = filters;
+}
+
+fn setTargetSegment(query: *model.Query, segment_id: ?[]const u8) void {
+    query.analysis_segment_id = segment_id;
+    if (query.analysis_breakdown) |*breakdown| breakdown.segment_id = segment_id;
 }
 
 const ParsedOverviewMetric = struct {
@@ -2977,6 +4303,25 @@ test "calendar query parsing finalizes canonical state and known aliases" {
     try std.testing.expect(!canonical.legacy_from_name);
     try std.testing.expect(!canonical.legacy_to_name);
 
+    const filtered = try finishQuery(
+        try parseQuery(
+            allocator,
+            "/admin/sites/example/overview?v=1&from=2024-02-01&to=2024-02-29&compare=previous&metric=visitors&segment=00000000-0000-4000-8000-000000000030&f=event%7Epage%7Eis%7Estring%7E%252Fpricing",
+            .overview,
+        ),
+        "example",
+        &default_range,
+        .previous,
+    );
+    try std.testing.expectEqualStrings(
+        "00000000-0000-4000-8000-000000000030",
+        filtered.analysis_segment_id.?,
+    );
+    try std.testing.expectEqualStrings(
+        "/pricing",
+        filtered.analysis_filters.clauses[0].values[0],
+    );
+
     const legacy = try parseQuery(
         allocator,
         "/admin/sites/example/overview?start=2025-01-01&end=2025-01-02",
@@ -3026,11 +4371,19 @@ test "Analyze Trend canonical and builder query shapes remain closed" {
 
     const builder = try parseTrendQuery(
         allocator,
-        "/admin/sites/example/analyze?from=2025-01-01&to=2025-01-02&compare=none&interval=week&metric-1=event-visitors&event-1=signup&metric-2=average-value&goal-2=" ++ goal_id,
+        "/admin/sites/example/analyze?from=2025-01-01&to=2025-01-02&compare=none&interval=week&metric-1=event-visitors&event-1=signup&metric-2=average-value&goal-2=" ++ goal_id ++
+            "&segment=" ++ goal_id ++
+            "&f=event%7Epage%7Eis%7Estring%7E%252Fpricing",
     );
     try std.testing.expectEqual(@as(usize, 2), builder.series.len);
     try std.testing.expectEqual(analysis.MetricKind.event_visitors, builder.series[0].kind);
     try std.testing.expectEqual(analysis.MetricKind.average_value, builder.series[1].kind);
+    try std.testing.expectEqualStrings(goal_id, builder.segment_id.?);
+    try std.testing.expectEqual(@as(usize, 1), builder.filters.clauses.len);
+    try std.testing.expectEqualStrings(
+        "/pricing",
+        builder.filters.clauses[0].values[0],
+    );
 
     try std.testing.expectError(
         error.MixedTrendQueryShape,
@@ -3756,4 +5109,237 @@ test "Install rejection guidance covers origin property and payload corrections"
         try std.testing.expect(guidance.consequence.len != 0);
         try std.testing.expect(guidance.correction.len != 0);
     }
+}
+
+test "analysis form state applies filters and persists site-scoped segments and views" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const backing = std.testing.allocator;
+    const path = try std.fmt.allocPrint(
+        backing,
+        ".zig-cache/tmp/{s}/meta.db",
+        .{temporary.sub_path},
+    );
+    defer backing.free(path);
+    var metadata = try meta.Store.open(backing, path);
+    defer metadata.deinit();
+    try metadata.migrate();
+    var arena = std.heap.ArenaAllocator.init(backing);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const site_id = "00000000-0000-4000-8000-000000000024";
+    try metadata.addSite(
+        allocator,
+        site_id,
+        "alpha",
+        "Alpha",
+        "https://alpha.example",
+        "UTC",
+        1,
+    );
+    try metadata.addProperty(allocator, "alpha", "plan");
+    try metadata.addSite(
+        allocator,
+        "00000000-0000-4000-8000-000000000025",
+        "beta",
+        "Beta",
+        "https://beta.example",
+        "UTC",
+        2,
+    );
+
+    const empty_state = try analysis.canonicalFilterJson(allocator, .{});
+    const apply_fields = [_]Field{
+        .{ .name = "site", .value = "alpha" },
+        .{ .name = "state_kind", .value = "overview" },
+        .{ .name = "state", .value = empty_state },
+        .{ .name = "from", .value = "2026-01-01" },
+        .{ .name = "to", .value = "2026-01-02" },
+        .{ .name = "compare", .value = "previous" },
+        .{ .name = "metric", .value = "visitors" },
+        .{ .name = "segment", .value = "" },
+        .{ .name = "scope", .value = "event" },
+        .{ .name = "field", .value = "event-property" },
+        .{ .name = "property", .value = "plan" },
+        .{ .name = "scalar_type", .value = "string" },
+        .{ .name = "operator", .value = "is" },
+        .{ .name = "values", .value = "Pro\nEnterprise" },
+    };
+    const applied = try applyFilterFromForm(
+        allocator,
+        &metadata,
+        .{ .fields = &apply_fields },
+    );
+    try std.testing.expectEqual(@as(usize, 1), applied.query.analysis_filters.clauses.len);
+    try std.testing.expectEqual(@as(usize, 2), applied.query.analysis_filters.clauses[0].values.len);
+    const filtered_state = try analysis.canonicalFilterJson(
+        allocator,
+        applied.query.analysis_filters,
+    );
+    const segment_fields = [_]Field{
+        .{ .name = "site", .value = "alpha" },
+        .{ .name = "state_kind", .value = "overview" },
+        .{ .name = "state", .value = filtered_state },
+        .{ .name = "from", .value = "2026-01-01" },
+        .{ .name = "to", .value = "2026-01-02" },
+        .{ .name = "compare", .value = "previous" },
+        .{ .name = "metric", .value = "visitors" },
+        .{ .name = "segment", .value = "" },
+        .{ .name = "name", .value = "Paying plans" },
+    };
+    try createSegmentFromForm(
+        allocator,
+        std.testing.io,
+        &metadata,
+        .{ .fields = &segment_fields },
+        10,
+    );
+    const segments = try metadata.listSegments(allocator, "alpha");
+    try std.testing.expectEqual(@as(usize, 1), segments.len);
+    const parsed_segment = try analysis.parseExactCanonicalFilterJson(
+        allocator,
+        segments[0].canonical_filter_json,
+    );
+    try std.testing.expect(analysis.filterSetsEqual(
+        applied.query.analysis_filters,
+        parsed_segment,
+    ));
+
+    const trend_series = [_]analysis.Metric{.{ .kind = .visitors }};
+    const trend_state = try analysis.canonicalTrendSetJson(allocator, .{
+        .site_id = site_id,
+        .range = .{ .start = "2026-01-01", .end = "2026-01-02" },
+        .comparison = .previous,
+        .interval = .day,
+        .series = &trend_series,
+        .filters = applied.query.analysis_filters,
+        .segment_id = segments[0].id,
+    });
+    const view_fields = [_]Field{
+        .{ .name = "site", .value = "alpha" },
+        .{ .name = "state_kind", .value = "trend" },
+        .{ .name = "state", .value = trend_state },
+        .{ .name = "name", .value = "Plan trend" },
+    };
+    try createSavedViewFromForm(
+        allocator,
+        std.testing.io,
+        &metadata,
+        .{ .fields = &view_fields },
+        20,
+    );
+    const views = try metadata.listSavedViews(allocator, "alpha");
+    try std.testing.expectEqual(@as(usize, 1), views.len);
+    const loaded = try loadSavedView(
+        allocator,
+        &metadata,
+        "alpha",
+        views[0].id,
+    );
+    try std.testing.expectEqual(model.Destination.analyze, loaded.destination);
+    try std.testing.expectEqualStrings(segments[0].id, loaded.query.analysis_segment_id.?);
+    try std.testing.expect(analysis.filterSetsEqual(
+        applied.query.analysis_filters,
+        loaded.query.analysis_filters,
+    ));
+    const missing_goal_series = [_]analysis.Metric{.{
+        .kind = .conversion_rate,
+        .selector = .{
+            .kind = .saved_goal,
+            .value = "00000000-0000-4000-8000-000000000099",
+        },
+        .conversion_basis = .visitor,
+    }};
+    const missing_goal_state = try analysis.canonicalTrendSetJson(allocator, .{
+        .site_id = site_id,
+        .range = .{ .start = "2026-01-01", .end = "2026-01-02" },
+        .comparison = .none,
+        .interval = .day,
+        .series = &missing_goal_series,
+    });
+    try metadata.addSavedView(
+        allocator,
+        "00000000-0000-4000-8000-000000000098",
+        "alpha",
+        "Removed goal",
+        missing_goal_state,
+        21,
+    );
+    try std.testing.expectError(
+        error.GoalNotFound,
+        loadSavedView(
+            allocator,
+            &metadata,
+            "alpha",
+            "00000000-0000-4000-8000-000000000098",
+        ),
+    );
+    try std.testing.expectError(
+        error.SavedViewNotFound,
+        loadSavedView(allocator, &metadata, "beta", views[0].id),
+    );
+    const predicate_values = [_][]const u8{"Pro"};
+    const selector_predicates = [_]analysis.PropertyPredicate{.{
+        .property_ref = .{ .name = "plan", .scalar_type = .string },
+        .operator = .is,
+        .values = &predicate_values,
+    }};
+    const predicate_view_state = try analysis.canonicalJson(allocator, .{
+        .site_id = site_id,
+        .range = .{ .start = "2026-01-01", .end = "2026-01-02" },
+        .mode = .breakdown,
+        .metric = .{
+            .kind = .event_count,
+            .selector = .{
+                .kind = .exact_event,
+                .value = "purchase",
+                .predicates = &selector_predicates,
+            },
+        },
+        .dimension = .{ .kind = .event_name },
+    });
+    try metadata.addSavedView(
+        allocator,
+        "00000000-0000-4000-8000-000000000097",
+        "alpha",
+        "Predicate property",
+        predicate_view_state,
+        22,
+    );
+    _ = try loadSavedView(
+        allocator,
+        &metadata,
+        "alpha",
+        "00000000-0000-4000-8000-000000000097",
+    );
+    _ = try metadata.connection.execBatch(
+        "DELETE FROM site_event_properties WHERE site_id = '" ++
+            "00000000-0000-4000-8000-000000000024' AND property_name = 'plan'",
+        .{},
+    );
+    const stale_policy = try metadata.sitePolicy(allocator, site_id);
+    try std.testing.expectError(
+        error.StaleFilterProperty,
+        loadSavedView(allocator, &metadata, "alpha", views[0].id),
+    );
+    try std.testing.expectError(
+        error.StaleFilterProperty,
+        loadSavedView(
+            allocator,
+            &metadata,
+            "alpha",
+            "00000000-0000-4000-8000-000000000097",
+        ),
+    );
+    try std.testing.expectError(
+        error.StaleFilterProperty,
+        resolveFilters(
+            allocator,
+            &metadata,
+            stale_policy,
+            "alpha",
+            loaded.query.analysis_filters,
+            loaded.query.analysis_segment_id,
+        ),
+    );
 }

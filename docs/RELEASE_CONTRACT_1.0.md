@@ -143,6 +143,11 @@ are not passes.
   exact metadata-5/event-7 predecessor, one empty settings row per existing
   site, preserved site policy, unique origin ownership, old-binary restore and
   pair rollback, and no silent assignment when predecessor origins conflict.
+- Metadata schema 7 additionally proves an exact `a2d71c0` metadata-6/event-7
+  predecessor, replayable additive tables, preserved rows/reports, site-isolated
+  canonical segment/view CRUD, stale/corrupt handling, backup plus independent
+  restore, old-binary read of the restored pair, refusal of migrated metadata,
+  and matched-pair rollback before a binary switch.
 - Core real-browser journeys pass with JavaScript enabled; the complete native
   baseline passes with JavaScript disabled. Mobile, keyboard, focus, contrast,
   reduced-motion, chart/table, zoom, and screen-reader checks meet the written
@@ -150,6 +155,15 @@ are not passes.
 - Analyze Trend's native GET builder, canonical redirect, direct URL, legacy
   list route, empty/overflow/timeout states, and server SVG/exact tables pass
   through the real authenticated loopback service with JavaScript disabled.
+- Universal-filter acceptance runs the real authenticated Overview, Trend, and
+  Breakdown routes with the same event/session/person FilterSet; exact AND/OR,
+  null/missing/type, maximum bounds, suggestions, chips, explicit row actions,
+  segment/view CRUD, stale recovery, canonical refresh/back/forward, HTMX
+  equivalence, JavaScript-disabled use, and mobile layout all pass. No filter is
+  silently ignored and no startup API/JSON request is added.
+- The named `e2e-filters` and `e2e-metadata7-migration` gates pass independently
+  and are also mandatory parts of `e2e-release-full`; the full packaged gate is
+  not a substitute for being able to reproduce either focused boundary.
 - Server-rendered chart families validate bounded typed inputs and stable IDs,
   handle empty/single/constant/missing data honestly, expose no inline handlers,
   and pair every visual value with an exact captioned table/details alternative.

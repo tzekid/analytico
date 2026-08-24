@@ -2,7 +2,7 @@
 
 > **Status:** Sections 1–10 describe the shipped one-process runtime, its frozen
 > protocol-v1 compatibility path, additive protocol-v2 collector foundation,
-> event schema 7, metadata schema 6, protocol-v2 tracker anonymous identity,
+> event schema 7, metadata schema 7, protocol-v2 tracker anonymous identity,
 > and 30-minute client sessions. The remaining 1.0 evolution is stated
 > separately below; it preserves this runtime shape and lands only with its
 > issue evidence.
@@ -150,7 +150,8 @@ the only new event fact needed for durable identity-mint warnings; query-time
 suspected verdicts remain derived and never rewrite the append-oriented rows.
 Metadata schema 5 introduced the per-site strict flag and daily accepted-event
 cap. Metadata schema 6 adds D36's one-to-one explicit default currency and
-unique origin ownership without changing collection or event facts.
+unique origin ownership. Metadata schema 7 adds D40's exact site-owned segments
+and saved views without changing collection or event facts.
 
 Decision D29 adds a parallel pure `AnalysisQuery` model and finite metric-v2
 store compiler. The domain model validates and canonicalizes state without I/O;
@@ -174,6 +175,16 @@ keyed sampled-catalog entry for 30 seconds, but no result cache, second query
 model, projection, migration, or frontend data request. The old
 combined campaign tuple redirects visibly to the canonical UTM-campaign
 dimension, while explicit legacy UTM fields map exactly.
+
+D40 makes the controller the only cross-store coordinator for saved analytical
+state. It loads exact canonical FilterSet/Trend/Breakdown JSON from Turso,
+validates the selected site and current property/goal catalog, composes segment
+and ad-hoc clauses, and passes only the owned resolved FilterSet to DuckDB.
+Overview, Trend, and Breakdown therefore share one visible context without
+Turso querying events or DuckDB reading configuration. The server renderer
+receives owned chip/action URLs and never parses state or performs I/O. The one
+D35 Overview cache entry keys the complete composed set; no ordinary result
+cache, client state store, background process, or new service is introduced.
 
 The serving process configures one query thread, a bounded memory limit, a
 bounded temporary directory, no community extensions, and no external file or

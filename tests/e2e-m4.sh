@@ -56,7 +56,7 @@ source_dir="$fixture_root/source"
 "$binary" site disable "$source_dir" retired >/dev/null
 
 test "$("$binary" doctor "$source_dir")" = \
-    "ok metadata=v6 events=v7 sites=2 goals=1 funnels=1 stored_events=3 key=ok"
+    "ok metadata=v7 events=v7 sites=2 goals=1 funnels=1 stored_events=3 key=ok"
 
 export_path="$fixture_root/active.csv"
 test "$("$binary" export "$source_dir" active 2025-01-01 2026-07-31 "$export_path")" = \
@@ -83,7 +83,7 @@ for backup in "$backup_one" "$backup_two"; do
         $'events.duckdb\nmanifest.json\nmeta.db\nvisitor.key'
     test "$(stat -c '%a' "$backup/visitor.key")" = 600
     test "$(jq -r '.schema' "$backup/manifest.json")" = 1
-    test "$(jq -r '.metadata_schema' "$backup/manifest.json")" = 6
+    test "$(jq -r '.metadata_schema' "$backup/manifest.json")" = 7
     test "$(jq -r '.event_schema' "$backup/manifest.json")" = 7
     for name in meta.db events.duckdb visitor.key; do
         expected=$(jq -r \
@@ -102,7 +102,7 @@ restored_two="$fixture_root/restored-two"
 "$binary" restore "$backup_one" "$restored_two" --verify >/dev/null
 for restored in "$restored_one" "$restored_two"; do
     test "$("$binary" doctor "$restored")" = \
-        "ok metadata=v6 events=v7 sites=2 goals=1 funnels=1 stored_events=3 key=ok"
+        "ok metadata=v7 events=v7 sites=2 goals=1 funnels=1 stored_events=3 key=ok"
     report=$("$binary" report "$restored" active 2026-07-31 2026-07-31 \
         overview --format json)
     test "$report" = \
@@ -135,7 +135,7 @@ expect_failure "$binary" backup "$source_dir" "$permission_backup"
 assert_absent_destination "$permission_backup"
 chmod 0600 "$source_dir/visitor.key"
 test "$("$binary" doctor "$source_dir")" = \
-    "ok metadata=v6 events=v7 sites=2 goals=1 funnels=1 stored_events=3 key=ok"
+    "ok metadata=v7 events=v7 sites=2 goals=1 funnels=1 stored_events=3 key=ok"
 
 newer_events="$fixture_root/newer-events"
 "$binary" restore "$backup_one" "$newer_events" --verify >/dev/null
@@ -160,7 +160,7 @@ test "$("$binary" doctor "$source_dir")" = "$before_recent"
 test "$("$binary" maintain "$source_dir" 2025-01-02)" = \
     "maintenance cutoff=2025-01-02 before=3 expired=1 site_events=1 sites=1 after=1"
 test "$("$binary" doctor "$source_dir")" = \
-    "ok metadata=v6 events=v7 sites=1 goals=1 funnels=1 stored_events=1 key=ok"
+    "ok metadata=v7 events=v7 sites=1 goals=1 funnels=1 stored_events=1 key=ok"
 recent_report=$("$binary" report "$source_dir" active 2026-07-31 2026-07-31 \
     overview --format json)
 test "$recent_report" = \
@@ -192,9 +192,9 @@ if wait "$migration_pid" 2>/dev/null; then
     exit 1
 fi
 test "$("$binary" migrate "$legacy_dir" "$legacy_backup")" = \
-    "migrated metadata=v6 events=v7"
+    "migrated metadata=v7 events=v7"
 test "$("$binary" doctor "$legacy_dir")" = \
-    "ok metadata=v6 events=v7 sites=0 goals=0 funnels=0 stored_events=1000000 key=ok"
+    "ok metadata=v7 events=v7 sites=0 goals=0 funnels=0 stored_events=1000000 key=ok"
 
 port=$((45000 + ($$ % 1000)))
 base="http://127.0.0.1:$port"
@@ -273,7 +273,7 @@ if rg -n 'private-path|secret-user-agent|203\\.0\\.113\\.42|visitor\\.key|events
     exit 1
 fi
 test "$("$binary" doctor "$fault_dir")" = \
-    "ok metadata=v6 events=v7 sites=1 goals=0 funnels=0 stored_events=0 key=ok"
+    "ok metadata=v7 events=v7 sites=1 goals=0 funnels=0 stored_events=0 key=ok"
 
 expect_failure "$binary" serve --listen 0.0.0.0:49992 \
     --meta "$source_dir/meta.db" \
