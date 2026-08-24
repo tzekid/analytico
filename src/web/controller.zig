@@ -256,6 +256,7 @@ pub const ParsedQuery = struct {
     legacy_to_name: bool = false,
     notice: []const u8 = "",
     kind: report.Kind,
+    report_set: bool = false,
     subject: []const u8 = "",
     campaign_dimension: report.CampaignDimension = .all,
     sort: report.Sort = .count,
@@ -317,6 +318,7 @@ pub fn parseQuery(
             query.comparison = try analysis.Comparison.parse(value);
         } else if (std.mem.eql(u8, name, "report")) {
             query.kind = try report.Kind.parse(value);
+            query.report_set = true;
         } else if (std.mem.eql(u8, name, "subject")) {
             query.subject = value;
         } else if (std.mem.eql(u8, name, "campaign")) {
@@ -390,6 +392,264 @@ pub fn finishQuery(
     return query;
 }
 
+pub fn translateOverviewTrendHandoff(
+    allocator: std.mem.Allocator,
+    parsed: ParsedQuery,
+) !?ParsedTrendQuery {
+    if (!parsed.overview_selection_set or parsed.site.len != 0 or
+        parsed.kind != .pages or parsed.subject.len != 0 or
+        parsed.campaign_dimension != .all or parsed.sort != .count or
+        parsed.limit != report.default_limit or parsed.page != 1)
+    {
+        return null;
+    }
+    const kind: analysis.MetricKind = switch (parsed.overview_metric) {
+        .visitors => .visitors,
+        .sessions => .sessions,
+        .page_views => .page_views,
+        .conversions, .revenue => return null,
+    };
+    const series = try allocator.alloc(analysis.Metric, 1);
+    series[0] = .{ .kind = kind };
+    return .{
+        .from = parsed.from,
+        .to = parsed.to,
+        .comparison = parsed.comparison,
+        .series = series,
+        .highlighted_interval = parsed.highlighted_interval,
+    };
+}
+
+pub const ParsedTrendQuery = struct {
+    from: ?[]const u8 = null,
+    to: ?[]const u8 = null,
+    comparison: ?analysis.Comparison = null,
+    interval: analysis.Interval = .auto,
+    series: []const analysis.Metric = &.{},
+    highlighted_interval: []const u8 = "",
+};
+
+pub fn parseTrendQuery(
+    allocator: std.mem.Allocator,
+    target: []const u8,
+) !ParsedTrendQuery {
+    const marker = std.mem.findScalar(u8, target, '?') orelse
+        return .{ .series = try defaultTrendSeries(allocator) };
+    const encoded = target[marker + 1 ..];
+    if (encoded.len == 0) {
+        return .{ .series = try defaultTrendSeries(allocator) };
+    }
+    if (encoded.len > analysis.maximum_url_bytes) return error.QueryTooLarge;
+
+    var parsed = ParsedTrendQuery{};
+    var version: ?[]const u8 = null;
+    var mode: ?[]const u8 = null;
+    var interval_seen = false;
+    var highlight_seen = false;
+    var canonical_series: std.ArrayList(analysis.Metric) = .empty;
+    var builder_metric: [analysis.maximum_series]?[]const u8 = @splat(null);
+    var builder_event: [analysis.maximum_series]?[]const u8 = @splat(null);
+    var builder_goal: [analysis.maximum_series]?[]const u8 = @splat(null);
+    var builder_seen = false;
+    var canonical_seen = false;
+    var parameter_count: usize = 0;
+    var parameters = std.mem.splitScalar(u8, encoded, '&');
+    while (parameters.next()) |parameter| {
+        if (parameter.len == 0) return error.InvalidTrendQuery;
+        parameter_count += 1;
+        if (parameter_count > analysis.maximum_url_parameters) {
+            return error.TooManyQueryFields;
+        }
+        const raw_name, const raw_value = std.mem.cutScalar(u8, parameter, '=') orelse
+            return error.InvalidTrendQuery;
+        if (raw_name.len == 0) return error.InvalidTrendQuery;
+        const name = try decodeComponent(allocator, raw_name);
+        if (std.mem.eql(u8, name, "series")) {
+            canonical_seen = true;
+            if (canonical_series.items.len >= analysis.maximum_series) {
+                return error.InvalidTrendSeriesCount;
+            }
+            try canonical_series.append(
+                allocator,
+                try analysis.parseTrendSeries(allocator, raw_value),
+            );
+            continue;
+        }
+        const value = try decodeComponent(allocator, raw_value);
+        if (std.mem.eql(u8, name, "v")) {
+            canonical_seen = true;
+            try setParsedOnce(&version, value);
+        } else if (std.mem.eql(u8, name, "mode")) {
+            canonical_seen = true;
+            try setParsedOnce(&mode, value);
+        } else if (std.mem.eql(u8, name, "from")) {
+            try setParsedOnce(&parsed.from, value);
+        } else if (std.mem.eql(u8, name, "to")) {
+            try setParsedOnce(&parsed.to, value);
+        } else if (std.mem.eql(u8, name, "compare")) {
+            if (parsed.comparison != null) return error.DuplicateQueryField;
+            parsed.comparison = try analysis.Comparison.parse(value);
+        } else if (std.mem.eql(u8, name, "interval")) {
+            if (interval_seen) return error.DuplicateQueryField;
+            parsed.interval = try analysis.Interval.parse(value);
+            interval_seen = true;
+        } else if (std.mem.eql(u8, name, "highlight")) {
+            if (highlight_seen) return error.DuplicateQueryField;
+            highlight_seen = true;
+            if (!validOverviewHighlight(value)) {
+                return error.InvalidOverviewHighlight;
+            }
+            parsed.highlighted_interval = value;
+        } else if (builderField(name, "metric-")) |slot| {
+            builder_seen = true;
+            try setParsedOnce(&builder_metric[slot], value);
+        } else if (builderField(name, "event-")) |slot| {
+            builder_seen = true;
+            try setParsedOnce(&builder_event[slot], value);
+        } else if (builderField(name, "goal-")) |slot| {
+            builder_seen = true;
+            try setParsedOnce(&builder_goal[slot], value);
+        } else {
+            return error.UnknownQueryField;
+        }
+    }
+    if (canonical_seen and builder_seen) return error.MixedTrendQueryShape;
+    if (canonical_seen) {
+        if (!std.mem.eql(u8, version orelse return error.IncompleteTrendQuery, "1") or
+            !std.mem.eql(u8, mode orelse return error.IncompleteTrendQuery, "trend") or
+            parsed.from == null or parsed.to == null or parsed.comparison == null or
+            !interval_seen or canonical_series.items.len == 0)
+        {
+            return error.IncompleteTrendQuery;
+        }
+        parsed.series = try canonical_series.toOwnedSlice(allocator);
+        return parsed;
+    }
+
+    var series: std.ArrayList(analysis.Metric) = .empty;
+    for (0..analysis.maximum_series) |slot| {
+        const metric_name = builder_metric[slot] orelse "";
+        const event_name = builder_event[slot] orelse "";
+        const goal_id = builder_goal[slot] orelse "";
+        if (metric_name.len == 0) {
+            if (event_name.len != 0 or goal_id.len != 0) {
+                return error.TrendSubjectWithoutMetric;
+            }
+            continue;
+        }
+        try series.append(
+            allocator,
+            try browserTrendMetric(metric_name, event_name, goal_id),
+        );
+    }
+    parsed.series = if (series.items.len == 0)
+        try defaultTrendSeries(allocator)
+    else
+        try series.toOwnedSlice(allocator);
+    return parsed;
+}
+
+pub fn finishTrendQuery(
+    parsed: ParsedTrendQuery,
+    site_slug: []const u8,
+    site_id: []const u8,
+    default_range: *const calendar.Range,
+    default_comparison: analysis.Comparison,
+) !model.Query {
+    if ((parsed.from == null) != (parsed.to == null)) {
+        return error.IncompleteQueryRange;
+    }
+    const range = if (parsed.from) |start|
+        analysis.LocalDateRange{ .start = start, .end = parsed.to.? }
+    else
+        default_range.view();
+    const comparison = parsed.comparison orelse default_comparison;
+    try (analysis.TrendSet{
+        .site_id = site_id,
+        .range = range,
+        .comparison = comparison,
+        .interval = parsed.interval,
+        .series = parsed.series,
+    }).validate();
+    const query = model.Query{
+        .site = site_slug,
+        .analysis_site_id = site_id,
+        .range = range,
+        .comparison = comparison,
+        .kind = .overview,
+        .highlighted_interval = parsed.highlighted_interval,
+        .analysis_interval = parsed.interval,
+        .analysis_series = parsed.series,
+    };
+    try validateQuery(query);
+    return query;
+}
+
+fn defaultTrendSeries(allocator: std.mem.Allocator) ![]const analysis.Metric {
+    const series = try allocator.alloc(analysis.Metric, 1);
+    series[0] = .{ .kind = .visitors };
+    return series;
+}
+
+fn browserTrendMetric(
+    metric_name: []const u8,
+    event_name: []const u8,
+    goal_id: []const u8,
+) !analysis.Metric {
+    const kind = try analysis.MetricKind.parse(metric_name);
+    const metric: analysis.Metric = switch (kind) {
+        .event_count, .event_visitors => if (event_name.len != 0 and goal_id.len == 0)
+            .{
+                .kind = kind,
+                .selector = .{ .kind = .exact_event, .value = event_name },
+            }
+        else
+            return error.InvalidTrendSubject,
+        .conversions, .conversion_rate => if (goal_id.len != 0 and event_name.len == 0)
+            .{
+                .kind = kind,
+                .selector = .{ .kind = .saved_goal, .value = goal_id },
+                .conversion_basis = .visitor,
+            }
+        else
+            return error.InvalidTrendSubject,
+        .revenue, .average_value => if (event_name.len != 0 and goal_id.len == 0)
+            .{
+                .kind = kind,
+                .selector = .{ .kind = .exact_event, .value = event_name },
+            }
+        else if (goal_id.len != 0 and event_name.len == 0)
+            .{
+                .kind = kind,
+                .selector = .{ .kind = .saved_goal, .value = goal_id },
+            }
+        else if (goal_id.len == 0 and event_name.len == 0)
+            .{ .kind = kind }
+        else
+            return error.InvalidTrendSubject,
+        else => if (event_name.len == 0 and goal_id.len == 0)
+            .{ .kind = kind }
+        else
+            return error.InvalidTrendSubject,
+    };
+    try analysis.validateTrendSeries(metric);
+    return metric;
+}
+
+fn builderField(name: []const u8, prefix: []const u8) ?usize {
+    if (!std.mem.startsWith(u8, name, prefix) or name.len != prefix.len + 1) {
+        return null;
+    }
+    const digit = name[prefix.len];
+    if (digit < '1' or digit > '0' + analysis.maximum_series) return null;
+    return digit - '1';
+}
+
+fn setParsedOnce(target: *?[]const u8, value: []const u8) !void {
+    if (target.* != null) return error.DuplicateQueryField;
+    target.* = value;
+}
+
 pub fn loadPage(
     allocator: std.mem.Allocator,
     metadata: *meta.Store,
@@ -423,6 +683,7 @@ pub fn loadPage(
     }
     const selected = try resolveSite(sites, query.site);
     query.site = selected.slug;
+    query.analysis_site_id = selected.id;
     try validateQuery(query);
     if (query.highlighted_interval.len != 0) {
         try validateGeneratedOverviewHighlight(
@@ -578,6 +839,512 @@ pub fn loadPage(
     };
 }
 
+pub fn loadTrendPage(
+    allocator: std.mem.Allocator,
+    metadata: *meta.Store,
+    event_store: *events.Store,
+    query_input: model.Query,
+    calendar_context: calendar.Context,
+    site_zone: timezone.Zone,
+    csrf_token: []const u8,
+    report_timeout_ms: u32,
+) !model.Page {
+    var query = query_input;
+    const sites = try metadata.listSites(allocator);
+    if (sites.len == 0) return error.SiteNotFound;
+    const selected = try resolveSite(sites, query.site);
+    query.site = selected.slug;
+    query.analysis_site_id = selected.id;
+    try validateQuery(query);
+
+    const goals = try metadata.listGoals(allocator, selected.slug);
+    const funnels = try metadata.listFunnels(allocator, selected.slug);
+    const policy = try metadata.sitePolicy(allocator, selected.id);
+    for (query.analysis_series) |metric| if (metric.selector) |selector| {
+        if (selector.kind == .saved_goal and goalById(goals, selector.value) == null) {
+            return error.GoalNotFound;
+        }
+    };
+    const resolved_goals = try resolveAnalysisGoals(allocator, goals);
+    const execution = analysis.TrendSetExecution{
+        .set = .{
+            .site_id = selected.id,
+            .range = query.range,
+            .comparison = query.comparison,
+            .interval = query.analysis_interval,
+            .series = query.analysis_series,
+        },
+        .comparison_range = if (calendar_context.comparison_range) |*range|
+            range.view()
+        else
+            null,
+        .active_goals = resolved_goals,
+        .strict_traffic_mode = policy.strict_mode,
+        .timeout_ms = report_timeout_ms,
+    };
+    const executed = analysis_store.executeTrendSet(
+        allocator,
+        event_store,
+        execution,
+    ) catch |err| {
+        if (err == error.AnalysisTimeout) return error.ReportTimeout;
+        if (err == error.TooManyAnalysisCurrencies or
+            err == error.TooManyAnalysisTrendRows)
+        {
+            return error.TooManyAnalyzeTrendSeries;
+        }
+        return err;
+    };
+    if (executed.series.len != query.analysis_series.len or
+        executed.series.len == 0)
+    {
+        return error.InvalidAnalyzeTrendResult;
+    }
+    const interval = executed.series[0].interval;
+    for (executed.series[1..]) |result| if (result.interval != interval) {
+        return error.InvalidAnalyzeTrendResult;
+    };
+    const current_buckets = try buildOverviewBuckets(
+        allocator,
+        site_zone,
+        query.range,
+        calendar_context.utc_range,
+        interval,
+        if (interval == .hour and calendar_context.includes_incomplete_today)
+            calendar_context.now_utc_seconds
+        else
+            null,
+    );
+    const comparison_buckets = if (calendar_context.comparison_range) |*range|
+        try buildOverviewBuckets(
+            allocator,
+            site_zone,
+            range.view(),
+            calendar_context.comparison_utc_range orelse
+                return error.MissingCalendarContext,
+            interval,
+            null,
+        )
+    else
+        &.{};
+    if (query.highlighted_interval.len != 0 and
+        !bucketContains(current_buckets, query.highlighted_interval) and
+        !bucketContains(comparison_buckets, query.highlighted_interval))
+    {
+        return error.InvalidOverviewHighlight;
+    }
+    const bounds = try event_store.siteEventBounds(selected.id);
+    const incomplete_bucket = if (calendar_context.includes_incomplete_today)
+        try currentAnalyzeBucketLabel(
+            allocator,
+            site_zone,
+            calendar_context.now_utc_seconds,
+            interval,
+        )
+    else
+        "";
+    const view = try buildAnalyzeTrend(
+        allocator,
+        query.analysis_series,
+        executed,
+        goals,
+        current_buckets,
+        comparison_buckets,
+        incomplete_bucket,
+        query.highlighted_interval,
+        bounds.count == 0,
+    );
+    return .{
+        .destination = .analyze,
+        .sites = sites,
+        .selected_site = selected,
+        .query = query,
+        .calendar_context = calendar_context,
+        .report_time_basis = .none,
+        .result = null,
+        .analyze_trend = view,
+        .goals = goals,
+        .funnels = funnels,
+        .self_exclusion_origins = policy.origins,
+        .excluded_networks = policy.excluded_networks,
+        .strict_mode = policy.strict_mode,
+        .daily_event_ceiling = policy.daily_event_ceiling,
+        .csrf_token = csrf_token,
+    };
+}
+
+pub fn validateTrendHighlight(
+    allocator: std.mem.Allocator,
+    query: model.Query,
+    context: calendar.Context,
+    zone: timezone.Zone,
+) !void {
+    if (query.highlighted_interval.len == 0) return;
+    const interval = if (query.analysis_interval == .auto)
+        try analysis.automaticInterval(query.range)
+    else
+        query.analysis_interval;
+    const current = try buildOverviewBuckets(
+        allocator,
+        zone,
+        query.range,
+        context.utc_range,
+        interval,
+        if (interval == .hour and context.includes_incomplete_today)
+            context.now_utc_seconds
+        else
+            null,
+    );
+    if (bucketContains(current, query.highlighted_interval)) return;
+    if (context.comparison_range) |*range| {
+        const comparison = try buildOverviewBuckets(
+            allocator,
+            zone,
+            range.view(),
+            context.comparison_utc_range orelse
+                return error.MissingCalendarContext,
+            interval,
+            null,
+        );
+        if (bucketContains(comparison, query.highlighted_interval)) return;
+    }
+    return error.InvalidOverviewHighlight;
+}
+
+fn buildAnalyzeTrend(
+    allocator: std.mem.Allocator,
+    metrics: []const analysis.Metric,
+    executed: analysis.TrendSetResult,
+    goals: []const meta.Goal,
+    current_buckets: []const analysis.OverviewBucket,
+    comparison_buckets: []const analysis.OverviewBucket,
+    incomplete_bucket: []const u8,
+    highlight: []const u8,
+    no_events_ever: bool,
+) !model.AnalyzeTrend {
+    var output: std.ArrayList(model.AnalyzeTrendSeries) = .empty;
+    var any_rows = false;
+    for (metrics, executed.series) |metric, result| {
+        any_rows = any_rows or result.points.len != 0 or
+            (result.comparison_points != null and
+                result.comparison_points.?.len != 0);
+        if (metric.kind == .revenue or metric.kind == .average_value) {
+            const currencies = try trendCurrencies(allocator, result);
+            if (currencies.len == 0) {
+                if (output.items.len >= analysis.maximum_series) {
+                    return error.TooManyAnalyzeTrendSeries;
+                }
+                try output.append(allocator, try buildAnalyzeSeries(
+                    allocator,
+                    metric,
+                    result,
+                    goals,
+                    current_buckets,
+                    comparison_buckets,
+                    incomplete_bucket,
+                    if (output.items.len == 0) highlight else "",
+                    "",
+                ));
+            } else for (currencies) |currency| {
+                if (output.items.len >= analysis.maximum_series) {
+                    return error.TooManyAnalyzeTrendSeries;
+                }
+                try output.append(allocator, try buildAnalyzeSeries(
+                    allocator,
+                    metric,
+                    result,
+                    goals,
+                    current_buckets,
+                    comparison_buckets,
+                    incomplete_bucket,
+                    if (output.items.len == 0) highlight else "",
+                    currency,
+                ));
+            }
+        } else {
+            if (output.items.len >= analysis.maximum_series) {
+                return error.TooManyAnalyzeTrendSeries;
+            }
+            try output.append(allocator, try buildAnalyzeSeries(
+                allocator,
+                metric,
+                result,
+                goals,
+                current_buckets,
+                comparison_buckets,
+                incomplete_bucket,
+                if (output.items.len == 0) highlight else "",
+                "",
+            ));
+        }
+    }
+    return .{
+        .series = try output.toOwnedSlice(allocator),
+        .no_events_ever = no_events_ever,
+        .no_matches = !no_events_ever and !any_rows,
+    };
+}
+
+fn currentAnalyzeBucketLabel(
+    allocator: std.mem.Allocator,
+    zone: timezone.Zone,
+    now_utc_seconds: i64,
+    interval: analysis.Interval,
+) ![]const u8 {
+    const local = try zone.localAt(now_utc_seconds);
+    return switch (interval) {
+        .hour => value: {
+            const label = try zone.localHourLabel(now_utc_seconds);
+            break :value try allocator.dupe(u8, &label);
+        },
+        .day => try allocator.dupe(u8, &local.date),
+        .week => value: {
+            var date = try timezone.Date.parse(&local.date);
+            const days_since_monday = @mod(date.dayNumber() + 3, 7);
+            date = try date.addDays(-days_since_monday);
+            const label = try date.format();
+            break :value try allocator.dupe(u8, &label);
+        },
+        .month => try allocator.dupe(u8, local.date[0..7]),
+        .auto => error.InvalidOverviewInterval,
+    };
+}
+
+fn buildAnalyzeSeries(
+    allocator: std.mem.Allocator,
+    metric: analysis.Metric,
+    result: analysis.TrendResult,
+    goals: []const meta.Goal,
+    current_buckets: []const analysis.OverviewBucket,
+    comparison_buckets: []const analysis.OverviewBucket,
+    incomplete_bucket: []const u8,
+    highlight: []const u8,
+    currency: []const u8,
+) !model.AnalyzeTrendSeries {
+    const count = @max(current_buckets.len, comparison_buckets.len);
+    const highlight_is_current = bucketContains(current_buckets, highlight);
+    const points = try allocator.alloc(model.AnalyzeTrendPoint, count);
+    for (points, 0..) |*point, index| {
+        const current_label = if (index < current_buckets.len)
+            current_buckets[index].label
+        else
+            "";
+        const comparison_label = if (index < comparison_buckets.len)
+            comparison_buckets[index].label
+        else
+            "";
+        point.* = .{
+            .current_label = current_label,
+            .comparison_label = comparison_label,
+            .current = if (current_label.len == 0)
+                null
+            else
+                try denseTrendMeasure(
+                    result.points,
+                    current_label,
+                    metric.kind,
+                    currency,
+                ),
+            .comparison = if (comparison_label.len == 0 or
+                result.comparison_points == null)
+                null
+            else
+                try denseTrendMeasure(
+                    result.comparison_points.?,
+                    comparison_label,
+                    metric.kind,
+                    currency,
+                ),
+            .current_incomplete = current_label.len != 0 and
+                std.mem.eql(u8, current_label, incomplete_bucket),
+            .current_highlighted = current_label.len != 0 and
+                std.mem.eql(u8, current_label, highlight),
+            .comparison_highlighted = !highlight_is_current and
+                comparison_label.len != 0 and
+                std.mem.eql(u8, comparison_label, highlight),
+        };
+    }
+    return .{
+        .metric = metric,
+        .title = try trendTitle(allocator, metric, goals, currency),
+        .points = points,
+        .current_total = try trendTotal(result.total, metric.kind, currency),
+        .comparison_total = if (result.comparison_total) |totals|
+            try trendTotal(totals, metric.kind, currency)
+        else
+            null,
+        .current_coverage = try coverageText(allocator, result.completeness, "Current"),
+        .comparison_coverage = if (result.comparison_completeness) |coverage|
+            try coverageText(allocator, coverage, "Comparison")
+        else
+            null,
+    };
+}
+
+fn trendCurrencies(
+    allocator: std.mem.Allocator,
+    result: analysis.TrendResult,
+) ![]const []const u8 {
+    var output: std.ArrayList([]const u8) = .empty;
+    for (result.total) |measure| try appendMeasureCurrency(allocator, &output, measure);
+    if (result.comparison_total) |totals| for (totals) |measure| {
+        try appendMeasureCurrency(allocator, &output, measure);
+    };
+    for (result.points) |point| try appendMeasureCurrency(allocator, &output, point.measure);
+    if (result.comparison_points) |points| for (points) |point| {
+        try appendMeasureCurrency(allocator, &output, point.measure);
+    };
+    std.mem.sort([]const u8, output.items, {}, struct {
+        fn lessThan(_: void, left: []const u8, right: []const u8) bool {
+            return std.mem.lessThan(u8, left, right);
+        }
+    }.lessThan);
+    return output.toOwnedSlice(allocator);
+}
+
+fn appendMeasureCurrency(
+    allocator: std.mem.Allocator,
+    currencies: *std.ArrayList([]const u8),
+    measure: analysis.Measure,
+) !void {
+    const currency = switch (measure) {
+        .amount => |amount| amount.currency,
+        else => return error.InvalidAnalyzeTrendResult,
+    };
+    if (currency.len != 3) return error.InvalidAnalyzeTrendResult;
+    for (currency) |byte| if (byte < 'A' or byte > 'Z') {
+        return error.InvalidAnalyzeTrendResult;
+    };
+    for (currencies.items) |existing| {
+        if (std.mem.eql(u8, existing, currency)) return;
+    }
+    try currencies.append(allocator, currency);
+}
+
+fn denseTrendMeasure(
+    points: []const analysis.TrendPoint,
+    label: []const u8,
+    kind: analysis.MetricKind,
+    currency: []const u8,
+) !?analysis.Measure {
+    for (points) |point| {
+        if (!std.mem.eql(u8, point.bucket, label)) continue;
+        switch (point.measure) {
+            .amount => |amount| {
+                if (std.mem.eql(u8, amount.currency, currency)) return point.measure;
+            },
+            else => {
+                if (currency.len != 0) return error.InvalidAnalyzeTrendResult;
+                return point.measure;
+            },
+        }
+    }
+    return switch (kind) {
+        .engagement_rate, .bounce_rate, .conversion_rate => null,
+        .revenue, .average_value => if (currency.len == 0)
+            null
+        else
+            .{ .amount = .{
+                .decimal = "0.000000",
+                .currency = currency,
+                .value_count = 0,
+            } },
+        else => .{ .count = 0 },
+    };
+}
+
+fn trendTotal(
+    totals: []const analysis.Measure,
+    kind: analysis.MetricKind,
+    currency: []const u8,
+) !?analysis.Measure {
+    for (totals) |measure| switch (measure) {
+        .amount => |amount| {
+            if (std.mem.eql(u8, amount.currency, currency)) return measure;
+        },
+        else => {
+            if (currency.len != 0 or totals.len != 1) {
+                return error.InvalidAnalyzeTrendResult;
+            }
+            return measure;
+        },
+    };
+    return switch (kind) {
+        .revenue, .average_value => if (currency.len == 0)
+            null
+        else
+            .{ .amount = .{
+                .decimal = "0.000000",
+                .currency = currency,
+                .value_count = 0,
+            } },
+        else => error.InvalidAnalyzeTrendResult,
+    };
+}
+
+fn trendTitle(
+    allocator: std.mem.Allocator,
+    metric: analysis.Metric,
+    goals: []const meta.Goal,
+    currency: []const u8,
+) ![]const u8 {
+    const label = metricLabel(metric.kind);
+    if (metric.selector) |selector| switch (selector.kind) {
+        .exact_event => return if (currency.len == 0)
+            std.fmt.allocPrint(allocator, "{s} · event {s}", .{ label, selector.value })
+        else
+            std.fmt.allocPrint(
+                allocator,
+                "{s} · event {s} · {s}",
+                .{ label, selector.value, currency },
+            ),
+        .saved_goal => {
+            const goal = goalById(goals, selector.value) orelse return error.GoalNotFound;
+            return if (currency.len == 0)
+                std.fmt.allocPrint(allocator, "{s} · goal {s}", .{ label, goal.name })
+            else
+                std.fmt.allocPrint(
+                    allocator,
+                    "{s} · goal {s} · {s}",
+                    .{ label, goal.name, currency },
+                );
+        },
+        else => return error.InvalidTrendSubject,
+    };
+    return if (currency.len == 0)
+        allocator.dupe(u8, label)
+    else
+        std.fmt.allocPrint(allocator, "{s} · {s}", .{ label, currency });
+}
+
+fn metricLabel(kind: analysis.MetricKind) []const u8 {
+    return switch (kind) {
+        .visitors => "Visitors",
+        .new_visitors => "New visitors",
+        .returning_visitors => "Returning visitors",
+        .sessions => "Sessions",
+        .engaged_sessions => "Engaged sessions",
+        .engagement_rate => "Engagement rate",
+        .bounce_rate => "Bounce rate",
+        .page_views => "Page views",
+        .custom_events => "Custom events",
+        .conversions => "Conversions",
+        .conversion_rate => "Conversion rate",
+        .revenue => "Revenue",
+        .average_value => "Average value",
+        .event_count => "Event count",
+        .event_visitors => "Event visitors",
+    };
+}
+
+fn bucketContains(
+    buckets: []const analysis.OverviewBucket,
+    label: []const u8,
+) bool {
+    for (buckets) |bucket| if (std.mem.eql(u8, bucket.label, label)) return true;
+    return false;
+}
+
 fn resolveAnalysisGoals(
     allocator: std.mem.Allocator,
     goals: []const meta.Goal,
@@ -617,6 +1384,7 @@ fn buildOverviewKpis(
         unavailable,
         "Distinct modeled people with a page view or custom event in this site-local range.",
         .analyze,
+        .{ .kind = .visitors },
     ));
     try cards.append(allocator, try countKpi(
         allocator,
@@ -625,6 +1393,7 @@ fn buildOverviewKpis(
         unavailable,
         "Distinct sessions with meaningful activity in this site-local range.",
         .analyze,
+        .{ .kind = .sessions },
     ));
     try cards.append(allocator, try countKpi(
         allocator,
@@ -633,6 +1402,7 @@ fn buildOverviewKpis(
         unavailable,
         "Accepted page-view events in this site-local range.",
         .analyze,
+        .{ .kind = .page_views },
     ));
     try cards.append(allocator, try ratioKpiModel(
         allocator,
@@ -641,6 +1411,7 @@ fn buildOverviewKpis(
         unavailable,
         "Sessions with 10 seconds of active engagement, two page views, or an active-goal match, divided by sessions.",
         .analyze,
+        .{ .kind = .engagement_rate },
     ));
     try cards.append(allocator, try countKpi(
         allocator,
@@ -649,6 +1420,7 @@ fn buildOverviewKpis(
         unavailable,
         "Matches across all active goals; one event can match more than one distinct goal.",
         .goals,
+        null,
     ));
     try cards.append(allocator, try ratioKpiModel(
         allocator,
@@ -657,6 +1429,7 @@ fn buildOverviewKpis(
         unavailable,
         "Distinct visitors with any active-goal match divided by all visitors in the same range.",
         .goals,
+        null,
     ));
     for (overview.revenue) |revenue| {
         const label = try std.fmt.allocPrint(
@@ -684,6 +1457,7 @@ fn buildOverviewKpis(
             .direction = delta.direction,
             .definition = "Exact accepted value total for this currency; currencies are never combined or converted.",
             .target = .analyze,
+            .legacy_focus_currency = revenue.currency,
         });
     }
     return .{
@@ -860,6 +1634,7 @@ fn countKpi(
     unavailable: []const u8,
     definition: []const u8,
     target: model.KpiTarget,
+    analysis_metric: ?analysis.Metric,
 ) !model.OverviewKpi {
     if (count.current < 0) return error.InvalidOverviewCount;
     const delta = if (count.comparison) |prior|
@@ -873,6 +1648,7 @@ fn countKpi(
         .direction = delta.direction,
         .definition = definition,
         .target = target,
+        .analysis_metric = analysis_metric,
     };
 }
 
@@ -883,6 +1659,7 @@ fn ratioKpiModel(
     unavailable: []const u8,
     definition: []const u8,
     target: model.KpiTarget,
+    analysis_metric: ?analysis.Metric,
 ) !model.OverviewKpi {
     try validateRatio(ratio.current);
     const current_available = ratio.current.denominator != 0;
@@ -912,6 +1689,7 @@ fn ratioKpiModel(
         .direction = delta.direction,
         .definition = definition,
         .target = target,
+        .analysis_metric = analysis_metric,
     };
 }
 
@@ -1218,6 +1996,36 @@ pub fn verifyCsrf(form: Form, expected: []const u8) !void {
 pub fn validateQuery(query: model.Query) !void {
     try domain.validateSlug(query.site);
     query.range.validate() catch return error.InvalidReportRange;
+    if (query.analysis_series.len != 0) {
+        domain.validateUuid(query.analysis_site_id) catch
+            return error.InvalidAnalysisSite;
+        if (query.kind != .overview or query.subject.len != 0 or
+            query.campaign_dimension != .all or query.sort != .count or
+            query.limit != report.default_limit or query.page != 1 or
+            query.overview_metric != .visitors or
+            query.overview_currency.len != 0 or
+            query.analysis_series.len > analysis.maximum_series)
+        {
+            return error.AnalysisOptionsNotApplicable;
+        }
+        for (query.analysis_series, 0..) |metric, index| {
+            try analysis.validateTrendSeries(metric);
+            for (query.analysis_series[0..index]) |prior| {
+                if (analysis.metricsEqual(metric, prior)) {
+                    return error.DuplicateTrendSeries;
+                }
+            }
+        }
+        if (query.highlighted_interval.len != 0 and
+            !validOverviewHighlight(query.highlighted_interval))
+        {
+            return error.InvalidOverviewHighlight;
+        }
+        return;
+    }
+    if (query.analysis_interval != .auto) {
+        return error.AnalysisOptionsNotApplicable;
+    }
     if (!query.kind.isPaginated() and
         (query.sort != .count or query.limit != report.default_limit or
             query.page != 1))
@@ -1506,6 +2314,92 @@ test "calendar query parsing finalizes canonical state and known aliases" {
     );
     try std.testing.expectEqualStrings("2025-01-01", defaults.range.start);
     try std.testing.expectEqual(analysis.Comparison.previous, defaults.comparison);
+}
+
+test "Analyze Trend canonical and builder query shapes remain closed" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const site_id = "00000000-0000-4000-8000-000000000028";
+    const default_range = calendar.Range{
+        .start = "2025-01-01".*,
+        .end = "2025-01-30".*,
+    };
+    const goal_id = "00000000-0000-4000-8000-000000000029";
+    const canonical = try parseTrendQuery(
+        allocator,
+        "/admin/sites/example/analyze?v=1&from=2025-01-01&to=2025-01-02&compare=previous&mode=trend&interval=day&series=visitors&series=event-count~event~signup&series=conversions~visitor~goal~" ++ goal_id,
+    );
+    const query = try finishTrendQuery(
+        canonical,
+        "example",
+        site_id,
+        &default_range,
+        .previous,
+    );
+    try std.testing.expectEqual(@as(usize, 3), query.analysis_series.len);
+    try std.testing.expectEqual(analysis.Interval.day, query.analysis_interval);
+    try std.testing.expectEqual(analysis.MetricKind.event_count, query.analysis_series[1].kind);
+    try std.testing.expectEqualStrings("signup", query.analysis_series[1].selector.?.value);
+
+    const builder = try parseTrendQuery(
+        allocator,
+        "/admin/sites/example/analyze?from=2025-01-01&to=2025-01-02&compare=none&interval=week&metric-1=event-visitors&event-1=signup&metric-2=average-value&goal-2=" ++ goal_id,
+    );
+    try std.testing.expectEqual(@as(usize, 2), builder.series.len);
+    try std.testing.expectEqual(analysis.MetricKind.event_visitors, builder.series[0].kind);
+    try std.testing.expectEqual(analysis.MetricKind.average_value, builder.series[1].kind);
+
+    try std.testing.expectError(
+        error.MixedTrendQueryShape,
+        parseTrendQuery(
+            allocator,
+            "/admin/sites/example/analyze?v=1&from=2025-01-01&to=2025-01-02&compare=none&mode=trend&interval=day&series=visitors&metric-1=sessions",
+        ),
+    );
+    try std.testing.expectError(
+        error.UnknownQueryField,
+        parseTrendQuery(allocator, "/admin/sites/example/analyze?metric-1=visitors&filter=hidden"),
+    );
+    try std.testing.expectError(
+        error.InvalidTrendSeriesCount,
+        parseTrendQuery(
+            allocator,
+            "/admin/sites/example/analyze?v=1&from=2025-01-01&to=2025-01-02&compare=none&mode=trend&interval=day&series=visitors&series=sessions&series=page-views&series=custom-events",
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidOverviewHighlight,
+        parseTrendQuery(
+            allocator,
+            "/admin/sites/example/analyze?v=1&from=2025-01-01&to=2025-01-02&compare=none&mode=trend&interval=day&series=visitors&highlight=",
+        ),
+    );
+    try std.testing.expectError(
+        error.DuplicateQueryField,
+        parseTrendQuery(
+            allocator,
+            "/admin/sites/example/analyze?v=1&from=2025-01-01&to=2025-01-02&compare=none&mode=trend&interval=day&series=visitors&highlight=2025-01-01&highlight=2025-01-02",
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidOverviewHighlight,
+        parseTrendQuery(
+            allocator,
+            "/admin/sites/example/analyze?v=1&from=2025-01-01&to=2025-01-02&compare=none&mode=trend&interval=day&series=visitors&highlight=&highlight=2025-01-01",
+        ),
+    );
+
+    const legacy = try parseQuery(
+        allocator,
+        "/admin/sites/example/analyze?from=2025-01-01&to=2025-01-02&compare=previous&report=pages&sort=count&limit=25&page=1&focus=sessions&highlight=2025-01-01",
+        .pages,
+    );
+    const translated = (try translateOverviewTrendHandoff(allocator, legacy)).?;
+    try std.testing.expectEqual(analysis.MetricKind.sessions, translated.series[0].kind);
+    var conversion = legacy;
+    conversion.overview_metric = .conversions;
+    try std.testing.expect((try translateOverviewTrendHandoff(allocator, conversion)) == null);
 }
 
 test "calendar query parsing rejects ambiguity partial ranges and unknown state" {
@@ -1892,6 +2786,197 @@ test "Overview KPI view model formats exact deltas coverage and currencies" {
     );
     try std.testing.expect(no_comparison.comparison_coverage == null);
     try std.testing.expect(no_comparison.includes_incomplete_today);
+}
+
+test "Analyze amount rows split by exact currency before the visual cap" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const metrics = [_]analysis.Metric{.{ .kind = .revenue }};
+    const totals = [_]analysis.Measure{
+        .{ .amount = .{ .decimal = "1.000000", .currency = "AUD", .value_count = 1 } },
+        .{ .amount = .{ .decimal = "1.000000", .currency = "EUR", .value_count = 1 } },
+        .{ .amount = .{ .decimal = "1.000000", .currency = "GBP", .value_count = 1 } },
+        .{ .amount = .{ .decimal = "1.000000", .currency = "USD", .value_count = 1 } },
+    };
+    const results = [_]analysis.TrendResult{.{
+        .points = &.{},
+        .comparison_points = null,
+        .comparison_total = null,
+        .comparison_completeness = null,
+        .total = &totals,
+        .interval = .day,
+        .completeness = .{
+            .total_people = 0,
+            .persistent_people = 0,
+            .ephemeral_people = 0,
+            .legacy_people = 0,
+            .persistent_basis_points = 0,
+            .persistent_since_local_date = null,
+        },
+    }};
+    const buckets = [_]analysis.OverviewBucket{.{ .label = "2025-01-01" }};
+    try std.testing.expectError(
+        error.TooManyAnalyzeTrendSeries,
+        buildAnalyzeTrend(
+            allocator,
+            &metrics,
+            .{ .series = &results },
+            &.{},
+            &buckets,
+            &.{},
+            "",
+            "",
+            false,
+        ),
+    );
+}
+
+test "Analyze known comparison currency gives an exact zero current total" {
+    const comparison_totals = [_]analysis.Measure{.{ .amount = .{
+        .decimal = "2.000000",
+        .currency = "EUR",
+        .value_count = 2,
+    } }};
+    const current = (try trendTotal(&.{}, .revenue, "EUR")).?.amount;
+    try std.testing.expectEqualStrings("0.000000", current.decimal);
+    try std.testing.expectEqualStrings("EUR", current.currency);
+    try std.testing.expectEqual(@as(i64, 0), current.value_count);
+    const comparison = (try trendTotal(
+        &comparison_totals,
+        .average_value,
+        "EUR",
+    )).?.amount;
+    try std.testing.expectEqualStrings("2.000000", comparison.decimal);
+    try std.testing.expectEqual(@as(i64, 2), comparison.value_count);
+    try std.testing.expect((try trendTotal(&.{}, .revenue, "")) == null);
+}
+
+test "Analyze highlight gives an overlapping label current precedence" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const current = [_]analysis.TrendPoint{.{
+        .bucket = "2025-01-01",
+        .measure = .{ .count = 1 },
+    }};
+    const comparison = [_]analysis.TrendPoint{.{
+        .bucket = "2025-01-01",
+        .measure = .{ .count = 2 },
+    }};
+    const totals = [_]analysis.Measure{.{ .count = 1 }};
+    const comparison_totals = [_]analysis.Measure{.{ .count = 2 }};
+    const coverage = analysis.Completeness{
+        .total_people = 0,
+        .persistent_people = 0,
+        .ephemeral_people = 0,
+        .legacy_people = 0,
+        .persistent_basis_points = 0,
+        .persistent_since_local_date = null,
+    };
+    const buckets = [_]analysis.OverviewBucket{.{ .label = "2025-01-01" }};
+    const series = try buildAnalyzeSeries(
+        arena.allocator(),
+        .{ .kind = .page_views },
+        .{
+            .points = &current,
+            .comparison_points = &comparison,
+            .comparison_total = &comparison_totals,
+            .comparison_completeness = coverage,
+            .total = &totals,
+            .interval = .day,
+            .completeness = coverage,
+        },
+        &.{},
+        &buckets,
+        &buckets,
+        "",
+        "2025-01-01",
+        "",
+    );
+    try std.testing.expect(series.points[0].current_highlighted);
+    try std.testing.expect(!series.points[0].comparison_highlighted);
+}
+
+test "Analyze marks the real current interval rather than a future final bucket" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var utc = try timezone.load(
+        allocator,
+        std.testing.io,
+        timezone.default_zoneinfo_root,
+        "UTC",
+    );
+    defer utc.deinit(allocator);
+
+    const now_utc_seconds: i64 = 1_735_776_000; // 2025-01-02T00:00:00Z
+    try std.testing.expectEqualStrings(
+        "2025-01-02T00:00",
+        try currentAnalyzeBucketLabel(allocator, utc, now_utc_seconds, .hour),
+    );
+    try std.testing.expectEqualStrings(
+        "2025-01-02",
+        try currentAnalyzeBucketLabel(allocator, utc, now_utc_seconds, .day),
+    );
+    try std.testing.expectEqualStrings(
+        "2024-12-30",
+        try currentAnalyzeBucketLabel(allocator, utc, now_utc_seconds, .week),
+    );
+    try std.testing.expectEqualStrings(
+        "2025-01",
+        try currentAnalyzeBucketLabel(allocator, utc, now_utc_seconds, .month),
+    );
+
+    const coverage = analysis.Completeness{
+        .total_people = 0,
+        .persistent_people = 0,
+        .ephemeral_people = 0,
+        .legacy_people = 0,
+        .persistent_basis_points = 0,
+        .persistent_since_local_date = null,
+    };
+    const totals = [_]analysis.Measure{.{ .count = 0 }};
+    const cases = [_]struct {
+        interval: analysis.Interval,
+        current: []const u8,
+        future: []const u8,
+    }{
+        .{ .interval = .day, .current = "2025-01-02", .future = "2025-01-03" },
+        .{ .interval = .week, .current = "2024-12-30", .future = "2025-01-06" },
+        .{ .interval = .month, .current = "2025-01", .future = "2025-02" },
+    };
+    for (cases) |case| {
+        const buckets = [_]analysis.OverviewBucket{
+            .{ .label = case.current },
+            .{ .label = case.future },
+        };
+        const series = try buildAnalyzeSeries(
+            allocator,
+            .{ .kind = .page_views },
+            .{
+                .points = &.{},
+                .comparison_points = null,
+                .comparison_total = null,
+                .comparison_completeness = null,
+                .total = &totals,
+                .interval = case.interval,
+                .completeness = coverage,
+            },
+            &.{},
+            &buckets,
+            &.{},
+            try currentAnalyzeBucketLabel(
+                allocator,
+                utc,
+                now_utc_seconds,
+                case.interval,
+            ),
+            "",
+            "",
+        );
+        try std.testing.expect(series.points[0].current_incomplete);
+        try std.testing.expect(!series.points[1].current_incomplete);
+    }
 }
 
 test "Overview accepted-event receipt formatting preserves the Unix epoch" {

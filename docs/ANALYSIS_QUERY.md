@@ -390,6 +390,60 @@ instant. Future local hours are not rendered or accepted as highlights;
 comparison hours remain complete. Day, week, and month series retain their
 final current bucket and mark it incomplete.
 
+## 8. Analyze Trend browser consumer
+
+Issue #28 keeps the single-query canonical grammar above as the saved/query
+compiler boundary and adds the D37 browser-only Trend-set envelope over one
+through three ordered queries. Its canonical scalar order is
+`v,from,to,compare,mode,interval`, followed by one through three repeated
+`series` tuples and an optional exact generated `highlight`. The tuple grammar,
+goal resolution, bounds, native builder redirect, shared deadline, currency
+expansion limit, and legacy `report=` compatibility are normative in D37.
+Both the visible builder and the shared date/context form submit numbered
+metric/event/goal fields and redirect to canonical state. They do not place a
+whole `~`-separated canonical tuple in a hidden control, because native HTML
+form encoding may encode those structural delimiters as `%7E`.
+
+The #28 route supplies the existing validated empty `FilterSet`. It rejects
+nonempty filter or segment route state rather than silently hiding it; issue
+#30 owns the visible universal filter/segment/saved-view extension. The
+canonical Trend set is already the typed save/export handoff, but #28 renders
+no dead action: #30 owns persistence and #31 owns actual export responses.
+
+Sparse Trend rows are aligned to the same site-local generated bucket calendar
+used by Overview. Missing counts are zero, zero-denominator rates are
+unavailable, and a known exact currency has an exact zero when that bucket has
+no value row. Hourly current ranges stop after the real current hour while
+preserving TZif gaps/overlaps. When a day, week, or month range extends beyond
+today, its future buckets remain visible but only the bucket containing the
+sampled site-local current instant is visibly incomplete. A future final bucket
+is never mislabeled. `highlight` visibly marks one generated primary-series
+bucket without filtering the query. An overlapping current/comparison label
+selects current deterministically. A date-context or builder submission clears
+the old highlight rather than carrying an interval that may not exist in the
+new generated calendar.
+
+The controller splits the existing amount rows into exact-currency visual
+series. No `Metric.currency` field, currency URL scalar, or `goal-matches`
+metric is added. Overview's all-goal Conversions and currency-specific Revenue
+point handoffs remain on the working non-filtering compatibility callout because
+they do not equal #28's selected-goal unique-conversion or all-currency typed
+metrics. Visitor, session, and page-view handoffs translate to typed Trend.
+
+Each returned rate keeps its exact numerator and denominator; chart basis
+points are derived display coordinates. Each average-value point keeps its
+exact summed `DECIMAL(18,6)` amount and value-row denominator. A deterministic
+six-decimal quotient truncated toward zero may be used for chart geometry,
+while the exact table prints the source numerator and denominator and does not
+relabel that quotient as an exact stored amount.
+
+The empty-filter browser set executes its identical identity-completeness query
+once under the same deadline, then attaches that result to each ordinary
+one-metric row/total result. This does not change D29's query grammar or the
+semantics of a standalone query. The compiler may omit unused session facts for
+an empty-filter Trend metric that cannot consume them; engagement metrics and
+all nonempty-filter queries retain the full plan.
+
 Legacy Overview visitors and legacy coverage are the exact distinct legacy
 anonymous identities with at least one product-eligible page-view or custom
 event inside each site-local period. Stored `visitor_day_start` is a metric-v1
@@ -431,7 +485,7 @@ dead setup URL before that route exists. A selected-site rejection with no
 accepted event is a distinct tracking-broken state and links to the same Live
 evidence.
 
-## 8. Acceptance evidence
+## 9. Acceptance evidence
 
 Issue #24 must provide:
 

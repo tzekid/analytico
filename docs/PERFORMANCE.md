@@ -286,6 +286,44 @@ remain issue #46's representative mixed-data benchmark; a miss there follows
 the optimization order before any cache, projection, rollup, table, service, or
 memory-limit change.
 
+Issue #28 adds no analysis cache. Its server-rendered Trend route executes one
+through three ordinary queries sequentially under one shared two-second
+interrupt budget. The real HTTP gate uses the standard million-event fixture,
+one warmup, and repeated three-series requests through the serving binary. It
+records every complete response time, requires each response inside the
+unchanged deadline, and keeps compressed HTML within the 32 KiB dashboard
+budget. A fresh serving-process HTTP request is labeled as such and is not
+misreported as cold disk or cold SQL; any separately recorded SQL profile must
+retain its own cold/warm conditions. Overview's D35 warm-cache evidence cannot
+stand in for this route. A failure follows the existing optimization order; it
+does not authorize a cache, projection, rollup, thread, worker, larger deadline,
+memory change, or client fetch.
+
+The first Debug million-row three-series route candidate failed with an honest
+503 at the unchanged two-second deadline. The measured plans were rebuilding
+the full session-facts relation and identical empty-filter identity coverage
+for simple visitor/session/page-view queries. The bounded correction shares
+that coverage once and omits session facts only when the metric and empty
+filter cannot consume them; engagement metrics and nonempty-filter D29 queries
+retain the full plan. A post-correction Debug real-HTTP run measured a
+0.508131-second fresh serving-process request and 0.483925-second p95 across ten
+complete samples after one warmup. The million-row HTML was 3,708 bytes gzip;
+the maximum legal 400-day, three-series comparison page was 23,489 bytes gzip.
+These are Debug implementation measurements, not ReleaseSafe evidence.
+
+The exact post-review source candidate was then measured independently in both
+optimization modes on Linux 7.1.4, an AMD EPYC 9354P, Zig
+0.17.0-dev.1509+bb296ab9b, Caddy 2.11.4, Playwright 1.62.0, and Chrome for
+Testing 151.0.7922.34. The final Debug run measured a 0.471847-second fresh
+serving-process request and 0.509004-second p95 across ten complete samples;
+the million-row and maximum legal pages were 3,713 and 23,516 bytes gzip. The
+final ReleaseSafe run measured 0.463579 seconds fresh and 0.472859 seconds p95;
+the same pages were 3,711 and 23,510 bytes gzip. Both runs kept the stylesheet
+at 5,857 bytes gzip, stayed below the 8 MiB repeated-view RSS-growth ceiling,
+made zero startup fetch/XHR requests, rendered byte-identical desktop/mobile
+screenshots, returned the forced shared-deadline timeout page, and then accepted
+a new event plus its idempotent duplicate through the same DuckDB owner.
+
 ### Analytico 1.0 Overview KPI confirmation
 
 Issue #26 adds one coordinated metric-v2 Overview statement under the same

@@ -82,6 +82,11 @@ are not passes.
   [`ANALYSIS_QUERY.md`](ANALYSIS_QUERY.md): closed types, canonical bounded
   serialization, explicit filter scopes, finite reviewed SQL fragments, bound
   values, typed unsupported-state failures, and preserved metric-v1 output.
+- The D37 Analyze Trend route reproduces one through three ordered typed
+  series from its canonical direct GET, keeps one request deadline, preserves
+  exact rate/amount components and currencies, marks generated
+  highlight/incomplete buckets visibly, and retains explicit metric-v1 list
+  compatibility until issue #29.
 - D34 query classification is reversible, default-off parity is exact, every
   documented human-evidence veto wins, strict mode uses one shared product
   predicate, and traffic-quality v5 exposes bounded contradiction/cap/anomaly
@@ -133,6 +138,9 @@ are not passes.
   baseline passes with JavaScript disabled. Mobile, keyboard, focus, contrast,
   reduced-motion, chart/table, zoom, and screen-reader checks meet the written
   accessibility contract.
+- Analyze Trend's native GET builder, canonical redirect, direct URL, legacy
+  list route, empty/overflow/timeout states, and server SVG/exact tables pass
+  through the real authenticated loopback service with JavaScript disabled.
 - Server-rendered chart families validate bounded typed inputs and stable IDs,
   handle empty/single/constant/missing data honestly, expose no inline handlers,
   and pair every visual value with an exact captioned table/details alternative.

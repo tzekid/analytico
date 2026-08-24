@@ -15,8 +15,7 @@ const dates = "from=2025-01-01&to=2025-01-02&compare=previous";
 
 function route(site, destination, query = "") {
   let state = query;
-  if (destination === "analyze") {
-    if (!state.includes("report=")) state += "&report=pages";
+  if (destination === "analyze" && state.includes("report=")) {
     if (!state.includes("sort=")) state += "&sort=count";
     if (!state.includes("limit=")) state += "&limit=25";
     if (!state.includes("page=")) state += "&page=1";
@@ -112,7 +111,7 @@ async function main() {
     assert.equal(
       await overviewKpi(page, "Page views")
         .locator("a.kpi-drill").getAttribute("href"),
-      "/admin/sites/example/analyze?from=2025-01-01&to=2025-01-02&compare=previous&report=pages&sort=count&limit=25&page=1",
+      "/admin/sites/example/analyze?v=1&from=2025-01-01&to=2025-01-02&compare=previous&mode=trend&interval=auto&series=page-views",
     );
     assert.equal(
       await overviewKpi(page, "Conversions")
@@ -217,10 +216,11 @@ async function main() {
     assert.equal(response.status(), 200);
     assert.match(page.url(), /\/admin\/sites\/example\/analyze\?/);
     assert.match(page.url(), /from=2025-01-01&to=2025-01-02&compare=previous/);
-    assert.match(page.url(), /[?&]focus=sessions(?:&|$)/);
+    assert.match(page.url(), /[?&]series=sessions(?:&|$)/);
     assert.match(page.url(), new RegExp(`[?&]highlight=${encodeURIComponent(interval)}(?:&|$)`));
-    assert.match(await page.locator(".analysis-focus").innerText(), new RegExp(`Sessions focus: ${interval}`));
-    assert.match(await page.locator(".analysis-focus").innerText(), /not a hidden filter/);
+    assert.equal(await page.getByRole("heading", { name: "Sessions", exact: true }).count(), 1);
+    assert.equal(await page.locator(".trend-highlight-marker").textContent(), "Highlighted");
+    assert.equal(await page.locator("svg .chart-point-highlighted").count(), 1);
     await page.goBack({ waitUntil: "load" });
     assert.equal(await page.locator(".overview-trend figcaption").textContent(), "Sessions over time");
 
@@ -243,18 +243,155 @@ async function main() {
       assert.equal(target.pathname, "/admin/sites/example/analyze");
       assert.deepEqual(
         [...target.searchParams.keys()].sort(),
-        ["compare", "focus", "from", "highlight", "limit", "page", "report", "sort", "to"].sort(),
+        ["compare", "from", "highlight", "interval", "mode", "series", "to", "v"].sort(),
       );
       assert.equal(target.searchParams.get("from"), "2025-01-01");
       assert.equal(target.searchParams.get("to"), "2025-01-03");
       assert.equal(target.searchParams.get("compare"), "previous");
-      assert.equal(target.searchParams.get("report"), "pages");
-      assert.equal(target.searchParams.get("focus"), "sessions");
+      assert.equal(target.searchParams.get("mode"), "trend");
+      assert.equal(target.searchParams.get("series"), "sessions");
       assert.equal(target.searchParams.get("highlight"), handoff.label);
       const handoffResponse = await context.request.get(target.href);
       assert.equal(handoffResponse.status(), 200);
       await handoffResponse.dispose();
     }
+
+    const analyzeRequests = [];
+    const captureAnalyzeRequest = (request) =>
+      analyzeRequests.push(request.resourceType());
+    page.on("request", captureAnalyzeRequest);
+    response = await page.goto(route("example", "analyze"), {
+      waitUntil: "load",
+    });
+    page.off("request", captureAnalyzeRequest);
+    assert.equal(response.status(), 200);
+    assert.deepEqual(new URL(page.url()).searchParams.getAll("series"), [
+      "visitors",
+    ]);
+    assert.equal(await page.locator("form.analysis-builder").count(), 1);
+    assert.equal(await page.locator(".analysis-series .trend-figure").count(), 1);
+    assert.equal(await page.getByRole("heading", { name: "Visitors", exact: true }).count(), 1);
+    assert.deepEqual(
+      [...new Set(analyzeRequests)].sort(),
+      ["document", "stylesheet"],
+    );
+    assert.equal(analyzeRequests.filter((kind) => kind === "fetch").length, 0);
+    assert.equal(analyzeRequests.filter((kind) => kind === "xhr").length, 0);
+
+    const builder = page.locator("form.analysis-builder");
+    await builder.locator('select[name="interval"]').selectOption("day");
+    await builder.locator('select[name="metric-1"]').selectOption("visitors");
+    await builder.locator('select[name="metric-2"]').selectOption("event-count");
+    await builder.locator('input[name="event-2"]').fill("signup");
+    response = await Promise.all([
+      page.waitForNavigation({ waitUntil: "load" }),
+      builder.getByRole("button", { name: "Run Trend" }).click(),
+    ]).then(([navigation]) => navigation);
+    assert.equal(response.status(), 200);
+    assert.equal(response.request().redirectedFrom() !== null, true);
+    assert.deepEqual(new URL(page.url()).searchParams.getAll("series"), [
+      "visitors",
+      "event-count~event~signup",
+    ]);
+    assert.equal(await page.locator(".analysis-series .trend-figure").count(), 2);
+
+    const twoSeriesBuilder = page.locator("form.analysis-builder");
+    await twoSeriesBuilder
+      .locator('select[name="metric-3"]')
+      .selectOption("conversions");
+    await twoSeriesBuilder
+      .locator('select[name="goal-3"]')
+      .selectOption({ label: "Signup" });
+    response = await Promise.all([
+      page.waitForNavigation({ waitUntil: "load" }),
+      twoSeriesBuilder.getByRole("button", { name: "Run Trend" }).click(),
+    ]).then(([navigation]) => navigation);
+    assert.equal(response.status(), 200);
+    assert.equal(response.request().redirectedFrom() !== null, true);
+    const configuredUrl = new URL(page.url());
+    assert.equal(configuredUrl.searchParams.get("interval"), "day");
+    assert.deepEqual(configuredUrl.searchParams.getAll("series"), [
+      "visitors",
+      "event-count~event~signup",
+      `conversions~visitor~goal~${await page.locator('select[name="goal-3"]').inputValue()}`,
+    ]);
+    assert.equal(await page.locator(".analysis-series .trend-figure").count(), 3);
+    assert.equal(await page.getByRole("heading", { name: "Event count · event signup", exact: true }).count(), 1);
+    assert.equal(await page.getByRole("heading", { name: "Conversions · goal Signup", exact: true }).count(), 1);
+    let canonicalConfiguredUrl = page.url();
+    response = await page.reload({ waitUntil: "load" });
+    assert.equal(response.status(), 200);
+    assert.equal(page.url(), canonicalConfiguredUrl);
+    assert.equal(await page.locator(".analysis-series .trend-figure").count(), 3);
+    const configuredMobileContext = page.locator("details.mobile-context");
+    await configuredMobileContext.locator(":scope > summary").click();
+    const configuredRangeForm = configuredMobileContext.locator(
+      "form.range-filter",
+    );
+    response = await Promise.all([
+      page.waitForNavigation({ waitUntil: "load" }),
+      configuredRangeForm
+        .getByRole("button", { name: "Update context" })
+        .press("Enter"),
+    ]).then(([navigation]) => navigation);
+    assert.equal(response.status(), 200);
+    assert.equal(response.request().redirectedFrom() !== null, true);
+    assert.deepEqual(new URL(page.url()).searchParams.getAll("series"), [
+      "visitors",
+      "event-count~event~signup",
+      `conversions~visitor~goal~${await page.locator('select[name="goal-3"]').inputValue()}`,
+    ]);
+    canonicalConfiguredUrl = page.url();
+    assert.ok(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= window.innerWidth,
+      ),
+    );
+    if (process.env.ANALYTICO_ANALYZE_MOBILE_SCREENSHOT_PATH) {
+      await page.screenshot({
+        path: process.env.ANALYTICO_ANALYZE_MOBILE_SCREENSHOT_PATH,
+        fullPage: true,
+      });
+    }
+
+    const invalidTyped = new URL(canonicalConfiguredUrl);
+    invalidTyped.searchParams.delete("series");
+    invalidTyped.searchParams.append("series", "goal-matches");
+    response = await page.goto(invalidTyped.href, { waitUntil: "load" });
+    assert.equal(response.status(), 400);
+    assert.equal(await page.getByRole("heading", { name: /Invalid/ }).count(), 1);
+
+    const noMatchUrl = canonicalConfiguredUrl.replace(
+      /(?:&series=[^&]*)+/,
+      "&series=event-count~event~never_seen",
+    );
+    response = await page.goto(noMatchUrl, { waitUntil: "load" });
+    assert.equal(response.status(), 200);
+    assert.equal(
+      await page.getByRole("heading", { name: "No matching data" }).count(),
+      1,
+    );
+
+    response = await page.goto(`${canonicalConfiguredUrl}&highlight=`, {
+      waitUntil: "load",
+    });
+    assert.equal(response.status(), 400);
+    assert.equal(await page.getByRole("heading", { name: /Invalid/ }).count(), 1);
+    response = await page.goto(
+      `${canonicalConfiguredUrl}&highlight=2025-01-01&highlight=2025-01-02`,
+      { waitUntil: "load" },
+    );
+    assert.equal(response.status(), 400);
+    response = await page.goto(
+      `${canonicalConfiguredUrl}&highlight=&highlight=2025-01-01`,
+      { waitUntil: "load" },
+    );
+    assert.equal(response.status(), 400);
+
+    await page.goto(
+      `${origin}/admin/sites/example/overview?from=2025-01-01&to=2025-01-03&compare=previous&metric=sessions`,
+      { waitUntil: "load" },
+    );
 
     const devicesLink = page.getByRole("link", { name: "Devices", exact: true });
     response = await Promise.all([
@@ -284,6 +421,45 @@ async function main() {
       await page.locator(".health-grid div", { hasText: "Accepted events stored" }).locator("dd").textContent(),
       "0",
     );
+    response = await page.goto(route("empty", "analyze"), {
+      waitUntil: "load",
+    });
+    assert.equal(response.status(), 200);
+    assert.equal(
+      await page.getByRole("heading", { name: "No events received yet" }).count(),
+      1,
+    );
+    assert.deepEqual(new URL(page.url()).searchParams.getAll("series"), [
+      "visitors",
+    ]);
+    assert.equal(await page.locator('select[name="goal-1"] option').count(), 2);
+    assert.equal(
+      await page.getByRole("option", { name: "No saved goals available" }).count(),
+      3,
+    );
+    const todayUtc = new Date().toISOString().slice(0, 10);
+    const tomorrowUtc = new Date(
+      Date.parse(`${todayUtc}T00:00:00Z`) + 86_400_000,
+    ).toISOString().slice(0, 10);
+    response = await page.goto(
+      `${origin}/admin/sites/empty/analyze?v=1&from=${todayUtc}&to=${tomorrowUtc}&compare=none&mode=trend&interval=day&series=engagement-rate&highlight=${todayUtc}`,
+      { waitUntil: "load" },
+    );
+    assert.equal(response.status(), 200);
+    const unavailableRows = page.locator("#analyze-trend-data tbody tr");
+    await page.locator("#analyze-trend-data > summary").click();
+    assert.equal(await unavailableRows.count(), 2);
+    const unavailableCurrentRow = unavailableRows.first();
+    assert.equal(await unavailableCurrentRow.isVisible(), true);
+    const unavailableCurrentText = await unavailableCurrentRow.innerText();
+    assert.match(unavailableCurrentText, /Incomplete/i);
+    assert.match(unavailableCurrentText, /Highlighted/i);
+    assert.match(unavailableCurrentText, /Unavailable/);
+    const unavailableFutureRow = unavailableRows.nth(1);
+    assert.equal(await unavailableFutureRow.isVisible(), true);
+    const unavailableFutureText = await unavailableFutureRow.innerText();
+    assert.match(unavailableFutureText, /Unavailable/);
+    assert.doesNotMatch(unavailableFutureText, /Incomplete|Highlighted/i);
 
     response = await page.goto(route("broken", "overview"), { waitUntil: "load" });
     assert.equal(response.status(), 200);
@@ -374,6 +550,15 @@ async function main() {
       connectionType: "none",
     });
     await page.setViewportSize({ width: 1440, height: 900 });
+    response = await page.goto(canonicalConfiguredUrl, { waitUntil: "load" });
+    assert.equal(response.status(), 200);
+    assert.equal(await page.locator(".analysis-series .trend-figure").count(), 3);
+    if (process.env.ANALYTICO_ANALYZE_SCREENSHOT_PATH) {
+      await page.screenshot({
+        path: process.env.ANALYTICO_ANALYZE_SCREENSHOT_PATH,
+        fullPage: true,
+      });
+    }
     response = await page.goto(
       route("example", "journeys/funnels", "&subject=Journey"),
       { waitUntil: "load" },
@@ -453,7 +638,11 @@ async function main() {
     ]).then(([navigation]) => navigation);
     assert.equal(response.status(), 200);
     assert.match(page.url(), new RegExp(`[?&]highlight=${encodeURIComponent(incompleteHour)}(?:&|$)`));
-    assert.match(await page.locator(".analysis-focus").innerText(), new RegExp(incompleteHour));
+    assert.equal(await page.locator(".trend-highlight-marker").textContent(), "Highlighted");
+    assert.equal(
+      await page.locator(".analysis-exact-data .trend-incomplete-marker").count(),
+      1,
+    );
     await page.goBack({ waitUntil: "load" });
     await page.goBack({ waitUntil: "load" });
     assert.equal(page.url(), fixedCalendarUrl);
@@ -486,7 +675,7 @@ async function main() {
     await assertMetric(page, "Page views", "2");
     await page.locator('.primary-navigation a:has-text("Analyze")').click();
     assert.match(page.url(), /\/admin\/sites\/second\/analyze/);
-    assert.match(page.url(), /report=pages/);
+    assert.match(page.url(), /series=visitors/);
 
     response = await page.goto(
       `${origin}/admin/sites/second/overview?from=1970-01-01&to=1970-01-01&compare=previous`,
@@ -517,11 +706,11 @@ async function main() {
       rangeForm.getByRole("button", { name: "Update context" }).click(),
     ]).then(([navigation]) => navigation);
     assert.equal(response.status(), 200);
-    assert.equal(response.request().redirectedFrom(), null);
+    assert.equal(response.request().redirectedFrom() !== null, true);
     assert.match(page.url(), /\/admin\/sites\/second\/analyze/);
     assert.match(page.url(), /from=2025-01-02/);
     assert.match(page.url(), /compare=previous-year/);
-    assert.match(page.url(), /report=pages/);
+    assert.match(page.url(), /series=visitors/);
 
     await page.goto(
       route("example", "journeys/goals", "&subject=Signup"),
@@ -816,7 +1005,7 @@ async function main() {
       engine: "chromium",
       javascript: "disabled",
       report_families: 13,
-      native_form_mutations: 6,
+      native_form_mutations: 7,
       startup_api_requests: 0,
       persistent_storage_entries: 0,
       canonical_destinations: 6,

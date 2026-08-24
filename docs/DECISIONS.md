@@ -45,6 +45,7 @@ semantic, or application state model is consequential and must be added here.
 | D34 | Query-time suspected traffic and site safeguards | Reversible suspected-session filtering, keyed network-day evidence, and a daily accepted-event ceiling | Accepted for 1.0 issue #70 |
 | D35 | Exact one-entry Overview result cache | Narrowly supersede D29's cache prohibition after measured cold SQL misses | Accepted for 1.0 issue #27 |
 | D36 | Browser site creation and metadata schema 6 | D19 durable autocommits, exact retry, stored settings, and unique origin ownership | Accepted for 1.0 issue #19 |
+| D37 | Bounded Analyze Trend query set | Preserve one-metric queries under one server-rendered shared-deadline envelope | Accepted for 1.0 issue #28 |
 
 ## D01. MVP interface
 
@@ -1954,3 +1955,192 @@ refresh failure that leaves one durable retryable site, immediate collection
 without restart, a working Install handoff, exact metadata-5/event-7 migration
 and pair rollback, response/asset/accessibility budgets, and Debug plus
 ReleaseSafe gates.
+
+## D37. Bounded Analyze Trend query set and server-rendered route
+
+**Status:** Accepted for Analytico 1.0 issue #28
+
+**Date:** 2026-08-24
+
+**Issue:** #28
+
+**Preserves:** D29's one-metric `AnalysisQuery`, finite compiler, and ordinary
+analysis-cache prohibition. D35 remains limited to the fixed Overview result.
+
+### Context
+
+The accepted metric-v2 domain and store execute one typed query with one
+metric. The 1.0 Analyze Trend surface must run one through three explicit
+current series, reproduce the complete state from a direct URL, and keep one
+interactive deadline. The existing browser Analyze route still serves the
+frozen metric-v1 list reports, while Overview trend points carry the temporary
+`focus` and `highlight` handoff accepted by issue #27.
+
+Calling the existing store entry point three times would allocate three full
+deadlines. Replacing `AnalysisQuery.metric` with an array would break the
+accepted single-query serialization, presets, compiler, CLI probes, and later
+Breakdown consumer. Overlaying unlike count, rate, and exact-value units would
+also require the multiple axes that issue #28 explicitly excludes.
+
+### Query-set candidates
+
+| Candidate | Runtime and correctness | URL, maintenance, and rollback |
+| --- | --- | --- |
+| Replace the query metric with an array | One domain value could describe the page | Breaks D29 and every single-query consumer; forces mode-specific arrays into Breakdown and saved-query state |
+| Repeat a complete encoded canonical query per series | Reuses the existing parser unchanged | Duplicates range, comparison, filters, and pagination; makes native forms and canonical equivalence difficult; consumes the 32-field bound quickly |
+| Add one bounded Trend-set envelope over existing queries | Preserves each query and finite SQL plan; permits one shared deadline | One small parser/serializer and batch adapter; no migration; rollback removes the additive route and returns bare Analyze to metric-v1 presets |
+
+Select the bounded envelope. It owns shared site, local range, comparison,
+interval, empty typed `FilterSet`, and one through three ordered, distinct
+`Metric` values. It materializes each series as an ordinary validated Trend
+query. Issue #30 owns nonempty universal filters, segments, and saved-view
+state; issue #28 rejects those route fields rather than ignoring hidden state.
+
+Canonical browser state is a query component in this order:
+
+```text
+v,from,to,compare,mode,interval,series...,highlight
+```
+
+`v=1` and `mode=trend` are mandatory. `series` repeats one through three times
+and order is meaningful; the first item is primary. A series is one
+percent-encoded `~`-separated tuple selected from these finite forms:
+
+```text
+metric
+event-count~event~event_name
+event-visitors~event~event_name
+conversions~visitor~goal~goal_uuid
+conversion-rate~visitor~goal~goal_uuid
+revenue~goal~goal_uuid
+average-value~goal~goal_uuid
+revenue~event~event_name
+average-value~event~event_name
+```
+
+Revenue and average value may also use the one-component form for all accepted
+value-bearing events. Goal UUIDs resolve only through the selected site's
+bounded active-goal snapshot; custom event names use the existing identifier
+grammar. No tuple component controls SQL text. Unknown components, empty
+tuples, duplicate series, missing subjects, subject/metric mismatches, more
+than three series, malformed encoding, unknown fields, duplicate scalar
+fields, more than 32 parameters, or more than 16 KiB reject before DuckDB.
+
+A native GET builder may submit three numbered metric/event/goal slots. That
+builder shape is not durable state: after validation the server redirects to
+the canonical repeated-series form. The shared date/context form uses the same
+builder-shaped hidden fields so ordinary HTML form encoding never turns the
+structural `~` delimiters into `%7E`; direct canonical URLs retain the strict
+component-before-delimiter grammar. The route-generated canonical component is
+the bounded hook that issues #30 and #31 later persist or export. Issue #28 does
+not render dead Save or Export controls and introduces no placeholder entity or
+endpoint.
+
+### Execution and rendering
+
+The store validates and compiles each materialized query, then executes them
+sequentially on the existing single writable DuckDB owner with one
+`deadline.Budget`. Because #28 fixes one empty filter and one site/range/traffic
+context for the whole set, its metric-independent identity coverage statement
+runs once and is attached to each series; every series still uses its ordinary
+D29 row and total plans. Empty-filter Trend plans omit the existing
+`session_facts` relation only for metrics that never consume session-derived
+fields. Engagement metrics and every nonempty-filter D29 query retain the full
+plan. Coverage, rows, comparisons, and totals all consume the same configured
+maximum. A timeout interrupts the current statement, returns the ordinary
+report-timeout page with the complete URL, and leaves the connection reusable.
+There is no thread, worker, cache, projection, rollup, table, durable state,
+dependency, client fetch, or second query engine.
+
+Each visual series uses one existing deterministic server SVG. One shared
+captioned exact table aligns the same generated buckets and exposes every
+series' raw/source components plus one native interval link, avoiding three
+copies of labels and canonical URLs at the 400-point bound. Each figure has one
+primary current line and, when selected, one neutral comparison line. Separate
+figures keep unlike units on separate axes. An amount query's currencies are
+separate visual series and are never added or converted. The complete page may
+contain at most three visual series after currency expansion. A larger valid
+result returns an explicit 422 bounded result error that asks for a narrower
+subject; it is never truncated or rendered into an oversized page.
+
+The controller aligns sparse SQL rows to exact generated site-local buckets:
+
+- absent count buckets are zero;
+- a rate with a zero denominator is unavailable, not zero;
+- once an exact currency is present in current or comparison data, an absent
+  bucket for that currency is exact `0.000000` with zero value rows;
+- hourly buckets preserve TZif gap/overlap behavior and stop after the bucket
+  containing the request-time instant; day, week, and month retain every
+  generated bucket in the requested range, including future buckets.
+
+When the range contains today, the bucket containing the sampled request-time
+instant is marked `Incomplete`. A later future bucket is never marked
+incomplete merely because it is the last generated bucket.
+An optional `highlight` must equal one generated current or comparison bucket
+and visibly marks the primary figure without changing SQL. If a long current
+and comparison range contain the same label, current takes deterministic
+precedence. Changing the date context or rerunning the builder clears a stale
+highlight; direct canonical links retain it. Known issue-#27
+visitor, session, and page-view `focus`/`highlight` URLs translate once to the
+canonical one-series state. Overview's all-active-goal Conversions count is not
+the selected-goal unique-conversion metric accepted for Analyze, and an
+Overview Revenue point names one exact currency while the accepted core query
+returns separate rows for every observed currency. Those two handoff shapes
+therefore keep the existing explicit non-filtering Analyze compatibility
+callout with the same range/highlight instead of inventing an undocumented
+metric or currency query dimension. Explicit legacy `report=` list URLs remain
+the working metric-v1 compatibility surface until issue #29; bare Analyze opens
+typed Trend.
+
+The page distinguishes a site with no stored event from a valid selection with
+no matching row in the range by using the existing selected-site event bounds.
+Both states preserve the configuration form and canonical context. A site with
+no goals keeps traffic/event metrics usable and labels goal subjects as
+unavailable; it does not invent a conversion definition or zero-result goal.
+
+Counts remain integers. Rates retain and display their exact numerator and
+denominator; basis points are only the deterministic chart coordinate and
+formatted percentage. Revenue retains exact `DECIMAL(18,6)` values per
+currency. Average value retains its exact summed amount and value-row
+denominator; a deterministic six-decimal quotient truncated toward zero may
+drive the chart, but the exact table also prints the numerator and denominator
+and never calls the quotient an exact stored amount.
+
+D37 does not add a metric kind or field to `Metric`. In particular there is no
+`goal-matches` canonical metric and no core currency query dimension. The
+controller splits the existing exact amount rows by currency before rendering;
+the three-visual-series cap applies after that split. This preserves the D29
+single-metric grammar/compiler inventory and keeps later saved/CLI consumers
+compatible.
+
+### Consequences
+
+- Runtime work is bounded by three ordinary plans and one existing request
+  deadline. The maximum rendered current points are three times 400, with the
+  same number of comparison points when available.
+- Maintenance is confined to the pure Trend-set grammar, the shared-budget
+  store adapter, typed controller/view models, and the existing renderer.
+- Security remains behind the passkey session and the current context-safe
+  renderer. The parser allocates only in the request arena, values remain
+  bound, and no raw request query, user agent, network identifier, or selector
+  value is persisted or logged.
+- There is no schema, backup-format, deployment-component, or data rollback
+  change. Code rollback removes the additive typed route and restores bare
+  Analyze to the retained metric-v1 page-presets path.
+- #29 later translates the explicit legacy list presets to typed Breakdown.
+  #30 later extends the visible shared context with nonempty filters, segments,
+  and saved views. #31 later consumes the canonical state for real exports and
+  detail routes.
+
+**Affected contracts:** `ANALYSIS_QUERY.md`, `ARCHITECTURE.md`,
+`DESIGN_SYSTEM.md`, `PERFORMANCE.md`, `RELEASE_CONTRACT_1.0.md`, and issue #28.
+
+### Acceptance evidence
+
+Issue #28 must prove canonical parser/form round trips; one, two, and three
+metric/event/goal series; automatic and every valid manual interval; exact
+count/rate/amount semantics; currency overflow; generated current/comparison
+highlights; legacy list compatibility; one shared timeout and post-interrupt
+reuse; no startup data request; JavaScript-off desktop/mobile/keyboard behavior;
+bounded response/assets; repeated million-row three-series HTTP latency; and
+separately captured Debug and ReleaseSafe gates.

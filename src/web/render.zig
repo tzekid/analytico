@@ -7,7 +7,7 @@ const components = @import("components.zig");
 const model = @import("model.zig");
 
 pub const stylesheet = @embedFile("style.css");
-pub const stylesheet_path = "/admin/app.v9.css";
+pub const stylesheet_path = "/admin/app.v10.css";
 pub const htmx = @embedFile("htmx_js");
 pub const htmx_gzip = @embedFile("htmx_gzip");
 pub const htmx_path = "/admin/htmx.28fae7bb.js";
@@ -66,8 +66,12 @@ pub fn page(output: *std.Io.Writer, value: model.Page) !void {
     switch (value.destination) {
         .overview => try overviewSection(output, value),
         .analyze => {
-            try reportNavigation(output, value);
-            try reportSection(output, value);
+            if (value.analyze_trend != null) {
+                try analyzeTrendSection(output, value);
+            } else {
+                try reportNavigation(output, value);
+                try reportSection(output, value);
+            }
         },
         .journeys => {
             try journeyNavigation(output, value);
@@ -397,8 +401,16 @@ fn primaryNavigation(
     try attribute(output, class);
     try output.writeAll("\" aria-label=\"Primary\">");
     inline for (std.meta.tags(model.Destination)) |destination| {
+        var destination_query = value.query;
+        var default_analysis_series = [_]analysis.Metric{.{ .kind = .visitors }};
+        if (destination == .analyze and destination_query.analysis_series.len == 0) {
+            destination_query.kind = .overview;
+            destination_query.analysis_interval = .auto;
+            destination_query.analysis_series = &default_analysis_series;
+            destination_query.highlighted_interval = "";
+        }
         try output.writeAll("<a href=\"");
-        try canonicalUrl(output, destination, value.query, 1);
+        try canonicalUrl(output, destination, destination_query, 1);
         if (destination == value.destination) {
             try output.writeAll("\" aria-current=\"page\">");
         } else {
@@ -446,6 +458,7 @@ fn contextControls(output: *std.Io.Writer, value: model.Page) !void {
         if (option.preset == .custom or option.range == null) continue;
         var adjusted = value.query;
         adjusted.range = option.range.?.view();
+        adjusted.highlighted_interval = "";
         try output.writeAll("<a href=\"");
         try canonicalUrl(output, value.destination, adjusted, adjusted.page);
         if (option.preset == context.selected_preset) {
@@ -503,7 +516,38 @@ fn contextControls(output: *std.Io.Writer, value: model.Page) !void {
 }
 
 fn destinationHiddenFields(output: *std.Io.Writer, value: model.Page) !void {
-    if (value.destination == .analyze) {
+    if (value.destination == .analyze and value.query.analysis_series.len != 0) {
+        try output.writeAll("<input type=\"hidden\" name=\"interval\" value=\"");
+        try attribute(output, value.query.analysis_interval.name());
+        try output.writeAll("\">");
+        for (value.query.analysis_series, 0..) |series_metric, index| {
+            try output.print(
+                "<input type=\"hidden\" name=\"metric-{d}\" value=\"",
+                .{index + 1},
+            );
+            try attribute(output, series_metric.kind.name());
+            try output.writeAll("\">");
+            if (series_metric.selector) |selector| switch (selector.kind) {
+                .exact_event => {
+                    try output.print(
+                        "<input type=\"hidden\" name=\"event-{d}\" value=\"",
+                        .{index + 1},
+                    );
+                    try attribute(output, selector.value);
+                    try output.writeAll("\">");
+                },
+                .saved_goal => {
+                    try output.print(
+                        "<input type=\"hidden\" name=\"goal-{d}\" value=\"",
+                        .{index + 1},
+                    );
+                    try attribute(output, selector.value);
+                    try output.writeAll("\">");
+                },
+                else => return error.InvalidTrendSubject,
+            };
+        }
+    } else if (value.destination == .analyze) {
         try output.writeAll("<input type=\"hidden\" name=\"report\" value=\"");
         try attribute(output, value.query.kind.name());
         try output.writeAll("\">");
@@ -523,7 +567,7 @@ fn destinationHiddenFields(output: *std.Io.Writer, value: model.Page) !void {
         try attribute(output, @tagName(value.query.sort));
         try output.writeAll("\">");
     }
-    if (value.destination == .analyze or
+    if ((value.destination == .analyze and value.query.analysis_series.len == 0) or
         (value.destination == .live and value.query.limit != report.default_limit))
     {
         try output.writeAll("<input type=\"hidden\" name=\"limit\" value=\"");
@@ -571,7 +615,7 @@ const navigation = [_]NavItem{
 fn destinationSummary(destination: model.Destination) []const u8 {
     return switch (destination) {
         .overview => "Traffic and audience at a glance.",
-        .analyze => "Explore the currently available report presets.",
+        .analyze => "Compare bounded metrics, events, and goals over time.",
         .journeys => "Review and manage goals and funnels.",
         .sessions => "Inspect visits and people without losing the shared site and date context.",
         .live => "Inspect current traffic-quality and collection diagnostics.",
@@ -607,6 +651,470 @@ fn reportSection(output: *std.Io.Writer, value: model.Page) !void {
     try output.writeAll("</section>");
 }
 
+fn analyzeTrendSection(output: *std.Io.Writer, value: model.Page) !void {
+    const trend = value.analyze_trend orelse return error.MissingAnalyzeTrend;
+    try output.writeAll(
+        "<section id=\"report\" aria-labelledby=\"analyze-trend-heading\">" ++
+            "<div class=\"analysis-heading\"><div><h2 id=\"analyze-trend-heading\">Trend</h2>" ++
+            "<p class=\"muted\">One to three typed metric queries share this request's deadline. Exact currencies remain separate.</p></div>" ++
+            "<a class=\"button button-secondary\" href=\"",
+    );
+    var legacy = value.query;
+    legacy.analysis_series = &.{};
+    legacy.analysis_interval = .auto;
+    legacy.highlighted_interval = "";
+    legacy.kind = .pages;
+    legacy.sort = .count;
+    legacy.limit = report.default_limit;
+    legacy.page = 1;
+    try canonicalUrl(output, .analyze, legacy, 1);
+    try output.writeAll("\">Open Breakdown presets</a></div>");
+
+    try output.writeAll("<form class=\"panel analysis-builder\" method=\"get\" action=\"");
+    try canonicalPath(output, .analyze, value.query);
+    try output.writeAll("\">");
+    try calendarHiddenFields(output, value.query);
+    try output.writeAll("<label class=\"analysis-interval\">Interval<select name=\"interval\">");
+    inline for (std.meta.tags(analysis.Interval)) |interval| {
+        try output.writeAll("<option value=\"");
+        try attribute(output, interval.name());
+        try output.writeByte('"');
+        if (interval == value.query.analysis_interval) try output.writeAll(" selected");
+        try output.writeByte('>');
+        try text(output, intervalLabel(interval));
+        try output.writeAll("</option>");
+    }
+    try output.writeAll("</select></label><p class=\"field-help analysis-builder-help\">Event metrics require one exact event. Conversion metrics require one saved goal. Revenue and average value may use either subject or all value events.</p><div class=\"analysis-series-builder\">");
+    for (0..analysis.maximum_series) |index| {
+        const configured_metric: ?analysis.Metric = if (index < value.query.analysis_series.len)
+            value.query.analysis_series[index]
+        else
+            null;
+        try output.print("<fieldset><legend>Series {d}</legend><label>Metric<select name=\"metric-{d}\"><option value=\"\">None</option>", .{ index + 1, index + 1 });
+        inline for (std.meta.tags(analysis.MetricKind)) |kind| {
+            try output.writeAll("<option value=\"");
+            try attribute(output, kind.name());
+            try output.writeByte('"');
+            if (configured_metric != null and configured_metric.?.kind == kind) {
+                try output.writeAll(" selected");
+            }
+            try output.writeByte('>');
+            try text(output, analysisMetricLabel(kind));
+            try output.writeAll("</option>");
+        }
+        try output.print("</select></label><label>Exact event <span class=\"muted\">(when applicable)</span><input name=\"event-{d}\" maxlength=\"64\" autocomplete=\"off\" value=\"", .{index + 1});
+        if (configured_metric) |selected_metric| if (selected_metric.selector) |selector| {
+            if (selector.kind == .exact_event) try attribute(output, selector.value);
+        };
+        try output.print("\"></label><label>Saved goal <span class=\"muted\">(when applicable)</span><select name=\"goal-{d}\"><option value=\"\">None</option>", .{index + 1});
+        if (value.goals.len == 0) {
+            try output.writeAll("<option disabled>No saved goals available</option>");
+        }
+        for (value.goals) |goal| {
+            try output.writeAll("<option value=\"");
+            try attribute(output, goal.id);
+            try output.writeByte('"');
+            if (configured_metric) |selected_metric| if (selected_metric.selector) |selector| {
+                if (selector.kind == .saved_goal and
+                    std.mem.eql(u8, selector.value, goal.id))
+                {
+                    try output.writeAll(" selected");
+                }
+            };
+            try output.writeByte('>');
+            try text(output, goal.name);
+            try output.writeAll("</option>");
+        }
+        try output.writeAll("</select></label></fieldset>");
+    }
+    try output.writeAll("</div><button type=\"submit\">Run Trend</button></form>");
+
+    if (trend.no_events_ever) {
+        const install_url = try std.fmt.allocPrint(
+            std.heap.page_allocator,
+            "/admin/sites/{s}/install",
+            .{value.query.site},
+        );
+        defer std.heap.page_allocator.free(install_url);
+        try components.emptyState(output, .{
+            .id = "analyze-no-events",
+            .title = "No events received yet",
+            .message = "Install the tracker and accept an event before comparing Trend series.",
+            .action_url = install_url,
+            .action_label = "Open installation",
+        });
+    } else if (trend.no_matches) {
+        try components.emptyState(output, .{
+            .id = "analyze-no-matches",
+            .title = "No matching data",
+            .message = "The site has events, but none match the selected metric subjects in this range.",
+        });
+    }
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    for (trend.series, 0..) |series, series_index| {
+        try output.writeAll("<section class=\"analysis-series\"><div class=\"analysis-series-summary\"><h3>");
+        try text(output, series.title);
+        try output.writeAll("</h3><p>");
+        try writeAnalyzeTotal(output, allocator, "Current total", series.current_total, series.metric.kind);
+        if (value.query.comparison != .none) {
+            try output.writeAll(" · ");
+            try writeAnalyzeTotal(
+                output,
+                allocator,
+                "Comparison total",
+                series.comparison_total,
+                series.metric.kind,
+            );
+        }
+        try output.writeAll("</p><p class=\"coverage-note\">");
+        try text(output, series.current_coverage);
+        try output.writeAll("</p>");
+        if (series.comparison_coverage) |coverage| {
+            try output.writeAll("<p class=\"coverage-note\">");
+            try text(output, coverage);
+            try output.writeAll("</p>");
+        }
+        try output.writeAll("</div>");
+        const points = try allocator.alloc(charts.TrendPoint, series.points.len);
+        for (points, series.points) |*point, source| {
+            const current = if (source.current) |measure|
+                try analyzeChartMeasure(allocator, measure, series.metric.kind)
+            else
+                AnalyzeChartMeasure{};
+            const comparison = if (source.comparison) |measure|
+                try analyzeChartMeasure(allocator, measure, series.metric.kind)
+            else
+                AnalyzeChartMeasure{};
+            point.* = .{
+                .label = source.current_label,
+                .comparison_interval_label = source.comparison_label,
+                .current = current.value,
+                .current_incomplete = source.current_incomplete,
+                .current_highlighted = source.current_highlighted,
+                .current_formatted = current.formatted,
+                .current_href = "",
+                .comparison = comparison.value,
+                .comparison_highlighted = source.comparison_highlighted,
+                .comparison_formatted = comparison.formatted,
+                .comparison_href = "",
+            };
+        }
+        const id = try std.fmt.allocPrint(allocator, "analyze-trend-{d}", .{series_index + 1});
+        try charts.renderTrend(output, .{
+            .id = id,
+            .title = series.title,
+            .summary = "Site-local current and comparison intervals. The shared exact table after the figures preserves every source value and native interval link.",
+            .current_label = analyzeValueLabel(series.metric.kind, false),
+            .comparison_label = analyzeValueLabel(series.metric.kind, true),
+            .show_comparison = value.query.comparison != .none and
+                value.calendar_context.?.comparison_range != null,
+            .scale = metricScale(series.metric.kind),
+            .points = points,
+            .render_exact_table = false,
+        });
+        try output.writeAll("</section>");
+    }
+    try renderAnalyzeExactTable(output, allocator, value, trend);
+    try output.writeAll("</section>");
+}
+
+fn renderAnalyzeExactTable(
+    output: *std.Io.Writer,
+    allocator: std.mem.Allocator,
+    page_value: model.Page,
+    trend: model.AnalyzeTrend,
+) !void {
+    if (trend.series.len == 0) return error.MissingAnalyzeTrend;
+    const point_count = trend.series[0].points.len;
+    for (trend.series[1..]) |series| if (series.points.len != point_count) {
+        return error.InvalidAnalyzeTrendMeasure;
+    };
+    const show_comparison = page_value.query.comparison != .none and
+        page_value.calendar_context.?.comparison_range != null;
+    try output.writeAll(
+        "<details id=\"analyze-trend-data\" class=\"chart-data analysis-exact-data\"><summary>View exact data for all series</summary>" ++
+            "<div class=\"table-scroll mobile-records\"><table>" ++
+            "<caption>Analyze Trend — exact values and source components</caption>" ++
+            "<thead><tr><th scope=\"col\">Current interval</th>",
+    );
+    for (trend.series) |series| {
+        try output.writeAll("<th scope=\"col\">Current · ");
+        try text(output, series.title);
+        try output.writeAll("</th>");
+    }
+    if (show_comparison) {
+        try output.writeAll("<th scope=\"col\">Comparison interval</th>");
+        for (trend.series) |series| {
+            try output.writeAll("<th scope=\"col\">Comparison · ");
+            try text(output, series.title);
+            try output.writeAll("</th>");
+        }
+    }
+    try output.writeAll("</tr></thead><tbody>");
+    for (0..point_count) |index| {
+        const primary = trend.series[0].points[index];
+        try output.writeAll("<tr><th scope=\"row\" data-label=\"Current interval\">");
+        try analyzeIntervalCell(
+            output,
+            allocator,
+            page_value.query,
+            primary.current_label,
+            primary.current_incomplete,
+            primary.current_highlighted,
+        );
+        try output.writeAll("</th>");
+        for (trend.series) |series| {
+            try output.writeAll("<td data-label=\"Current · ");
+            try attribute(output, series.title);
+            try output.writeAll("\">");
+            try analyzeExactMeasure(
+                output,
+                allocator,
+                series.points[index].current,
+                series.metric.kind,
+            );
+            try output.writeAll("</td>");
+        }
+        if (show_comparison) {
+            try output.writeAll("<td data-label=\"Comparison interval\">");
+            try analyzeIntervalCell(
+                output,
+                allocator,
+                page_value.query,
+                primary.comparison_label,
+                false,
+                primary.comparison_highlighted,
+            );
+            try output.writeAll("</td>");
+            for (trend.series) |series| {
+                try output.writeAll("<td data-label=\"Comparison · ");
+                try attribute(output, series.title);
+                try output.writeAll("\">");
+                try analyzeExactMeasure(
+                    output,
+                    allocator,
+                    series.points[index].comparison,
+                    series.metric.kind,
+                );
+                try output.writeAll("</td>");
+            }
+        }
+        try output.writeAll("</tr>");
+    }
+    if (point_count == 0) {
+        try output.print(
+            "<tr><td colspan=\"{d}\">No data in this range.</td></tr>",
+            .{1 + trend.series.len + if (show_comparison) 1 + trend.series.len else 0},
+        );
+    }
+    try output.writeAll("</tbody></table></div></details>");
+}
+
+fn analyzeIntervalCell(
+    output: *std.Io.Writer,
+    allocator: std.mem.Allocator,
+    query: model.Query,
+    label: []const u8,
+    incomplete: bool,
+    highlighted: bool,
+) !void {
+    if (label.len == 0) return output.writeAll("Unavailable");
+    const href = try analyzePointHref(allocator, query, label);
+    try output.writeAll("<a href=\"");
+    try attribute(output, href);
+    try output.writeAll("\">");
+    try text(output, label);
+    try output.writeAll("</a>");
+    if (incomplete) {
+        try output.writeAll(" <span class=\"trend-incomplete-marker\">Incomplete</span>");
+    }
+    if (highlighted) {
+        try output.writeAll(" <span class=\"trend-highlight-marker\">Highlighted</span>");
+    }
+}
+
+fn analyzeExactMeasure(
+    output: *std.Io.Writer,
+    allocator: std.mem.Allocator,
+    measure: ?analysis.Measure,
+    kind: analysis.MetricKind,
+) !void {
+    if (measure) |source| {
+        const value = try analyzeChartMeasure(allocator, source, kind);
+        try charts.writeExactTrendValue(
+            output,
+            value.value,
+            value.formatted,
+            metricScale(kind),
+        );
+    } else {
+        try output.writeAll("Unavailable");
+    }
+}
+
+fn intervalLabel(interval: analysis.Interval) []const u8 {
+    return switch (interval) {
+        .auto => "Auto",
+        .hour => "Hour",
+        .day => "Day",
+        .week => "Week",
+        .month => "Month",
+    };
+}
+
+fn analysisMetricLabel(kind: analysis.MetricKind) []const u8 {
+    return switch (kind) {
+        .visitors => "Visitors",
+        .new_visitors => "New visitors",
+        .returning_visitors => "Returning visitors",
+        .sessions => "Sessions",
+        .engaged_sessions => "Engaged sessions",
+        .engagement_rate => "Engagement rate",
+        .bounce_rate => "Bounce rate",
+        .page_views => "Page views",
+        .custom_events => "Custom events",
+        .conversions => "Conversions",
+        .conversion_rate => "Conversion rate",
+        .revenue => "Revenue",
+        .average_value => "Average value",
+        .event_count => "Event count",
+        .event_visitors => "Event visitors",
+    };
+}
+
+const AnalyzeChartMeasure = struct {
+    value: ?i128 = null,
+    formatted: []const u8 = "",
+};
+
+fn analyzeChartMeasure(
+    allocator: std.mem.Allocator,
+    measure: analysis.Measure,
+    kind: analysis.MetricKind,
+) !AnalyzeChartMeasure {
+    return switch (measure) {
+        .count => |count| if (metricScale(kind) != 0 or count < 0)
+            error.InvalidAnalyzeTrendMeasure
+        else
+            .{ .value = count },
+        .ratio => |ratio| value: {
+            if (metricScale(kind) != 2 or ratio.numerator < 0 or
+                ratio.denominator < 0 or ratio.numerator > ratio.denominator)
+            {
+                return error.InvalidAnalyzeTrendMeasure;
+            }
+            const basis_points: i128 = if (ratio.denominator == 0)
+                0
+            else
+                @divTrunc(
+                    @as(i128, ratio.numerator) * 10_000,
+                    ratio.denominator,
+                );
+            const percent_text = if (ratio.denominator == 0)
+                "unavailable"
+            else
+                try std.fmt.allocPrint(
+                    allocator,
+                    "{d}.{d:0>2}%",
+                    .{ @divTrunc(basis_points, 100), @mod(basis_points, 100) },
+                );
+            const formatted = try std.fmt.allocPrint(
+                allocator,
+                "{d}/{d} · {s}",
+                .{ ratio.numerator, ratio.denominator, percent_text },
+            );
+            break :value .{
+                .value = if (ratio.denominator == 0)
+                    null
+                else
+                    basis_points,
+                .formatted = formatted,
+            };
+        },
+        .amount => |amount| value: {
+            if (metricScale(kind) != 6 or amount.value_count < 0) {
+                return error.InvalidAnalyzeTrendMeasure;
+            }
+            const sum = try decimalMicros(amount.decimal);
+            if (kind == .average_value) break :value .{
+                .value = if (amount.value_count == 0)
+                    null
+                else
+                    @divTrunc(sum, amount.value_count),
+                .formatted = try std.fmt.allocPrint(
+                    allocator,
+                    "exact sum {s} {s} / {d} values",
+                    .{ amount.currency, amount.decimal, amount.value_count },
+                ),
+            };
+            if (kind != .revenue) return error.InvalidAnalyzeTrendMeasure;
+            break :value .{
+                .value = sum,
+                .formatted = try std.fmt.allocPrint(
+                    allocator,
+                    "{s} {s}",
+                    .{ amount.currency, amount.decimal },
+                ),
+            };
+        },
+    };
+}
+
+fn analyzeValueLabel(kind: analysis.MetricKind, comparison: bool) []const u8 {
+    return switch (kind) {
+        .average_value => if (comparison)
+            "Comparison computed average"
+        else
+            "Current computed average",
+        .engagement_rate, .bounce_rate, .conversion_rate => if (comparison)
+            "Comparison rate"
+        else
+            "Current rate",
+        else => if (comparison) "Comparison range" else "Current range",
+    };
+}
+
+fn metricScale(kind: analysis.MetricKind) u8 {
+    return switch (kind) {
+        .engagement_rate, .bounce_rate, .conversion_rate => 2,
+        .revenue, .average_value => 6,
+        else => 0,
+    };
+}
+
+fn analyzePointHref(
+    allocator: std.mem.Allocator,
+    query: model.Query,
+    interval: []const u8,
+) ![]const u8 {
+    var adjusted = query;
+    adjusted.highlighted_interval = interval;
+    var href = std.Io.Writer.Allocating.init(allocator);
+    try canonicalUrlRaw(&href.writer, .analyze, adjusted, 1);
+    return href.toOwnedSlice();
+}
+
+fn writeAnalyzeTotal(
+    output: *std.Io.Writer,
+    allocator: std.mem.Allocator,
+    label: []const u8,
+    measure: ?analysis.Measure,
+    kind: analysis.MetricKind,
+) !void {
+    try output.writeAll("<strong>");
+    try text(output, label);
+    try output.writeAll(":</strong> ");
+    if (measure) |source| {
+        const value = try analyzeChartMeasure(allocator, source, kind);
+        try charts.writeExactTrendValue(output, value.value, value.formatted, metricScale(kind));
+    } else {
+        try output.writeAll("Unavailable");
+    }
+}
+
 fn overviewSection(output: *std.Io.Writer, value: model.Page) !void {
     const overview = value.overview_kpis orelse return error.MissingOverviewKpis;
     const details = value.overview_details orelse return error.MissingOverviewDetails;
@@ -628,7 +1136,21 @@ fn overviewSection(output: *std.Io.Writer, value: model.Page) !void {
         var href = std.Io.Writer.fixed(&href_buffer);
         var adjusted = value.query;
         const destination: model.Destination = switch (card.target) {
-            .analyze => .analyze,
+            .analyze => target: {
+                if (card.analysis_metric) |card_metric| {
+                    adjusted.kind = .overview;
+                    adjusted.subject = "";
+                    adjusted.analysis_interval = .auto;
+                    adjusted.analysis_series = &.{card_metric};
+                    adjusted.highlighted_interval = "";
+                } else if (card.legacy_focus_currency.len != 0) {
+                    adjusted.kind = .pages;
+                    adjusted.analysis_series = &.{};
+                    adjusted.overview_metric = .revenue;
+                    adjusted.overview_currency = card.legacy_focus_currency;
+                }
+                break :target .analyze;
+            },
             .goals => target: {
                 adjusted.kind = .goal;
                 adjusted.subject = "";
@@ -803,10 +1325,25 @@ fn trendPointHref(
     interval: []const u8,
 ) ![]const u8 {
     var adjusted = query;
-    adjusted.kind = .pages;
-    adjusted.sort = .count;
-    adjusted.limit = report.default_limit;
-    adjusted.page = 1;
+    const typed_kind: ?analysis.MetricKind = switch (query.overview_metric) {
+        .visitors => .visitors,
+        .sessions => .sessions,
+        .page_views => .page_views,
+        .conversions, .revenue => null,
+    };
+    var typed_series: [1]analysis.Metric = undefined;
+    if (typed_kind) |kind| {
+        typed_series[0] = .{ .kind = kind };
+        adjusted.kind = .overview;
+        adjusted.analysis_interval = .auto;
+        adjusted.analysis_series = &typed_series;
+    } else {
+        adjusted.kind = .pages;
+        adjusted.sort = .count;
+        adjusted.limit = report.default_limit;
+        adjusted.page = 1;
+        adjusted.analysis_series = &.{};
+    }
     adjusted.highlighted_interval = interval;
     var href = std.Io.Writer.Allocating.init(allocator);
     try canonicalUrlRaw(&href.writer, .analyze, adjusted, 1);
@@ -1667,7 +2204,9 @@ fn canonicalUrlSeparated(
             adjusted.kind = .overview;
             adjusted.subject = "";
         },
-        .analyze => if (!adjusted.kind.isList()) {
+        .analyze => if (adjusted.analysis_series.len == 0 and
+            !adjusted.kind.isList())
+        {
             adjusted.kind = .pages;
             adjusted.subject = "";
         },
@@ -1686,6 +2225,29 @@ fn canonicalUrlSeparated(
     }
     adjusted.page = page_number;
     try canonicalPath(output, destination, adjusted);
+    if (destination == .analyze and adjusted.analysis_series.len != 0) {
+        const parameters = try analysis.canonicalTrendSetUrl(
+            std.heap.page_allocator,
+            .{
+                .site_id = adjusted.analysis_site_id,
+                .range = adjusted.range,
+                .comparison = adjusted.comparison,
+                .interval = adjusted.analysis_interval,
+                .series = adjusted.analysis_series,
+            },
+            adjusted.highlighted_interval,
+        );
+        defer std.heap.page_allocator.free(parameters);
+        try output.writeByte('?');
+        var parts = std.mem.splitScalar(u8, parameters, '&');
+        var first = true;
+        while (parts.next()) |part| {
+            if (!first) try output.writeAll(separator);
+            first = false;
+            try output.writeAll(part);
+        }
+        return;
+    }
     try output.writeAll("?from=");
     try urlComponent(output, adjusted.range.start);
     try output.writeAll(separator);
@@ -1922,6 +2484,42 @@ test "report percentages format zero and positive signed counts exactly" {
     try std.testing.expectEqualStrings("Unavailable", unavailable.written());
 }
 
+test "Analyze chart coordinates retain exact rate and average components" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const rate = try analyzeChartMeasure(
+        allocator,
+        .{ .ratio = .{ .numerator = 1, .denominator = 3 } },
+        .conversion_rate,
+    );
+    try std.testing.expectEqual(@as(?i128, 3333), rate.value);
+    try std.testing.expectEqualStrings("1/3 · 33.33%", rate.formatted);
+
+    const unavailable = try analyzeChartMeasure(
+        allocator,
+        .{ .ratio = .{ .numerator = 0, .denominator = 0 } },
+        .engagement_rate,
+    );
+    try std.testing.expectEqual(@as(?i128, null), unavailable.value);
+    try std.testing.expectEqualStrings("0/0 · unavailable", unavailable.formatted);
+
+    const average = try analyzeChartMeasure(
+        allocator,
+        .{ .amount = .{
+            .decimal = "10.000000",
+            .currency = "EUR",
+            .value_count = 3,
+        } },
+        .average_value,
+    );
+    try std.testing.expectEqual(@as(?i128, 3_333_333), average.value);
+    try std.testing.expectEqualStrings(
+        "exact sum EUR 10.000000 / 3 values",
+        average.formatted,
+    );
+}
+
 test "production stylesheet mirrors the approved accessible design tokens" {
     const source = @embedFile("../../docs/design-tokens.json");
     const parsed = try std.json.parseFromSlice(
@@ -1971,5 +2569,5 @@ test "production stylesheet mirrors the approved accessible design tokens" {
 
     try std.testing.expect(std.mem.indexOf(u8, stylesheet, "@import") == null);
     try std.testing.expect(std.mem.indexOf(u8, stylesheet, "url(") == null);
-    try std.testing.expectEqualStrings("/admin/app.v9.css", stylesheet_path);
+    try std.testing.expectEqualStrings("/admin/app.v10.css", stylesheet_path);
 }

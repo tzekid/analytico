@@ -108,13 +108,25 @@ retention renderer follows the functional contract's maximum of 12 cohorts and
 cohort size, and represents incomplete cells separately; later retention work
 may show fewer but cannot expand this rendering bound silently.
 
+Issue #28 composes the existing Trend family as at most three separate visual
+series after exact-currency expansion. Each figure owns one current line and
+its neutral comparison so counts, rates, and amounts never require multiple
+axes. One captioned table following the figures aligns all exact series values
+and source components by interval, with one native link per current/comparison
+label; figures do not duplicate that bounded alternative. The primary series
+may carry one text-and-shape `Highlighted` marker for an exact generated
+interval; this is distinct from the final-current-bucket `Incomplete` marker.
+A result that would exceed three visual series returns an explicit bounded
+state rather than truncating currencies or emitting an oversized chart/table
+page.
+
 Server validation renders one focused error summary and associates only the
 affected form fields with that summary while preserving submitted values.
 Notices use restrained status semantics, errors use alerts, and loading is
 limited to the region whose existing native navigation or form is in flight.
 None of these enhancement states may replace the JavaScript-free baseline.
 
-The component stylesheet is self-hosted at a versioned `/admin/app.v9.css` path.
+The component stylesheet is self-hosted at a versioned `/admin/app.v10.css` path.
 Changing its bytes requires another path revision because existing responses
 may be cached privately for 24 hours.
 

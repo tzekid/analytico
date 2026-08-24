@@ -176,7 +176,11 @@ pub fn handle(
             try methodNotAllowed(output, "GET");
             return true;
         }
-        try getPage(dependencies, request, output, route);
+        if (route.destination == .analyze) {
+            try getAnalyzePage(dependencies, request, output, route);
+        } else {
+            try getPage(dependencies, request, output, route);
+        }
         return true;
     }
     const action = actionFor(path) orelse return false;
@@ -702,6 +706,195 @@ fn getPage(
     try writePage(output, 200, loaded);
 }
 
+fn getAnalyzePage(
+    dependencies: Dependencies,
+    request: request_mod.Request,
+    output: *std.Io.Writer,
+    route: Route,
+) !void {
+    const legacy = controller.parseQuery(
+        dependencies.allocator,
+        request.target,
+        route.default_kind,
+    ) catch {
+        if (hasRawQueryField(request.target, "report") or
+            hasRawQueryField(request.target, "focus"))
+        {
+            return getPage(dependencies, request, output, route);
+        }
+        return getTrendPage(dependencies, request, output, route, null);
+    };
+    if (try controller.translateOverviewTrendHandoff(
+        dependencies.allocator,
+        legacy,
+    )) |translated| {
+        return getTrendPage(dependencies, request, output, route, translated);
+    }
+    if (legacy.report_set or legacy.overview_selection_set) {
+        return getPage(dependencies, request, output, route);
+    }
+    return getTrendPage(dependencies, request, output, route, null);
+}
+
+fn hasRawQueryField(target: []const u8, expected: []const u8) bool {
+    const marker = std.mem.findScalar(u8, target, '?') orelse return false;
+    var parameters = std.mem.splitScalar(u8, target[marker + 1 ..], '&');
+    while (parameters.next()) |parameter| {
+        const name, _ = std.mem.cutScalar(u8, parameter, '=') orelse continue;
+        if (std.mem.eql(u8, name, expected)) return true;
+    }
+    return false;
+}
+
+fn getTrendPage(
+    dependencies: Dependencies,
+    request: request_mod.Request,
+    output: *std.Io.Writer,
+    route: Route,
+    translated: ?controller.ParsedTrendQuery,
+) !void {
+    const now = currentSeconds() catch {
+        try writeError(output, .{
+            .status = 503,
+            .title = "Clock unavailable",
+            .message = "The server could not determine a safe analysis calendar.",
+        });
+        return;
+    };
+    const sites = try dependencies.metadata.listSites(dependencies.allocator);
+    if (sites.len == 0) {
+        try writeFirstRun(output, dependencies.collection_available);
+        return;
+    }
+    const selected = controller.resolveSite(sites, route.site) catch {
+        try writeError(output, .{
+            .status = 404,
+            .title = "Analysis not found",
+            .message = "The selected site no longer exists.",
+        });
+        return;
+    };
+    const site_calendar = dependencies.site_calendar orelse {
+        try calendarUnavailable(output);
+        return;
+    };
+    const selected_calendar = site_calendar.find(selected.id) orelse {
+        try calendarUnavailable(output);
+        return;
+    };
+    const default_range = calendar.rangeForPreset(
+        selected_calendar.zone,
+        now,
+        .last_30_days,
+    ) catch {
+        try calendarUnavailable(output);
+        return;
+    };
+    const default_series = [_]analysis.Metric{.{ .kind = .visitors }};
+    const default_query = model.Query{
+        .site = selected.slug,
+        .analysis_site_id = selected.id,
+        .range = default_range.view(),
+        .comparison = .previous,
+        .kind = .overview,
+        .analysis_series = &default_series,
+    };
+    const parsed = translated orelse controller.parseTrendQuery(
+        dependencies.allocator,
+        request.target,
+    ) catch {
+        try invalidTrendQueryPage(dependencies.allocator, output, default_query);
+        return;
+    };
+    const query = controller.finishTrendQuery(
+        parsed,
+        selected.slug,
+        selected.id,
+        &default_range,
+        .previous,
+    ) catch {
+        try invalidTrendQueryPage(dependencies.allocator, output, default_query);
+        return;
+    };
+    const resolved_calendar = calendar.resolve(
+        selected_calendar.zone,
+        selected_calendar.timezone_name,
+        now,
+        query.range,
+        query.comparison,
+    ) catch {
+        try invalidTrendQueryPage(dependencies.allocator, output, default_query);
+        return;
+    };
+    controller.validateTrendHighlight(
+        dependencies.allocator,
+        query,
+        resolved_calendar,
+        selected_calendar.zone,
+    ) catch {
+        try writeError(output, .{
+            .status = 400,
+            .title = "Invalid report request",
+            .message = "The highlighted interval is not part of the generated current or comparison Trend buckets.",
+            .return_url = request.target,
+        });
+        return;
+    };
+    if (!try isCanonicalTarget(
+        dependencies.allocator,
+        request.target,
+        .analyze,
+        query,
+        "",
+    )) {
+        try redirectToCanonical(
+            dependencies.allocator,
+            output,
+            .analyze,
+            query,
+            "",
+        );
+        return;
+    }
+    const loaded = controller.loadTrendPage(
+        dependencies.allocator,
+        dependencies.metadata,
+        dependencies.events,
+        query,
+        resolved_calendar,
+        selected_calendar.zone,
+        dependencies.csrf_token,
+        dependencies.report_timeout_ms,
+    ) catch |err| {
+        if (err == error.ReportTimeout) {
+            try writeError(output, .{
+                .status = 503,
+                .title = "Analysis timed out",
+                .message = "The analysis exceeded its shared server deadline. Narrow the selected date range or reduce the series and retry.",
+                .return_url = request.target,
+            });
+        } else if (err == error.TooManyAnalyzeTrendSeries) {
+            try writeError(output, .{
+                .status = 422,
+                .title = "Too many visual series",
+                .message = "Exact currencies remain separate, and this result expands beyond the three-series display limit. Select fewer amount metrics or narrower subjects.",
+                .return_url = request.target,
+            });
+        } else if (err == error.GoalNotFound or isInvalidInput(err)) {
+            try writeError(output, .{
+                .status = 400,
+                .title = "Invalid analysis request",
+                .message = "The typed metric, subject, interval, or highlighted interval is no longer valid for this site.",
+                .return_url = request.target,
+            });
+        } else {
+            return err;
+        }
+        return;
+    };
+    try writePage(output, 200, loaded);
+}
+
 fn kindAllowed(route: Route, kind: report.Kind) bool {
     return switch (route.destination) {
         .overview => kind == .overview,
@@ -1168,6 +1361,21 @@ fn invalidQueryPage(
     });
 }
 
+fn invalidTrendQueryPage(
+    allocator: std.mem.Allocator,
+    output: *std.Io.Writer,
+    default_query: model.Query,
+) !void {
+    var reset = std.Io.Writer.Allocating.init(allocator);
+    try canonicalUrl(&reset.writer, .analyze, default_query);
+    try writeError(output, .{
+        .status = 400,
+        .title = "Invalid analysis request",
+        .message = "The URL has an invalid, duplicate, incomplete, or unsupported typed metric, subject, interval, or series field.",
+        .return_url = reset.written(),
+    });
+}
+
 fn calendarUnavailable(output: *std.Io.Writer) !void {
     try writeError(output, .{
         .status = 503,
@@ -1194,6 +1402,23 @@ fn canonicalUrl(
         .live => "/live",
         .settings => "/settings/general",
     });
+    if (destination == .analyze and query.analysis_series.len != 0) {
+        const parameters = try analysis.canonicalTrendSetUrl(
+            std.heap.page_allocator,
+            .{
+                .site_id = query.analysis_site_id,
+                .range = query.range,
+                .comparison = query.comparison,
+                .interval = query.analysis_interval,
+                .series = query.analysis_series,
+            },
+            query.highlighted_interval,
+        );
+        defer std.heap.page_allocator.free(parameters);
+        try output.writeByte('?');
+        try output.writeAll(parameters);
+        return;
+    }
     try output.writeAll("?from=");
     try urlComponent(output, query.range.start);
     try output.writeAll("&to=");
@@ -1263,6 +1488,15 @@ fn isInvalidInput(err: anyerror) bool {
         error.InvalidOverviewHighlight,
         error.OverviewMetricNotApplicable,
         error.OverviewHighlightNotApplicable,
+        error.AnalysisOptionsNotApplicable,
+        error.InvalidAnalysisSite,
+        error.InvalidAnalyzeTrendResult,
+        error.InvalidTrendSeries,
+        error.InvalidTrendSubject,
+        error.InvalidTrendHighlight,
+        error.InvalidAnalysisRange,
+        error.InvalidAnalysisInterval,
+        error.HourIntervalRangeTooLarge,
         => true,
         else => false,
     };

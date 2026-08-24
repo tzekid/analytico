@@ -574,6 +574,112 @@ pub const Metric = struct {
     }
 };
 
+pub fn canonicalTrendSeries(
+    allocator: std.mem.Allocator,
+    metric: Metric,
+) ![]u8 {
+    try validateBrowserTrendMetric(metric);
+    var output = std.Io.Writer.Allocating.init(allocator);
+    errdefer output.deinit();
+    try writeGrammarComponent(&output.writer, metric.kind.name(), false);
+    if (metric.conversion_basis) |basis| {
+        try writeGrammarComponent(&output.writer, basis.name(), true);
+    }
+    if (metric.selector) |selector| {
+        try writeGrammarComponent(&output.writer, selector.kind.name(), true);
+        try writeGrammarComponent(&output.writer, selector.value, true);
+    }
+    return output.toOwnedSlice();
+}
+
+pub fn parseTrendSeries(
+    allocator: std.mem.Allocator,
+    encoded: []const u8,
+) !Metric {
+    if (encoded.len == 0 or encoded.len > maximum_filter_value_bytes) {
+        return error.InvalidTrendSeries;
+    }
+    var parts: [4][]const u8 = undefined;
+    var count: usize = 0;
+    var components = std.mem.splitScalar(u8, encoded, '~');
+    while (components.next()) |component| {
+        if (count == parts.len or component.len == 0) {
+            return error.InvalidTrendSeries;
+        }
+        parts[count] = try percentDecode(allocator, component);
+        count += 1;
+    }
+    if (count == 0) return error.InvalidTrendSeries;
+    const kind = try MetricKind.parse(parts[0]);
+    const metric = switch (kind) {
+        .event_count, .event_visitors => if (count == 3)
+            Metric{
+                .kind = kind,
+                .selector = .{
+                    .kind = try SelectorKind.parse(parts[1]),
+                    .value = parts[2],
+                },
+            }
+        else
+            return error.InvalidTrendSeries,
+        .conversions, .conversion_rate => if (count == 4)
+            Metric{
+                .kind = kind,
+                .conversion_basis = try ConversionBasis.parse(parts[1]),
+                .selector = .{
+                    .kind = try SelectorKind.parse(parts[2]),
+                    .value = parts[3],
+                },
+            }
+        else
+            return error.InvalidTrendSeries,
+        .revenue, .average_value => switch (count) {
+            1 => Metric{ .kind = kind },
+            3 => Metric{
+                .kind = kind,
+                .selector = .{
+                    .kind = try SelectorKind.parse(parts[1]),
+                    .value = parts[2],
+                },
+            },
+            else => return error.InvalidTrendSeries,
+        },
+        else => if (count == 1)
+            Metric{ .kind = kind }
+        else
+            return error.InvalidTrendSeries,
+    };
+    try validateBrowserTrendMetric(metric);
+    return metric;
+}
+
+fn validateBrowserTrendMetric(metric: Metric) !void {
+    try metric.validate();
+    if (metric.selector) |selector| {
+        if (selector.predicates.len != 0) return error.InvalidTrendSeries;
+    }
+    switch (metric.kind) {
+        .event_count, .event_visitors => if (metric.selector.?.kind != .exact_event) {
+            return error.InvalidTrendSeries;
+        },
+        .conversions, .conversion_rate => if (metric.conversion_basis.? != .visitor or
+            metric.selector.?.kind != .saved_goal)
+        {
+            return error.InvalidTrendSeries;
+        },
+        .revenue, .average_value => if (metric.selector) |selector| {
+            if (selector.kind != .exact_event and selector.kind != .saved_goal) {
+                return error.InvalidTrendSeries;
+            }
+        },
+        else => {},
+    }
+}
+
+pub fn validateTrendSeries(metric: Metric) !void {
+    try validateBrowserTrendMetric(metric);
+}
+
 pub const Ratio = struct {
     numerator: i64,
     denominator: i64,
@@ -900,6 +1006,136 @@ pub const Execution = struct {
         }
     }
 };
+
+pub const TrendSet = struct {
+    site_id: []const u8,
+    range: LocalDateRange,
+    comparison: Comparison = .none,
+    interval: Interval = .auto,
+    series: []const Metric,
+
+    pub fn validate(self: TrendSet) !void {
+        if (self.series.len == 0 or self.series.len > maximum_series) {
+            return error.InvalidTrendSeriesCount;
+        }
+        for (self.series, 0..) |metric, index| {
+            try validateBrowserTrendMetric(metric);
+            const item_query = self.query(metric);
+            try item_query.validate();
+            for (self.series[0..index]) |prior| {
+                if (metricsEqual(metric, prior)) {
+                    return error.DuplicateTrendSeries;
+                }
+            }
+        }
+    }
+
+    pub fn query(self: TrendSet, metric: Metric) Query {
+        return .{
+            .site_id = self.site_id,
+            .range = self.range,
+            .comparison = self.comparison,
+            .mode = .trend,
+            .metric = metric,
+            .interval = self.interval,
+        };
+    }
+};
+
+pub fn canonicalTrendSetUrl(
+    allocator: std.mem.Allocator,
+    set: TrendSet,
+    highlight: []const u8,
+) ![]u8 {
+    try set.validate();
+    if (highlight.len > 16 or
+        (highlight.len != 0 and !std.unicode.utf8ValidateSlice(highlight)))
+    {
+        return error.InvalidTrendHighlight;
+    }
+    var output = std.Io.Writer.Allocating.init(allocator);
+    errdefer output.deinit();
+    var first = true;
+    try writeParameter(&output.writer, &first, "v", "1");
+    try writeParameter(&output.writer, &first, "from", set.range.start);
+    try writeParameter(&output.writer, &first, "to", set.range.end);
+    try writeParameter(&output.writer, &first, "compare", set.comparison.name());
+    try writeParameter(&output.writer, &first, "mode", "trend");
+    try writeParameter(&output.writer, &first, "interval", set.interval.name());
+    for (set.series) |metric| {
+        const encoded = try canonicalTrendSeries(allocator, metric);
+        defer allocator.free(encoded);
+        try writeRawParameter(&output.writer, &first, "series", encoded);
+    }
+    if (highlight.len != 0) {
+        try writeParameter(&output.writer, &first, "highlight", highlight);
+    }
+    const encoded = try output.toOwnedSlice();
+    if (encoded.len > maximum_url_bytes) {
+        allocator.free(encoded);
+        return error.AnalysisUrlTooLong;
+    }
+    return encoded;
+}
+
+pub const TrendSetExecution = struct {
+    set: TrendSet,
+    comparison_range: ?LocalDateRange = null,
+    active_goals: []const ResolvedGoal = &.{},
+    strict_traffic_mode: bool = false,
+    timeout_ms: u32 = maximum_timeout_ms,
+
+    pub fn validate(self: TrendSetExecution) !void {
+        try self.set.validate();
+        for (self.set.series) |metric| {
+            try (Execution{
+                .query = self.set.query(metric),
+                .comparison_range = self.comparison_range,
+                .active_goals = self.active_goals,
+                .strict_traffic_mode = self.strict_traffic_mode,
+                .timeout_ms = self.timeout_ms,
+            }).validate();
+        }
+    }
+};
+
+pub const TrendSetResult = struct {
+    series: []const TrendResult,
+};
+
+pub fn metricsEqual(left: Metric, right: Metric) bool {
+    if (left.kind != right.kind or left.conversion_basis != right.conversion_basis) {
+        return false;
+    }
+    if ((left.selector == null) != (right.selector == null)) return false;
+    if (left.selector == null) return true;
+    const left_selector = left.selector.?;
+    const right_selector = right.selector.?;
+    if (left_selector.kind != right_selector.kind or
+        !std.mem.eql(u8, left_selector.value, right_selector.value) or
+        left_selector.predicates.len != right_selector.predicates.len)
+    {
+        return false;
+    }
+    for (left_selector.predicates, right_selector.predicates) |left_predicate, right_predicate| {
+        if (left_predicate.property_ref.scalar_type !=
+            right_predicate.property_ref.scalar_type or
+            !std.mem.eql(
+                u8,
+                left_predicate.property_ref.name,
+                right_predicate.property_ref.name,
+            ) or
+            left_predicate.operator != right_predicate.operator or
+            left_predicate.values.len != right_predicate.values.len)
+        {
+            return false;
+        }
+        for (left_predicate.values, right_predicate.values) |left_value, right_value| {
+            if (!std.mem.eql(u8, left_value, right_value)) return false;
+        }
+    }
+    return true;
+}
 
 pub const OverviewExecution = struct {
     site_id: []const u8,
@@ -2001,6 +2237,124 @@ test "metric selectors and resolved comparisons fail before execution" {
         error.UnresolvedAnalysisSegment,
         (Execution{ .query = segmented }).validate(),
     );
+}
+
+test "browser Trend series grammar and set remain finite and canonical" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const goal = "00000000-0000-4000-8000-000000000028";
+    const cases = [_]Metric{
+        .{ .kind = .visitors },
+        .{
+            .kind = .event_count,
+            .selector = .{ .kind = .exact_event, .value = "sign_up" },
+        },
+        .{
+            .kind = .conversion_rate,
+            .conversion_basis = .visitor,
+            .selector = .{ .kind = .saved_goal, .value = goal },
+        },
+        .{
+            .kind = .average_value,
+            .selector = .{ .kind = .exact_event, .value = "purchase" },
+        },
+    };
+    const expected = [_][]const u8{
+        "visitors",
+        "event-count~event~sign_up",
+        "conversion-rate~visitor~goal~00000000-0000-4000-8000-000000000028",
+        "average-value~event~purchase",
+    };
+    for (cases, expected) |metric, encoded| {
+        const canonical = try canonicalTrendSeries(allocator, metric);
+        try std.testing.expectEqualStrings(encoded, canonical);
+        const parsed = try parseTrendSeries(allocator, encoded);
+        try std.testing.expect(metricsEqual(metric, parsed));
+    }
+
+    try std.testing.expectError(
+        error.InvalidTrendSeries,
+        parseTrendSeries(allocator, "event-count~page~%2Fpricing"),
+    );
+    try std.testing.expectError(
+        error.InvalidTrendSeries,
+        parseTrendSeries(allocator, "conversions~session~goal~" ++ goal),
+    );
+    try std.testing.expectError(
+        error.InvalidTrendSeries,
+        parseTrendSeries(allocator, "visitors~event~signup"),
+    );
+    try std.testing.expectError(
+        error.InvalidAnalysisPercentEncoding,
+        parseTrendSeries(allocator, "event-count~event~sign%5fup"),
+    );
+    try std.testing.expectError(
+        error.InvalidAnalysisMetric,
+        parseTrendSeries(allocator, "goal-matches"),
+    );
+    try std.testing.expectError(
+        error.InvalidEventSelector,
+        parseTrendSeries(allocator, "revenue~currency~EUR"),
+    );
+
+    const revenue_query = Query{
+        .site_id = "00000000-0000-4000-8000-000000000024",
+        .range = .{ .start = "2026-01-01", .end = "2026-01-02" },
+        .mode = .trend,
+        .metric = .{ .kind = .revenue },
+        .interval = .day,
+    };
+    const revenue_url = try canonicalUrl(allocator, revenue_query);
+    try std.testing.expectEqualStrings(
+        "v=1&from=2026-01-01&to=2026-01-02&compare=none&mode=trend&metric=revenue&interval=day&sort=value-desc&page=1&limit=25",
+        revenue_url,
+    );
+    const parsed_revenue = try parseCanonicalUrl(
+        allocator,
+        revenue_query.site_id,
+        revenue_url,
+    );
+    try std.testing.expect(metricsEqual(revenue_query.metric, parsed_revenue.metric));
+
+    const duplicate = [_]Metric{ cases[0], cases[0] };
+    try std.testing.expectError(error.DuplicateTrendSeries, (TrendSet{
+        .site_id = "00000000-0000-4000-8000-000000000024",
+        .range = .{ .start = "2026-01-01", .end = "2026-01-02" },
+        .series = &duplicate,
+    }).validate());
+    try std.testing.expectError(error.InvalidTrendSeriesCount, (TrendSet{
+        .site_id = "00000000-0000-4000-8000-000000000024",
+        .range = .{ .start = "2026-01-01", .end = "2026-01-02" },
+        .series = &.{},
+    }).validate());
+}
+
+test "canonical Trend set releases compact-series intermediates" {
+    const metrics = [_]Metric{
+        .{ .kind = .visitors },
+        .{ .kind = .sessions },
+        .{
+            .kind = .event_count,
+            .selector = .{ .kind = .exact_event, .value = "signup" },
+        },
+    };
+    const set = TrendSet{
+        .site_id = "00000000-0000-4000-8000-000000000028",
+        .range = .{ .start = "2026-01-01", .end = "2026-01-02" },
+        .comparison = .previous,
+        .interval = .day,
+        .series = &metrics,
+    };
+    for (0..64) |_| {
+        const url = try canonicalTrendSetUrl(
+            std.testing.allocator,
+            set,
+            "2026-01-01",
+        );
+        try std.testing.expect(std.mem.indexOf(u8, url, "series=event-count~event~signup") != null);
+        std.testing.allocator.free(url);
+    }
 }
 
 test "canonical URL normalizes equivalent typed query state" {
