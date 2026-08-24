@@ -558,7 +558,7 @@ async function main() {
     assert.equal(await mobileTable.locator("caption").count(), 1);
     assert.equal(
       await mobileTable.locator('thead th[scope="col"]').count(),
-      2,
+      3,
     );
     const mobileRows = await mobileTable.locator("tbody tr").count();
     assert.ok(mobileRows > 0);

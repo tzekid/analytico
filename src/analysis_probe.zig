@@ -458,6 +458,30 @@ pub fn run(
         \\) FROM events WHERE event_id =
         \\  CAST('00000000-0000-4000-8000-000000000107' AS UUID)
     );
+    try store.database.exec(
+        \\INSERT INTO events SELECT * REPLACE (
+        \\  CAST('00000000-0000-4000-8000-000000000123' AS UUID) AS event_id,
+        \\  '00000000-0000-4000-8000-000000000030' AS site_id,
+        \\  1 AS kind, 'pageview' AS event_name, '/real-page' AS path,
+        \\  CAST('00000000-0000-4000-8000-0000000000a0' AS UUID) AS anonymous_id,
+        \\  CAST('00000000-0000-4000-8000-0000000000b0' AS UUID) AS session_id,
+        \\  0 AS sequence, TRUE AS session_start,
+        \\  '{"plan":"pro"}' AS properties_json,
+        \\  repeat('d', 64) AS event_payload_digest
+        \\) FROM events WHERE event_id =
+        \\  CAST('00000000-0000-4000-8000-000000000107' AS UUID);
+        \\INSERT INTO events SELECT * REPLACE (
+        \\  CAST('00000000-0000-4000-8000-000000000124' AS UUID) AS event_id,
+        \\  '00000000-0000-4000-8000-000000000030' AS site_id,
+        \\  2 AS kind, 'custom_only' AS event_name, '/custom-only' AS path,
+        \\  CAST('00000000-0000-4000-8000-0000000000a0' AS UUID) AS anonymous_id,
+        \\  CAST('00000000-0000-4000-8000-0000000000b0' AS UUID) AS session_id,
+        \\  1 AS sequence, FALSE AS session_start,
+        \\  '{"plan":"pro"}' AS properties_json,
+        \\  repeat('e', 64) AS event_payload_digest
+        \\) FROM events WHERE event_id =
+        \\  CAST('00000000-0000-4000-8000-000000000107' AS UUID)
+    );
     const delayed_evidence = evidence: {
         var statement = try store.database.prepare(
             "SELECT received_at_utc_micros, occurred_at_utc_micros, " ++
@@ -555,6 +579,45 @@ pub fn run(
             .limit = 1,
         },
     })).breakdown;
+    const custom_only_page_result = (try analysis_store.execute(
+        allocator,
+        &store,
+        .{ .query = .{
+            .site_id = "00000000-0000-4000-8000-000000000030",
+            .range = .{ .start = "2026-01-03", .end = "2026-01-03" },
+            .mode = .breakdown,
+            .metric = .{ .kind = .page_views },
+            .dimension = .{ .kind = .page },
+            .filters = .{ .clauses = &event_filters },
+            .limit = 100,
+        } },
+    )).breakdown;
+    const custom_only_empty_page = (try analysis_store.execute(
+        allocator,
+        &store,
+        .{ .query = .{
+            .site_id = "00000000-0000-4000-8000-000000000030",
+            .range = .{ .start = "2026-01-03", .end = "2026-01-03" },
+            .mode = .breakdown,
+            .metric = .{ .kind = .page_views },
+            .dimension = .{ .kind = .page },
+            .filters = .{ .clauses = &event_filters },
+            .page = 2,
+            .limit = 1,
+        } },
+    )).breakdown;
+    const event_filtered_page_views = (try analysis_store.execute(
+        allocator,
+        &store,
+        .{ .query = .{
+            .site_id = site,
+            .range = .{ .start = "2026-01-03", .end = "2026-01-03" },
+            .mode = .trend,
+            .metric = .{ .kind = .page_views },
+            .filters = .{ .clauses = &event_filters },
+            .interval = .day,
+        } },
+    )).trend;
 
     const trait_values = [_][]const u8{"enterprise"};
     const person_filters = [_]analysis.Clause{.{
@@ -577,6 +640,82 @@ pub fn run(
             .interval = .day,
         },
     })).trend;
+
+    const suggestion_execution = analysis.Execution{ .query = trendQuery(
+        range,
+        .visitors,
+    ) };
+    const page_suggestions = try analysis_store.executeSuggestions(
+        allocator,
+        &store,
+        .{
+            .execution = suggestion_execution,
+            .scope = .event,
+            .field = .{ .kind = .page },
+            .scalar_type = .string,
+            .search = "pric",
+        },
+    );
+    var filtered_suggestion_execution = suggestion_execution;
+    filtered_suggestion_execution.query.filters = .{
+        .clauses = &event_filters,
+    };
+    const device_suggestions = try analysis_store.executeSuggestions(
+        allocator,
+        &store,
+        .{
+            .execution = filtered_suggestion_execution,
+            .scope = .session,
+            .field = .{ .kind = .device },
+            .scalar_type = .string,
+        },
+    );
+    const amount_suggestions = try analysis_store.executeSuggestions(
+        allocator,
+        &store,
+        .{
+            .execution = suggestion_execution,
+            .scope = .event,
+            .field = .{
+                .kind = .event_property,
+                .property_ref = .{
+                    .name = "amount",
+                    .scalar_type = .decimal,
+                },
+            },
+            .scalar_type = .decimal,
+            .search = "14",
+        },
+    );
+    const trait_suggestions = try analysis_store.executeSuggestions(
+        allocator,
+        &store,
+        .{
+            .execution = suggestion_execution,
+            .scope = .person,
+            .field = .{
+                .kind = .user_trait,
+                .property_ref = .{
+                    .name = "plan",
+                    .scalar_type = .string,
+                },
+            },
+            .scalar_type = .string,
+        },
+    );
+    var isolated_suggestion_execution = suggestion_execution;
+    isolated_suggestion_execution.query.site_id =
+        "00000000-0000-4000-8000-000000000025";
+    const isolated_suggestions = try analysis_store.executeSuggestions(
+        allocator,
+        &store,
+        .{
+            .execution = isolated_suggestion_execution,
+            .scope = .event,
+            .field = .{ .kind = .page },
+            .scalar_type = .string,
+        },
+    );
 
     const amount_values = [_][]const u8{"10.0"};
     const selector_predicates = [_]analysis.PropertyPredicate{.{
@@ -645,6 +784,37 @@ pub fn run(
             },
         },
     );
+    const filtered_overview_base = analysis.OverviewExecution{
+        .site_id = site,
+        .range = .{ .start = "2026-01-03", .end = "2026-01-03" },
+        .active_goals = &overview_goals,
+        .trend = .{
+            .metric = .visitors,
+            .interval = .day,
+            .current_buckets = &.{.{ .label = "2026-01-03" }},
+        },
+    };
+    var session_filtered_execution = filtered_overview_base;
+    session_filtered_execution.filters = .{ .clauses = &session_filters };
+    const session_filtered_overview = try analysis_store.executeOverview(
+        allocator,
+        &store,
+        session_filtered_execution,
+    );
+    var event_filtered_execution = filtered_overview_base;
+    event_filtered_execution.filters = .{ .clauses = &event_filters };
+    const event_filtered_overview = try analysis_store.executeOverview(
+        allocator,
+        &store,
+        event_filtered_execution,
+    );
+    var person_filtered_execution = filtered_overview_base;
+    person_filtered_execution.filters = .{ .clauses = &person_filters };
+    const person_filtered_overview = try analysis_store.executeOverview(
+        allocator,
+        &store,
+        person_filtered_execution,
+    );
     const cache_goal_low_values = [_][]const u8{"10.0"};
     const cache_goal_high_values = [_][]const u8{"20.0"};
     const cache_goal_low_predicates = [_]analysis.PropertyPredicate{.{
@@ -677,6 +847,7 @@ pub fn run(
         .site_id = site,
         .range = .{ .start = "2026-01-03", .end = "2026-01-03" },
         .active_goals = &cache_goal_low,
+        .filters = .{ .clauses = &session_filters },
         .trend = .{
             .metric = .visitors,
             .interval = .day,
@@ -863,6 +1034,15 @@ pub fn run(
     const conversions = conversion_result.total[0].count;
     if (visitors != 4 or engaged != 2 or returning != 1 or
         desktop_sessions != 1 or identified_visitors != 1 or
+        page_suggestions.values.len != 1 or page_suggestions.has_more or
+        !std.mem.eql(u8, page_suggestions.values[0], "/pricing") or
+        device_suggestions.values.len != 1 or device_suggestions.has_more or
+        !std.mem.eql(u8, device_suggestions.values[0], "desktop") or
+        amount_suggestions.values.len != 1 or amount_suggestions.has_more or
+        !std.mem.eql(u8, amount_suggestions.values[0], "14.250000") or
+        trait_suggestions.values.len != 1 or trait_suggestions.has_more or
+        !std.mem.eql(u8, trait_suggestions.values[0], "enterprise") or
+        isolated_suggestions.values.len != 0 or isolated_suggestions.has_more or
         page_result.cardinality != 2 or page_result.next_page != 2 or
         conversions != 1 or
         revenue_result.total.len != 2 or
@@ -894,6 +1074,29 @@ pub fn run(
         return error.InvalidOverviewSemanticEvidence;
     const overview_details = overview_result.details orelse
         return error.InvalidOverviewSemanticEvidence;
+    var acquisition_sessions: i64 = 0;
+    var direct_sessions: ?i64 = null;
+    var search_sessions: ?i64 = null;
+    for (overview_details.acquisition) |row| {
+        if (row.source.len == 0 or row.sessions <= 0 or
+            row.converting_sessions < 0 or
+            row.converting_sessions > row.sessions)
+        {
+            return error.InvalidOverviewSemanticEvidence;
+        }
+        acquisition_sessions = std.math.add(
+            i64,
+            acquisition_sessions,
+            row.sessions,
+        ) catch return error.InvalidOverviewSemanticEvidence;
+        if (std.mem.eql(u8, row.source, "Direct")) {
+            if (direct_sessions != null) return error.InvalidOverviewSemanticEvidence;
+            direct_sessions = row.sessions;
+        } else if (std.mem.eql(u8, row.source, "search.example")) {
+            if (search_sessions != null) return error.InvalidOverviewSemanticEvidence;
+            search_sessions = row.sessions;
+        }
+    }
     const revenue_details = overview_revenue_trend.details orelse
         return error.InvalidOverviewSemanticEvidence;
     const empty_details = empty_overview.details orelse
@@ -927,6 +1130,29 @@ pub fn run(
         overview_result.completeness.legacy_people != 1 or
         overview_result.comparison_completeness.?.persistent_people != 1 or
         overview_result.revenue.len != 3 or
+        session_filtered_overview.sessions.current != desktop_sessions or
+        event_filtered_page_views.total.len != 1 or
+        event_filtered_page_views.total[0] != .count or
+        event_filtered_overview.page_views.current !=
+            event_filtered_page_views.total[0].count or
+        custom_only_page_result.cardinality != 1 or
+        custom_only_page_result.rows.len != 1 or
+        custom_only_page_result.rows[0].measure != .count or
+        custom_only_page_result.rows[0].measure.count != 1 or
+        !std.mem.eql(
+            u8,
+            custom_only_page_result.rows[0].label.value,
+            "/real-page",
+        ) or
+        custom_only_empty_page.cardinality != 1 or
+        custom_only_empty_page.rows.len != 0 or
+        custom_only_empty_page.next_page != null or
+        person_filtered_overview.visitors.current != identified_visitors or
+        session_filtered_overview.details == null or
+        event_filtered_overview.details == null or
+        person_filtered_overview.details == null or
+        event_filtered_overview.details.?.health.accepted_events !=
+            overview_details.health.accepted_events or
         !std.mem.eql(u8, eur.current.decimal, "12.500000") or
         !std.mem.eql(u8, eur.comparison.?.decimal, "0.000000") or
         !std.mem.eql(u8, gbp.current.decimal, "0.000000") or
@@ -941,6 +1167,8 @@ pub fn run(
         overview_details.trend.comparison.?[0].measure.count != 1 or
         overview_details.content.len == 0 or overview_details.content.len > 5 or
         overview_details.acquisition.len == 0 or overview_details.acquisition.len > 5 or
+        acquisition_sessions != overview_result.sessions.current or
+        direct_sessions != 3 or search_sessions != 1 or
         overview_details.conversions.len != 2 or
         !std.mem.eql(
             u8,
@@ -1032,6 +1260,7 @@ pub fn run(
         .returning_visitors = returning,
         .desktop_sessions = desktop_sessions,
         .identified_trait_visitors = identified_visitors,
+        .suggestions_range_search_filter_type_trait_site_exact = true,
         .event_filter_cardinality = page_result.cardinality,
         .event_filter_next_page = page_result.next_page,
         .typed_property_conversions = conversions,
@@ -1055,6 +1284,7 @@ pub fn run(
         .overview_detail_comparison_visitors = overview_details.trend.comparison.?[0].measure.count,
         .overview_detail_content_rows = overview_details.content.len,
         .overview_detail_acquisition_rows = overview_details.acquisition.len,
+        .overview_detail_acquisition_direct_sessions = direct_sessions.?,
         .overview_detail_conversion_rows = overview_details.conversions.len,
         .overview_detail_conversion_ties_follow_resolved_name_order = std.mem.eql(u8, overview_details.conversions[0].goal_id, overview_goals[0].id) and std.mem.eql(u8, overview_details.conversions[1].goal_id, overview_goals[1].id),
         .overview_detail_audience_rows = overview_details.audience.len,
@@ -1065,6 +1295,9 @@ pub fn run(
         .overview_detail_cache_invalidated = refreshed_empty_details.trend.current[0].measure.count == 1 and refreshed_empty_details.health.accepted_events == 1 and refreshed_empty_details.health.ceiling_reached_days == 1,
         .overview_detail_ceiling_cache_key_exact = raised_ceiling_details.health.ceiling_reached_days == 0,
         .overview_result_cache_selector_predicate_key_exact = cache_goal_low_details.conversions[0].converting_people == 1 and cache_goal_high_details.conversions[0].converting_people == 0,
+        .filtered_overview_goal_predicate_projection_exact = cache_goal_low_details.conversions[0].converting_people == 1 and cache_goal_high_details.conversions[0].converting_people == 0,
+        .filtered_page_breakdown_custom_only_path_excluded = custom_only_page_result.cardinality == 1 and custom_only_page_result.rows.len == 1 and std.mem.eql(u8, custom_only_page_result.rows[0].label.value, "/real-page") and custom_only_empty_page.cardinality == 1 and custom_only_empty_page.rows.len == 0,
+        .overview_filter_scopes_exact = session_filtered_overview.sessions.current == desktop_sessions and event_filtered_overview.page_views.current == event_filtered_page_views.total[0].count and person_filtered_overview.visitors.current == identified_visitors,
         .overview_no_comparison = overview_without_comparison.visitors.comparison == null,
         .overview_empty_revenue_omitted = empty_overview.revenue.len == 0,
         .overview_legacy_local_boundary_exact = boundary_overview.visitors.current == boundary_exact.total[0].count,

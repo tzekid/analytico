@@ -449,6 +449,67 @@ traffic-quality parity remained inside their existing gates.
 Environment, fixture, rejected candidates, raw observations, and cache-
 invalidation evidence are in `bench/results/overview-panels-release-safe.json`.
 
+### Analytico 1.0 universal-filter and saved-state gate
+
+D40 keeps the D29 limits of 12 clauses, 20 OR values per clause, a 16 KiB URL,
+32 query parameters, 32 KiB canonical JSON, and a two-second interactive
+deadline. Metadata schema 7 permits at most 32 segments and 32 saved views per
+site. Only authenticated filter/saved-state form routes accept a 64 KiB body so
+form encoding can carry the already-bounded canonical JSON; the application and
+canonical Caddy matcher enforce the same ceiling. Only those saved-state
+mutation routes set `request_buffers 65536`, forcing Caddy to read the complete
+bounded body before upstream dispatch; the exact `max_size 65536` then returns
+413 for the first oversized byte instead of racing an application close. This
+is not generic or global request buffering. All other ordinary dashboard routes
+retain the 8 KiB application request-body ceiling; passkey routes retain
+Caddy's 192 KiB outer ceiling.
+
+One suggestion request returns at most 50 typed values plus `has_more`, runs
+one finite bound statement under the same two-second interrupt mechanism, and
+uses no cache, projection, EAV table, background worker, dependency, or client
+data request. The scale gate records cold and repeated search conditions rather
+than presenting one as the other.
+
+The established empty-filter Overview SQL and its one-entry D35 cache remain
+unchanged. A nonempty composed FilterSet uses a period-aware finite plan and
+adds its entire canonical byte representation to that one entry's exact key.
+The million-row gate performs one explicit cold call and ten repeated calls in
+each policy mode: cold must remain below the two-second request deadline,
+normal repeated p95 remains below 250 ms, and strict repeated p95 remains at or
+below 500 ms. Filtered Trend, Breakdown, and suggestion HTTP calls must each
+remain below two seconds. A miss follows the existing optimization order and
+does not authorize a second cache, wider memory limit, rollup, service, or
+client fetch.
+
+The first strict combined candidates did not provide acceptable margin. The
+retained baseline profile was 2.03 seconds; deriving conversion counts with
+`bit_count(goal_mask)` measured 2.14 seconds, a meaningful-first struct measured
+2.04 seconds, a combined catalog path measured 2.18 seconds, and a struct person
+key measured 2.28 seconds. Grouping-set and combined event/revenue candidates
+measured 2.22 and 2.25 seconds wall time; a two-stage Content candidate measured
+2.32 seconds, and fully inlining the qualified relation measured 2.21 seconds.
+One later candidate profiled at 1.99 seconds but then timed out in a fresh real
+request. These are rejected observations and do not relax the deadline or
+authorize more memory.
+
+The accepted bounded corrections remove duplicate aggregate states, put exact
+revenue predicates on the narrow source path, build strict cross-session
+contradictions only from persistent candidate keys, and derive session
+cardinality directly from `session_facts` only when every clause is a true
+session fact. Predicate-bearing goals still project `properties_json`, and the
+specialized Page Views-by-Page statement excludes custom-only paths. Five
+separate strict processes against the retained fixture measured cold Overview
+between 1.763 and 1.989 seconds. An earlier qualifying fresh-fixture run measured
+default/strict cold Overview at 1.695/1.736 seconds. The exact final-candidate
+ReleaseSafe gate measured default/strict cold Overview at 1.709/1.895 seconds,
+warm p95 at 15/32 microseconds, Trend at 1.064/1.129 seconds, Breakdown at
+0.555/0.637 seconds, and suggestions at 1.396/1.397 seconds. The default
+`EXPLAIN ANALYZE` completed in 1.79 seconds and produced 174,639 bytes. A
+separate strict profile against the retained fixture completed in 1.67 seconds;
+its empty persistent-candidate build side yielded zero cross-session rows rather
+than scanning the million-row identity relation. Exact final samples are in
+`bench/results/filters-release-safe.json`.
+
 ### M4 production-MVP baseline
 
 The current ReleaseSafe package contains a 26,341,344-byte executable and a
@@ -476,6 +537,8 @@ These apply only when the dashboard exists:
 | Largest server-rendered table page | 100 rows |
 | Trend points per rendered series | ≤ 400 |
 | Breakdown/property catalog | ≤ 100 rows / latest 2,000 eligible events / ≤ 100 property names / one 30-second entry |
+| Filter suggestions | ≤ 50 values plus has-more; one request deadline |
+| Saved state | ≤ 32 segments and 32 views per site; ≤ 32 KiB canonical JSON each |
 | Funnel steps | 2–8 |
 | Path plot | 3–5 columns; ≤ 10 nodes per column; ≤ 400 edges |
 | Retention matrix | ≤ 12 cohorts × 12 visible periods |

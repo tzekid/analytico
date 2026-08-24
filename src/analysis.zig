@@ -23,6 +23,7 @@ pub const maximum_filter_value_bytes: usize = 1_024;
 pub const maximum_search_bytes: usize = 256;
 pub const maximum_property_names: u16 = 100;
 pub const maximum_property_catalog_events: u32 = 2_000;
+pub const maximum_suggestions: u8 = 50;
 
 pub const LocalDateRange = struct {
     start: []const u8,
@@ -482,6 +483,224 @@ pub const FilterSet = struct {
     }
 };
 
+const JsonFilterSet = struct {
+    schema: u8,
+    match: []const u8,
+    filters: []const []const u8 = &.{},
+};
+
+pub fn canonicalFilterJson(
+    allocator: std.mem.Allocator,
+    filters: FilterSet,
+) ![]u8 {
+    try filters.validate();
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const encoded = try encodedClauses(arena.allocator(), filters.clauses);
+    var output = std.Io.Writer.Allocating.init(allocator);
+    errdefer output.deinit();
+    try std.json.Stringify.value(JsonFilterSet{
+        .schema = query_schema_version,
+        .match = "all",
+        .filters = encoded,
+    }, .{}, &output.writer);
+    const json = try output.toOwnedSlice();
+    if (json.len > maximum_json_bytes) {
+        allocator.free(json);
+        return error.AnalysisJsonTooLong;
+    }
+    return json;
+}
+
+pub fn parseCanonicalFilterJson(
+    allocator: std.mem.Allocator,
+    encoded: []const u8,
+) !FilterSet {
+    if (encoded.len == 0 or encoded.len > maximum_json_bytes) {
+        return error.AnalysisJsonTooLong;
+    }
+    const state = std.json.parseFromSliceLeaky(
+        JsonFilterSet,
+        allocator,
+        encoded,
+        .{ .ignore_unknown_fields = false },
+    ) catch return error.InvalidAnalysisJson;
+    if (state.schema != query_schema_version) {
+        return error.UnsupportedAnalysisQueryVersion;
+    }
+    if (!std.mem.eql(u8, state.match, "all")) {
+        return error.InvalidAnalysisFilterMatch;
+    }
+    const filters = FilterSet{
+        .clauses = try parseClauses(allocator, state.filters),
+    };
+    try filters.validate();
+    return filters;
+}
+
+pub fn parseExactCanonicalFilterJson(
+    allocator: std.mem.Allocator,
+    encoded: []const u8,
+) !FilterSet {
+    const filters = try parseCanonicalFilterJson(allocator, encoded);
+    const normalized = try canonicalFilterJson(allocator, filters);
+    defer allocator.free(normalized);
+    if (!std.mem.eql(u8, encoded, normalized)) {
+        return error.NonCanonicalAnalysisJson;
+    }
+    return filters;
+}
+
+pub fn composeFilterSets(
+    allocator: std.mem.Allocator,
+    first: FilterSet,
+    second: FilterSet,
+) !FilterSet {
+    try first.validate();
+    try second.validate();
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    const encoded = try scratch.alloc(
+        []const u8,
+        first.clauses.len + second.clauses.len,
+    );
+    var index: usize = 0;
+    for (first.clauses) |clause| {
+        encoded[index] = try encodeClause(scratch, clause);
+        index += 1;
+    }
+    for (second.clauses) |clause| {
+        encoded[index] = try encodeClause(scratch, clause);
+        index += 1;
+    }
+    const unique = sortUnique(encoded);
+    if (unique.len > maximum_clauses) return error.TooManyAnalysisClauses;
+    const clauses = try allocator.alloc(Clause, unique.len);
+    for (unique, 0..) |value, clause_index| {
+        clauses[clause_index] = try parseClause(allocator, value);
+    }
+    return .{ .clauses = clauses };
+}
+
+pub fn filterSetsEqual(left: FilterSet, right: FilterSet) bool {
+    if (left.version != right.version or left.clauses.len != right.clauses.len) {
+        return false;
+    }
+    for (left.clauses, right.clauses) |a, b| {
+        if (!clausesEqual(a, b)) return false;
+    }
+    return true;
+}
+
+pub fn clausesEqual(a: Clause, b: Clause) bool {
+    if (a.scope != b.scope or a.field.kind != b.field.kind or
+        a.operator != b.operator or a.scalar_type != b.scalar_type or
+        a.values.len != b.values.len)
+    {
+        return false;
+    }
+    if ((a.field.property_ref == null) != (b.field.property_ref == null)) {
+        return false;
+    }
+    if (a.field.property_ref) |a_property| {
+        const b_property = b.field.property_ref.?;
+        if (a_property.scalar_type != b_property.scalar_type or
+            !std.mem.eql(u8, a_property.name, b_property.name))
+        {
+            return false;
+        }
+    }
+    for (a.values, b.values) |a_value, b_value| {
+        if (!std.mem.eql(u8, a_value, b_value)) return false;
+    }
+    return true;
+}
+
+pub fn canonicalClause(
+    allocator: std.mem.Allocator,
+    clause: Clause,
+) ![]u8 {
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    return allocator.dupe(u8, try encodeClause(scratch.allocator(), clause));
+}
+
+pub fn canonicalFilterUrlSuffix(
+    allocator: std.mem.Allocator,
+    segment_id: ?[]const u8,
+    filters: FilterSet,
+) ![]u8 {
+    try filters.validate();
+    if (segment_id) |id| try domain.validateUuid(id);
+    var output = std.Io.Writer.Allocating.init(allocator);
+    errdefer output.deinit();
+    var first = true;
+    if (segment_id) |id| {
+        try writeParameter(&output.writer, &first, "segment", id);
+    }
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const encoded = try encodedClauses(arena.allocator(), filters.clauses);
+    for (encoded) |filter| {
+        try writeRawParameter(&output.writer, &first, "f", filter);
+    }
+    return output.toOwnedSlice();
+}
+
+pub fn canonicalOverviewUrl(
+    allocator: std.mem.Allocator,
+    range: LocalDateRange,
+    comparison: Comparison,
+    metric: OverviewTrendMetric,
+    currency: []const u8,
+    segment_id: ?[]const u8,
+    filters: FilterSet,
+) ![]u8 {
+    try range.validate();
+    try filters.validate();
+    if (segment_id) |id| try domain.validateUuid(id);
+    if (metric == .revenue) {
+        try domain.validateCurrency(currency);
+    } else if (currency.len != 0) return error.UnexpectedOverviewCurrency;
+    var output = std.Io.Writer.Allocating.init(allocator);
+    errdefer output.deinit();
+    var first = true;
+    try writeParameter(&output.writer, &first, "v", "1");
+    try writeParameter(&output.writer, &first, "from", range.start);
+    try writeParameter(&output.writer, &first, "to", range.end);
+    try writeParameter(&output.writer, &first, "compare", comparison.name());
+    const selection = if (metric == .revenue)
+        try std.fmt.allocPrint(allocator, "revenue-{s}", .{currency})
+    else
+        metric.name();
+    defer if (metric == .revenue) allocator.free(selection);
+    try writeParameter(&output.writer, &first, "metric", selection);
+    const suffix = try canonicalFilterUrlSuffix(
+        allocator,
+        segment_id,
+        filters,
+    );
+    defer allocator.free(suffix);
+    if (suffix.len != 0) {
+        try output.writer.writeByte('&');
+        try output.writer.writeAll(suffix);
+    }
+    const encoded = try output.toOwnedSlice();
+    if (encoded.len > maximum_url_bytes) {
+        allocator.free(encoded);
+        return error.AnalysisUrlTooLong;
+    }
+    return encoded;
+}
+
+pub fn parseCanonicalClause(
+    allocator: std.mem.Allocator,
+    encoded: []const u8,
+) !Clause {
+    return parseClause(allocator, encoded);
+}
+
 pub const SelectorKind = enum {
     exact_page,
     page_prefix,
@@ -916,6 +1135,35 @@ pub const PropertyCatalog = struct {
     truncated: bool,
 };
 
+pub const SuggestionRequest = struct {
+    execution: Execution,
+    scope: Scope,
+    field: Field,
+    scalar_type: ScalarType,
+    search: []const u8 = "",
+
+    pub fn validate(self: SuggestionRequest) !void {
+        try self.execution.validate();
+        try validateSearch(self.search);
+        if (self.scalar_type == .boolean or self.scalar_type == .null or
+            self.scalar_type == .missing)
+        {
+            return error.SuggestionValueNotApplicable;
+        }
+        try (Clause{
+            .scope = self.scope,
+            .field = self.field,
+            .operator = .exists,
+            .scalar_type = self.scalar_type,
+        }).validate();
+    }
+};
+
+pub const SuggestionResult = struct {
+    values: []const []const u8,
+    has_more: bool,
+};
+
 pub const BreakdownPageResult = struct {
     breakdown: BreakdownResult,
     properties: PropertyCatalog,
@@ -1068,8 +1316,14 @@ pub const TrendSet = struct {
     comparison: Comparison = .none,
     interval: Interval = .auto,
     series: []const Metric,
+    filters: FilterSet = .{},
+    segment_id: ?[]const u8 = null,
 
     pub fn validate(self: TrendSet) !void {
+        try domain.validateUuid(self.site_id);
+        try self.range.validate();
+        try self.filters.validate();
+        if (self.segment_id) |id| try domain.validateUuid(id);
         if (self.series.len == 0 or self.series.len > maximum_series) {
             return error.InvalidTrendSeriesCount;
         }
@@ -1093,6 +1347,8 @@ pub const TrendSet = struct {
             .mode = .trend,
             .metric = metric,
             .interval = self.interval,
+            .filters = self.filters,
+            .segment_id = self.segment_id,
         };
     }
 };
@@ -1122,8 +1378,17 @@ pub fn canonicalTrendSetUrl(
         defer allocator.free(encoded);
         try writeRawParameter(&output.writer, &first, "series", encoded);
     }
+    if (set.segment_id) |id| {
+        try writeParameter(&output.writer, &first, "segment", id);
+    }
     if (highlight.len != 0) {
         try writeParameter(&output.writer, &first, "highlight", highlight);
+    }
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const filters = try encodedClauses(arena.allocator(), set.filters.clauses);
+    for (filters) |filter| {
+        try writeRawParameter(&output.writer, &first, "f", filter);
     }
     const encoded = try output.toOwnedSlice();
     if (encoded.len > maximum_url_bytes) {
@@ -1133,11 +1398,221 @@ pub fn canonicalTrendSetUrl(
     return encoded;
 }
 
+const JsonTrendSet = struct {
+    schema: u8,
+    metric_version: u8,
+    site_id: []const u8,
+    from: []const u8,
+    to: []const u8,
+    compare: []const u8,
+    mode: []const u8,
+    interval: []const u8,
+    series: []const []const u8,
+    segment: ?[]const u8 = null,
+    filters: []const []const u8 = &.{},
+};
+
+pub fn canonicalTrendSetJson(
+    allocator: std.mem.Allocator,
+    set: TrendSet,
+) ![]u8 {
+    try set.validate();
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    const series = try scratch.alloc([]const u8, set.series.len);
+    for (set.series, 0..) |metric, index| {
+        series[index] = try canonicalTrendSeries(scratch, metric);
+    }
+    const filters = try encodedClauses(scratch, set.filters.clauses);
+    var output = std.Io.Writer.Allocating.init(allocator);
+    errdefer output.deinit();
+    try std.json.Stringify.value(JsonTrendSet{
+        .schema = query_schema_version,
+        .metric_version = metric_version,
+        .site_id = set.site_id,
+        .from = set.range.start,
+        .to = set.range.end,
+        .compare = set.comparison.name(),
+        .mode = "trend",
+        .interval = set.interval.name(),
+        .series = series,
+        .segment = set.segment_id,
+        .filters = filters,
+    }, .{ .emit_null_optional_fields = false }, &output.writer);
+    const json = try output.toOwnedSlice();
+    if (json.len > maximum_json_bytes) {
+        allocator.free(json);
+        return error.AnalysisJsonTooLong;
+    }
+    return json;
+}
+
+pub fn parseCanonicalTrendSetJson(
+    allocator: std.mem.Allocator,
+    encoded: []const u8,
+) !TrendSet {
+    if (encoded.len == 0 or encoded.len > maximum_json_bytes) {
+        return error.AnalysisJsonTooLong;
+    }
+    const state = std.json.parseFromSliceLeaky(
+        JsonTrendSet,
+        allocator,
+        encoded,
+        .{ .ignore_unknown_fields = false },
+    ) catch return error.InvalidAnalysisJson;
+    if (state.schema != query_schema_version or
+        state.metric_version != metric_version)
+    {
+        return error.UnsupportedAnalysisQueryVersion;
+    }
+    if (!std.mem.eql(u8, state.mode, "trend") or
+        state.series.len == 0 or state.series.len > maximum_series)
+    {
+        return error.InvalidAnalysisMode;
+    }
+    const series = try allocator.alloc(Metric, state.series.len);
+    for (state.series, 0..) |value, index| {
+        series[index] = try parseTrendSeries(allocator, value);
+    }
+    const set = TrendSet{
+        .site_id = state.site_id,
+        .range = .{ .start = state.from, .end = state.to },
+        .comparison = try Comparison.parse(state.compare),
+        .interval = try Interval.parse(state.interval),
+        .series = series,
+        .filters = .{ .clauses = try parseClauses(allocator, state.filters) },
+        .segment_id = state.segment,
+    };
+    try set.validate();
+    return set;
+}
+
+pub fn parseExactCanonicalTrendSetJson(
+    allocator: std.mem.Allocator,
+    encoded: []const u8,
+) !TrendSet {
+    const set = try parseCanonicalTrendSetJson(allocator, encoded);
+    const normalized = try canonicalTrendSetJson(allocator, set);
+    defer allocator.free(normalized);
+    if (!std.mem.eql(u8, encoded, normalized)) {
+        return error.NonCanonicalAnalysisJson;
+    }
+    return set;
+}
+
+pub const ParsedTrendSetUrl = struct {
+    set: TrendSet,
+    highlight: []const u8 = "",
+};
+
+const TrendUrlParts = struct {
+    version: ?[]const u8 = null,
+    from: ?[]const u8 = null,
+    to: ?[]const u8 = null,
+    comparison: ?[]const u8 = null,
+    mode: ?[]const u8 = null,
+    interval: ?[]const u8 = null,
+    segment: ?[]const u8 = null,
+    highlight: ?[]const u8 = null,
+};
+
+pub fn parseCanonicalTrendSetUrl(
+    allocator: std.mem.Allocator,
+    site_id: []const u8,
+    encoded: []const u8,
+) !ParsedTrendSetUrl {
+    if (encoded.len == 0 or encoded.len > maximum_url_bytes) {
+        return error.AnalysisUrlTooLong;
+    }
+    var parts = TrendUrlParts{};
+    var series: std.ArrayList(Metric) = .empty;
+    var clauses: std.ArrayList(Clause) = .empty;
+    var count: usize = 0;
+    var parameters = std.mem.splitScalar(u8, encoded, '&');
+    while (parameters.next()) |parameter| {
+        count += 1;
+        if (count > maximum_url_parameters or parameter.len == 0) {
+            return error.TooManyAnalysisUrlParameters;
+        }
+        const equals = std.mem.findScalar(u8, parameter, '=') orelse
+            return error.InvalidAnalysisUrl;
+        if (equals == 0 or equals + 1 == parameter.len or
+            std.mem.findScalar(u8, parameter[equals + 1 ..], '=') != null)
+        {
+            return error.InvalidAnalysisUrl;
+        }
+        const key = parameter[0..equals];
+        const raw_value = parameter[equals + 1 ..];
+        if (std.mem.eql(u8, key, "series")) {
+            if (series.items.len >= maximum_series) {
+                return error.InvalidTrendSeriesCount;
+            }
+            try series.append(allocator, try parseTrendSeries(allocator, raw_value));
+        } else if (std.mem.eql(u8, key, "f")) {
+            if (clauses.items.len >= maximum_clauses) {
+                return error.TooManyAnalysisClauses;
+            }
+            try clauses.append(allocator, try parseFormClause(allocator, raw_value));
+        } else {
+            const value = try percentDecode(allocator, raw_value);
+            if (std.mem.eql(u8, key, "v")) {
+                try setOnce(&parts.version, value);
+            } else if (std.mem.eql(u8, key, "from")) {
+                try setOnce(&parts.from, value);
+            } else if (std.mem.eql(u8, key, "to")) {
+                try setOnce(&parts.to, value);
+            } else if (std.mem.eql(u8, key, "compare")) {
+                try setOnce(&parts.comparison, value);
+            } else if (std.mem.eql(u8, key, "mode")) {
+                try setOnce(&parts.mode, value);
+            } else if (std.mem.eql(u8, key, "interval")) {
+                try setOnce(&parts.interval, value);
+            } else if (std.mem.eql(u8, key, "segment")) {
+                try setOnce(&parts.segment, value);
+            } else if (std.mem.eql(u8, key, "highlight")) {
+                try setOnce(&parts.highlight, value);
+            } else return error.UnknownAnalysisUrlParameter;
+        }
+    }
+    if (!std.mem.eql(
+        u8,
+        parts.version orelse return error.MissingAnalysisUrlField,
+        "1",
+    )) return error.UnsupportedAnalysisQueryVersion;
+    if (!std.mem.eql(
+        u8,
+        parts.mode orelse return error.MissingAnalysisUrlField,
+        "trend",
+    )) return error.InvalidAnalysisMode;
+    const highlight = parts.highlight orelse "";
+    if (highlight.len > 16) return error.InvalidTrendHighlight;
+    const set = TrendSet{
+        .site_id = site_id,
+        .range = .{
+            .start = parts.from orelse return error.MissingAnalysisUrlField,
+            .end = parts.to orelse return error.MissingAnalysisUrlField,
+        },
+        .comparison = try Comparison.parse(
+            parts.comparison orelse return error.MissingAnalysisUrlField,
+        ),
+        .interval = try Interval.parse(
+            parts.interval orelse return error.MissingAnalysisUrlField,
+        ),
+        .series = try series.toOwnedSlice(allocator),
+        .filters = .{ .clauses = try clauses.toOwnedSlice(allocator) },
+        .segment_id = parts.segment,
+    };
+    try set.validate();
+    return .{ .set = set, .highlight = highlight };
+}
+
 pub const TrendSetExecution = struct {
     set: TrendSet,
     comparison_range: ?LocalDateRange = null,
     active_goals: []const ResolvedGoal = &.{},
     strict_traffic_mode: bool = false,
+    segment_resolved: bool = false,
     timeout_ms: u32 = maximum_timeout_ms,
 
     pub fn validate(self: TrendSetExecution) !void {
@@ -1148,6 +1623,7 @@ pub const TrendSetExecution = struct {
                 .comparison_range = self.comparison_range,
                 .active_goals = self.active_goals,
                 .strict_traffic_mode = self.strict_traffic_mode,
+                .segment_resolved = self.segment_resolved,
                 .timeout_ms = self.timeout_ms,
             }).validate();
         }
@@ -1197,6 +1673,9 @@ pub const OverviewExecution = struct {
     range: LocalDateRange,
     comparison_range: ?LocalDateRange = null,
     active_goals: []const ResolvedGoal = &.{},
+    filters: FilterSet = .{},
+    segment_id: ?[]const u8 = null,
+    segment_resolved: bool = false,
     strict_traffic_mode: bool = false,
     daily_event_ceiling: i64 = 100_000,
     timeout_ms: u32 = maximum_timeout_ms,
@@ -1205,6 +1684,11 @@ pub const OverviewExecution = struct {
     pub fn validate(self: OverviewExecution) !void {
         try domain.validateUuid(self.site_id);
         try self.range.validate();
+        try self.filters.validate();
+        if (self.segment_id) |id| try domain.validateUuid(id);
+        if (self.segment_id != null and !self.segment_resolved) {
+            return error.UnresolvedAnalysisSegment;
+        }
         if (self.comparison_range) |range| try range.validate();
         if (self.timeout_ms == 0 or self.timeout_ms > maximum_timeout_ms) {
             return error.InvalidAnalysisTimeout;
@@ -1525,6 +2009,19 @@ pub fn parseCanonicalJson(
     return query;
 }
 
+pub fn parseExactCanonicalJson(
+    allocator: std.mem.Allocator,
+    encoded: []const u8,
+) !Query {
+    const query = try parseCanonicalJson(allocator, encoded);
+    const normalized = try canonicalJson(allocator, query);
+    defer allocator.free(normalized);
+    if (!std.mem.eql(u8, encoded, normalized)) {
+        return error.NonCanonicalAnalysisJson;
+    }
+    return query;
+}
+
 pub fn canonicalUrl(
     allocator: std.mem.Allocator,
     query: Query,
@@ -1647,7 +2144,10 @@ pub fn parseCanonicalUrl(
         const key = parameter[0..equals];
         const raw_value = parameter[equals + 1 ..];
         if (std.mem.eql(u8, key, "f")) {
-            try clauses.append(allocator, try parseClause(allocator, raw_value));
+            try clauses.append(
+                allocator,
+                try parseFormClause(allocator, raw_value),
+            );
         } else if (std.mem.eql(u8, key, "p")) {
             try predicates.append(
                 allocator,
@@ -1735,6 +2235,16 @@ pub fn parseFormPredicate(
     raw_value: []const u8,
 ) !PropertyPredicate {
     return parsePredicate(
+        allocator,
+        try formGrammarValue(allocator, raw_value),
+    );
+}
+
+pub fn parseFormClause(
+    allocator: std.mem.Allocator,
+    raw_value: []const u8,
+) !Clause {
+    return parseClause(
         allocator,
         try formGrammarValue(allocator, raw_value),
     );
@@ -2222,9 +2732,6 @@ fn validateValue(scalar_type: ScalarType, value: []const u8) !void {
     {
         return error.InvalidAnalysisValue;
     }
-    for (value) |byte| if (byte < 0x20 or byte == 0x7f) {
-        return error.InvalidAnalysisValue;
-    };
     switch (scalar_type) {
         .integer => if (try property.numberType(value) != .integer) {
             return error.InvalidAnalysisValue;
@@ -2295,6 +2802,151 @@ test "typed filters enforce scope type operator and value bounds" {
     var invalid = valid;
     invalid.values = &too_many;
     try std.testing.expectError(error.TooManyAnalysisValues, invalid.validate());
+}
+
+test "canonical FilterSet JSON is exact and composition deduplicates" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const values = [_][]const u8{ "mobile", "desktop", "mobile" };
+    const clause = Clause{
+        .scope = .session,
+        .field = .{ .kind = .device },
+        .operator = .is,
+        .scalar_type = .string,
+        .values = &values,
+    };
+    const first = [_]Clause{clause};
+    const second = [_]Clause{clause};
+    const composed = try composeFilterSets(
+        allocator,
+        .{ .clauses = &first },
+        .{ .clauses = &second },
+    );
+    try std.testing.expectEqual(@as(usize, 1), composed.clauses.len);
+    const json = try canonicalFilterJson(std.testing.allocator, composed);
+    defer std.testing.allocator.free(json);
+    try std.testing.expectEqualStrings(
+        "{\"schema\":1,\"match\":\"all\",\"filters\":[\"session~device~is~string~desktop~mobile\"]}",
+        json,
+    );
+    const parsed = try parseExactCanonicalFilterJson(allocator, json);
+    try std.testing.expectEqual(@as(usize, 1), parsed.clauses.len);
+    try std.testing.expectError(
+        error.NonCanonicalAnalysisJson,
+        parseExactCanonicalFilterJson(
+            allocator,
+            "{\"schema\":1,\"match\":\"all\",\"filters\":[\"session~device~is~string~mobile~desktop\"]}",
+        ),
+    );
+
+    const legacy_values = [_][]const u8{"=SUM(\"x\")\nnext"};
+    const legacy_clause = Clause{
+        .scope = .session,
+        .field = .{ .kind = .utm_source },
+        .operator = .is,
+        .scalar_type = .string,
+        .values = &legacy_values,
+    };
+    const legacy_encoded = try canonicalClause(
+        std.testing.allocator,
+        legacy_clause,
+    );
+    defer std.testing.allocator.free(legacy_encoded);
+    try std.testing.expectEqualStrings(
+        "session~utm-source~is~string~%3DSUM%28%22x%22%29%0Anext",
+        legacy_encoded,
+    );
+    const legacy_round_trip = try parseCanonicalClause(allocator, legacy_encoded);
+    try std.testing.expectEqualStrings(
+        legacy_values[0],
+        legacy_round_trip.values[0],
+    );
+}
+
+test "canonical Overview URLs enforce the shared 16 KiB bound" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var values: [maximum_values][]const u8 = undefined;
+    for (&values, 0..) |*value, index| {
+        const generated = try allocator.alloc(u8, maximum_filter_value_bytes);
+        @memset(generated, 'x');
+        generated[0] = @intCast('A' + index);
+        value.* = generated;
+    }
+    const clauses = [_]Clause{.{
+        .scope = .event,
+        .field = .{ .kind = .page_title },
+        .operator = .is,
+        .scalar_type = .string,
+        .values = &values,
+    }};
+    try std.testing.expectError(
+        error.AnalysisUrlTooLong,
+        canonicalOverviewUrl(
+            std.testing.allocator,
+            .{ .start = "2026-08-01", .end = "2026-08-07" },
+            .previous,
+            .visitors,
+            "",
+            null,
+            .{ .clauses = &clauses },
+        ),
+    );
+}
+
+test "Trend set canonical URL and JSON preserve filters and segment" {
+    const filter_values = [_][]const u8{"DE"};
+    const clauses = [_]Clause{.{
+        .scope = .session,
+        .field = .{ .kind = .country },
+        .operator = .is,
+        .scalar_type = .string,
+        .values = &filter_values,
+    }};
+    const series = [_]Metric{.{ .kind = .visitors }};
+    const set = TrendSet{
+        .site_id = "00000000-0000-4000-8000-000000000030",
+        .range = .{ .start = "2026-08-01", .end = "2026-08-07" },
+        .comparison = .previous,
+        .interval = .day,
+        .series = &series,
+        .filters = .{ .clauses = &clauses },
+        .segment_id = "00000000-0000-4000-8000-000000000031",
+    };
+    const url = try canonicalTrendSetUrl(
+        std.testing.allocator,
+        set,
+        "2026-08-07",
+    );
+    defer std.testing.allocator.free(url);
+    try std.testing.expectEqualStrings(
+        "v=1&from=2026-08-01&to=2026-08-07&compare=previous&mode=trend" ++
+            "&interval=day&series=visitors" ++
+            "&segment=00000000-0000-4000-8000-000000000031" ++
+            "&highlight=2026-08-07&f=session~country~is~string~DE",
+        url,
+    );
+    var url_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer url_arena.deinit();
+    const parsed_url = try parseCanonicalTrendSetUrl(
+        url_arena.allocator(),
+        set.site_id,
+        url,
+    );
+    try std.testing.expectEqualStrings("2026-08-07", parsed_url.highlight);
+    try std.testing.expectEqual(@as(usize, 1), parsed_url.set.filters.clauses.len);
+    const json = try canonicalTrendSetJson(std.testing.allocator, set);
+    defer std.testing.allocator.free(json);
+    var json_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer json_arena.deinit();
+    const parsed_json = try parseExactCanonicalTrendSetJson(
+        json_arena.allocator(),
+        json,
+    );
+    try std.testing.expectEqual(@as(usize, 1), parsed_json.filters.clauses.len);
+    try std.testing.expectEqualStrings(set.segment_id.?, parsed_json.segment_id.?);
 }
 
 test "metric selectors and resolved comparisons fail before execution" {

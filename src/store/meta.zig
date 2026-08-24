@@ -2,9 +2,11 @@ const std = @import("std");
 const turso = @import("turso");
 const domain = @import("../domain.zig");
 
-pub const schema_version: i64 = 6;
+pub const schema_version: i64 = 7;
 pub const maximum_excluded_networks: usize = 16;
 pub const maximum_active_goals: usize = 32;
+pub const maximum_saved_entities: usize = 32;
+pub const maximum_saved_state_bytes: usize = 32 * 1024;
 pub const default_daily_event_ceiling: i64 = 100_000;
 pub const maximum_daily_event_ceiling: i64 = 10_000_000;
 
@@ -82,6 +84,22 @@ pub const FunnelStepInput = struct {
     name: []const u8,
     match_kind: domain.MatchKind,
     match_value: []const u8,
+};
+
+pub const Segment = struct {
+    id: []u8,
+    name: []u8,
+    canonical_filter_json: []u8,
+    created_at_utc_micros: i64,
+    updated_at_utc_micros: i64,
+};
+
+pub const SavedView = struct {
+    id: []u8,
+    name: []u8,
+    canonical_query_json: []u8,
+    created_at_utc_micros: i64,
+    updated_at_utc_micros: i64,
 };
 
 pub const Counts = struct {
@@ -363,6 +381,42 @@ pub const Store = struct {
             \\INSERT INTO meta_migrations VALUES (6, 'site-settings-and-origin-owner', 0);
         , .{ .diagnostics = &diagnostics }) catch |err| {
             std.log.err("metadata migration v6 failed: {s}", .{diagnostics.text()});
+            return err;
+        };
+        if (current < 7) _ = self.connection.execBatch(
+            \\CREATE TABLE IF NOT EXISTS segments (
+            \\  id TEXT PRIMARY KEY,
+            \\  site_id TEXT NOT NULL,
+            \\  name TEXT NOT NULL,
+            \\  filter_schema_version INTEGER NOT NULL
+            \\    CHECK (filter_schema_version = 1),
+            \\  canonical_filter_json TEXT NOT NULL,
+            \\  created_at_utc_micros INTEGER NOT NULL,
+            \\  updated_at_utc_micros INTEGER NOT NULL,
+            \\  FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE CASCADE,
+            \\  UNIQUE (site_id, name),
+            \\  CHECK (length(id) = 36),
+            \\  CHECK (length(name) BETWEEN 1 AND 120),
+            \\  CHECK (length(canonical_filter_json) BETWEEN 1 AND 32768)
+            \\);
+            \\CREATE TABLE IF NOT EXISTS saved_views (
+            \\  id TEXT PRIMARY KEY,
+            \\  site_id TEXT NOT NULL,
+            \\  name TEXT NOT NULL,
+            \\  query_schema_version INTEGER NOT NULL
+            \\    CHECK (query_schema_version = 1),
+            \\  canonical_query_json TEXT NOT NULL,
+            \\  created_at_utc_micros INTEGER NOT NULL,
+            \\  updated_at_utc_micros INTEGER NOT NULL,
+            \\  FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE CASCADE,
+            \\  UNIQUE (site_id, name),
+            \\  CHECK (length(id) = 36),
+            \\  CHECK (length(name) BETWEEN 1 AND 120),
+            \\  CHECK (length(canonical_query_json) BETWEEN 1 AND 32768)
+            \\);
+            \\INSERT INTO meta_migrations VALUES (7, 'segments-and-saved-views', 0);
+        , .{ .diagnostics = &diagnostics }) catch |err| {
+            std.log.err("metadata migration v7 failed: {s}", .{diagnostics.text()});
             return err;
         };
     }
@@ -1274,6 +1328,333 @@ pub const Store = struct {
         if (changed != 1) return error.FunnelNotFound;
     }
 
+    pub fn addSegment(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        id: []const u8,
+        site_slug: []const u8,
+        name: []const u8,
+        canonical_filter_json: []const u8,
+        now_micros: i64,
+    ) !void {
+        try validateSavedEntity(id, name, canonical_filter_json);
+        const site_id = try self.siteIdBySlug(allocator, site_slug);
+        const changed = try self.connection.execParams(
+            \\INSERT INTO segments
+            \\  (id, site_id, name, filter_schema_version,
+            \\   canonical_filter_json, created_at_utc_micros,
+            \\   updated_at_utc_micros)
+            \\SELECT ?1, ?2, ?3, 1, ?4, ?5, ?5
+            \\WHERE (SELECT count(*) FROM segments WHERE site_id = ?2) < ?6
+        ,
+            .{
+                id,
+                site_id,
+                name,
+                canonical_filter_json,
+                now_micros,
+                @as(i64, maximum_saved_entities),
+            },
+            .{},
+        );
+        if (changed != 1) return error.TooManySavedEntities;
+    }
+
+    pub fn listSegments(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        site_slug: []const u8,
+    ) ![]Segment {
+        return self.listSavedEntities(Segment, allocator, site_slug, .segment);
+    }
+
+    pub fn segmentById(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        site_slug: []const u8,
+        id: []const u8,
+    ) !Segment {
+        try domain.validateUuid(id);
+        return self.savedEntityById(Segment, allocator, site_slug, id, .segment);
+    }
+
+    pub fn renameSegment(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        site_slug: []const u8,
+        id: []const u8,
+        name: []const u8,
+        now_micros: i64,
+    ) !void {
+        try self.renameSavedEntity(
+            allocator,
+            "segments",
+            site_slug,
+            id,
+            name,
+            now_micros,
+            error.SegmentNotFound,
+        );
+    }
+
+    pub fn updateSegmentState(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        site_slug: []const u8,
+        id: []const u8,
+        canonical_filter_json: []const u8,
+        now_micros: i64,
+    ) !void {
+        try domain.validateUuid(id);
+        if (canonical_filter_json.len == 0 or
+            canonical_filter_json.len > maximum_saved_state_bytes or
+            !std.unicode.utf8ValidateSlice(canonical_filter_json))
+        {
+            return error.InvalidSavedState;
+        }
+        const site_id = try self.siteIdBySlug(allocator, site_slug);
+        const changed = try self.connection.execParams(
+            \\UPDATE segments SET canonical_filter_json = ?3,
+            \\  updated_at_utc_micros = ?4
+            \\WHERE site_id = ?1 AND id = ?2
+        ,
+            .{ site_id, id, canonical_filter_json, now_micros },
+            .{},
+        );
+        if (changed != 1) return error.SegmentNotFound;
+    }
+
+    pub fn deleteSegment(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        site_slug: []const u8,
+        id: []const u8,
+        exact_name: []const u8,
+    ) !void {
+        try self.deleteSavedEntity(
+            allocator,
+            "segments",
+            site_slug,
+            id,
+            exact_name,
+            error.SegmentNotFound,
+        );
+    }
+
+    pub fn addSavedView(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        id: []const u8,
+        site_slug: []const u8,
+        name: []const u8,
+        canonical_query_json: []const u8,
+        now_micros: i64,
+    ) !void {
+        try validateSavedEntity(id, name, canonical_query_json);
+        const site_id = try self.siteIdBySlug(allocator, site_slug);
+        const changed = try self.connection.execParams(
+            \\INSERT INTO saved_views
+            \\  (id, site_id, name, query_schema_version,
+            \\   canonical_query_json, created_at_utc_micros,
+            \\   updated_at_utc_micros)
+            \\SELECT ?1, ?2, ?3, 1, ?4, ?5, ?5
+            \\WHERE (SELECT count(*) FROM saved_views WHERE site_id = ?2) < ?6
+        ,
+            .{
+                id,
+                site_id,
+                name,
+                canonical_query_json,
+                now_micros,
+                @as(i64, maximum_saved_entities),
+            },
+            .{},
+        );
+        if (changed != 1) return error.TooManySavedEntities;
+    }
+
+    pub fn listSavedViews(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        site_slug: []const u8,
+    ) ![]SavedView {
+        return self.listSavedEntities(SavedView, allocator, site_slug, .view);
+    }
+
+    pub fn savedViewById(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        site_slug: []const u8,
+        id: []const u8,
+    ) !SavedView {
+        try domain.validateUuid(id);
+        return self.savedEntityById(SavedView, allocator, site_slug, id, .view);
+    }
+
+    pub fn renameSavedView(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        site_slug: []const u8,
+        id: []const u8,
+        name: []const u8,
+        now_micros: i64,
+    ) !void {
+        try self.renameSavedEntity(
+            allocator,
+            "saved_views",
+            site_slug,
+            id,
+            name,
+            now_micros,
+            error.SavedViewNotFound,
+        );
+    }
+
+    pub fn deleteSavedView(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        site_slug: []const u8,
+        id: []const u8,
+        exact_name: []const u8,
+    ) !void {
+        try self.deleteSavedEntity(
+            allocator,
+            "saved_views",
+            site_slug,
+            id,
+            exact_name,
+            error.SavedViewNotFound,
+        );
+    }
+
+    const SavedKind = enum { segment, view };
+
+    fn listSavedEntities(
+        self: *Store,
+        comptime T: type,
+        allocator: std.mem.Allocator,
+        site_slug: []const u8,
+        kind: SavedKind,
+    ) ![]T {
+        try domain.validateSlug(site_slug);
+        const sql = switch (kind) {
+            .segment =>
+            \\SELECT segments.id, segments.name, segments.canonical_filter_json,
+            \\       segments.created_at_utc_micros, segments.updated_at_utc_micros
+            \\FROM segments JOIN sites ON sites.id = segments.site_id
+            \\WHERE sites.slug = ?1 ORDER BY segments.name, segments.id
+            ,
+            .view =>
+            \\SELECT saved_views.id, saved_views.name, saved_views.canonical_query_json,
+            \\       saved_views.created_at_utc_micros, saved_views.updated_at_utc_micros
+            \\FROM saved_views JOIN sites ON sites.id = saved_views.site_id
+            \\WHERE sites.slug = ?1 ORDER BY saved_views.name, saved_views.id
+            ,
+        };
+        var rows = try self.connection.queryParams(sql, .{site_slug}, .{});
+        defer rows.deinit();
+        var result: std.ArrayList(T) = .empty;
+        while (try rows.next()) |row| {
+            if (result.items.len >= maximum_saved_entities) {
+                return error.TooManySavedEntities;
+            }
+            try result.append(
+                allocator,
+                try savedEntityFromRow(T, allocator, row),
+            );
+        }
+        try rows.finish(null);
+        return result.toOwnedSlice(allocator);
+    }
+
+    fn savedEntityById(
+        self: *Store,
+        comptime T: type,
+        allocator: std.mem.Allocator,
+        site_slug: []const u8,
+        id: []const u8,
+        kind: SavedKind,
+    ) !T {
+        try domain.validateSlug(site_slug);
+        const sql = switch (kind) {
+            .segment =>
+            \\SELECT segments.id, segments.name, segments.canonical_filter_json,
+            \\       segments.created_at_utc_micros, segments.updated_at_utc_micros
+            \\FROM segments JOIN sites ON sites.id = segments.site_id
+            \\WHERE sites.slug = ?1 AND segments.id = ?2
+            ,
+            .view =>
+            \\SELECT saved_views.id, saved_views.name, saved_views.canonical_query_json,
+            \\       saved_views.created_at_utc_micros, saved_views.updated_at_utc_micros
+            \\FROM saved_views JOIN sites ON sites.id = saved_views.site_id
+            \\WHERE sites.slug = ?1 AND saved_views.id = ?2
+            ,
+        };
+        var rows = try self.connection.queryParams(sql, .{ site_slug, id }, .{});
+        defer rows.deinit();
+        const row = (try rows.next()) orelse return switch (kind) {
+            .segment => error.SegmentNotFound,
+            .view => error.SavedViewNotFound,
+        };
+        const result = try savedEntityFromRow(T, allocator, row);
+        if ((try rows.next()) != null) return error.UnexpectedSavedEntityRow;
+        try rows.finish(null);
+        return result;
+    }
+
+    fn renameSavedEntity(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        table: []const u8,
+        site_slug: []const u8,
+        id: []const u8,
+        name: []const u8,
+        now_micros: i64,
+        not_found: anyerror,
+    ) !void {
+        try domain.validateUuid(id);
+        try domain.validateName(name, 120);
+        const site_id = try self.siteIdBySlug(allocator, site_slug);
+        const sql = if (std.mem.eql(u8, table, "segments"))
+            "UPDATE segments SET name = ?3, updated_at_utc_micros = ?4 WHERE site_id = ?1 AND id = ?2"
+        else if (std.mem.eql(u8, table, "saved_views"))
+            "UPDATE saved_views SET name = ?3, updated_at_utc_micros = ?4 WHERE site_id = ?1 AND id = ?2"
+        else
+            unreachable;
+        const changed = try self.connection.execParams(
+            sql,
+            .{ site_id, id, name, now_micros },
+            .{},
+        );
+        if (changed != 1) return not_found;
+    }
+
+    fn deleteSavedEntity(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        table: []const u8,
+        site_slug: []const u8,
+        id: []const u8,
+        exact_name: []const u8,
+        not_found: anyerror,
+    ) !void {
+        try domain.validateUuid(id);
+        try domain.validateName(exact_name, 120);
+        const site_id = try self.siteIdBySlug(allocator, site_slug);
+        const sql = if (std.mem.eql(u8, table, "segments"))
+            "DELETE FROM segments WHERE site_id = ?1 AND id = ?2 AND name = ?3"
+        else if (std.mem.eql(u8, table, "saved_views"))
+            "DELETE FROM saved_views WHERE site_id = ?1 AND id = ?2 AND name = ?3"
+        else
+            unreachable;
+        const changed = try self.connection.execParams(
+            sql,
+            .{ site_id, id, exact_name },
+            .{},
+        );
+        if (changed != 1) return not_found;
+    }
+
     pub fn siteIdBySlug(
         self: *Store,
         allocator: std.mem.Allocator,
@@ -1501,6 +1882,48 @@ pub const Store = struct {
     }
 };
 
+fn validateSavedEntity(
+    id: []const u8,
+    name: []const u8,
+    canonical_json: []const u8,
+) !void {
+    try domain.validateUuid(id);
+    try domain.validateName(name, 120);
+    if (canonical_json.len == 0 or canonical_json.len > maximum_saved_state_bytes) {
+        return error.InvalidSavedState;
+    }
+    if (!std.unicode.utf8ValidateSlice(canonical_json)) {
+        return error.InvalidSavedState;
+    }
+}
+
+fn savedEntityFromRow(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    row: anytype,
+) !T {
+    const id = try allocator.dupe(u8, try row.get([]const u8, 0));
+    const name = try allocator.dupe(u8, try row.get([]const u8, 1));
+    const canonical_json = try allocator.dupe(u8, try row.get([]const u8, 2));
+    const created = try row.get(i64, 3);
+    const updated = try row.get(i64, 4);
+    if (T == Segment) return .{
+        .id = id,
+        .name = name,
+        .canonical_filter_json = canonical_json,
+        .created_at_utc_micros = created,
+        .updated_at_utc_micros = updated,
+    };
+    if (T == SavedView) return .{
+        .id = id,
+        .name = name,
+        .canonical_query_json = canonical_json,
+        .created_at_utc_micros = created,
+        .updated_at_utc_micros = updated,
+    };
+    @compileError("unsupported saved entity type");
+}
+
 fn containsString(values: []const []const u8, expected: []const u8) bool {
     for (values) |value| {
         if (std.mem.eql(u8, value, expected)) return true;
@@ -1621,6 +2044,196 @@ test "probe seed preserves the metadata 6 settings invariant" {
     )) orelse return error.MissingProbeSiteSettings;
     defer allocator.free(currency);
     try std.testing.expectEqualStrings("", currency);
+}
+
+test "saved segments and views remain site scoped and require exact deletion" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const backing_allocator = std.testing.allocator;
+    const path = try std.fmt.allocPrint(
+        backing_allocator,
+        ".zig-cache/tmp/{s}/meta.db",
+        .{temporary.sub_path},
+    );
+    defer backing_allocator.free(path);
+    var store = try Store.open(backing_allocator, path);
+    defer store.deinit();
+    try store.migrate();
+
+    var arena = std.heap.ArenaAllocator.init(backing_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    _ = try store.createSite(allocator, .{
+        .id = "00000000-0000-4000-8000-000000000030",
+        .slug = "alpha",
+        .name = "Alpha",
+        .origin = "https://alpha.example",
+        .timezone_name = "UTC",
+        .default_currency = "",
+        .created_at_utc_micros = 1,
+    });
+    _ = try store.createSite(allocator, .{
+        .id = "00000000-0000-4000-8000-000000000031",
+        .slug = "beta",
+        .name = "Beta",
+        .origin = "https://beta.example",
+        .timezone_name = "UTC",
+        .default_currency = "",
+        .created_at_utc_micros = 1,
+    });
+    try store.addSegment(
+        allocator,
+        "00000000-0000-4000-8000-000000000032",
+        "alpha",
+        "Mobile",
+        "{\"schema\":1,\"match\":\"all\",\"filters\":[]}",
+        2,
+    );
+    try store.addSavedView(
+        allocator,
+        "00000000-0000-4000-8000-000000000033",
+        "alpha",
+        "Main trend",
+        "{\"schema\":1}",
+        2,
+    );
+    try std.testing.expectEqual(@as(usize, 1), (try store.listSegments(
+        allocator,
+        "alpha",
+    )).len);
+    try std.testing.expectEqual(@as(usize, 0), (try store.listSegments(
+        allocator,
+        "beta",
+    )).len);
+    try std.testing.expectError(
+        error.SegmentNotFound,
+        store.segmentById(
+            allocator,
+            "beta",
+            "00000000-0000-4000-8000-000000000032",
+        ),
+    );
+    try store.renameSegment(
+        allocator,
+        "alpha",
+        "00000000-0000-4000-8000-000000000032",
+        "Phones",
+        3,
+    );
+    const renamed = try store.segmentById(
+        allocator,
+        "alpha",
+        "00000000-0000-4000-8000-000000000032",
+    );
+    try std.testing.expectEqualStrings("Phones", renamed.name);
+    try std.testing.expectEqual(@as(i64, 3), renamed.updated_at_utc_micros);
+    try std.testing.expectError(
+        error.SegmentNotFound,
+        store.deleteSegment(
+            allocator,
+            "alpha",
+            renamed.id,
+            "Wrong name",
+        ),
+    );
+    try store.deleteSegment(allocator, "alpha", renamed.id, renamed.name);
+    try store.deleteSavedView(
+        allocator,
+        "alpha",
+        "00000000-0000-4000-8000-000000000033",
+        "Main trend",
+    );
+    try std.testing.expectEqual(@as(usize, 0), (try store.listSavedViews(
+        allocator,
+        "alpha",
+    )).len);
+}
+
+test "saved segment and view counts stop exactly at the per-site bound" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const backing = std.testing.allocator;
+    const path = try std.fmt.allocPrint(
+        backing,
+        ".zig-cache/tmp/{s}/meta.db",
+        .{temporary.sub_path},
+    );
+    defer backing.free(path);
+    var store = try Store.open(backing, path);
+    defer store.deinit();
+    try store.migrate();
+    var arena = std.heap.ArenaAllocator.init(backing);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    _ = try store.createSite(allocator, .{
+        .id = "00000000-0000-4000-8000-000000000030",
+        .slug = "alpha",
+        .name = "Alpha",
+        .origin = "https://alpha.example",
+        .timezone_name = "UTC",
+        .default_currency = "",
+        .created_at_utc_micros = 1,
+    });
+    for (0..maximum_saved_entities) |index| {
+        const segment_id = try std.fmt.allocPrint(
+            allocator,
+            "00000000-0000-4000-8000-{d:0>12}",
+            .{index + 1},
+        );
+        const segment_name = try std.fmt.allocPrint(
+            allocator,
+            "Segment {d}",
+            .{index + 1},
+        );
+        try store.addSegment(
+            allocator,
+            segment_id,
+            "alpha",
+            segment_name,
+            "{\"schema\":1,\"match\":\"all\",\"filters\":[]}",
+            @intCast(index + 2),
+        );
+        const view_id = try std.fmt.allocPrint(
+            allocator,
+            "00000000-0000-4001-8000-{d:0>12}",
+            .{index + 1},
+        );
+        const view_name = try std.fmt.allocPrint(
+            allocator,
+            "View {d}",
+            .{index + 1},
+        );
+        try store.addSavedView(
+            allocator,
+            view_id,
+            "alpha",
+            view_name,
+            "{\"schema\":1}",
+            @intCast(index + 2),
+        );
+    }
+    try std.testing.expectError(
+        error.TooManySavedEntities,
+        store.addSegment(
+            allocator,
+            "00000000-0000-4000-8000-000000000099",
+            "alpha",
+            "Segment overflow",
+            "{\"schema\":1,\"match\":\"all\",\"filters\":[]}",
+            100,
+        ),
+    );
+    try std.testing.expectError(
+        error.TooManySavedEntities,
+        store.addSavedView(
+            allocator,
+            "00000000-0000-4001-8000-000000000099",
+            "alpha",
+            "View overflow",
+            "{\"schema\":1}",
+            100,
+        ),
+    );
 }
 
 test "returned child write failure synchronously compensates the new parent" {

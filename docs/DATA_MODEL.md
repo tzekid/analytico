@@ -1,7 +1,7 @@
 # Data model and metric semantics
 
 > **Status:** Sections 1–9 define the shipped analytics-metadata subset in
-> Turso metadata schema 6, DuckDB event schema 7, and metric semantics v1. Authentication storage
+> Turso metadata schema 7, DuckDB event schema 7, and metric semantics v1. Authentication storage
 > remains governed by its own specification. The daily-pseudonym and UTC-day
 > rules remain the compatibility contract for existing rows and current
 > reports. Section 10 records the remaining 1.0 transition; event schema 7 does
@@ -177,6 +177,50 @@ CREATE TABLE site_event_properties (
 
 This table allowlists custom-event properties. An empty allowlist means no
 properties are accepted.
+
+### `segments` and `saved_views`
+
+```sql
+CREATE TABLE segments (
+    id TEXT PRIMARY KEY,
+    site_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    filter_schema_version INTEGER NOT NULL CHECK (filter_schema_version = 1),
+    canonical_filter_json TEXT NOT NULL,
+    created_at_utc_micros INTEGER NOT NULL,
+    updated_at_utc_micros INTEGER NOT NULL,
+    FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE CASCADE,
+    UNIQUE (site_id, name),
+    CHECK (length(id) = 36),
+    CHECK (length(name) BETWEEN 1 AND 120),
+    CHECK (length(canonical_filter_json) BETWEEN 1 AND 32768)
+);
+
+CREATE TABLE saved_views (
+    id TEXT PRIMARY KEY,
+    site_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    query_schema_version INTEGER NOT NULL CHECK (query_schema_version = 1),
+    canonical_query_json TEXT NOT NULL,
+    created_at_utc_micros INTEGER NOT NULL,
+    updated_at_utc_micros INTEGER NOT NULL,
+    FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE CASCADE,
+    UNIQUE (site_id, name),
+    CHECK (length(id) = 36),
+    CHECK (length(name) BETWEEN 1 AND 120),
+    CHECK (length(canonical_query_json) BETWEEN 1 AND 32768)
+);
+```
+
+Metadata migration 7 is additive and backfills no saved object. The
+application permits at most 32 segments and 32 saved views per site, generates
+canonical JSON before insertion, and verifies exact parse/reserialization on
+load. A segment owns one schema-1 FilterSet. A saved view owns one canonical
+Breakdown Query or Trend-set and may reference a segment UUID inside that
+state; the UUID is not a database foreign key because deletion must leave a
+visible stale view rather than cascade or silently rewrite it. All operations
+remain site-scoped D19 autocommits. No owner/team, public token, widget layout,
+or DuckDB table is added.
 
 ### `goals`
 
@@ -719,7 +763,10 @@ D34 and issue #70 advance to event schema 7 and metadata 5, add only keyed
 daily-prefix evidence plus explicit site safeguards, and keep soft verdicts in
 the reversible query layer. D36 and issue #19 advance metadata to schema 6,
 store the explicit optional site currency, and make origin ownership unique;
-event schema 7 and every stored event fact remain unchanged.
+event schema 7 and every stored event fact remain unchanged. D40 and issue #30
+advance metadata to schema 7 with exact site-owned segments and saved views.
+The controller resolves their canonical state before DuckDB, so neither store
+queries the other and stale references remain visible rather than disappearing.
 
 ### Identity and sessions
 

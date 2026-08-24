@@ -7,7 +7,7 @@ const components = @import("components.zig");
 const model = @import("model.zig");
 
 pub const stylesheet = @embedFile("style.css");
-pub const stylesheet_path = "/admin/app.v10.css";
+pub const stylesheet_path = "/admin/app.v11.css";
 pub const htmx = @embedFile("htmx_js");
 pub const htmx_gzip = @embedFile("htmx_gzip");
 pub const htmx_path = "/admin/htmx.28fae7bb.js";
@@ -71,6 +71,7 @@ pub fn page(output: *std.Io.Writer, value: model.Page) !void {
     try output.writeAll("</h1><p>");
     try text(output, destinationSummary(value.destination));
     try output.writeAll("</p></div>");
+    if (value.analysis_state_kind.len != 0) try filterBar(output, value);
     switch (value.destination) {
         .overview => try overviewSection(output, value),
         .analyze => {
@@ -690,14 +691,365 @@ fn contextControls(output: *std.Io.Writer, value: model.Page) !void {
     } else {
         try output.writeAll("Complete local dates");
     }
-    try output.writeAll("</dd></div><div><dt>Segment</dt><dd>All visitors</dd></div><div><dt>Filters</dt><dd>None</dd></div></dl></div>");
+    try output.writeAll("</dd></div><div><dt>Segment</dt><dd>");
+    if (value.selected_segment_name.len == 0) {
+        try output.writeAll("All visitors");
+    } else {
+        try text(output, value.selected_segment_name);
+    }
+    try output.writeAll("</dd></div><div><dt>Filters</dt><dd>");
+    if (value.filter_chips.len == 0) {
+        try output.writeAll("None");
+    } else {
+        try output.print("{d} ad-hoc", .{value.filter_chips.len});
+    }
+    try output.writeAll("</dd></div></dl></div>");
+}
+
+fn filterBar(output: *std.Io.Writer, value: model.Page) !void {
+    const selected_scope = if (value.filter_suggestions) |suggestions|
+        suggestions.scope.name()
+    else
+        "event";
+    const selected_field = if (value.filter_suggestions) |suggestions|
+        suggestions.field.kind.name()
+    else
+        "page";
+    const selected_property = if (value.filter_suggestions) |suggestions|
+        if (suggestions.field.property_ref) |reference| reference.name else ""
+    else
+        "";
+    const selected_type = if (value.filter_suggestions) |suggestions|
+        suggestions.scalar_type.name()
+    else
+        "string";
+    const selected_operator = if (value.filter_suggestions) |suggestions|
+        suggestions.operator.name()
+    else
+        "is";
+    const selected_search = if (value.filter_suggestions) |suggestions|
+        suggestions.search
+    else
+        "";
+    const selected_values = if (value.filter_suggestions) |suggestions|
+        suggestions.builder_values
+    else
+        "";
+    try output.writeAll(
+        "<section class=\"panel filter-context\" aria-labelledby=\"filter-context-heading\">" ++
+            "<div class=\"analysis-heading\"><div><h2 id=\"filter-context-heading\">Filters</h2>" ++
+            "<p class=\"muted\">All clauses match; multiple values inside one clause match any value.</p></div></div>" ++
+            "<div class=\"filter-chips\">",
+    );
+    if (value.selected_segment_name.len != 0) {
+        try output.writeAll("<span class=\"filter-chip segment-chip\">Segment: ");
+        try text(output, value.selected_segment_name);
+        try output.writeAll(" <a aria-label=\"Remove selected segment\" href=\"");
+        try attribute(output, value.clear_segment_url);
+        try output.writeAll("\">Remove</a></span>");
+    }
+    for (value.filter_chips) |chip| {
+        try output.writeAll("<span class=\"filter-chip\">");
+        try text(output, chip.label);
+        try output.writeAll(" <a aria-label=\"Remove filter: ");
+        try attribute(output, chip.label);
+        try output.writeAll("\" href=\"");
+        try attribute(output, chip.remove_url);
+        try output.writeAll("\">Remove</a></span>");
+    }
+    if (value.selected_segment_name.len == 0 and value.filter_chips.len == 0) {
+        try output.writeAll("<span class=\"muted\">All visitors · no filters</span>");
+    }
+    try output.writeAll("</div><details class=\"management filter-builder\"");
+    if (value.filter_suggestions != null) try output.writeAll(" open");
+    try output.writeAll("><summary>Add a filter</summary><form method=\"post\" action=\"/admin/filters/apply\">");
+    try analysisStateHiddenFields(output, value);
+    try output.writeAll("<div class=\"form-grid\"><label>Scope<select name=\"scope\">");
+    try filterSelectOptions(output, &filter_scope_options, selected_scope);
+    try output.writeAll("</select></label><label>Field<select name=\"field\">");
+    try filterSelectOptions(output, &filter_field_options, selected_field);
+    try output.writeAll("</select></label><label>Property name<input name=\"property\" maxlength=\"120\" placeholder=\"Required for property or trait\" value=\"");
+    try attribute(output, selected_property);
+    try output.writeAll("\"></label><label>Type<select name=\"scalar_type\">");
+    try filterSelectOptions(output, &filter_type_options, selected_type);
+    try output.writeAll("</select></label><label>Operator<select name=\"operator\">");
+    try filterSelectOptions(output, &filter_operator_options, selected_operator);
+    try output.writeAll("</select></label><label>Suggestion search<input name=\"search\" maxlength=\"256\" value=\"");
+    try attribute(output, selected_search);
+    try output.writeAll("\"></label><label class=\"wide\">Values, one per line<textarea name=\"values\" rows=\"3\" maxlength=\"20480\">");
+    try text(output, selected_values);
+    try output.writeAll(
+        "</textarea></label></div><button type=\"submit\">Apply filter</button> " ++
+            "<button class=\"button-secondary\" type=\"submit\" formaction=\"/admin/filters/suggest\">Preview values</button></form>",
+    );
+    if (value.filter_suggestions) |suggestions| {
+        try output.writeAll("<section class=\"suggestion-results\" aria-live=\"polite\"><h3>Suggested values for ");
+        try text(output, suggestions.scope.name());
+        try output.writeAll(" · ");
+        try text(output, suggestions.field.kind.name());
+        if (suggestions.field.property_ref) |reference| {
+            try output.writeByte(':');
+            try text(output, reference.name);
+        }
+        try output.writeAll(" · ");
+        try text(output, suggestions.scalar_type.name());
+        try output.writeAll("</h3>");
+        try output.writeAll("<p class=\"muted\">Context: ");
+        try text(output, suggestions.scope.name());
+        try output.writeAll(" · ");
+        try text(output, suggestions.field.kind.name());
+        if (suggestions.field.property_ref) |reference| {
+            try output.writeByte(':');
+            try text(output, reference.name);
+        }
+        try output.writeAll(" · ");
+        try text(output, suggestions.scalar_type.name());
+        if (suggestions.search.len != 0) {
+            try output.writeAll(" · search “");
+            try text(output, suggestions.search);
+            try output.writeAll("”");
+        }
+        try output.writeAll("</p>");
+        if (suggestions.values.len == 0) {
+            try output.writeAll("<p>No values matched this site, range, preceding filter context, and search.</p>");
+        } else {
+            try output.writeAll("<ul>");
+            for (suggestions.values) |option| {
+                try output.writeAll("<li><code>");
+                try text(output, option.value);
+                try output.writeAll("</code> ");
+                try filterActions(
+                    output,
+                    option.filter_url,
+                    option.exclude_url,
+                    option.value,
+                );
+                try output.writeAll("</li>");
+            }
+            try output.writeAll("</ul>");
+            if (suggestions.has_more) {
+                try output.writeAll("<p>More than 50 values matched. Refine the search.</p>");
+            }
+        }
+        try output.writeAll("</section>");
+    }
+    try output.writeAll("</details><details class=\"management\"><summary>Segments</summary>");
+    if (value.segment_options.len != 0) {
+        try output.writeAll("<nav class=\"saved-list\" aria-label=\"Saved segments\">");
+        for (value.segment_options) |option| {
+            try output.writeAll("<article class=\"segment-row\">");
+            if (option.url.len == 0) {
+                try output.writeAll("<span>");
+                try text(output, option.name);
+                try output.writeAll(" — URL limit reached</span>");
+            } else {
+                try output.writeAll("<a href=\"");
+                try attribute(output, option.url);
+                if (option.selected) {
+                    try output.writeAll("\" aria-current=\"page\">");
+                } else try output.writeAll("\">");
+                try text(output, option.name);
+                try output.writeAll("</a>");
+            }
+            try output.writeAll(" <small class=\"muted\">Updated ");
+            try text(output, option.updated_at_utc);
+            try output.writeAll("</small><form method=\"post\" action=\"/admin/segments/delete\">");
+            try hidden(output, "csrf", value.csrf_token);
+            try hidden(output, "site", value.query.site);
+            try hidden(output, "id", option.id);
+            try output.writeAll("<label>Type exact name to delete<input name=\"name\" required maxlength=\"120\"></label><button class=\"danger\" type=\"submit\">Delete segment</button></form></article>");
+        }
+        try output.writeAll("</nav>");
+    } else try output.writeAll("<p class=\"muted\">No saved segments.</p>");
+    try output.writeAll("<form method=\"post\" action=\"/admin/segments\">");
+    try analysisStateHiddenFields(output, value);
+    try output.writeAll("<label>Name<input name=\"name\" required maxlength=\"120\"></label><button type=\"submit\">Save current filters as segment</button></form>");
+    if (value.query.analysis_segment_id) |id| {
+        try output.writeAll("<form method=\"post\" action=\"/admin/segments/update\">");
+        try analysisStateHiddenFields(output, value);
+        try hidden(output, "id", id);
+        try output.writeAll("<button type=\"submit\">Replace segment with current filters</button></form>");
+        try output.writeAll("<form method=\"post\" action=\"/admin/segments/rename\">");
+        try analysisStateHiddenFields(output, value);
+        try hidden(output, "id", id);
+        try output.writeAll("<label>New name<input name=\"name\" required maxlength=\"120\" value=\"");
+        try attribute(output, value.selected_segment_name);
+        try output.writeAll("\"></label><button type=\"submit\">Rename segment</button></form>" ++
+            "<form method=\"post\" action=\"/admin/segments/duplicate\">");
+        try analysisStateHiddenFields(output, value);
+        try hidden(output, "id", id);
+        try output.writeAll("<label>Copy name<input name=\"name\" required maxlength=\"120\"></label><button type=\"submit\">Duplicate segment</button></form>");
+    }
+    try output.writeAll("</details>");
+    if (value.destination == .analyze) try savedViews(output, value);
+    try output.writeAll("</section>");
+}
+
+const FilterSelectOption = struct {
+    value: []const u8,
+    label: []const u8,
+};
+
+const filter_scope_options = [_]FilterSelectOption{
+    .{ .value = "event", .label = "Event" },
+    .{ .value = "session", .label = "Session" },
+    .{ .value = "person", .label = "Person" },
+};
+
+const filter_field_options = [_]FilterSelectOption{
+    .{ .value = "page", .label = "Page" },
+    .{ .value = "page-title", .label = "Page title" },
+    .{ .value = "hostname", .label = "Hostname" },
+    .{ .value = "event-name", .label = "Event name" },
+    .{ .value = "landing-page", .label = "Landing page" },
+    .{ .value = "exit-page", .label = "Exit page" },
+    .{ .value = "channel", .label = "Channel" },
+    .{ .value = "referrer", .label = "Referrer" },
+    .{ .value = "utm-source", .label = "UTM source" },
+    .{ .value = "utm-medium", .label = "UTM medium" },
+    .{ .value = "utm-campaign", .label = "UTM campaign" },
+    .{ .value = "utm-term", .label = "UTM term" },
+    .{ .value = "utm-content", .label = "UTM content" },
+    .{ .value = "country", .label = "Country" },
+    .{ .value = "language", .label = "Language" },
+    .{ .value = "device", .label = "Device" },
+    .{ .value = "browser", .label = "Browser" },
+    .{ .value = "operating-system", .label = "Operating system" },
+    .{ .value = "identity-state", .label = "Identity state" },
+    .{ .value = "session-converted", .label = "Session converted" },
+    .{ .value = "session-duration-ms", .label = "Session duration ms" },
+    .{ .value = "session-engagement-ms", .label = "Session engagement ms" },
+    .{ .value = "event-property", .label = "Event property" },
+    .{ .value = "user-trait", .label = "User trait" },
+};
+
+const filter_type_options = [_]FilterSelectOption{
+    .{ .value = "string", .label = "String" },
+    .{ .value = "integer", .label = "Integer" },
+    .{ .value = "decimal", .label = "Decimal" },
+    .{ .value = "boolean", .label = "Boolean" },
+    .{ .value = "null", .label = "Null" },
+    .{ .value = "missing", .label = "Missing" },
+};
+
+const filter_operator_options = [_]FilterSelectOption{
+    .{ .value = "is", .label = "Is (Filter)" },
+    .{ .value = "is_not", .label = "Is not (Exclude)" },
+    .{ .value = "contains", .label = "Contains" },
+    .{ .value = "not_contains", .label = "Does not contain" },
+    .{ .value = "starts_with", .label = "Starts with" },
+    .{ .value = "gt", .label = "Greater than" },
+    .{ .value = "gte", .label = "At least" },
+    .{ .value = "lt", .label = "Less than" },
+    .{ .value = "lte", .label = "At most" },
+    .{ .value = "is_true", .label = "Is true" },
+    .{ .value = "is_false", .label = "Is false" },
+    .{ .value = "exists", .label = "Exists" },
+    .{ .value = "absent", .label = "Absent" },
+};
+
+fn filterSelectOptions(
+    output: *std.Io.Writer,
+    options: []const FilterSelectOption,
+    selected: []const u8,
+) !void {
+    for (options) |option| {
+        try output.writeAll("<option value=\"");
+        try attribute(output, option.value);
+        if (std.mem.eql(u8, option.value, selected)) {
+            try output.writeAll("\" selected>");
+        } else {
+            try output.writeAll("\">");
+        }
+        try text(output, option.label);
+        try output.writeAll("</option>");
+    }
+}
+
+fn savedViews(output: *std.Io.Writer, value: model.Page) !void {
+    try output.writeAll("<details class=\"management\"><summary>Saved views</summary><form method=\"post\" action=\"/admin/saved-views\">");
+    try analysisStateHiddenFields(output, value);
+    try output.writeAll("<label>Name<input name=\"name\" required maxlength=\"120\"></label><button type=\"submit\">Save this view</button></form>");
+    if (value.saved_views.len == 0) {
+        try output.writeAll("<p class=\"muted\">No saved views.</p>");
+    }
+    for (value.saved_views) |view| {
+        try output.writeAll("<article class=\"saved-row\"><a href=\"/admin/sites/");
+        try attribute(output, value.query.site);
+        try output.writeAll("/saved-views/");
+        try attribute(output, view.id);
+        try output.writeAll("\">");
+        try text(output, view.name);
+        try output.writeAll("</a><form method=\"post\" action=\"/admin/saved-views/rename\">");
+        try savedEntityFields(output, value, view.id);
+        try output.writeAll("<label>New name<input name=\"name\" required maxlength=\"120\" value=\"");
+        try attribute(output, view.name);
+        try output.writeAll("\"></label><button type=\"submit\">Rename</button></form>" ++
+            "<form method=\"post\" action=\"/admin/saved-views/duplicate\">");
+        try savedEntityFields(output, value, view.id);
+        try output.writeAll("<label>Copy name<input name=\"name\" required maxlength=\"120\"></label><button type=\"submit\">Duplicate</button></form>" ++
+            "<form method=\"post\" action=\"/admin/saved-views/delete\">");
+        try savedEntityFields(output, value, view.id);
+        try output.writeAll("<label>Type exact name<input name=\"name\" required maxlength=\"120\"></label><button class=\"danger\" type=\"submit\">Delete</button></form></article>");
+    }
+    try output.writeAll("</details>");
+}
+
+fn savedEntityFields(
+    output: *std.Io.Writer,
+    value: model.Page,
+    id: []const u8,
+) !void {
+    try hidden(output, "csrf", value.csrf_token);
+    try hidden(output, "site", value.query.site);
+    try hidden(output, "id", id);
+}
+
+fn analysisStateHiddenFields(output: *std.Io.Writer, value: model.Page) !void {
+    try hidden(output, "csrf", value.csrf_token);
+    try hidden(output, "site", value.query.site);
+    try hidden(output, "state_kind", value.analysis_state_kind);
+    try hidden(output, "state", value.analysis_state_json);
+    if (std.mem.eql(u8, value.analysis_state_kind, "overview")) {
+        try hidden(output, "from", value.query.range.start);
+        try hidden(output, "to", value.query.range.end);
+        try hidden(output, "compare", value.query.comparison.name());
+        if (value.query.overview_metric == .revenue) {
+            try output.writeAll(
+                "<input type=\"hidden\" name=\"metric\" value=\"revenue-",
+            );
+            try attribute(output, value.query.overview_currency);
+            try output.writeAll("\">");
+        } else {
+            try hidden(output, "metric", value.query.overview_metric.name());
+        }
+        try hidden(
+            output,
+            "segment",
+            value.query.analysis_segment_id orelse "",
+        );
+    }
+}
+
+fn hidden(output: *std.Io.Writer, name: []const u8, value: []const u8) !void {
+    try output.writeAll("<input type=\"hidden\" name=\"");
+    try attribute(output, name);
+    try output.writeAll("\" value=\"");
+    try attribute(output, value);
+    try output.writeAll("\">");
 }
 
 fn destinationHiddenFields(output: *std.Io.Writer, value: model.Page) !void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-    if (value.destination == .analyze and value.query.analysis_breakdown != null) {
+    if (value.destination == .overview) {
+        try hidden(output, "v", "1");
+        if (value.query.overview_metric == .revenue) {
+            try output.writeAll("<input type=\"hidden\" name=\"metric\" value=\"revenue-");
+            try attribute(output, value.query.overview_currency);
+            try output.writeAll("\">");
+        } else {
+            try hidden(output, "metric", value.query.overview_metric.name());
+        }
+    } else if (value.destination == .analyze and value.query.analysis_breakdown != null) {
         const breakdown = value.query.analysis_breakdown.?;
         try output.writeAll(
             "<input type=\"hidden\" name=\"v\" value=\"1\">" ++
@@ -717,11 +1069,7 @@ fn destinationHiddenFields(output: *std.Io.Writer, value: model.Page) !void {
             try output.writeAll("\"><input type=\"hidden\" name=\"selector-value\" value=\"");
             try attribute(output, selector.value);
             try output.writeAll("\">");
-            for (selector.predicates) |predicate| {
-                const encoded = try analysis.canonicalPredicate(
-                    allocator,
-                    predicate,
-                );
+            for (value.analysis_predicate_parameters) |encoded| {
                 try output.writeAll("<input type=\"hidden\" name=\"p\" value=\"");
                 try attribute(output, encoded);
                 try output.writeAll("\">");
@@ -803,6 +1151,16 @@ fn destinationHiddenFields(output: *std.Io.Writer, value: model.Page) !void {
         try output.writeAll("<input type=\"hidden\" name=\"limit\" value=\"");
         try output.print("{d}", .{value.query.limit});
         try output.writeAll("\"><input type=\"hidden\" name=\"page\" value=\"1\">");
+    }
+    if (value.destination == .overview or value.destination == .analyze) {
+        try analysisContextHiddenFields(output, value);
+    }
+}
+
+fn analysisContextHiddenFields(output: *std.Io.Writer, value: model.Page) !void {
+    if (value.query.analysis_segment_id) |id| try hidden(output, "segment", id);
+    for (value.analysis_filter_parameters) |encoded| {
+        try hidden(output, "f", encoded);
     }
 }
 
@@ -889,11 +1247,13 @@ fn analyzeTrendSection(output: *std.Io.Writer, value: model.Page) !void {
             "<p class=\"muted\">One to three typed metric queries share this request's deadline. Exact currencies remain separate.</p></div>" ++
             "<a class=\"button button-secondary\" href=\"",
     );
-    const breakdown = analysis.presetQuery(
+    var breakdown = analysis.presetQuery(
         .pages,
         value.query.analysis_site_id,
         value.query.range,
     );
+    breakdown.filters = value.query.analysis_filters;
+    breakdown.segment_id = value.query.analysis_segment_id;
     var breakdown_query = value.query;
     breakdown_query.comparison = .none;
     breakdown_query.analysis_series = &.{};
@@ -907,6 +1267,7 @@ fn analyzeTrendSection(output: *std.Io.Writer, value: model.Page) !void {
     try canonicalPath(output, .analyze, value.query);
     try output.writeAll("\">");
     try calendarHiddenFields(output, value.query);
+    try analysisContextHiddenFields(output, value);
     try output.writeAll("<label class=\"analysis-interval\">Interval<select name=\"interval\">");
     inline for (std.meta.tags(analysis.Interval)) |interval| {
         try output.writeAll("<option value=\"");
@@ -1101,11 +1462,13 @@ fn analyzeBreakdownSection(output: *std.Io.Writer, value: model.Page) !void {
     try output.writeAll("\">Open Trend</a></div><nav class=\"report-tabs breakdown-presets\" aria-label=\"Breakdown presets\">");
     for (breakdown_presets) |item| {
         var preset_query = value.query;
-        const preset = analysis.presetQuery(
+        var preset = analysis.presetQuery(
             item.preset,
             value.query.analysis_site_id,
             value.query.range,
         );
+        preset.filters = value.query.analysis_filters;
+        preset.segment_id = value.query.analysis_segment_id;
         preset_query.analysis_breakdown = preset;
         try output.writeAll("<a id=\"breakdown-preset-");
         try attribute(output, @tagName(item.preset));
@@ -1129,7 +1492,9 @@ fn analyzeBreakdownSection(output: *std.Io.Writer, value: model.Page) !void {
     try attribute(output, query.range.start);
     try output.writeAll("\"><input type=\"hidden\" name=\"to\" value=\"");
     try attribute(output, query.range.end);
-    try output.writeAll("\"><label>Metric<select name=\"metric\">");
+    try output.writeAll("\">");
+    try analysisContextHiddenFields(output, value);
+    try output.writeAll("<label>Metric<select name=\"metric\">");
     inline for (std.meta.tags(analysis.MetricKind)) |kind| {
         try output.writeAll("<option value=\"");
         try attribute(output, kind.name());
@@ -1213,12 +1578,11 @@ fn analyzeBreakdownSection(output: *std.Io.Writer, value: model.Page) !void {
         try output.print(">{d}</option>", .{limit});
     }
     try output.writeAll("</select></label>");
-    if (query.metric.selector) |selector| for (selector.predicates) |predicate| {
-        const encoded = try analysis.canonicalPredicate(allocator, predicate);
+    for (value.analysis_predicate_parameters) |encoded| {
         try output.writeAll("<input type=\"hidden\" name=\"p\" value=\"");
         try attribute(output, encoded);
         try output.writeAll("\">");
-    };
+    }
     try output.writeAll("<p class=\"field-help analysis-builder-help\">Event metrics require one exact event; conversion metrics require one saved goal. A property with multiple observed types requires one explicit type. Missing is distinct from null.");
     if (query.metric.selector) |selector| if (selector.predicates.len != 0) {
         try output.print(
@@ -1308,7 +1672,11 @@ fn renderBreakdownTable(
 ) !void {
     const values = try allocator.alloc(AnalyzeChartMeasure, view.rows.len);
     for (values, view.rows) |*target, row| {
-        target.* = try analyzeChartMeasure(allocator, row.measure, query.metric.kind);
+        target.* = try analyzeChartMeasure(
+            allocator,
+            row.data.measure,
+            query.metric.kind,
+        );
     }
     const property_dimension = query.dimension.?.kind == .event_property;
     try output.writeAll("<div class=\"table-scroll mobile-records\"><table class=\"breakdown-table\"><caption>");
@@ -1320,16 +1688,16 @@ fn renderBreakdownTable(
     if (property_dimension) try output.writeAll("</th><th scope=\"col\">Type");
     try output.writeAll("</th><th scope=\"col\">");
     try text(output, analysisMetricLabel(query.metric.kind));
-    try output.writeAll("</th></tr></thead><tbody>");
+    try output.writeAll("</th><th scope=\"col\">Actions</th></tr></thead><tbody>");
     for (view.rows, values, 0..) |row, chart_value, row_index| {
         try output.writeAll("<tr><th scope=\"row\" data-label=\"");
         try attribute(output, dimensionLabel(query.dimension.?.kind));
         try output.writeAll("\">");
-        try text(output, row.label.value);
+        try text(output, row.data.label.value);
         try output.writeAll("</th>");
         if (property_dimension) {
             try output.writeAll("<td data-label=\"Type\">");
-            try text(output, humanize(row.label.scalar_type.?.name()));
+            try text(output, humanize(row.data.label.scalar_type.?.name()));
             try output.writeAll("</td>");
         }
         try output.writeAll("<td data-label=\"");
@@ -1348,17 +1716,24 @@ fn renderBreakdownTable(
                 "<progress class=\"cell-bar\" max=\"{d}\" value=\"{d}\" aria-label=\"",
                 .{ maximum, number },
             );
-            try attribute(output, row.label.value);
+            try attribute(output, row.data.label.value);
             try output.writeAll(" — ");
             try attribute(output, analysisMetricLabel(query.metric.kind));
             try output.writeAll(" proportional bar\"></progress>");
         };
+        try output.writeAll("</td><td data-label=\"Actions\">");
+        try filterActions(
+            output,
+            row.filter_url,
+            row.exclude_url,
+            row.data.label.value,
+        );
         try output.writeAll("</td></tr>");
     }
     if (view.rows.len == 0) {
         try output.print(
             "<tr><td colspan=\"{d}\">No matching buckets.</td></tr>",
-            .{@as(u8, if (property_dimension) 3 else 2)},
+            .{@as(u8, if (property_dimension) 4 else 3)},
         );
     }
     try output.writeAll("</tbody></table></div><nav aria-label=\"Breakdown pagination\">");
@@ -1376,20 +1751,20 @@ fn renderBreakdownTable(
 }
 
 fn breakdownBarMaximum(
-    rows: []const analysis.BreakdownRow,
+    rows: []const model.AnalyzeBreakdownRow,
     values: []const AnalyzeChartMeasure,
     selected: usize,
 ) i128 {
-    const selected_currency: ?[]const u8 = switch (rows[selected].measure) {
+    const selected_currency: ?[]const u8 = switch (rows[selected].data.measure) {
         .amount => |amount| amount.currency,
         else => null,
     };
     var maximum: i128 = 0;
     for (rows, values) |row, value| {
-        const comparable = if (selected_currency) |currency| switch (row.measure) {
+        const comparable = if (selected_currency) |currency| switch (row.data.measure) {
             .amount => |amount| std.mem.eql(u8, currency, amount.currency),
             else => false,
-        } else switch (row.measure) {
+        } else switch (row.data.measure) {
             .amount => false,
             else => true,
         };
@@ -1624,13 +1999,14 @@ fn analyzeChartMeasure(
                     @as(i128, ratio.numerator) * 10_000,
                     ratio.denominator,
                 );
+            var percent_buffer: [32]u8 = undefined;
             const percent_text = if (ratio.denominator == 0)
                 "unavailable"
             else
-                try std.fmt.allocPrint(
-                    allocator,
-                    "{d}.{d:0>2}%",
-                    .{ @divTrunc(basis_points, 100), @mod(basis_points, 100) },
+                try percentText(
+                    &percent_buffer,
+                    ratio.numerator,
+                    ratio.denominator,
                 );
             const formatted = try std.fmt.allocPrint(
                 allocator,
@@ -1843,7 +2219,10 @@ fn renderOverviewTrend(
     try attribute(output, value.query.range.end);
     try output.writeAll("\"><input type=\"hidden\" name=\"compare\" value=\"");
     try attribute(output, value.query.comparison.name());
-    try output.writeAll("\"><label>Trend metric<select name=\"metric\">");
+    try output.writeAll("\">");
+    try hidden(output, "v", "1");
+    try analysisContextHiddenFields(output, value);
+    try output.writeAll("<label>Trend metric<select name=\"metric\">");
     inline for (.{
         analysis.OverviewTrendMetric.visitors,
         analysis.OverviewTrendMetric.sessions,
@@ -2016,7 +2395,7 @@ fn renderOverviewPanels(
     try output.writeAll("<section class=\"answer-grid\" aria-label=\"Overview answers\">");
     try output.writeAll("<article class=\"answer-panel\"><div class=\"answer-heading\"><h2>Content</h2><a href=\"");
     try queryUrl(output, value.query, .pages, "", 1);
-    try output.writeAll("\">View all pages</a></div><div class=\"table-scroll mobile-records\"><table><caption>Top pages</caption><thead><tr><th scope=\"col\">Page</th><th scope=\"col\">Page views</th><th scope=\"col\">Visitors</th><th scope=\"col\">Share</th></tr></thead><tbody>");
+    try output.writeAll("\">View all pages</a></div><div class=\"table-scroll mobile-records\"><table><caption>Top pages</caption><thead><tr><th scope=\"col\">Page</th><th scope=\"col\">Page views</th><th scope=\"col\">Visitors</th><th scope=\"col\">Share</th><th scope=\"col\">Actions</th></tr></thead><tbody>");
     for (details.content) |row| {
         try output.writeAll("<tr><th scope=\"row\" data-label=\"Page\"><a href=\"");
         try queryUrl(output, value.query, .pages, "", 1);
@@ -2024,14 +2403,16 @@ fn renderOverviewPanels(
         try text(output, row.label);
         try output.print("</a></th><td data-label=\"Page views\">{d}</td><td data-label=\"Visitors\">{d}</td><td data-label=\"Share\">", .{ row.page_views, row.visitors });
         try renderBasisPoints(output, row.share_basis_points);
+        try output.writeAll("</td><td data-label=\"Actions\">");
+        try filterActions(output, row.filter_url, row.exclude_url, row.label);
         try output.writeAll("</td></tr>");
     }
-    if (details.content.len == 0) try output.writeAll("<tr><td colspan=\"4\">No page views in this range.</td></tr>");
+    if (details.content.len == 0) try output.writeAll("<tr><td colspan=\"5\">No page views in this range.</td></tr>");
     try output.writeAll("</tbody></table></div></article>");
 
     try output.writeAll("<article class=\"answer-panel\"><div class=\"answer-heading\"><h2>Acquisition</h2><a href=\"");
     try queryUrl(output, value.query, .sources, "", 1);
-    try output.writeAll("\">View all sources</a></div><div class=\"table-scroll mobile-records\"><table><caption>Top referrer sources</caption><thead><tr><th scope=\"col\">Source</th><th scope=\"col\">Sessions</th><th scope=\"col\">Conversion rate</th></tr></thead><tbody>");
+    try output.writeAll("\">View all sources</a></div><div class=\"table-scroll mobile-records\"><table><caption>Top referrer sources</caption><thead><tr><th scope=\"col\">Source</th><th scope=\"col\">Sessions</th><th scope=\"col\">Conversion rate</th><th scope=\"col\">Actions</th></tr></thead><tbody>");
     for (details.acquisition) |row| {
         try output.writeAll("<tr><th scope=\"row\" data-label=\"Source\"><a href=\"");
         try queryUrl(output, value.query, .sources, "", 1);
@@ -2039,9 +2420,11 @@ fn renderOverviewPanels(
         try text(output, row.label);
         try output.print("</a></th><td data-label=\"Sessions\">{d}</td><td data-label=\"Conversion rate\">", .{row.sessions});
         try renderRatio(output, row.conversion);
+        try output.writeAll("</td><td data-label=\"Actions\">");
+        try filterActions(output, row.filter_url, row.exclude_url, row.label);
         try output.writeAll("</td></tr>");
     }
-    if (details.acquisition.len == 0) try output.writeAll("<tr><td colspan=\"3\">No sessions in this range.</td></tr>");
+    if (details.acquisition.len == 0) try output.writeAll("<tr><td colspan=\"4\">No sessions in this range.</td></tr>");
     try output.writeAll("</tbody></table></div></article>");
 
     try output.writeAll("<article class=\"answer-panel\"><div class=\"answer-heading\"><h2>Conversions</h2><a href=\"");
@@ -2068,16 +2451,39 @@ fn renderOverviewPanels(
     try queryUrl(output, value.query, .countries, "", 1);
     try output.writeAll("\">Countries</a> · <a href=\"");
     try queryUrl(output, value.query, .devices, "", 1);
-    try output.writeAll("\">Devices</a></span></div><div class=\"table-scroll mobile-records\"><table><caption>Top countries</caption><thead><tr><th scope=\"col\">Country</th><th scope=\"col\">Sessions</th></tr></thead><tbody>");
+    try output.writeAll("\">Devices</a></span></div><div class=\"table-scroll mobile-records\"><table><caption>Top countries</caption><thead><tr><th scope=\"col\">Country</th><th scope=\"col\">Sessions</th><th scope=\"col\">Actions</th></tr></thead><tbody>");
     for (details.audience) |row| {
         try output.writeAll("<tr><th scope=\"row\" data-label=\"Country\"><a href=\"");
         try queryUrl(output, value.query, .countries, "", 1);
         try output.writeAll("\">");
         try text(output, row.label);
-        try output.print("</a></th><td data-label=\"Sessions\">{d}</td></tr>", .{row.sessions});
+        try output.print("</a></th><td data-label=\"Sessions\">{d}</td><td data-label=\"Actions\">", .{row.sessions});
+        try filterActions(output, row.filter_url, row.exclude_url, row.label);
+        try output.writeAll("</td></tr>");
     }
-    if (details.audience.len == 0) try output.writeAll("<tr><td colspan=\"2\">No audience sessions in this range.</td></tr>");
+    if (details.audience.len == 0) try output.writeAll("<tr><td colspan=\"3\">No audience sessions in this range.</td></tr>");
     try output.writeAll("</tbody></table></div></article></section>");
+}
+
+fn filterActions(
+    output: *std.Io.Writer,
+    filter_url: []const u8,
+    exclude_url: []const u8,
+    label: []const u8,
+) !void {
+    if (filter_url.len == 0 or exclude_url.len == 0) {
+        try output.writeAll("Filter limit reached");
+        return;
+    }
+    try output.writeAll("<a href=\"");
+    try attribute(output, filter_url);
+    try output.writeAll("\" aria-label=\"Filter to ");
+    try attribute(output, label);
+    try output.writeAll("\">Filter</a> · <a href=\"");
+    try attribute(output, exclude_url);
+    try output.writeAll("\" aria-label=\"Exclude ");
+    try attribute(output, label);
+    try output.writeAll("\">Exclude</a>");
 }
 
 fn renderOverviewHealth(
@@ -2773,11 +3179,14 @@ fn queryUrl(
             .campaign_tuple => .campaigns_campaign,
             else => return error.InvalidBreakdownPreset,
         };
-        adjusted.analysis_breakdown = analysis.presetQuery(
+        var breakdown = analysis.presetQuery(
             preset,
             adjusted.analysis_site_id,
             adjusted.range,
         );
+        breakdown.filters = adjusted.analysis_filters;
+        breakdown.segment_id = adjusted.analysis_segment_id;
+        adjusted.analysis_breakdown = breakdown;
         return canonicalUrl(output, .analyze, adjusted, page_number);
     }
     const destination: model.Destination = switch (kind) {
@@ -2831,6 +3240,7 @@ fn canonicalUrlSeparated(
     separator: []const u8,
 ) !void {
     var adjusted = query;
+    const default_trend_series = [_]analysis.Metric{.{ .kind = .visitors }};
     switch (destination) {
         .overview => {
             adjusted.kind = .overview;
@@ -2840,8 +3250,15 @@ fn canonicalUrlSeparated(
             adjusted.analysis_breakdown == null and
             !adjusted.kind.isList())
         {
-            adjusted.kind = .pages;
-            adjusted.subject = "";
+            if (adjusted.analysis_filters.clauses.len != 0 or
+                adjusted.analysis_segment_id != null)
+            {
+                adjusted.analysis_series = &default_trend_series;
+                adjusted.analysis_interval = .auto;
+            } else {
+                adjusted.kind = .pages;
+                adjusted.subject = "";
+            }
         },
         .journeys => if (adjusted.kind != .goal and adjusted.kind != .funnel) {
             adjusted.kind = .goal;
@@ -2858,6 +3275,39 @@ fn canonicalUrlSeparated(
     }
     adjusted.page = page_number;
     try canonicalPath(output, destination, adjusted);
+    if (destination == .overview) {
+        try output.writeAll("?v=1");
+        try output.writeAll(separator);
+        try output.writeAll("from=");
+        try urlComponent(output, adjusted.range.start);
+        try output.writeAll(separator);
+        try output.writeAll("to=");
+        try urlComponent(output, adjusted.range.end);
+        try output.writeAll(separator);
+        try output.writeAll("compare=");
+        try urlComponent(output, adjusted.comparison.name());
+        try output.writeAll(separator);
+        try output.writeAll("metric=");
+        if (adjusted.overview_metric == .revenue) {
+            try output.writeAll("revenue-");
+            try urlComponent(output, adjusted.overview_currency);
+        } else {
+            try urlComponent(output, adjusted.overview_metric.name());
+        }
+        const suffix = try analysis.canonicalFilterUrlSuffix(
+            std.heap.page_allocator,
+            adjusted.analysis_segment_id,
+            adjusted.analysis_filters,
+        );
+        defer std.heap.page_allocator.free(suffix);
+        var parts = std.mem.splitScalar(u8, suffix, '&');
+        while (parts.next()) |part| {
+            if (part.len == 0) continue;
+            try output.writeAll(separator);
+            try output.writeAll(part);
+        }
+        return;
+    }
     if (destination == .analyze and adjusted.analysis_breakdown != null) {
         var breakdown = adjusted.analysis_breakdown.?;
         breakdown.page = page_number;
@@ -2885,6 +3335,8 @@ fn canonicalUrlSeparated(
                 .comparison = adjusted.comparison,
                 .interval = adjusted.analysis_interval,
                 .series = adjusted.analysis_series,
+                .filters = adjusted.analysis_filters,
+                .segment_id = adjusted.analysis_segment_id,
             },
             adjusted.highlighted_interval,
         );
@@ -3187,31 +3639,31 @@ test "Analyze chart coordinates retain exact rate and average components" {
 }
 
 test "Breakdown bars never compare unlike currencies" {
-    const rows = [_]analysis.BreakdownRow{
-        .{
+    const rows = [_]model.AnalyzeBreakdownRow{
+        .{ .data = .{
             .label = .{ .value = "A" },
             .measure = .{ .amount = .{
                 .decimal = "10.000000",
                 .currency = "EUR",
                 .value_count = 1,
             } },
-        },
-        .{
+        }, .filter_url = "", .exclude_url = "" },
+        .{ .data = .{
             .label = .{ .value = "B" },
             .measure = .{ .amount = .{
                 .decimal = "20.000000",
                 .currency = "USD",
                 .value_count = 1,
             } },
-        },
-        .{
+        }, .filter_url = "", .exclude_url = "" },
+        .{ .data = .{
             .label = .{ .value = "C" },
             .measure = .{ .amount = .{
                 .decimal = "5.000000",
                 .currency = "EUR",
                 .value_count = 1,
             } },
-        },
+        }, .filter_url = "", .exclude_url = "" },
     };
     const values = [_]AnalyzeChartMeasure{
         .{ .value = 10_000_000 },
@@ -3229,7 +3681,7 @@ test "Breakdown bars never compare unlike currencies" {
 }
 
 test "production stylesheet mirrors the approved accessible design tokens" {
-    const source = @embedFile("../../docs/design-tokens.json");
+    const source = @embedFile("design_tokens");
     const parsed = try std.json.parseFromSlice(
         std.json.Value,
         std.testing.allocator,
@@ -3277,5 +3729,5 @@ test "production stylesheet mirrors the approved accessible design tokens" {
 
     try std.testing.expect(std.mem.indexOf(u8, stylesheet, "@import") == null);
     try std.testing.expect(std.mem.indexOf(u8, stylesheet, "url(") == null);
-    try std.testing.expectEqualStrings("/admin/app.v10.css", stylesheet_path);
+    try std.testing.expectEqualStrings("/admin/app.v11.css", stylesheet_path);
 }

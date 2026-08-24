@@ -230,6 +230,180 @@ fn executeWithBudget(
     };
 }
 
+fn compileFilteredPageBreakdown(
+    allocator: std.mem.Allocator,
+    execution: analysis.Execution,
+) !StatementPlan {
+    const selection = analysis.OverviewTrendSelection{
+        .metric = .page_views,
+        .interval = .day,
+        .current_buckets = &.{},
+        .comparison_buckets = &.{},
+    };
+    const overview_execution = analysis.OverviewExecution{
+        .site_id = execution.query.site_id,
+        .range = execution.query.range,
+        .active_goals = execution.active_goals,
+        .filters = execution.query.filters,
+        .strict_traffic_mode = execution.strict_traffic_mode,
+        .daily_event_ceiling = 1,
+        .trend = selection,
+    };
+    var builder = Builder.init(allocator);
+    try writeFilteredOverviewCommon(
+        &builder,
+        overview_execution,
+        selection,
+        false,
+    );
+    try builder.write(
+        ", metric_rows AS (SELECT path AS label," ++
+            " count(*) FILTER (WHERE kind = 1)::BIGINT AS page_views" ++
+            " FROM qualified GROUP BY path" ++
+            " HAVING count(*) FILTER (WHERE kind = 1) > 0)," ++
+            " filtered_rows AS (SELECT *" ++
+            " FROM metric_rows",
+    );
+    if (execution.query.search.len != 0) {
+        try builder.write(" WHERE contains(lower(label), lower(");
+        try builder.bindText(execution.query.search);
+        try builder.write("))");
+    }
+    try builder.write(
+        "), ranked_rows AS (SELECT label, page_views," ++
+            " count(*) OVER ()::BIGINT AS cardinality FROM filtered_rows",
+    );
+    switch (execution.query.sort) {
+        .value_desc => try builder.write(
+            " ORDER BY page_views DESC, label ASC",
+        ),
+        .value_asc => try builder.write(
+            " ORDER BY page_views ASC, label ASC",
+        ),
+        .label_asc => try builder.write(" ORDER BY label ASC"),
+        .label_desc => try builder.write(" ORDER BY label DESC"),
+    }
+    try builder.write(" LIMIT ");
+    try builder.bindInteger(@as(i64, execution.query.limit) + 1);
+    try builder.write(" OFFSET ");
+    try builder.bindInteger(try execution.query.offset());
+    try builder.write(
+        "), summary_values AS (SELECT" ++
+            " count(DISTINCT person_key)::BIGINT AS visitors," ++
+            " count(DISTINCT CASE WHEN identity_quality = 1" ++
+            " THEN person_key END)::BIGINT AS persistent," ++
+            " count(DISTINCT CASE WHEN identity_quality = 2" ++
+            " THEN person_key END)::BIGINT AS ephemeral," ++
+            " count(DISTINCT CASE WHEN identity_quality = 3" ++
+            " THEN person_key END)::BIGINT AS legacy FROM qualified)," ++
+            " persistent_since AS (SELECT CAST(min(site_local_date) AS VARCHAR)" ++
+            " AS local_date FROM events WHERE site_id = ",
+    );
+    try builder.bindText(execution.query.site_id);
+    try builder.write(
+        " AND kind IN (1, 2) AND traffic_class IN (1, 5)" ++
+            " AND identity_quality = 1",
+    );
+    if (execution.strict_traffic_mode) try builder.write(
+        " AND session_id NOT IN (SELECT session_id" ++
+            " FROM d34_current_suspected_sessions)",
+    );
+    try builder.write(
+        ") SELECT 'row' AS row_kind, r.label, r.page_views," ++
+            " r.cardinality, s.persistent, s.ephemeral, s.legacy, p.local_date" ++
+            " FROM ranked_rows r CROSS JOIN summary_values s" ++
+            " CROSS JOIN persistent_since p" ++
+            " UNION ALL SELECT 'summary', '', s.visitors," ++
+            " (SELECT count(*)::BIGINT FROM filtered_rows)," ++
+            " s.persistent, s.ephemeral, s.legacy, p.local_date" ++
+            " FROM summary_values s CROSS JOIN persistent_since p",
+    );
+    return builder.finish();
+}
+
+fn executeFilteredPageBreakdown(
+    allocator: std.mem.Allocator,
+    event_store: *events.Store,
+    execution: analysis.Execution,
+    budget: *deadline.Budget,
+) !analysis.Result {
+    var result = try executePlan(
+        &event_store.database,
+        try compileFilteredPageBreakdown(allocator, execution),
+        budget,
+    );
+    defer result.deinit();
+    if (result.columnCount() != 8 or
+        result.rowCount() > @as(usize, execution.query.limit) + 2)
+    {
+        return error.InvalidAnalysisResult;
+    }
+    var rows: std.ArrayList(analysis.BreakdownRow) = .empty;
+    defer rows.deinit(allocator);
+    var cardinality: ?i64 = null;
+    var completeness: ?analysis.Completeness = null;
+    for (0..result.rowCount()) |row| {
+        const row_kind = try result.text(allocator, 0, row);
+        if (std.mem.eql(u8, row_kind, "row")) {
+            const value = result.int64(2, row);
+            const row_cardinality = result.int64(3, row);
+            if (value < 0 or row_cardinality < 0 or
+                (cardinality != null and cardinality.? != row_cardinality))
+            {
+                return error.InvalidAnalysisResult;
+            }
+            cardinality = row_cardinality;
+            try rows.append(allocator, .{
+                .label = .{ .value = try result.text(allocator, 1, row) },
+                .measure = .{ .count = value },
+            });
+            continue;
+        }
+        if (!std.mem.eql(u8, row_kind, "summary") or completeness != null) {
+            return error.InvalidAnalysisResult;
+        }
+        const total = result.int64(2, row);
+        const persistent = result.int64(4, row);
+        const ephemeral = result.int64(5, row);
+        const legacy = result.int64(6, row);
+        const summary_cardinality = result.int64(3, row);
+        if (total < 0 or summary_cardinality < 0 or
+            persistent < 0 or ephemeral < 0 or legacy < 0 or
+            persistent + ephemeral + legacy != total)
+        {
+            return error.InvalidAnalysisResult;
+        }
+        if (cardinality != null and cardinality.? != summary_cardinality) {
+            return error.InvalidAnalysisResult;
+        }
+        cardinality = summary_cardinality;
+        const persistent_scaled = std.math.mul(i64, persistent, 10_000) catch
+            return error.InvalidAnalysisResult;
+        completeness = .{
+            .total_people = total,
+            .persistent_people = persistent,
+            .ephemeral_people = ephemeral,
+            .legacy_people = legacy,
+            .persistent_basis_points = if (total == 0)
+                0
+            else
+                @intCast(@divTrunc(persistent_scaled, total)),
+            .persistent_since_local_date = if (result.isNull(7, row))
+                null
+            else
+                try result.text(allocator, 7, row),
+        };
+    }
+    if (completeness == null) return error.InvalidAnalysisResult;
+    const visible = @min(rows.items.len, @as(usize, execution.query.limit));
+    return .{ .breakdown = .{
+        .rows = try allocator.dupe(analysis.BreakdownRow, rows.items[0..visible]),
+        .next_page = if (rows.items.len > visible) execution.query.page + 1 else null,
+        .cardinality = cardinality orelse 0,
+        .completeness = completeness.?,
+    } };
+}
+
 pub fn executeBreakdownPage(
     allocator: std.mem.Allocator,
     event_store: *events.Store,
@@ -239,12 +413,22 @@ pub fn executeBreakdownPage(
     if (execution.query.mode != .breakdown) return error.InvalidBreakdownPageQuery;
     const catalog_key = try propertyCatalogCacheKey(allocator, execution);
     var budget = deadline.Budget.init(execution.timeout_ms);
-    const result = try executeWithBudget(
-        allocator,
-        event_store,
-        execution,
-        &budget,
-    );
+    const result = if (execution.query.filters.clauses.len != 0 and
+        execution.query.metric.kind == .page_views and
+        execution.query.dimension.?.kind == .page)
+        try executeFilteredPageBreakdown(
+            allocator,
+            event_store,
+            execution,
+            &budget,
+        )
+    else
+        try executeWithBudget(
+            allocator,
+            event_store,
+            execution,
+            &budget,
+        );
     var site_has_events = result.breakdown.cardinality != 0;
     if (!site_has_events) {
         const presence = try executeCardinality(
@@ -278,6 +462,153 @@ pub fn executeBreakdownPage(
         .properties = properties,
         .site_has_events = site_has_events,
     };
+}
+
+pub fn executeSuggestions(
+    allocator: std.mem.Allocator,
+    event_store: *events.Store,
+    request: analysis.SuggestionRequest,
+) !analysis.SuggestionResult {
+    try request.validate();
+    var budget = deadline.Budget.init(request.execution.timeout_ms);
+    var result = try executePlan(
+        &event_store.database,
+        try compileSuggestions(allocator, request),
+        &budget,
+    );
+    defer result.deinit();
+    if (result.columnCount() != 1 or
+        result.rowCount() > analysis.maximum_suggestions + 1)
+    {
+        return error.InvalidAnalysisResult;
+    }
+    const visible = @min(result.rowCount(), analysis.maximum_suggestions);
+    const values = try allocator.alloc([]const u8, visible);
+    for (0..visible) |index| {
+        const value = try result.text(allocator, 0, index);
+        if (value.len == 0 or value.len > analysis.maximum_filter_value_bytes or
+            !std.unicode.utf8ValidateSlice(value))
+        {
+            return error.InvalidAnalysisResult;
+        }
+        values[index] = value;
+    }
+    return .{
+        .values = values,
+        .has_more = result.rowCount() > analysis.maximum_suggestions,
+    };
+}
+
+pub fn compileSuggestions(
+    allocator: std.mem.Allocator,
+    request: analysis.SuggestionRequest,
+) !StatementPlan {
+    try request.validate();
+    var builder = Builder.init(allocator);
+    const full_session = request.scope != .event or
+        hasSessionFact(request.field.kind);
+    try writeCommon(
+        &builder,
+        request.execution,
+        request.execution.query.range,
+        full_session,
+        request.field.kind == .user_trait,
+    );
+    try builder.write(", suggestion_values AS (SELECT DISTINCT ");
+    const alias = switch (request.scope) {
+        .event => "e",
+        .session => if (hasSessionFact(request.field.kind)) "s" else "sf",
+        .person => if (request.field.kind == .identity_state)
+            "e"
+        else if (request.field.kind == .user_trait)
+            "pf"
+        else
+            "pf",
+    };
+    try writeSuggestionExpression(&builder, request, alias);
+    try builder.write(" AS value FROM qualified e");
+    switch (request.scope) {
+        .event => {},
+        .session => if (hasSessionFact(request.field.kind)) {
+            try builder.write(" JOIN session_facts s USING (session_id)");
+        } else {
+            try builder.write(
+                " JOIN base sf ON sf.session_id = e.session_id",
+            );
+        },
+        .person => if (request.field.kind == .identity_state) {} else {
+            try builder.write(" JOIN ");
+            try builder.write(if (request.field.kind == .user_trait)
+                "person_traits"
+            else
+                "base");
+            try builder.write(" pf ON pf.person_key = e.person_key");
+        },
+    }
+    try builder.write(" WHERE ");
+    try writeSuggestionPresence(&builder, request, alias);
+    if (request.search.len != 0) {
+        try builder.write(" AND contains(lower(CAST(");
+        try writeSuggestionExpression(&builder, request, alias);
+        try builder.write(" AS VARCHAR)), lower(");
+        try builder.bindText(request.search);
+        try builder.write("))");
+    }
+    try builder.write(" ORDER BY value LIMIT ");
+    try builder.bindInteger(analysis.maximum_suggestions + 1);
+    try builder.write(") SELECT value FROM suggestion_values ORDER BY value");
+    return builder.finish();
+}
+
+fn writeSuggestionPresence(
+    builder: *Builder,
+    request: analysis.SuggestionRequest,
+    alias: []const u8,
+) !void {
+    if (request.field.property_ref) |reference| {
+        const pointer = try property.jsonPointer(builder.allocator, reference.name);
+        return writeJsonTypeGuard(
+            builder,
+            alias,
+            if (request.field.kind == .user_trait)
+                "user_traits_json"
+            else
+                "properties_json",
+            pointer,
+            reference.scalar_type,
+        );
+    }
+    try writeSuggestionExpression(builder, request, alias);
+    try builder.write(" IS NOT NULL");
+    if (request.scalar_type == .string) {
+        try builder.write(" AND ");
+        try writeSuggestionExpression(builder, request, alias);
+        try builder.write(" <> ''");
+    }
+}
+
+fn writeSuggestionExpression(
+    builder: *Builder,
+    request: analysis.SuggestionRequest,
+    alias: []const u8,
+) !void {
+    if (request.field.property_ref) |reference| {
+        try builder.write("CAST(");
+        try writeJsonValue(
+            builder,
+            alias,
+            if (request.field.kind == .user_trait)
+                "user_traits_json"
+            else
+                "properties_json",
+            try property.jsonPointer(builder.allocator, reference.name),
+            reference.scalar_type,
+        );
+        return builder.write(" AS VARCHAR)");
+    }
+    if (request.scalar_type != .string) try builder.write("CAST(");
+    try writeScalarExpression(builder, request.field.kind, alias);
+    if (request.scalar_type != .string) try builder.write(" AS VARCHAR)");
 }
 
 const property_catalog_cache_milliseconds: i64 = 30_000;
@@ -370,6 +701,12 @@ pub fn executeTrendSet(
     execution: analysis.TrendSetExecution,
 ) !analysis.TrendSetResult {
     try execution.validate();
+    if (execution.set.filters.clauses.len != 0 and
+        execution.set.series.len == 1 and
+        execution.set.series[0].kind == .visitors)
+    {
+        return executeFilteredVisitorTrendSet(allocator, event_store, execution);
+    }
     var budget = deadline.Budget.init(execution.timeout_ms);
     const coverage_execution = trendSetItemExecution(
         execution,
@@ -408,6 +745,186 @@ pub fn executeTrendSet(
     return .{ .series = series };
 }
 
+fn compileFilteredVisitorTrendSet(
+    allocator: std.mem.Allocator,
+    execution: analysis.TrendSetExecution,
+) !StatementPlan {
+    const item = trendSetItemExecution(execution, execution.set.series[0]);
+    const interval = try resolveInterval(item.query);
+    const selection = analysis.OverviewTrendSelection{
+        .metric = .visitors,
+        .interval = interval,
+        .current_buckets = &.{},
+        .comparison_buckets = &.{},
+    };
+    const overview_execution = analysis.OverviewExecution{
+        .site_id = item.query.site_id,
+        .range = item.query.range,
+        .comparison_range = item.comparison_range,
+        .active_goals = item.active_goals,
+        .filters = item.query.filters,
+        .strict_traffic_mode = item.strict_traffic_mode,
+        .daily_event_ceiling = 1,
+        .trend = selection,
+    };
+    var builder = Builder.init(allocator);
+    try writeFilteredOverviewCommon(
+        &builder,
+        overview_execution,
+        selection,
+        false,
+    );
+    try builder.write(
+        ", trend_rows AS (SELECT period, bucket_label," ++
+            " count(DISTINCT person_key)::BIGINT AS visitors" ++
+            " FROM qualified GROUP BY period, bucket_label)," ++
+            " summary_values AS (SELECT period," ++
+            " count(DISTINCT person_key)::BIGINT AS visitors," ++
+            " count(DISTINCT CASE WHEN identity_quality = 1" ++
+            " THEN person_key END)::BIGINT AS persistent," ++
+            " count(DISTINCT CASE WHEN identity_quality = 2" ++
+            " THEN person_key END)::BIGINT AS ephemeral," ++
+            " count(DISTINCT CASE WHEN identity_quality = 3" ++
+            " THEN person_key END)::BIGINT AS legacy" ++
+            " FROM qualified GROUP BY period)," ++
+            " period_summary AS (SELECT p.period," ++
+            " COALESCE(s.visitors, 0)::BIGINT AS visitors," ++
+            " COALESCE(s.persistent, 0)::BIGINT AS persistent," ++
+            " COALESCE(s.ephemeral, 0)::BIGINT AS ephemeral," ++
+            " COALESCE(s.legacy, 0)::BIGINT AS legacy" ++
+            " FROM periods p LEFT JOIN summary_values s USING (period))," ++
+            " persistent_since AS (SELECT CAST(min(site_local_date) AS VARCHAR)" ++
+            " AS local_date FROM events WHERE site_id = ",
+    );
+    try builder.bindText(item.query.site_id);
+    try builder.write(
+        " AND kind IN (1, 2) AND traffic_class IN (1, 5)" ++
+            " AND identity_quality = 1",
+    );
+    if (item.strict_traffic_mode) try builder.write(
+        " AND session_id NOT IN (SELECT session_id" ++
+            " FROM d34_current_suspected_sessions)",
+    );
+    try builder.write(
+        ") SELECT 'point' AS row_kind, t.period, t.bucket_label," ++
+            " t.visitors, s.persistent, s.ephemeral, s.legacy, p.local_date" ++
+            " FROM trend_rows t JOIN period_summary s USING (period)" ++
+            " CROSS JOIN persistent_since p" ++
+            " UNION ALL SELECT 'total', s.period, '', s.visitors," ++
+            " s.persistent, s.ephemeral, s.legacy, p.local_date" ++
+            " FROM period_summary s CROSS JOIN persistent_since p" ++
+            " ORDER BY period, row_kind, bucket_label",
+    );
+    return builder.finish();
+}
+
+fn executeFilteredVisitorTrendSet(
+    allocator: std.mem.Allocator,
+    event_store: *events.Store,
+    execution: analysis.TrendSetExecution,
+) !analysis.TrendSetResult {
+    var budget = deadline.Budget.init(execution.timeout_ms);
+    var result = try executePlan(
+        &event_store.database,
+        try compileFilteredVisitorTrendSet(allocator, execution),
+        &budget,
+    );
+    defer result.deinit();
+    if (result.columnCount() != 8 or
+        result.rowCount() > analysis.maximum_trend_rows * 2 + 2)
+    {
+        return error.InvalidAnalysisResult;
+    }
+    var current_points: std.ArrayList(analysis.TrendPoint) = .empty;
+    errdefer current_points.deinit(allocator);
+    var comparison_points: std.ArrayList(analysis.TrendPoint) = .empty;
+    errdefer comparison_points.deinit(allocator);
+    var current_total: ?i64 = null;
+    var comparison_total: ?i64 = null;
+    var current_completeness: ?analysis.Completeness = null;
+    var comparison_completeness: ?analysis.Completeness = null;
+    for (0..result.rowCount()) |row| {
+        const period = result.int64(1, row);
+        const points = if (period == 1)
+            &current_points
+        else if (period == 2)
+            &comparison_points
+        else
+            return error.InvalidAnalysisResult;
+        const value = result.int64(3, row);
+        const persistent = result.int64(4, row);
+        const ephemeral = result.int64(5, row);
+        const legacy = result.int64(6, row);
+        if (value < 0 or persistent < 0 or ephemeral < 0 or legacy < 0) {
+            return error.InvalidAnalysisResult;
+        }
+        const row_kind = try result.text(allocator, 0, row);
+        if (std.mem.eql(u8, row_kind, "point")) {
+            try points.append(allocator, .{
+                .bucket = try result.text(allocator, 2, row),
+                .measure = .{ .count = value },
+            });
+            continue;
+        }
+        if (!std.mem.eql(u8, row_kind, "total") or
+            persistent + ephemeral + legacy != value)
+        {
+            return error.InvalidAnalysisResult;
+        }
+        const persistent_scaled = std.math.mul(i64, persistent, 10_000) catch
+            return error.InvalidAnalysisResult;
+        const completeness = analysis.Completeness{
+            .total_people = value,
+            .persistent_people = persistent,
+            .ephemeral_people = ephemeral,
+            .legacy_people = legacy,
+            .persistent_basis_points = if (value == 0)
+                0
+            else
+                @intCast(@divTrunc(persistent_scaled, value)),
+            .persistent_since_local_date = if (result.isNull(7, row))
+                null
+            else
+                try result.text(allocator, 7, row),
+        };
+        if (period == 1) {
+            if (current_total != null) return error.InvalidAnalysisResult;
+            current_total = value;
+            current_completeness = completeness;
+        } else {
+            if (comparison_total != null) return error.InvalidAnalysisResult;
+            comparison_total = value;
+            comparison_completeness = completeness;
+        }
+    }
+    if (current_total == null or current_completeness == null or
+        (execution.comparison_range != null) != (comparison_total != null))
+    {
+        return error.InvalidAnalysisResult;
+    }
+    const totals = try allocator.alloc(analysis.Measure, 1);
+    totals[0] = .{ .count = current_total.? };
+    const comparison_totals = if (comparison_total) |value| block: {
+        const values = try allocator.alloc(analysis.Measure, 1);
+        values[0] = .{ .count = value };
+        break :block values;
+    } else null;
+    const series = try allocator.alloc(analysis.TrendResult, 1);
+    series[0] = .{
+        .points = try current_points.toOwnedSlice(allocator),
+        .comparison_points = if (execution.comparison_range != null)
+            try comparison_points.toOwnedSlice(allocator)
+        else
+            null,
+        .comparison_total = comparison_totals,
+        .comparison_completeness = comparison_completeness,
+        .total = totals,
+        .interval = try resolveInterval(execution.set.query(execution.set.series[0])),
+        .completeness = current_completeness.?,
+    };
+    return .{ .series = series };
+}
+
 fn trendSetItemExecution(
     execution: analysis.TrendSetExecution,
     metric: analysis.Metric,
@@ -417,6 +934,7 @@ fn trendSetItemExecution(
         .comparison_range = execution.comparison_range,
         .active_goals = execution.active_goals,
         .strict_traffic_mode = execution.strict_traffic_mode,
+        .segment_resolved = execution.segment_resolved,
         .timeout_ms = execution.timeout_ms,
     };
 }
@@ -962,6 +1480,875 @@ pub fn compileOverviewDetails(
     return builder.finish();
 }
 
+const FilteredSessionColumns = struct {
+    landing_page: bool = false,
+    exit_page: bool = false,
+    channel: bool = false,
+    referrer: bool = false,
+    utm_source: bool = false,
+    utm_medium: bool = false,
+    utm_campaign: bool = false,
+    utm_term: bool = false,
+    utm_content: bool = false,
+    country: bool = false,
+    language: bool = false,
+    device: bool = false,
+    browser: bool = false,
+    operating_system: bool = false,
+
+    fn include(result: *FilteredSessionColumns, field: analysis.FieldKind) void {
+        switch (field) {
+            .landing_page => result.landing_page = true,
+            .exit_page => result.exit_page = true,
+            .channel => {
+                result.channel = true;
+                result.referrer = true;
+                result.utm_source = true;
+                result.utm_medium = true;
+            },
+            .referrer => result.referrer = true,
+            .utm_source => result.utm_source = true,
+            .utm_medium => result.utm_medium = true,
+            .utm_campaign => result.utm_campaign = true,
+            .utm_term => result.utm_term = true,
+            .utm_content => result.utm_content = true,
+            .country => result.country = true,
+            .language => result.language = true,
+            .device => result.device = true,
+            .browser => result.browser = true,
+            .operating_system => result.operating_system = true,
+            .session_converted,
+            .session_duration_ms,
+            .session_engagement_ms,
+            => {},
+            else => unreachable,
+        }
+    }
+
+    fn resolve(filters: analysis.FilterSet, include_details: bool) FilteredSessionColumns {
+        var result = FilteredSessionColumns{};
+        if (include_details) {
+            result.referrer = true;
+            result.country = true;
+        }
+        for (filters.clauses) |clause| {
+            if (clause.scope != .session or !hasSessionFact(clause.field.kind)) continue;
+            result.include(clause.field.kind);
+        }
+        return result;
+    }
+};
+
+fn needsFilteredEventColumns(filters: analysis.FilterSet) bool {
+    for (filters.clauses) |clause| switch (clause.scope) {
+        .event => return true,
+        .session => if (!hasSessionFact(clause.field.kind)) return true,
+        .person => if (clause.field.kind != .identity_state and
+            clause.field.kind != .user_trait)
+        {
+            return true;
+        },
+    };
+    return false;
+}
+
+fn usesOnlySessionFacts(filters: analysis.FilterSet) bool {
+    if (filters.clauses.len == 0) return false;
+    for (filters.clauses) |clause| {
+        if (clause.scope != .session or !hasSessionFact(clause.field.kind)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn writeSessionFirst(
+    builder: *Builder,
+    column: []const u8,
+    alias: []const u8,
+    default_value: []const u8,
+    kinds: []const u8,
+    descending: bool,
+) !void {
+    try builder.write(", COALESCE(first(");
+    try builder.write(column);
+    try builder.write(" ORDER BY occurred_at_utc_micros");
+    if (descending) try builder.write(" DESC");
+    try builder.write(", sequence");
+    if (descending) try builder.write(" DESC");
+    try builder.write(", received_at_utc_micros");
+    if (descending) try builder.write(" DESC");
+    try builder.write(", event_id");
+    if (descending) try builder.write(" DESC");
+    try builder.write(") FILTER (WHERE kind ");
+    try builder.write(kinds);
+    try builder.write("), ");
+    try builder.write(default_value);
+    try builder.write(") AS ");
+    try builder.write(alias);
+}
+
+fn writeFilteredOverviewCommon(
+    builder: *Builder,
+    execution: analysis.OverviewExecution,
+    selection: ?analysis.OverviewTrendSelection,
+    include_detail_panels: bool,
+) !void {
+    const session_columns = FilteredSessionColumns.resolve(
+        execution.filters,
+        include_detail_panels,
+    );
+    var goal_event_name = false;
+    var goal_path = false;
+    var goal_properties_json = false;
+    for (execution.active_goals) |goal| {
+        goal_properties_json = goal_properties_json or
+            goal.selector.predicates.len != 0;
+        switch (goal.selector.kind) {
+            .exact_event => goal_event_name = true,
+            .exact_page, .page_prefix => goal_path = true,
+            .saved_goal => return error.UnresolvedGoalSelector,
+        }
+    }
+    const include_event_columns = needsFilteredEventColumns(execution.filters);
+    if (execution.strict_traffic_mode) {
+        var goals: [analysis.maximum_active_goals]traffic.Goal = undefined;
+        for (execution.active_goals, 0..) |goal, index| goals[index] = .{
+            .kind = switch (goal.selector.kind) {
+                .exact_event => .event,
+                .exact_page => .path,
+                .page_prefix => .prefix,
+                .saved_goal => return error.UnresolvedGoalSelector,
+            },
+            .value = goal.selector.value,
+        };
+        try builder.write("WITH ");
+        try builder.appendTraffic(try traffic.classifierFragment(
+            builder.allocator,
+            execution.site_id,
+            goals[0..execution.active_goals.len],
+            true,
+        ));
+        try builder.write(", ");
+    } else try builder.write("WITH ");
+    try builder.write(
+        "periods(period, start_date, end_date) AS (VALUES" ++
+            " (1::UTINYINT, CAST(",
+    );
+    try builder.bindText(execution.range.start);
+    try builder.write(" AS DATE), CAST(");
+    try builder.bindText(execution.range.end);
+    try builder.write(" AS DATE))");
+    if (execution.comparison_range) |range| {
+        try builder.write(", (2::UTINYINT, CAST(");
+        try builder.bindText(range.start);
+        try builder.write(" AS DATE), CAST(");
+        try builder.bindText(range.end);
+        try builder.write(" AS DATE))");
+    }
+    try builder.write(
+        "), range_events AS NOT MATERIALIZED (SELECT p.period," ++
+            " e.session_id, e.kind",
+    );
+    if (include_event_columns) {
+        try builder.write(
+            ", e.event_name, e.path, e.page_title, e.hostname," ++
+                " e.referrer_host AS referrer," ++
+                " e.utm_source, e.utm_medium, e.utm_campaign," ++
+                " e.utm_term, e.utm_content, e.country_code AS country," ++
+                " e.language, e.device_category AS device," ++
+                " e.browser_family AS browser," ++
+                " e.os_family AS operating_system, e.properties_json",
+        );
+    } else if (selection != null) {
+        try builder.write(", e.path");
+    }
+    try builder.write(
+        ", e.value_amount, e.value_currency," ++
+            " e.identity_quality," ++
+            " struct_pack(identity_kind := CASE" ++
+            " WHEN e.identity_quality = 1" ++
+            " AND COALESCE(l.user_id, e.user_id, '') <> ''" ++
+            " THEN 0::UTINYINT ELSE e.identity_quality END," ++
+            " user_id := CASE WHEN e.identity_quality = 1" ++
+            " AND COALESCE(l.user_id, e.user_id, '') <> ''" ++
+            " THEN COALESCE(l.user_id, e.user_id) ELSE '' END," ++
+            " anonymous_id := CASE WHEN e.identity_quality = 1" ++
+            " AND COALESCE(l.user_id, e.user_id, '') <> ''" ++
+            " THEN CAST(NULL AS UUID) ELSE e.anonymous_id END) AS person_key," ++
+            " CASE WHEN e.identity_quality = 1" ++
+            " AND COALESCE(l.user_id, e.user_id, '') <> '' THEN 'identified'" ++
+            " WHEN e.identity_quality = 1 THEN 'anonymous'" ++
+            " WHEN e.identity_quality = 2 THEN 'ephemeral'" ++
+            " ELSE 'legacy' END AS identity_state, ",
+    );
+    try writeGoalMatchCount(builder, execution.active_goals, "e");
+    try builder.write(" AS goal_matches, ");
+    try writeGoalMatchMask(builder, execution.active_goals, "e");
+    try builder.write(" AS goal_mask");
+    if (selection) |trend| {
+        try builder.write(", ");
+        try writeBucket(builder, trend.interval, "e");
+        try builder.write(" AS bucket_label");
+    }
+    try builder.write(
+        " FROM events e JOIN periods p" ++
+            " ON e.site_local_date BETWEEN p.start_date AND p.end_date" ++
+            " LEFT JOIN identity_links l ON l.site_id = e.site_id" ++
+            " AND l.anonymous_id = e.anonymous_id" ++
+            " WHERE e.site_id = ",
+    );
+    try builder.bindText(execution.site_id);
+    try builder.write(" AND e.kind IN (1, 2) AND e.traffic_class IN (1, 5)");
+    if (execution.strict_traffic_mode) try builder.write(
+        " AND e.session_id NOT IN (SELECT session_id" ++
+            " FROM d34_current_suspected_sessions)",
+    );
+    try builder.write(
+        "), base AS NOT MATERIALIZED (SELECT * FROM range_events)," ++
+            " range_sessions AS NOT MATERIALIZED" ++
+            " (SELECT DISTINCT period, session_id FROM range_events)," ++
+            " session_events AS NOT MATERIALIZED" ++
+            " (SELECT rs.period, e.session_id, e.kind",
+    );
+    if (goal_event_name) try builder.write(", e.event_name");
+    if (goal_path or session_columns.landing_page or session_columns.exit_page) {
+        try builder.write(", e.path");
+    }
+    if (goal_properties_json) try builder.write(", e.properties_json");
+    if (session_columns.referrer) try builder.write(", e.referrer_host");
+    if (session_columns.utm_source) try builder.write(", e.utm_source");
+    if (session_columns.utm_medium) try builder.write(", e.utm_medium");
+    if (session_columns.utm_campaign) try builder.write(", e.utm_campaign");
+    if (session_columns.utm_term) try builder.write(", e.utm_term");
+    if (session_columns.utm_content) try builder.write(", e.utm_content");
+    if (session_columns.country) try builder.write(", e.country_code");
+    if (session_columns.language) try builder.write(", e.language");
+    if (session_columns.device) try builder.write(", e.device_category");
+    if (session_columns.browser) try builder.write(", e.browser_family");
+    if (session_columns.operating_system) try builder.write(", e.os_family");
+    try builder.write(
+        ", e.engagement_ms," ++
+            " e.occurred_at_utc_micros, e.sequence," ++
+            " e.received_at_utc_micros, e.event_id" ++
+            " FROM events e JOIN range_sessions rs" ++
+            " ON rs.session_id = e.session_id WHERE e.site_id = ",
+    );
+    try builder.bindText(execution.site_id);
+    try builder.write(" AND e.traffic_class IN (1, 5)");
+    try builder.write(
+        "), session_summary AS NOT MATERIALIZED (SELECT period, session_id",
+    );
+    if (session_columns.landing_page) try writeSessionFirst(
+        builder,
+        "path",
+        "landing_page",
+        "''",
+        "= 1",
+        false,
+    );
+    if (session_columns.exit_page) try writeSessionFirst(
+        builder,
+        "path",
+        "exit_page",
+        "''",
+        "= 1",
+        true,
+    );
+    if (session_columns.referrer) try writeSessionFirst(
+        builder,
+        "referrer_host",
+        "referrer",
+        "''",
+        "= 1",
+        false,
+    );
+    if (session_columns.utm_source) try writeSessionFirst(
+        builder,
+        "utm_source",
+        "utm_source",
+        "''",
+        "= 1",
+        false,
+    );
+    if (session_columns.utm_medium) try writeSessionFirst(
+        builder,
+        "utm_medium",
+        "utm_medium",
+        "''",
+        "= 1",
+        false,
+    );
+    if (session_columns.utm_campaign) try writeSessionFirst(
+        builder,
+        "utm_campaign",
+        "utm_campaign",
+        "''",
+        "= 1",
+        false,
+    );
+    if (session_columns.utm_term) try writeSessionFirst(
+        builder,
+        "utm_term",
+        "utm_term",
+        "''",
+        "= 1",
+        false,
+    );
+    if (session_columns.utm_content) try writeSessionFirst(
+        builder,
+        "utm_content",
+        "utm_content",
+        "''",
+        "= 1",
+        false,
+    );
+    if (session_columns.country) try writeSessionFirst(
+        builder,
+        "country_code",
+        "country",
+        "'ZZ'",
+        "IN (1, 2)",
+        false,
+    );
+    if (session_columns.language) try writeSessionFirst(
+        builder,
+        "language",
+        "language",
+        "''",
+        "IN (1, 2)",
+        false,
+    );
+    if (session_columns.device) try writeSessionFirst(
+        builder,
+        "device_category",
+        "device",
+        "'unknown'",
+        "IN (1, 2)",
+        false,
+    );
+    if (session_columns.browser) try writeSessionFirst(
+        builder,
+        "browser_family",
+        "browser",
+        "'Unknown'",
+        "IN (1, 2)",
+        false,
+    );
+    if (session_columns.operating_system) try writeSessionFirst(
+        builder,
+        "os_family",
+        "operating_system",
+        "'Unknown'",
+        "IN (1, 2)",
+        false,
+    );
+    try builder.write(
+        ", min(occurred_at_utc_micros) AS first_at," ++
+            " max(occurred_at_utc_micros) AS last_at," ++
+            " count(*) FILTER (WHERE kind = 1)::BIGINT AS page_views," ++
+            " sum(engagement_ms)::BIGINT AS engagement_ms," ++
+            " bool_or(CASE WHEN kind IN (1, 2) THEN ",
+    );
+    try writeAnyGoalMatch(builder, execution.active_goals, "session_events");
+    try builder.write(
+        " ELSE FALSE END) AS converted" ++
+            " FROM session_events GROUP BY period, session_id)," ++
+            " session_facts AS (SELECT st.period, st.session_id",
+    );
+    if (session_columns.landing_page) try builder.write(", st.landing_page");
+    if (session_columns.exit_page) try builder.write(", st.exit_page");
+    if (session_columns.referrer) try builder.write(", st.referrer");
+    if (session_columns.utm_source) try builder.write(", st.utm_source");
+    if (session_columns.utm_medium) try builder.write(", st.utm_medium");
+    if (session_columns.utm_campaign) try builder.write(", st.utm_campaign");
+    if (session_columns.utm_term) try builder.write(", st.utm_term");
+    if (session_columns.utm_content) try builder.write(", st.utm_content");
+    if (session_columns.country) try builder.write(", st.country");
+    if (session_columns.language) try builder.write(", st.language");
+    if (session_columns.device) try builder.write(", st.device");
+    if (session_columns.browser) try builder.write(", st.browser");
+    if (session_columns.operating_system) try builder.write(", st.operating_system");
+    if (session_columns.channel) try builder.write(
+        ", CASE WHEN st.utm_source = ''" ++
+            " AND st.utm_medium = ''" ++
+            " AND st.referrer = '' THEN 'Direct'" ++
+            " WHEN lower(st.utm_medium) IN ('cpc', 'ppc', 'paidsearch')" ++
+            " THEN 'Paid Search'" ++
+            " WHEN lower(st.utm_medium) = 'organic' THEN 'Organic Search'" ++
+            " WHEN lower(st.utm_medium) IN" ++
+            " ('social', 'social-network', 'social-media', 'sm') THEN 'Social'" ++
+            " WHEN lower(st.utm_medium) = 'email' THEN 'Email'" ++
+            " WHEN lower(st.utm_medium) = 'referral' OR" ++
+            " (st.referrer <> '' AND st.utm_source = ''" ++
+            " AND st.utm_medium = '') THEN 'Referral'" ++
+            " ELSE 'Other / Unknown' END AS channel",
+    );
+    try builder.write(
+        ", greatest(0, (st.last_at - st.first_at) / 1000)::BIGINT" ++
+            " AS duration_ms, st.engagement_ms, st.page_views," ++
+            " (st.engagement_ms >= 10000 OR st.page_views >= 2" ++
+            " OR st.converted) AS engaged, st.converted" ++
+            " FROM session_summary st)",
+    );
+    if (hasUserTraitClause(execution.filters.clauses)) {
+        try writePersonTraits(
+            builder,
+            execution.site_id,
+            execution.strict_traffic_mode,
+            true,
+        );
+    }
+    try builder.write(", qualified AS ");
+    if (selection == null) try builder.write("NOT ");
+    try builder.write(
+        "MATERIALIZED (SELECT e.period, e.session_id," ++
+            " e.kind, e.value_amount, e.value_currency, e.identity_quality," ++
+            " e.person_key, e.goal_matches, e.goal_mask",
+    );
+    if (selection != null) try builder.write(
+        ", e.path, e.bucket_label",
+    );
+    try builder.write(
+        " FROM base e" ++
+            " JOIN session_facts s USING (period, session_id) WHERE TRUE",
+    );
+    for (execution.filters.clauses) |clause| {
+        try builder.write(" AND ");
+        try writePeriodClause(builder, clause, "e", "s");
+    }
+    try builder.write(")");
+}
+
+fn writePeriodClause(
+    builder: *Builder,
+    clause: analysis.Clause,
+    event_alias: []const u8,
+    session_alias: []const u8,
+) !void {
+    switch (clause.scope) {
+        .event => try writeFieldPredicate(builder, clause, event_alias),
+        .session => if (hasSessionFact(clause.field.kind)) {
+            try writeFieldPredicate(builder, clause, session_alias);
+        } else {
+            try builder.write("EXISTS (SELECT 1 FROM base sf WHERE sf.period = ");
+            try builder.write(event_alias);
+            try builder.write(".period AND sf.session_id = ");
+            try builder.write(event_alias);
+            try builder.write(".session_id AND ");
+            try writeFieldPredicate(builder, clause, "sf");
+            try builder.write(")");
+        },
+        .person => {
+            if (clause.field.kind == .identity_state) {
+                return writeIdentityStatePredicate(builder, clause, event_alias);
+            }
+            try builder.write(event_alias);
+            try builder.write(".person_key IS NOT NULL AND EXISTS (SELECT 1 FROM ");
+            try builder.write(if (clause.field.kind == .user_trait)
+                "person_traits"
+            else
+                "base");
+            try builder.write(" pf WHERE pf.person_key = ");
+            try builder.write(event_alias);
+            try builder.write(".person_key");
+            if (clause.field.kind != .user_trait) {
+                try builder.write(" AND pf.period = ");
+                try builder.write(event_alias);
+                try builder.write(".period");
+            }
+            try builder.write(" AND ");
+            try writeFieldPredicate(builder, clause, "pf");
+            try builder.write(")");
+        },
+    }
+}
+
+fn writeIdentityStatePredicate(
+    builder: *Builder,
+    clause: analysis.Clause,
+    alias: []const u8,
+) !void {
+    switch (clause.operator) {
+        .is, .is_not => {
+            try builder.write(alias);
+            try builder.write(if (clause.operator == .is)
+                ".identity_state IN ("
+            else
+                ".identity_state NOT IN (");
+            for (clause.values, 0..) |value, index| {
+                if (index != 0) try builder.write(", ");
+                try builder.bindText(value);
+            }
+            try builder.write(")");
+        },
+        .contains, .not_contains, .starts_with => {
+            try builder.write("(");
+            for (clause.values, 0..) |value, index| {
+                if (index != 0) try builder.write(
+                    if (clause.operator == .not_contains) " AND " else " OR ",
+                );
+                if (clause.operator == .not_contains) try builder.write("NOT ");
+                try builder.write(if (clause.operator == .starts_with)
+                    "starts_with("
+                else
+                    "contains(");
+                try builder.write(alias);
+                try builder.write(".identity_state, ");
+                try builder.bindText(value);
+                try builder.write(")");
+            }
+            try builder.write(")");
+        },
+        .exists, .absent => {
+            try builder.write(alias);
+            try builder.write(if (clause.operator == .exists)
+                ".identity_state <> ''"
+            else
+                ".identity_state = ''");
+        },
+        .gt, .gte, .lt, .lte, .is_true, .is_false => unreachable,
+    }
+}
+
+fn writeFilteredOverviewAggregates(
+    builder: *Builder,
+    execution: analysis.OverviewExecution,
+) !void {
+    try builder.write(
+        ", event_summary AS (SELECT period," ++
+            " count(*) FILTER (WHERE kind = 1)::BIGINT AS page_views," ++
+            " COALESCE(sum(goal_matches), 0)::BIGINT AS conversions" ++
+            " FROM qualified GROUP BY period),",
+    );
+    if (usesOnlySessionFacts(execution.filters)) {
+        try builder.write(
+            " qualified_sessions AS (SELECT period, session_id" ++
+                " FROM session_facts s WHERE TRUE",
+        );
+        for (execution.filters.clauses) |clause| {
+            try builder.write(" AND ");
+            try writePeriodClause(builder, clause, "s", "s");
+        }
+        try builder.write("),");
+    } else try builder.write(
+        " qualified_sessions AS (SELECT DISTINCT period, session_id" ++
+            " FROM qualified),",
+    );
+    try builder.write(
+        " engagement_summary AS (SELECT q.period," ++
+            " count(*)::BIGINT AS sessions," ++
+            " count(*) FILTER (WHERE s.engaged)::BIGINT AS engaged_sessions" ++
+            " FROM qualified_sessions q JOIN session_facts s" ++
+            " USING (period, session_id) GROUP BY q.period)," ++
+            " person_rows AS MATERIALIZED (SELECT period, person_key," ++
+            " max(identity_quality)::UTINYINT AS identity_quality," ++
+            " bit_or(goal_mask)::UBIGINT AS goal_mask FROM qualified" ++
+            " WHERE person_key IS NOT NULL GROUP BY period, person_key),",
+    );
+    try builder.write(
+        " person_summary AS (SELECT period, count(*)::BIGINT AS visitors," ++
+            " count(*) FILTER (WHERE identity_quality = 1)::BIGINT" ++
+            " AS persistent," ++
+            " count(*) FILTER (WHERE identity_quality = 2)::BIGINT" ++
+            " AS ephemeral," ++
+            " count(*) FILTER (WHERE identity_quality = 3)::BIGINT AS legacy," ++
+            " count(*) FILTER (WHERE goal_mask <> 0)::BIGINT" ++
+            " AS converting_visitors" ++
+            " FROM person_rows GROUP BY period)," ++
+            " summary_values AS (SELECT e.period, g.sessions, e.page_views," ++
+            " g.engaged_sessions, e.conversions, p.visitors, p.persistent," ++
+            " p.ephemeral, p.legacy, p.converting_visitors" ++
+            " FROM event_summary e JOIN engagement_summary g USING (period)" ++
+            " JOIN person_summary p USING (period))," ++
+            " overview_summary AS MATERIALIZED (SELECT p.period," ++
+            " COALESCE(v.sessions, 0)::BIGINT AS sessions," ++
+            " COALESCE(v.page_views, 0)::BIGINT AS page_views," ++
+            " COALESCE(v.engaged_sessions, 0)::BIGINT AS engaged_sessions," ++
+            " COALESCE(v.conversions, 0)::BIGINT AS conversions," ++
+            " COALESCE(v.visitors, 0)::BIGINT AS visitors," ++
+            " COALESCE(v.persistent, 0)::BIGINT AS persistent," ++
+            " COALESCE(v.ephemeral, 0)::BIGINT AS ephemeral," ++
+            " COALESCE(v.legacy, 0)::BIGINT AS legacy," ++
+            " COALESCE(v.converting_visitors, 0)::BIGINT AS converting_visitors" ++
+            " FROM periods p LEFT JOIN summary_values v USING (period))," ++
+            " overview_revenue AS (SELECT e.period," ++
+            " e.value_currency AS currency," ++
+            " CAST(sum(e.value_amount) AS VARCHAR) AS amount," ++
+            " count(*)::BIGINT AS value_count," ++
+            " row_number() OVER (PARTITION BY e.period" ++
+            " ORDER BY e.value_currency) AS position" ++
+            " FROM base e JOIN session_facts s USING (period, session_id)" ++
+            " WHERE e.value_amount IS NOT NULL AND e.value_currency <> ''",
+    );
+    for (execution.filters.clauses) |clause| {
+        try builder.write(" AND ");
+        try writePeriodClause(builder, clause, "e", "s");
+    }
+    try builder.write(
+        " GROUP BY e.period, e.value_currency)," ++
+            " history_currencies AS (SELECT value_currency FROM events" ++
+            " WHERE site_id = ",
+    );
+    try builder.bindText(execution.site_id);
+    try builder.write(
+        " AND kind IN (1, 2) AND traffic_class IN (1, 5)" ++
+            " AND value_amount IS NOT NULL AND value_currency <> ''",
+    );
+    if (execution.strict_traffic_mode) try builder.write(
+        " AND session_id NOT IN (SELECT session_id" ++
+            " FROM d34_current_suspected_sessions)",
+    );
+    try builder.write(
+        " GROUP BY value_currency ORDER BY value_currency LIMIT ",
+    );
+    try builder.bindInteger(@as(i64, analysis.maximum_currency_series) + 1);
+    try builder.write(")");
+}
+
+pub fn compileFilteredOverview(
+    allocator: std.mem.Allocator,
+    execution: analysis.OverviewExecution,
+) !StatementPlan {
+    try execution.validate();
+    if (execution.filters.clauses.len == 0) return error.MissingAnalysisFilters;
+    var builder = Builder.init(allocator);
+    try writeFilteredOverviewCommon(&builder, execution, null, false);
+    try writeFilteredOverviewAggregates(&builder, execution);
+    try builder.write(
+        " SELECT CASE o.period WHEN 1 THEN 'current' ELSE 'comparison' END" ++
+            " AS period, v.metric, v.numerator::BIGINT," ++
+            " v.denominator::BIGINT, CAST(NULL AS VARCHAR) AS amount," ++
+            " '' AS currency, 0::BIGINT AS value_count," ++
+            " o.persistent, o.ephemeral, o.legacy," ++
+            " CAST(NULL AS VARCHAR) AS text_value" ++
+            " FROM overview_summary o CROSS JOIN LATERAL (VALUES" ++
+            " ('visitors', o.visitors, 0)," ++
+            " ('sessions', o.sessions, 0)," ++
+            " ('page-views', o.page_views, 0)," ++
+            " ('engagement-rate', o.engaged_sessions, o.sessions)," ++
+            " ('conversions', o.conversions, 0)," ++
+            " ('conversion-rate', o.converting_visitors, o.visitors)" ++
+            ") v(metric, numerator, denominator)" ++
+            " UNION ALL SELECT CASE r.period WHEN 1 THEN 'current'" ++
+            " ELSE 'comparison' END, 'revenue', 0::BIGINT, 0::BIGINT," ++
+            " r.amount, r.currency, r.value_count, o.persistent, o.ephemeral," ++
+            " o.legacy, CAST(NULL AS VARCHAR)" ++
+            " FROM overview_revenue r JOIN overview_summary o USING (period)" ++
+            " WHERE r.position <= ",
+    );
+    try builder.bindInteger(@as(i64, analysis.maximum_currency_series) + 1);
+    try builder.write(
+        " UNION ALL SELECT 'history', 'revenue', 0::BIGINT, 0::BIGINT," ++
+            " CAST(NULL AS VARCHAR), value_currency, 0::BIGINT, 0::BIGINT," ++
+            " 0::BIGINT, 0::BIGINT, CAST(NULL AS VARCHAR)" ++
+            " FROM history_currencies",
+    );
+    return builder.finish();
+}
+
+pub fn compileFilteredOverviewDetails(
+    allocator: std.mem.Allocator,
+    execution: analysis.OverviewExecution,
+) !StatementPlan {
+    try execution.validate();
+    if (execution.filters.clauses.len == 0) return error.MissingAnalysisFilters;
+    const selection = execution.trend orelse return error.MissingOverviewTrend;
+    var builder = Builder.init(allocator);
+    try writeFilteredOverviewCommon(&builder, execution, selection, true);
+    try writeFilteredOverviewAggregates(&builder, execution);
+    try builder.write(", trend_buckets(period, position, label) AS (VALUES ");
+    var first = true;
+    for (selection.current_buckets, 0..) |bucket, index| {
+        if (!first) try builder.write(", ");
+        first = false;
+        try builder.write("(1::UTINYINT, ");
+        try builder.bindInteger(@intCast(index));
+        try builder.write("::UINTEGER, ");
+        try builder.bindText(bucket.label);
+        try builder.write(")");
+    }
+    for (selection.comparison_buckets, 0..) |bucket, index| {
+        if (!first) try builder.write(", ");
+        first = false;
+        try builder.write("(2::UTINYINT, ");
+        try builder.bindInteger(@intCast(index));
+        try builder.write("::UINTEGER, ");
+        try builder.bindText(bucket.label);
+        try builder.write(")");
+    }
+    if (first) return error.MissingOverviewBuckets;
+    try builder.write("), trend_values AS (");
+    switch (selection.metric) {
+        .visitors => try builder.write(
+            "SELECT period, bucket_label AS label," ++
+                " count(DISTINCT person_key)::BIGINT AS numerator," ++
+                " CAST(NULL AS VARCHAR) AS amount FROM qualified" ++
+                " GROUP BY period, label",
+        ),
+        .sessions => try builder.write(
+            "SELECT period, bucket_label AS label," ++
+                " count(DISTINCT session_id)::BIGINT AS numerator," ++
+                " CAST(NULL AS VARCHAR) AS amount FROM qualified" ++
+                " GROUP BY period, label",
+        ),
+        .page_views => try builder.write(
+            "SELECT period, bucket_label AS label," ++
+                " count(*) FILTER (WHERE kind = 1)::BIGINT AS numerator," ++
+                " CAST(NULL AS VARCHAR) AS amount FROM qualified" ++
+                " GROUP BY period, label",
+        ),
+        .conversions => try builder.write(
+            "SELECT period, bucket_label AS label," ++
+                " COALESCE(sum(goal_matches), 0)::BIGINT AS numerator," ++
+                " CAST(NULL AS VARCHAR) AS amount FROM qualified" ++
+                " GROUP BY period, label",
+        ),
+        .revenue => {
+            try builder.write(
+                "SELECT period, bucket_label AS label, 0::BIGINT AS numerator," ++
+                    " CAST(sum(value_amount) AS VARCHAR) AS amount" ++
+                    " FROM qualified WHERE value_amount IS NOT NULL" ++
+                    " AND value_currency = ",
+            );
+            try builder.bindText(selection.currency);
+            try builder.write(" GROUP BY period, label");
+        },
+    }
+    try builder.write(
+        "), trend_rows AS (SELECT b.period, b.position, b.label," ++
+            " COALESCE(v.numerator, 0)::BIGINT AS numerator," ++
+            " COALESCE(v.amount, '0.000000') AS amount" ++
+            " FROM trend_buckets b LEFT JOIN trend_values v" ++
+            " ON v.period = b.period AND v.label = b.label)," ++
+            " current_sessions AS NOT MATERIALIZED (SELECT session_id" ++
+            " FROM qualified_sessions WHERE period = 1)," ++
+            " content_rows AS (SELECT path, count(*)::BIGINT AS page_views," ++
+            " count(DISTINCT person_key)::BIGINT AS visitors" ++
+            " FROM qualified WHERE period = 1 AND kind = 1 GROUP BY path)," ++
+            " acquisition_rows AS (SELECT" ++
+            " COALESCE(NULLIF(sf.referrer, ''), 'Direct') AS source," ++
+            " count(*)::BIGINT AS sessions," ++
+            " count(*) FILTER (WHERE sf.converted)::BIGINT AS converting_sessions" ++
+            " FROM current_sessions cs JOIN session_facts sf" ++
+            " ON sf.period = 1 AND sf.session_id = cs.session_id" ++
+            " GROUP BY source)," ++
+            " audience_rows AS (SELECT sf.country, count(*)::BIGINT AS sessions" ++
+            " FROM current_sessions cs JOIN session_facts sf" ++
+            " ON sf.period = 1 AND sf.session_id = cs.session_id" ++
+            " GROUP BY sf.country), goal_rows AS (",
+    );
+    if (execution.active_goals.len == 0) {
+        try builder.write(
+            "SELECT '' AS goal_id, 0::UINTEGER AS goal_position," ++
+                " 0::BIGINT AS converting_people WHERE FALSE",
+        );
+    } else for (execution.active_goals, 0..) |goal, index| {
+        if (index != 0) try builder.write(" UNION ALL ");
+        try builder.write("SELECT ");
+        try builder.bindText(goal.id);
+        try builder.write(" AS goal_id, ");
+        try builder.bindInteger(@intCast(index));
+        try builder.write(
+            "::UINTEGER AS goal_position," ++
+                " count(*)::BIGINT AS converting_people" ++
+                " FROM person_rows e WHERE e.period = 1" ++
+                " AND (e.goal_mask & ",
+        );
+        try builder.bindInteger(@as(i64, 1) << @intCast(index));
+        try builder.write("::UBIGINT) <> 0");
+    }
+    try builder.write(
+        "), health_days AS MATERIALIZED (SELECT site_local_date," ++
+            " count(*)::BIGINT AS accepted_events," ++
+            " COALESCE(max(received_at_utc_micros), 0)::BIGINT AS last_received," ++
+            " count(*) FILTER (WHERE protocol_version = 1)::BIGINT AS protocol_v1," ++
+            " count(*) FILTER (WHERE protocol_version = 2)::BIGINT AS protocol_v2" ++
+            " FROM events WHERE site_id = ",
+    );
+    try builder.bindText(execution.site_id);
+    try builder.write(
+        " GROUP BY site_local_date), health_row AS (SELECT" ++
+            " COALESCE(sum(accepted_events), 0)::BIGINT AS accepted_events," ++
+            " COALESCE(max(last_received), 0)::BIGINT AS last_received," ++
+            " COALESCE(sum(protocol_v1), 0)::BIGINT AS protocol_v1," ++
+            " COALESCE(sum(protocol_v2), 0)::BIGINT AS protocol_v2," ++
+            " count(*) FILTER (WHERE site_local_date BETWEEN CAST(",
+    );
+    try builder.bindText(execution.range.start);
+    try builder.write(" AS DATE) AND CAST(");
+    try builder.bindText(execution.range.end);
+    try builder.write(" AS DATE) AND accepted_events >= ");
+    try builder.bindInteger(execution.daily_event_ceiling);
+    try builder.write(
+        ")::BIGINT AS ceiling_reached_days FROM health_days)" ++
+            " SELECT 'detail' AS period, 'trend' AS metric," ++
+            " t.position::BIGINT AS numerator, t.numerator AS denominator," ++
+            " t.amount, ",
+    );
+    if (selection.metric == .revenue) {
+        try builder.bindText(selection.currency);
+    } else try builder.write("''");
+    try builder.write(
+        " AS currency, 0::BIGINT AS value_count," ++
+            " t.period::BIGINT AS persistent, 0::BIGINT AS ephemeral," ++
+            " 0::BIGINT AS legacy, t.label AS text_value FROM trend_rows t" ++
+            " UNION ALL SELECT * FROM (SELECT 'detail', 'content'," ++
+            " row_number() OVER (ORDER BY page_views DESC, path ASC)::BIGINT," ++
+            " page_views, CAST(NULL AS VARCHAR), '', visitors," ++
+            " 0::BIGINT, 0::BIGINT, 0::BIGINT, path FROM content_rows" ++
+            " ORDER BY page_views DESC, path ASC LIMIT 5)" ++
+            " UNION ALL SELECT * FROM (SELECT 'detail', 'acquisition'," ++
+            " row_number() OVER (ORDER BY sessions DESC, source ASC)::BIGINT," ++
+            " sessions, CAST(NULL AS VARCHAR), '', converting_sessions," ++
+            " 0::BIGINT, 0::BIGINT, 0::BIGINT, source FROM acquisition_rows" ++
+            " ORDER BY sessions DESC, source ASC LIMIT 5)" ++
+            " UNION ALL SELECT * FROM (SELECT 'detail', 'conversion'," ++
+            " row_number() OVER (ORDER BY converting_people DESC," ++
+            " goal_position ASC)::BIGINT, converting_people," ++
+            " CAST(NULL AS VARCHAR), '', 0::BIGINT," ++
+            " 0::BIGINT, 0::BIGINT, 0::BIGINT, goal_id" ++
+            " FROM goal_rows ORDER BY converting_people DESC," ++
+            " goal_position ASC LIMIT 5)" ++
+            " UNION ALL SELECT * FROM (SELECT 'detail', 'audience'," ++
+            " row_number() OVER (ORDER BY sessions DESC, country ASC)::BIGINT," ++
+            " sessions, CAST(NULL AS VARCHAR), '', 0::BIGINT," ++
+            " 0::BIGINT, 0::BIGINT, 0::BIGINT, country FROM audience_rows" ++
+            " ORDER BY sessions DESC, country ASC LIMIT 5)" ++
+            " UNION ALL SELECT 'detail', 'health', 0::BIGINT," ++
+            " accepted_events, CAST(NULL AS VARCHAR), '', last_received," ++
+            " protocol_v1, protocol_v2, ceiling_reached_days, ''" ++
+            " FROM health_row" ++
+            " UNION ALL SELECT CASE o.period WHEN 1 THEN 'current'" ++
+            " ELSE 'comparison' END, v.metric, v.numerator::BIGINT," ++
+            " v.denominator::BIGINT, CAST(NULL AS VARCHAR), '', 0::BIGINT," ++
+            " o.persistent, o.ephemeral, o.legacy, CAST(NULL AS VARCHAR)" ++
+            " FROM overview_summary o CROSS JOIN LATERAL (VALUES" ++
+            " ('visitors', o.visitors, 0)," ++
+            " ('sessions', o.sessions, 0)," ++
+            " ('page-views', o.page_views, 0)," ++
+            " ('engagement-rate', o.engaged_sessions, o.sessions)," ++
+            " ('conversions', o.conversions, 0)," ++
+            " ('conversion-rate', o.converting_visitors, o.visitors)" ++
+            ") v(metric, numerator, denominator)" ++
+            " UNION ALL SELECT CASE r.period WHEN 1 THEN 'current'" ++
+            " ELSE 'comparison' END, 'revenue', 0::BIGINT, 0::BIGINT," ++
+            " r.amount, r.currency, r.value_count, o.persistent, o.ephemeral," ++
+            " o.legacy, CAST(NULL AS VARCHAR)" ++
+            " FROM overview_revenue r JOIN overview_summary o USING (period)" ++
+            " WHERE r.position <= ",
+    );
+    try builder.bindInteger(@as(i64, analysis.maximum_currency_series) + 1);
+    try builder.write(
+        " UNION ALL SELECT 'history', 'revenue', 0::BIGINT, 0::BIGINT," ++
+            " CAST(NULL AS VARCHAR), value_currency, 0::BIGINT, 0::BIGINT," ++
+            " 0::BIGINT, 0::BIGINT, CAST(NULL AS VARCHAR)" ++
+            " FROM history_currencies" ++
+            " ORDER BY period, metric, persistent, numerator",
+    );
+    return builder.finish();
+}
+
 pub fn executeOverview(
     allocator: std.mem.Allocator,
     event_store: *events.Store,
@@ -979,16 +2366,39 @@ pub fn executeOverview(
             }
         }
     }
-    const plan = try compileOverview(allocator, execution);
+    const filtered = execution.filters.clauses.len != 0;
+    const combined_filtered = filtered and execution.trend != null;
+    const plan = if (combined_filtered)
+        try compileFilteredOverviewDetails(allocator, execution)
+    else if (filtered)
+        try compileFilteredOverview(allocator, execution)
+    else
+        try compileOverview(allocator, execution);
     var budget = deadline.Budget.init(execution.timeout_ms);
     var result = try executePlan(&event_store.database, plan, &budget);
     var decoded = decodeOverview(allocator, execution, &result) catch |err| {
         result.deinit();
         return err;
     };
+    if (combined_filtered) {
+        decoded.details = decodeOverviewDetails(
+            allocator,
+            execution,
+            &result,
+        ) catch |err| {
+            result.deinit();
+            return err;
+        };
+        result.deinit();
+        try cacheOverviewResult(event_store, cache_key.?, decoded);
+        return decoded;
+    }
     result.deinit();
     if (execution.trend != null) {
-        const detail_plan = try compileOverviewDetails(allocator, execution);
+        const detail_plan = if (filtered)
+            try compileFilteredOverviewDetails(allocator, execution)
+        else
+            try compileOverviewDetails(allocator, execution);
         var detail_result = try executePlan(
             &event_store.database,
             detail_plan,
@@ -1015,7 +2425,7 @@ fn overviewCacheKey(
 ) ![]const u8 {
     const trend = execution.trend orelse return error.MissingOverviewTrend;
     var key = std.Io.Writer.Allocating.init(allocator);
-    try key.writer.writeAll("overview-result-v1|metric-v2|");
+    try key.writer.writeAll("overview-result-v2|metric-v2|");
     try cacheKeySlice(&key.writer, execution.site_id);
     try cacheKeySlice(&key.writer, execution.range.start);
     try cacheKeySlice(&key.writer, execution.range.end);
@@ -1031,6 +2441,12 @@ fn overviewCacheKey(
         @tagName(trend.interval),
     });
     try cacheKeySlice(&key.writer, trend.currency);
+    const canonical_filters = try analysis.canonicalFilterJson(
+        allocator,
+        execution.filters,
+    );
+    defer allocator.free(canonical_filters);
+    try cacheKeySlice(&key.writer, canonical_filters);
     try key.writer.print("goals={d}|", .{execution.active_goals.len});
     for (execution.active_goals) |goal| {
         try cacheKeySlice(&key.writer, goal.id);
@@ -1247,7 +2663,15 @@ fn decodeOverview(
     execution: analysis.OverviewExecution,
     result: *duckdb.Result,
 ) !analysis.OverviewResult {
-    if (result.columnCount() != 11 or result.rowCount() > 64) {
+    const maximum_rows = 64 + if (execution.filters.clauses.len != 0)
+        if (execution.trend) |trend|
+            trend.current_buckets.len + trend.comparison_buckets.len +
+                analysis.maximum_overview_panel_rows * 4 + 1
+        else
+            0
+    else
+        0;
+    if (result.columnCount() != 11 or result.rowCount() > maximum_rows) {
         return error.InvalidOverviewResult;
     }
 
@@ -1258,6 +2682,7 @@ fn decodeOverview(
 
     for (0..result.rowCount()) |row| {
         const period = try result.text(allocator, 0, row);
+        if (std.mem.eql(u8, period, "detail")) continue;
         const metric = try result.text(allocator, 1, row);
         if (std.mem.eql(u8, period, "history")) {
             if (std.mem.eql(u8, metric, "revenue")) {
@@ -1418,10 +2843,14 @@ fn decodeOverviewDetails(
     result: *duckdb.Result,
 ) !analysis.OverviewDetails {
     const selection = execution.trend orelse return error.MissingOverviewTrend;
-    const maximum_rows = selection.current_buckets.len +
+    const combined = result.columnCount() == 11;
+    const maximum_rows: usize = selection.current_buckets.len +
         selection.comparison_buckets.len +
-        analysis.maximum_overview_panel_rows * 4 + 1;
-    if (result.columnCount() != 10 or result.rowCount() > maximum_rows) {
+        analysis.maximum_overview_panel_rows * 4 + 1 +
+        (if (combined) @as(usize, 64) else @as(usize, 0));
+    if ((result.columnCount() != 10 and !combined) or
+        result.rowCount() > maximum_rows)
+    {
         return error.InvalidOverviewDetails;
     }
     var current: std.ArrayList(analysis.OverviewTrendPoint) = .empty;
@@ -1433,11 +2862,16 @@ fn decodeOverviewDetails(
     var health: ?analysis.OverviewHealth = null;
 
     for (0..result.rowCount()) |row| {
-        const section = try result.text(allocator, 0, row);
-        const label = try result.text(allocator, 1, row);
+        if (combined and !std.mem.eql(
+            u8,
+            try result.text(allocator, 0, row),
+            "detail",
+        )) continue;
+        const section = try result.text(allocator, if (combined) 1 else 0, row);
+        const label = try result.text(allocator, if (combined) 10 else 1, row);
         const position = result.int64(2, row);
         const numerator = result.int64(3, row);
-        const denominator = result.int64(4, row);
+        const denominator = result.int64(if (combined) 6 else 4, row);
         if (position < 0 or numerator < 0 or denominator < 0) {
             return error.InvalidOverviewDetails;
         }
@@ -1458,8 +2892,16 @@ fn decodeOverviewDetails(
                 .label = label,
                 .measure = if (selection.metric == .revenue)
                     .{ .amount = .{
-                        .decimal = try result.text(allocator, 5, row),
-                        .currency = try result.text(allocator, 6, row),
+                        .decimal = try result.text(
+                            allocator,
+                            if (combined) 4 else 5,
+                            row,
+                        ),
+                        .currency = try result.text(
+                            allocator,
+                            if (combined) 5 else 6,
+                            row,
+                        ),
                         .value_count = 0,
                     } }
                 else
@@ -1556,12 +2998,27 @@ pub fn profileOverview(
     event_store: *events.Store,
     execution: analysis.OverviewExecution,
 ) ![]u8 {
+    try execution.validate();
+    const filtered = execution.filters.clauses.len != 0;
     var output = std.Io.Writer.Allocating.init(allocator);
+    if (filtered and execution.trend != null) {
+        try output.writer.writeAll("OVERVIEW COMBINED STATEMENT\n");
+        try profileOverviewPlan(
+            allocator,
+            event_store,
+            try compileFilteredOverviewDetails(allocator, execution),
+            &output.writer,
+        );
+        return output.toOwnedSlice();
+    }
     try output.writer.writeAll("OVERVIEW KPI STATEMENT\n");
     try profileOverviewPlan(
         allocator,
         event_store,
-        try compileOverview(allocator, execution),
+        if (filtered)
+            try compileFilteredOverview(allocator, execution)
+        else
+            try compileOverview(allocator, execution),
         &output.writer,
     );
     if (execution.trend != null) {
@@ -1569,7 +3026,10 @@ pub fn profileOverview(
         try profileOverviewPlan(
             allocator,
             event_store,
-            try compileOverviewDetails(allocator, execution),
+            if (filtered)
+                try compileFilteredOverviewDetails(allocator, execution)
+            else
+                try compileOverviewDetails(allocator, execution),
             &output.writer,
         );
     }
@@ -1722,6 +3182,24 @@ fn writeGoalMatchCount(
         try builder.write(" THEN 1 ELSE 0 END");
     }
     try builder.write(")::BIGINT");
+}
+
+fn writeGoalMatchMask(
+    builder: *Builder,
+    goals: []const analysis.ResolvedGoal,
+    event_alias: []const u8,
+) !void {
+    if (goals.len == 0) return builder.write("0::UBIGINT");
+    try builder.write("(");
+    for (goals, 0..) |goal, index| {
+        if (index != 0) try builder.write(" | ");
+        try builder.write("CASE WHEN ");
+        try writeSelector(builder, goal.selector, event_alias);
+        try builder.write(" THEN ");
+        try builder.bindInteger(@as(i64, 1) << @intCast(index));
+        try builder.write("::UBIGINT ELSE 0::UBIGINT END");
+    }
+    try builder.write(")::UBIGINT");
 }
 
 fn writeAnyGoalMatch(
@@ -2020,7 +3498,7 @@ fn writeMetricRows(
     range: analysis.LocalDateRange,
     interval: analysis.Interval,
 ) !void {
-    try writeCommon(builder, execution, range);
+    try writeCommon(builder, execution, range, false, false);
     try builder.write(", metric_rows AS (SELECT ");
     if (execution.query.mode == .trend) {
         try writeBucket(builder, interval, "e");
@@ -2076,7 +3554,7 @@ fn compileTotal(
     range: analysis.LocalDateRange,
 ) !StatementPlan {
     var builder = Builder.init(allocator);
-    try writeCommon(&builder, execution, range);
+    try writeCommon(&builder, execution, range, false, false);
     try builder.write(" SELECT '' AS label, ");
     try writeMeasure(&builder, execution, range, "e", "s");
     try builder.write(", 1::BIGINT AS cardinality");
@@ -2095,7 +3573,7 @@ fn compileCoverage(
     range: analysis.LocalDateRange,
 ) !StatementPlan {
     var builder = Builder.init(allocator);
-    try writeCommon(&builder, execution, range);
+    try writeCommon(&builder, execution, range, false, false);
     try builder.write(
         " SELECT count(DISTINCT person_key) FILTER (WHERE identity_quality = 1)," ++
             " count(DISTINCT person_key) FILTER (WHERE identity_quality = 2)," ++
@@ -2193,10 +3671,50 @@ fn writeCommon(
     builder: *Builder,
     execution: analysis.Execution,
     range: analysis.LocalDateRange,
+    force_session_facts: bool,
+    include_user_traits: bool,
 ) !void {
-    if (!needsSessionFacts(execution)) {
+    if (!needsSessionFacts(execution) and !force_session_facts and
+        !include_user_traits)
+    {
         return writeSimpleCommon(builder, execution, range);
     }
+    var session_columns = FilteredSessionColumns.resolve(
+        execution.query.filters,
+        false,
+    );
+    if (force_session_facts) session_columns = .{
+        .landing_page = true,
+        .exit_page = true,
+        .channel = true,
+        .referrer = true,
+        .utm_source = true,
+        .utm_medium = true,
+        .utm_campaign = true,
+        .utm_term = true,
+        .utm_content = true,
+        .country = true,
+        .language = true,
+        .device = true,
+        .browser = true,
+        .operating_system = true,
+    } else if (execution.query.mode == .breakdown) switch (execution.query.dimension.?.kind) {
+        .landing_page => session_columns.include(.landing_page),
+        .exit_page => session_columns.include(.exit_page),
+        .channel => session_columns.include(.channel),
+        .referrer => session_columns.include(.referrer),
+        .utm_source => session_columns.include(.utm_source),
+        .utm_medium => session_columns.include(.utm_medium),
+        .utm_campaign => session_columns.include(.utm_campaign),
+        .utm_term => session_columns.include(.utm_term),
+        .utm_content => session_columns.include(.utm_content),
+        .country => session_columns.include(.country),
+        .language => session_columns.include(.language),
+        .device => session_columns.include(.device),
+        .browser => session_columns.include(.browser),
+        .operating_system => session_columns.include(.operating_system),
+        .page, .hostname, .event_name, .event_property => {},
+    };
     if (execution.strict_traffic_mode) {
         var goals: [analysis.maximum_active_goals]traffic.Goal = undefined;
         for (execution.active_goals, 0..) |goal, index| {
@@ -2248,70 +3766,167 @@ fn writeCommon(
         " AND e.traffic_class IN (1, 5)" ++
             " AND e.session_id IN" ++
             " (SELECT DISTINCT session_id FROM range_events))," ++
-            " session_meaningful AS (SELECT * FROM session_events WHERE kind IN (1, 2))," ++
-            " page_ascending AS (SELECT *, row_number() OVER (PARTITION BY session_id" ++
-            " ORDER BY occurred_at_utc_micros, sequence, received_at_utc_micros, event_id) AS position" ++
-            " FROM session_meaningful WHERE kind = 1)," ++
-            " page_descending AS (SELECT *, row_number() OVER (PARTITION BY session_id" ++
-            " ORDER BY occurred_at_utc_micros DESC, sequence DESC, received_at_utc_micros DESC, event_id DESC) AS position" ++
-            " FROM session_meaningful WHERE kind = 1)," ++
-            " event_ascending AS (SELECT *, row_number() OVER (PARTITION BY session_id" ++
-            " ORDER BY occurred_at_utc_micros, sequence, received_at_utc_micros, event_id) AS position" ++
-            " FROM session_meaningful)," ++
-            " session_stats AS (SELECT session_id," ++
-            " min(occurred_at_utc_micros) AS first_at," ++
+            " session_summary AS MATERIALIZED (SELECT session_id",
+    );
+    if (session_columns.landing_page) try writeSessionFirst(
+        builder,
+        "path",
+        "landing_page",
+        "''",
+        "= 1",
+        false,
+    );
+    if (session_columns.exit_page) try writeSessionFirst(
+        builder,
+        "path",
+        "exit_page",
+        "''",
+        "= 1",
+        true,
+    );
+    if (session_columns.referrer) try writeSessionFirst(
+        builder,
+        "referrer_host",
+        "referrer",
+        "''",
+        "= 1",
+        false,
+    );
+    if (session_columns.utm_source) try writeSessionFirst(
+        builder,
+        "utm_source",
+        "utm_source",
+        "''",
+        "= 1",
+        false,
+    );
+    if (session_columns.utm_medium) try writeSessionFirst(
+        builder,
+        "utm_medium",
+        "utm_medium",
+        "''",
+        "= 1",
+        false,
+    );
+    if (session_columns.utm_campaign) try writeSessionFirst(
+        builder,
+        "utm_campaign",
+        "utm_campaign",
+        "''",
+        "= 1",
+        false,
+    );
+    if (session_columns.utm_term) try writeSessionFirst(
+        builder,
+        "utm_term",
+        "utm_term",
+        "''",
+        "= 1",
+        false,
+    );
+    if (session_columns.utm_content) try writeSessionFirst(
+        builder,
+        "utm_content",
+        "utm_content",
+        "''",
+        "= 1",
+        false,
+    );
+    if (session_columns.country) try writeSessionFirst(
+        builder,
+        "country_code",
+        "country",
+        "'ZZ'",
+        "IN (1, 2)",
+        false,
+    );
+    if (session_columns.language) try writeSessionFirst(
+        builder,
+        "language",
+        "language",
+        "''",
+        "IN (1, 2)",
+        false,
+    );
+    if (session_columns.device) try writeSessionFirst(
+        builder,
+        "device_category",
+        "device",
+        "'unknown'",
+        "IN (1, 2)",
+        false,
+    );
+    if (session_columns.browser) try writeSessionFirst(
+        builder,
+        "browser_family",
+        "browser",
+        "'Unknown'",
+        "IN (1, 2)",
+        false,
+    );
+    if (session_columns.operating_system) try writeSessionFirst(
+        builder,
+        "os_family",
+        "operating_system",
+        "'Unknown'",
+        "IN (1, 2)",
+        false,
+    );
+    try builder.write(
+        ", min(occurred_at_utc_micros) AS first_at," ++
             " max(occurred_at_utc_micros) AS last_at," ++
             " count(*) FILTER (WHERE kind = 1)::BIGINT AS page_views," ++
-            " sum(engagement_ms)::BIGINT AS engagement_ms" ++
+            " sum(engagement_ms)::BIGINT AS engagement_ms," ++
+            " bool_or(CASE WHEN kind IN (1, 2) THEN ",
+    );
+    try writeAnyGoalMatch(builder, execution.active_goals, "session_events");
+    try builder.write(
+        " ELSE FALSE END) AS converted" ++
             " FROM session_events GROUP BY session_id)," ++
-            " session_facts AS (SELECT st.session_id," ++
-            " COALESCE(fp.path, '') AS landing_page," ++
-            " COALESCE(lp.path, '') AS exit_page," ++
-            " COALESCE(fp.referrer_host, '') AS referrer," ++
-            " COALESCE(fp.utm_source, '') AS utm_source," ++
-            " COALESCE(fp.utm_medium, '') AS utm_medium," ++
-            " COALESCE(fp.utm_campaign, '') AS utm_campaign," ++
-            " COALESCE(fp.utm_term, '') AS utm_term," ++
-            " COALESCE(fp.utm_content, '') AS utm_content," ++
-            " COALESCE(fe.country_code, 'ZZ') AS country," ++
-            " COALESCE(fe.language, '') AS language," ++
-            " COALESCE(fe.device_category, 'unknown') AS device," ++
-            " COALESCE(fe.browser_family, 'Unknown') AS browser," ++
-            " COALESCE(fe.os_family, 'Unknown') AS operating_system," ++
-            " CASE" ++
-            " WHEN COALESCE(fp.utm_source, '') = ''" ++
-            "  AND COALESCE(fp.utm_medium, '') = ''" ++
-            "  AND COALESCE(fp.referrer_host, '') = '' THEN 'Direct'" ++
-            " WHEN lower(fp.utm_medium) IN ('cpc', 'ppc', 'paidsearch') THEN 'Paid Search'" ++
-            " WHEN lower(fp.utm_medium) = 'organic' THEN 'Organic Search'" ++
-            " WHEN lower(fp.utm_medium) IN" ++
+            " session_facts AS (SELECT st.session_id",
+    );
+    if (session_columns.landing_page) try builder.write(", st.landing_page");
+    if (session_columns.exit_page) try builder.write(", st.exit_page");
+    if (session_columns.referrer) try builder.write(", st.referrer");
+    if (session_columns.utm_source) try builder.write(", st.utm_source");
+    if (session_columns.utm_medium) try builder.write(", st.utm_medium");
+    if (session_columns.utm_campaign) try builder.write(", st.utm_campaign");
+    if (session_columns.utm_term) try builder.write(", st.utm_term");
+    if (session_columns.utm_content) try builder.write(", st.utm_content");
+    if (session_columns.country) try builder.write(", st.country");
+    if (session_columns.language) try builder.write(", st.language");
+    if (session_columns.device) try builder.write(", st.device");
+    if (session_columns.browser) try builder.write(", st.browser");
+    if (session_columns.operating_system) try builder.write(", st.operating_system");
+    if (session_columns.channel) try builder.write(
+        ", CASE WHEN st.utm_source = '' AND st.utm_medium = ''" ++
+            "  AND st.referrer = '' THEN 'Direct'" ++
+            " WHEN lower(st.utm_medium) IN ('cpc', 'ppc', 'paidsearch')" ++
+            " THEN 'Paid Search'" ++
+            " WHEN lower(st.utm_medium) = 'organic' THEN 'Organic Search'" ++
+            " WHEN lower(st.utm_medium) IN" ++
             "  ('social', 'social-network', 'social-media', 'sm') THEN 'Social'" ++
-            " WHEN lower(fp.utm_medium) = 'email' THEN 'Email'" ++
-            " WHEN lower(fp.utm_medium) = 'referral'" ++
-            "  OR (COALESCE(fp.referrer_host, '') <> ''" ++
-            "      AND COALESCE(fp.utm_source, '') = ''" ++
-            "      AND COALESCE(fp.utm_medium, '') = '') THEN 'Referral'" ++
-            " ELSE 'Other / Unknown' END AS channel," ++
-            " greatest(0, (st.last_at - st.first_at) / 1000)::BIGINT AS duration_ms," ++
+            " WHEN lower(st.utm_medium) = 'email' THEN 'Email'" ++
+            " WHEN lower(st.utm_medium) = 'referral'" ++
+            "  OR (st.referrer <> '' AND st.utm_source = ''" ++
+            "      AND st.utm_medium = '') THEN 'Referral'" ++
+            " ELSE 'Other / Unknown' END AS channel",
+    );
+    try builder.write(
+        ", greatest(0, (st.last_at - st.first_at) / 1000)::BIGINT AS duration_ms," ++
             " st.engagement_ms, st.page_views," ++
-            " (st.engagement_ms >= 10000 OR st.page_views >= 2 OR ",
+            " (st.engagement_ms >= 10000 OR st.page_views >= 2" ++
+            " OR st.converted) AS engaged, st.converted" ++
+            " FROM session_summary st)",
     );
-    try writeActiveGoalExists(builder, execution.active_goals, "st.session_id");
-    try builder.write(
-        ") AS engaged, ",
-    );
-    try writeActiveGoalExists(builder, execution.active_goals, "st.session_id");
-    try builder.write(
-        " AS converted FROM session_stats st" ++
-            " LEFT JOIN page_ascending fp ON fp.session_id = st.session_id AND fp.position = 1" ++
-            " LEFT JOIN page_descending lp ON lp.session_id = st.session_id AND lp.position = 1" ++
-            " LEFT JOIN event_ascending fe ON fe.session_id = st.session_id AND fe.position = 1)",
-    );
-    if (hasUserTraitClause(execution.query.filters.clauses)) {
+    if (hasUserTraitClause(execution.query.filters.clauses) or
+        include_user_traits)
+    {
         try writePersonTraits(
             builder,
             execution.query.site_id,
             execution.strict_traffic_mode,
+            false,
         );
     }
     try builder.write(
@@ -2329,9 +3944,7 @@ fn writeCommon(
 }
 
 fn needsSessionFacts(execution: analysis.Execution) bool {
-    if (execution.query.filters.clauses.len != 0 or
-        execution.query.segment_id != null)
-    {
+    if (execution.query.filters.clauses.len != 0) {
         return true;
     }
     if (switch (execution.query.metric.kind) {
@@ -2422,22 +4035,6 @@ fn writeMetricSource(builder: *Builder, execution: analysis.Execution) !void {
     }
 }
 
-fn writeActiveGoalExists(
-    builder: *Builder,
-    goals: []const analysis.ResolvedGoal,
-    session_expression: []const u8,
-) !void {
-    if (goals.len == 0) return builder.write("FALSE");
-    try builder.write("EXISTS (SELECT 1 FROM session_meaningful g WHERE g.session_id = ");
-    try builder.write(session_expression);
-    try builder.write(" AND (");
-    for (goals, 0..) |goal, index| {
-        if (index != 0) try builder.write(" OR ");
-        try writeSelector(builder, goal.selector, "g");
-    }
-    try builder.write("))");
-}
-
 fn hasUserTraitClause(clauses: []const analysis.Clause) bool {
     for (clauses) |clause| {
         if (clause.field.kind == .user_trait) return true;
@@ -2449,13 +4046,30 @@ fn writePersonTraits(
     builder: *Builder,
     site_id: []const u8,
     strict_traffic_mode: bool,
+    compact_key: bool,
 ) !void {
+    try builder.write(", person_trait_events AS (SELECT e.*, ");
+    if (compact_key) {
+        try builder.write(
+            "struct_pack(identity_kind := CASE" ++
+                " WHEN COALESCE(l.user_id, e.user_id, '') <> ''" ++
+                " THEN 0::UTINYINT ELSE 1::UTINYINT END," ++
+                " user_id := CASE" ++
+                " WHEN COALESCE(l.user_id, e.user_id, '') <> ''" ++
+                " THEN COALESCE(l.user_id, e.user_id) ELSE '' END," ++
+                " anonymous_id := CASE" ++
+                " WHEN COALESCE(l.user_id, e.user_id, '') <> ''" ++
+                " THEN CAST(NULL AS UUID) ELSE e.anonymous_id END) AS person_key",
+        );
+    } else {
+        try builder.write(
+            "CASE WHEN COALESCE(l.user_id, e.user_id, '') <> ''" ++
+                " THEN 'u:' || COALESCE(l.user_id, e.user_id)" ++
+                " ELSE 'a:' || CAST(e.anonymous_id AS VARCHAR) END AS person_key",
+        );
+    }
     try builder.write(
-        ", person_trait_events AS (SELECT e.*, CASE" ++
-            " WHEN COALESCE(l.user_id, e.user_id, '') <> ''" ++
-            " THEN 'u:' || COALESCE(l.user_id, e.user_id)" ++
-            " ELSE 'a:' || CAST(e.anonymous_id AS VARCHAR) END AS person_key" ++
-            " FROM events e LEFT JOIN identity_links l" ++
+        " FROM events e LEFT JOIN identity_links l" ++
             " ON l.site_id = e.site_id AND l.anonymous_id = e.anonymous_id" ++
             " WHERE e.site_id = ",
     );
@@ -3537,6 +5151,18 @@ test "simple empty-filter Trend plans omit unused session facts" {
         u8,
         simple.primary_rows.sql,
         "FROM qualified e JOIN",
+    ) == null);
+
+    var empty_segment_query = base;
+    empty_segment_query.segment_id = "00000000-0000-4000-8000-000000000030";
+    const empty_segment = try compile(arena.allocator(), .{
+        .query = empty_segment_query,
+        .segment_resolved = true,
+    });
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        empty_segment.primary_rows.sql,
+        "session_facts",
     ) == null);
 
     var engaged_query = base;

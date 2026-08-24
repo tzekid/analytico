@@ -108,6 +108,9 @@ pub fn build(b: *std.Build) void {
     });
     tests.root_module.addLibraryPath(duckdb_dependency.path(""));
     addHtmxAssets(tests.root_module, htmx_source, htmx_gzip);
+    tests.root_module.addAnonymousImport("design_tokens", .{
+        .root_source_file = b.path("docs/design-tokens.json"),
+    });
     tests.root_module.linkSystemLibrary("duckdb", .{ .use_pkg_config = .no });
     tests.root_module.addRPath(duckdb_dependency.path(""));
     const run_tests = b.addRunArtifact(tests);
@@ -311,6 +314,14 @@ pub fn build(b: *std.Build) void {
         "Measure M3 reports over one million real events",
     ).dependOn(&m3_benchmark.step);
 
+    const filters_benchmark = b.addSystemCommand(&.{ "bash", "bench/filters.sh" });
+    filters_benchmark.addArtifactArg(app);
+    filters_benchmark.step.dependOn(b.getInstallStep());
+    b.step(
+        "bench-filters",
+        "Measure filtered Overview, Trend, Breakdown, and suggestions over one million events",
+    ).dependOn(&filters_benchmark.step);
+
     const m4_e2e = b.addSystemCommand(&.{ "bash", "tests/e2e-m4.sh" });
     m4_e2e.addArtifactArg(app);
     m4_e2e.step.dependOn(b.getInstallStep());
@@ -401,6 +412,17 @@ pub fn build(b: *std.Build) void {
         "Run HTMX 4 enhancement and native fallback through real Chromium",
     ).dependOn(&m7_htmx_e2e.step);
 
+    const filters_e2e = b.addSystemCommand(&.{
+        "bash",
+        "tests/e2e-filters.sh",
+    });
+    filters_e2e.addArtifactArg(app);
+    filters_e2e.step.dependOn(b.getInstallStep());
+    b.step(
+        "e2e-filters",
+        "Run filters, suggestions, segments, and saved views through real Chromium",
+    ).dependOn(&filters_e2e.step);
+
     const passkey_p1_e2e = b.addSystemCommand(&.{
         "bash",
         "tests/e2e-passkey-p1.sh",
@@ -445,6 +467,18 @@ pub fn build(b: *std.Build) void {
         "e2e-metadata6-migration",
         "Migrate and roll back the exact deployed metadata-5/event-7 predecessor",
     ).dependOn(&metadata6_migration_e2e.step);
+
+    const metadata7_migration_e2e = b.addSystemCommand(&.{
+        "bash",
+        "scripts/run-metadata6-gate.sh",
+    });
+    metadata7_migration_e2e.addArtifactArg(app);
+    metadata7_migration_e2e.addArg("tests/e2e-metadata7-migration.sh");
+    metadata7_migration_e2e.step.dependOn(b.getInstallStep());
+    b.step(
+        "e2e-metadata7-migration",
+        "Migrate and roll back the exact deployed metadata-6/event-7 predecessor",
+    ).dependOn(&metadata7_migration_e2e.step);
 }
 
 fn addHtmxAssets(

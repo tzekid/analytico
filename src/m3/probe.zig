@@ -494,6 +494,209 @@ pub fn overviewV2(
     );
 }
 
+pub fn filtersV2(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    output: *std.Io.Writer,
+    directory: []const u8,
+    site_slug: []const u8,
+    current_start: []const u8,
+    current_end: []const u8,
+    comparison_start: []const u8,
+    comparison_end: []const u8,
+    profile: bool,
+) !void {
+    try domain.validateSlug(site_slug);
+    const current = analysis.LocalDateRange{
+        .start = current_start,
+        .end = current_end,
+    };
+    const comparison = analysis.LocalDateRange{
+        .start = comparison_start,
+        .end = comparison_end,
+    };
+    try current.validate();
+    try comparison.validate();
+    const metadata_path = try std.fs.path.join(allocator, &.{ directory, "meta.db" });
+    var metadata = try meta.Store.open(allocator, metadata_path);
+    defer metadata.deinit();
+    try metadata.requireCurrent();
+    const site_id = try metadata.siteIdBySlug(allocator, site_slug);
+    const goals = try metadata.listGoals(allocator, site_slug);
+    const policy = try metadata.sitePolicy(allocator, site_id);
+    const resolved = try allocator.alloc(analysis.ResolvedGoal, goals.len);
+    for (resolved, goals) |*target, goal| target.* = .{
+        .id = goal.id,
+        .selector = .{
+            .kind = switch (goal.match_kind) {
+                .event => .exact_event,
+                .path => .exact_page,
+                .prefix => .page_prefix,
+            },
+            .value = goal.match_value,
+        },
+    };
+    const event_path = try std.fs.path.join(allocator, &.{ directory, "events.duckdb" });
+    var store = try events.Store.open(allocator, event_path);
+    defer store.deinit();
+    try store.requireCurrent();
+
+    const filter_values = [_][]const u8{"desktop"};
+    const filter_clauses = [_]analysis.Clause{.{
+        .scope = .session,
+        .field = .{ .kind = .device },
+        .operator = .is,
+        .scalar_type = .string,
+        .values = &filter_values,
+    }};
+    const filters = analysis.FilterSet{ .clauses = &filter_clauses };
+    const current_buckets = try overviewDayBuckets(allocator, current);
+    const comparison_buckets = try overviewDayBuckets(allocator, comparison);
+    const overview_execution = analysis.OverviewExecution{
+        .site_id = site_id,
+        .range = current,
+        .comparison_range = comparison,
+        .active_goals = resolved,
+        .filters = filters,
+        .strict_traffic_mode = policy.strict_mode,
+        .daily_event_ceiling = policy.daily_event_ceiling,
+        .trend = .{
+            .metric = .visitors,
+            .interval = .day,
+            .current_buckets = current_buckets,
+            .comparison_buckets = comparison_buckets,
+        },
+    };
+    if (profile) {
+        try output.writeAll(try analysis_store.profileOverview(
+            allocator,
+            &store,
+            overview_execution,
+        ));
+        return;
+    }
+
+    var started = std.Io.Clock.awake.now(io).nanoseconds;
+    const cold_overview = try analysis_store.executeOverview(
+        allocator,
+        &store,
+        overview_execution,
+    );
+    const cold_overview_micros: i64 = @intCast(@divTrunc(
+        std.Io.Clock.awake.now(io).nanoseconds - started,
+        std.time.ns_per_us,
+    ));
+    std.debug.print("filtered cold Overview micros={d}\n", .{cold_overview_micros});
+    var warm_overview_micros: [10]i64 = undefined;
+    for (&warm_overview_micros) |*elapsed| {
+        started = std.Io.Clock.awake.now(io).nanoseconds;
+        _ = try analysis_store.executeOverview(allocator, &store, overview_execution);
+        elapsed.* = @intCast(@divTrunc(
+            std.Io.Clock.awake.now(io).nanoseconds - started,
+            std.time.ns_per_us,
+        ));
+    }
+    std.mem.sort(i64, &warm_overview_micros, {}, std.sort.asc(i64));
+    std.debug.print("filtered warm Overview p95 micros={d}\n", .{
+        warm_overview_micros[9],
+    });
+
+    const series = [_]analysis.Metric{.{ .kind = .visitors }};
+    started = std.Io.Clock.awake.now(io).nanoseconds;
+    const trend = try analysis_store.executeTrendSet(
+        allocator,
+        &store,
+        .{
+            .set = .{
+                .site_id = site_id,
+                .range = current,
+                .comparison = .previous,
+                .interval = .day,
+                .series = &series,
+                .filters = filters,
+            },
+            .comparison_range = comparison,
+            .active_goals = resolved,
+            .strict_traffic_mode = policy.strict_mode,
+        },
+    );
+    const trend_micros: i64 = @intCast(@divTrunc(
+        std.Io.Clock.awake.now(io).nanoseconds - started,
+        std.time.ns_per_us,
+    ));
+    std.debug.print("filtered Trend micros={d}\n", .{trend_micros});
+
+    const breakdown_query = analysis.Query{
+        .site_id = site_id,
+        .range = current,
+        .mode = .breakdown,
+        .metric = .{ .kind = .page_views },
+        .dimension = .{ .kind = .page },
+        .filters = filters,
+    };
+    started = std.Io.Clock.awake.now(io).nanoseconds;
+    const breakdown = try analysis_store.executeBreakdownPage(
+        allocator,
+        &store,
+        .{
+            .query = breakdown_query,
+            .active_goals = resolved,
+            .strict_traffic_mode = policy.strict_mode,
+        },
+    );
+    const breakdown_micros: i64 = @intCast(@divTrunc(
+        std.Io.Clock.awake.now(io).nanoseconds - started,
+        std.time.ns_per_us,
+    ));
+    std.debug.print("filtered Breakdown micros={d}\n", .{breakdown_micros});
+
+    var suggestion_query = breakdown_query;
+    suggestion_query.mode = .trend;
+    suggestion_query.metric = .{ .kind = .visitors };
+    suggestion_query.dimension = null;
+    started = std.Io.Clock.awake.now(io).nanoseconds;
+    const suggestions = try analysis_store.executeSuggestions(
+        allocator,
+        &store,
+        .{
+            .execution = .{
+                .query = suggestion_query,
+                .active_goals = resolved,
+                .strict_traffic_mode = policy.strict_mode,
+            },
+            .scope = .event,
+            .field = .{ .kind = .page },
+            .scalar_type = .string,
+            .search = "/",
+        },
+    );
+    const suggestion_micros: i64 = @intCast(@divTrunc(
+        std.Io.Clock.awake.now(io).nanoseconds - started,
+        std.time.ns_per_us,
+    ));
+    std.debug.print("filtered suggestions micros={d}\n", .{suggestion_micros});
+
+    try std.json.Stringify.value(.{
+        .metric_version = analysis.metric_version,
+        .strict_mode = policy.strict_mode,
+        .filter = "session.device is desktop",
+        .cold_overview_micros = cold_overview_micros,
+        .warm_overview_sample_micros = warm_overview_micros,
+        .warm_overview_p50_micros = warm_overview_micros[4],
+        .warm_overview_p95_micros = warm_overview_micros[9],
+        .warm_overview_p99_micros = warm_overview_micros[9],
+        .overview_visitors = cold_overview.visitors.current,
+        .trend_micros = trend_micros,
+        .trend_points = trend.series[0].points.len,
+        .breakdown_micros = breakdown_micros,
+        .breakdown_rows = breakdown.breakdown.rows.len,
+        .suggestion_micros = suggestion_micros,
+        .suggestion_values = suggestions.values.len,
+        .suggestion_has_more = suggestions.has_more,
+    }, .{}, output);
+    try output.writeByte('\n');
+}
+
 fn overviewDayBuckets(
     allocator: std.mem.Allocator,
     range: analysis.LocalDateRange,

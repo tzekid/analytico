@@ -198,6 +198,25 @@ pub fn main(init: std.process.Init) !void {
         );
         return;
     }
+    if (args.len == 9 and
+        std.mem.eql(u8, args[1], "m3") and
+        (std.mem.eql(u8, args[2], "filters-v2-series") or
+            std.mem.eql(u8, args[2], "filters-v2-profile")))
+    {
+        try m3_probe.filtersV2(
+            allocator,
+            init.io,
+            output,
+            args[3],
+            args[4],
+            args[5],
+            args[6],
+            args[7],
+            args[8],
+            std.mem.eql(u8, args[2], "filters-v2-profile"),
+        );
+        return;
+    }
     if (args.len == 4 and
         std.mem.eql(u8, args[1], "m4") and
         std.mem.eql(u8, args[2], "legacy-million"))
@@ -284,6 +303,8 @@ pub fn main(init: std.process.Init) !void {
         \\  analytico m3 million <directory> <site-id>
         \\  analytico m3 timeout <directory>
         \\  analytico m3 traffic-quality-profile <directory> <site-slug> <start-date> <end-date>
+        \\  analytico m3 filters-v2-series <directory> <site-slug> <current-start> <current-end> <comparison-start> <comparison-end>
+        \\  analytico m3 filters-v2-profile <directory> <site-slug> <current-start> <current-end> <comparison-start> <comparison-end>
         \\  analytico m3 legacy-create <directory>
         \\  analytico m3 legacy-verify <directory>
         \\  analytico m3 legacy-evidence <directory>

@@ -133,13 +133,30 @@ seconds, and do not replace exact result cardinality; direct property input
 remains visible. At mobile width each row retains its dimension/type/metric
 context without requiring horizontal navigation or JavaScript.
 
+Issue #30 adds one shared server-rendered filter band to current Overview,
+Trend, and Breakdown. A selected segment is visually distinct from ad-hoc
+chips; every chip prints scope, field, operator, and exact OR values plus a
+native removal link. The filter disclosure remains a normal labeled form with
+an explicit Apply action. Its bounded suggestion page names the selected
+field/type and whether more values exist; direct typed input remains available.
+Stale clauses stay visible with text explaining why execution stopped and one
+explicit remove/reset action. Segment and saved-view management uses ordinary
+forms, exact-name delete confirmation, and no ambiguous row click.
+
+Breakdown and eligible Overview rows expose separate `Filter` and `Exclude`
+links beside any detail link. Desktop and mobile keep those labels; a row itself
+never changes meaning according to viewport. All action URLs are controller-
+built owned strings. The renderer escapes and writes them without allocation,
+query parsing, session access, or I/O. Native POST/303/GET and browser history
+are the baseline; HTMX may boost the same controls but adds no client state.
+
 Server validation renders one focused error summary and associates only the
 affected form fields with that summary while preserving submitted values.
 Notices use restrained status semantics, errors use alerts, and loading is
 limited to the region whose existing native navigation or form is in flight.
 None of these enhancement states may replace the JavaScript-free baseline.
 
-The component stylesheet is self-hosted at a versioned `/admin/app.v10.css` path.
+The component stylesheet is self-hosted at a versioned `/admin/app.v11.css` path.
 Changing its bytes requires another path revision because existing responses
 may be cached privately for 24 hours.
 

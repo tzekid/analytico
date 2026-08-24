@@ -123,9 +123,9 @@ test "$("$previous" report "$verified" migration "$today" "$today" \
     overview --format json)" = "$before"
 
 test "$("$current" migrate "$live" "$backup")" = \
-    "migrated metadata=v6 events=v7"
+    "migrated metadata=v7 events=v7"
 test "$("$current" doctor "$live")" = \
-    "ok metadata=v6 events=v7 sites=1 goals=0 funnels=0 stored_events=5 key=ok"
+    "ok metadata=v7 events=v7 sites=1 goals=0 funnels=0 stored_events=5 key=ok"
 
 inspect() {
     "$current" m2 v2-inspect "$live" "$site_id" \
@@ -181,7 +181,7 @@ jq -e '
 ' <<<"$quality" >/dev/null
 
 test "$("$current" migrate "$live" "$backup")" = \
-    "migrated metadata=v6 events=v7"
+    "migrated metadata=v7 events=v7"
 rolled_back="$fixture/rolled-back"
 "$previous" restore "$backup" "$rolled_back" --verify >/dev/null
 test "$("$previous" doctor "$rolled_back")" = \
@@ -238,9 +238,9 @@ if wait "$migration_pid" 2>/dev/null; then
 fi
 migration_pid=
 test "$("$current" migrate "$million" "$million_backup")" = \
-    "migrated metadata=v6 events=v7"
+    "migrated metadata=v7 events=v7"
 test "$("$current" doctor "$million")" = \
-    "ok metadata=v6 events=v7 sites=1 goals=0 funnels=0 stored_events=1000000 key=ok"
+    "ok metadata=v7 events=v7 sites=1 goals=0 funnels=0 stored_events=1000000 key=ok"
 million_quality=$("$current" report "$million" million \
     2025-01-01 2025-01-31 traffic-quality --format json)
 jq -e '
@@ -249,7 +249,7 @@ jq -e '
     .signal_evidence.webdriver_events == 0
 ' <<<"$million_quality" >/dev/null
 test "$("$current" migrate "$million" "$million_backup")" = \
-    "migrated metadata=v6 events=v7"
+    "migrated metadata=v7 events=v7"
 million_rollback="$fixture/million-rollback"
 "$previous" restore "$million_backup" "$million_rollback" --verify >/dev/null
 test "$("$previous" doctor "$million_rollback")" = \

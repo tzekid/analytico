@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -ne 2 ]]; then
-    echo "usage: $0 <current-binary> <metadata5-binary>" >&2
+    echo "usage: $0 <current-binary> <metadata6-binary>" >&2
     exit 2
 fi
 current=$1
@@ -29,7 +29,7 @@ live="$fixture/live"
     1787443200000000 2026-08-23 203.0.113.42 Chrome Linux desktop >/dev/null
 
 test "$("$previous" doctor "$live")" = \
-    "ok metadata=v5 events=v7 sites=1 goals=1 funnels=1 stored_events=1 key=ok"
+    "ok metadata=v6 events=v7 sites=1 goals=1 funnels=1 stored_events=1 key=ok"
 before_report=$("$previous" report "$live" migration 2026-08-23 2026-08-23 \
     overview --format json)
 metadata_facts() {
@@ -43,6 +43,8 @@ UNION ALL SELECT 'property', site_id, property_name, '', '', ''
   FROM site_event_properties
 UNION ALL SELECT 'policy', site_id, strict_mode, daily_event_ceiling,
                  updated_at_utc_micros, '' FROM site_traffic_policy
+UNION ALL SELECT 'settings', site_id, default_currency, '', '', ''
+  FROM site_settings
 UNION ALL SELECT 'goal', id, site_id, name, match_kind, match_value FROM goals
 UNION ALL SELECT 'funnel', id, site_id, name, created_at_utc_micros, ''
   FROM funnels
@@ -59,17 +61,59 @@ SQL
 metadata_facts "$live" >"$fixture/before-metadata.txt"
 before_event_sha=$(sha256sum "$live/events.duckdb" | cut -d' ' -f1)
 
-backup="$fixture/pre-metadata6"
+backup="$fixture/pre-metadata7"
 test "$("$current" backup "$live" "$backup")" = \
-    "backup complete destination=$backup metadata=v5 events=v7"
-test "$(jq -r .metadata_schema "$backup/manifest.json")" = 5
+    "backup complete destination=$backup metadata=v6 events=v7"
+test "$(jq -r .metadata_schema "$backup/manifest.json")" = 6
 test "$(jq -r .event_schema "$backup/manifest.json")" = 7
-verified="$fixture/verified-metadata5"
+verified="$fixture/verified-metadata6"
 "$current" restore "$backup" "$verified" --verify >/dev/null
 test "$("$previous" doctor "$verified")" = \
-    "ok metadata=v5 events=v7 sites=1 goals=1 funnels=1 stored_events=1 key=ok"
+    "ok metadata=v6 events=v7 sites=1 goals=1 funnels=1 stored_events=1 key=ok"
 test "$("$previous" report "$verified" migration 2026-08-23 2026-08-23 \
     overview --format json)" = "$before_report"
+
+interrupted="$fixture/interrupted"
+cp -a "$verified" "$interrupted"
+interrupted_backup="$fixture/interrupted-backup"
+"$current" backup "$interrupted" "$interrupted_backup" >/dev/null
+sqlite3 "$interrupted/meta.db" <<'SQL'
+PRAGMA foreign_keys = ON;
+CREATE TABLE segments (
+  id TEXT PRIMARY KEY,
+  site_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  filter_schema_version INTEGER NOT NULL CHECK (filter_schema_version = 1),
+  canonical_filter_json TEXT NOT NULL,
+  created_at_utc_micros INTEGER NOT NULL,
+  updated_at_utc_micros INTEGER NOT NULL,
+  FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE CASCADE,
+  UNIQUE (site_id, name),
+  CHECK (length(id) = 36),
+  CHECK (length(name) BETWEEN 1 AND 120),
+  CHECK (length(canonical_filter_json) BETWEEN 1 AND 32768)
+);
+SQL
+test "$(sqlite3 "$interrupted/meta.db" \
+    'SELECT max(version) FROM meta_migrations;')" = 6
+if "$current" migrate "$interrupted" "$interrupted_backup" >/dev/null 2>&1; then
+    echo "partially changed metadata unexpectedly matched the pre-migration backup" >&2
+    exit 1
+fi
+test "$(sqlite3 "$interrupted/meta.db" \
+    'SELECT max(version) FROM meta_migrations;')" = 6
+interrupted_retry="$fixture/interrupted-retry"
+"$current" restore "$interrupted_backup" "$interrupted_retry" --verify >/dev/null
+test "$("$current" migrate "$interrupted_retry" "$interrupted_backup")" = \
+    "migrated metadata=v7 events=v7"
+test "$("$current" doctor "$interrupted_retry")" = \
+    "ok metadata=v7 events=v7 sites=1 goals=1 funnels=1 stored_events=1 key=ok"
+test "$(sqlite3 "$interrupted_retry/meta.db" \
+    'SELECT count(*) FROM segments;')" = 0
+test "$(sqlite3 "$interrupted_retry/meta.db" \
+    'SELECT count(*) FROM saved_views;')" = 0
+test "$("$current" migrate "$interrupted_retry")" = \
+    "migrated metadata=v7 events=v7"
 
 test "$("$current" migrate "$live" "$backup")" = \
     "migrated metadata=v7 events=v7"
@@ -80,45 +124,28 @@ cmp "$fixture/before-metadata.txt" "$fixture/after-metadata.txt"
 test "$(sha256sum "$live/events.duckdb" | cut -d' ' -f1)" = "$before_event_sha"
 test "$("$current" report "$live" migration 2026-08-23 2026-08-23 \
     overview --format json)" = "$before_report"
-test "$(sqlite3 "$live/meta.db" 'SELECT count(*) FROM site_settings;')" = 1
-test -z "$(sqlite3 "$live/meta.db" 'SELECT default_currency FROM site_settings;')"
+test "$(sqlite3 "$live/meta.db" 'SELECT count(*) FROM segments;')" = 0
+test "$(sqlite3 "$live/meta.db" 'SELECT count(*) FROM saved_views;')" = 0
 test "$(sqlite3 "$live/meta.db" \
-    "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='site_origins_unique_origin';")" = 1
+    "SELECT count(*) FROM meta_migrations WHERE version=7 AND name='segments-and-saved-views';")" = 1
 test "$("$current" migrate "$live" "$backup")" = \
     "migrated metadata=v7 events=v7"
 if "$previous" doctor "$live" >/dev/null 2>&1; then
-    echo "metadata-5 predecessor unexpectedly opened metadata 6" >&2
+    echo "metadata-6 predecessor unexpectedly opened metadata 7" >&2
     exit 1
 fi
 
 rolled_back="$fixture/rolled-back"
 "$previous" restore "$backup" "$rolled_back" --verify >/dev/null
 test "$("$previous" doctor "$rolled_back")" = \
-    "ok metadata=v5 events=v7 sites=1 goals=1 funnels=1 stored_events=1 key=ok"
+    "ok metadata=v6 events=v7 sites=1 goals=1 funnels=1 stored_events=1 key=ok"
 test "$("$previous" report "$rolled_back" migration 2026-08-23 2026-08-23 \
     overview --format json)" = "$before_report"
 
 fresh="$fixture/fresh"
 "$current" init "$fresh" >/dev/null
 test "$(sqlite3 "$fresh/meta.db" 'SELECT max(version) FROM meta_migrations;')" = 7
-test "$(sqlite3 "$fresh/meta.db" 'SELECT count(*) FROM site_settings;')" = 0
+test "$(sqlite3 "$fresh/meta.db" 'SELECT count(*) FROM segments;')" = 0
+test "$(sqlite3 "$fresh/meta.db" 'SELECT count(*) FROM saved_views;')" = 0
 
-duplicate="$fixture/duplicate"
-"$previous" init "$duplicate" >/dev/null
-"$previous" site add "$duplicate" alpha Alpha https://alpha.example \
-    --timezone UTC >/dev/null
-"$previous" site add "$duplicate" beta Beta https://beta.example \
-    --timezone UTC >/dev/null
-"$previous" site origin-add "$duplicate" beta https://alpha.example >/dev/null
-duplicate_backup="$fixture/duplicate-backup"
-"$current" backup "$duplicate" "$duplicate_backup" >/dev/null
-if "$current" migrate "$duplicate" "$duplicate_backup" >/dev/null 2>&1; then
-    echo "cross-site duplicate origin unexpectedly migrated" >&2
-    exit 1
-fi
-test "$(sqlite3 "$duplicate/meta.db" 'SELECT max(version) FROM meta_migrations;')" = 5
-test "$(sqlite3 "$duplicate/meta.db" 'SELECT count(*) FROM site_settings;')" = 2
-test "$(sqlite3 "$duplicate/meta.db" \
-    "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='site_origins_unique_origin';")" = 0
-
-printf 'metadata6_migration_e2e=pass predecessor=b96bc79677280367e87668811aa250300f35865a metadata=5-to-6 events=7 rows=preserved duplicate_origin=failed-before-ledger rollback=matched-pair\n'
+printf 'metadata7_migration_e2e=pass predecessor=a2d71c046a8b8b632429336f58ff0d1eebfea7b3 metadata=6-to-7 events=7 rows=preserved interruption=retried replay=idempotent rollback=matched-pair\n'

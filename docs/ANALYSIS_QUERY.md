@@ -157,7 +157,10 @@ Operators are closed by scalar type:
 
 Property and trait references use validated bound JSON Pointer values. String,
 integer, exact decimal, boolean, null, and missing remain distinct. No implicit
-string/number conversion is permitted.
+string/number conversion is permitted. Exact string filter values are bounded
+valid UTF-8 and may contain percent-encoded control bytes so legacy observed
+dimensions remain exactly filterable; they stay escaped in HTML, bound in SQL,
+and absent from request logging. Search text remains control-free.
 
 ## 4. Metric and dimension semantics
 
@@ -241,7 +244,8 @@ sort expressions, and JSON paths are never interpolated. A compiler test must
 prove adversarial values appear in bindings but not compiled SQL.
 
 Except for D35's one exact, mutation-invalidated complete Overview-result entry
-and D39's one short-lived sampled property-suggestion catalog entry, no cache,
+as filter-keyed by D40 and D39's one short-lived sampled property-suggestion
+catalog entry, no cache,
 rollup, projection, EAV table, background worker, extension, or new dependency
 is accepted by this contract. A measured miss follows the optimization order
 in `PERFORMANCE.md` and requires a later decision where consequential. Neither
@@ -261,6 +265,15 @@ no transient page number. Optional Breakdown search follows dimension in that
 fixed order and is absent when empty. Unknown fields, duplicate logical fields,
 invalid UTF-8, noncanonical numbers, and out-of-bound arrays reject.
 
+D40 additionally defines canonical FilterSet JSON as exactly schema 1,
+`match="all"`, and sorted/deduplicated encoded clauses. Trend-set saved JSON
+uses schema 1 and metric version 2 with the set's site, explicit dates,
+comparison, `mode="trend"`, interval, ordered series, optional segment, and
+sorted ad-hoc filters. It omits the transient highlighted interval. Stored
+segment, Breakdown, and Trend bytes are accepted only when parsing and exact
+reserialization reproduce the original bytes; a merely normalizable stored
+encoding is corrupt rather than silently rewritten.
+
 Canonical URL state is a query component, not a full route. The site lives in
 the route and is not duplicated. Scalar parameters occur once in this order:
 
@@ -276,7 +289,7 @@ values. Each component is percent-encoded independently; the parser splits
 `&`, `=`, and `~` before percent-decoding, so encoded delimiters cannot alter
 structure. Percent escapes use uppercase hex and spaces use `%20`, never `+`.
 
-The #29 native GET forms may encode the structural `~` bytes in repeated `p=`
+Native GET forms may encode the structural `~` bytes in repeated `p=` or `f=`
 values once as `%7E` while encoding component escapes as `%25`. The parser
 accepts exactly that one well-formed browser layer and redirects to the raw-`~`
 canonical spelling. Missing separators, lowercase/noncanonical escapes, extra
@@ -465,7 +478,7 @@ preserve.
 
 ## 9. Analyze Trend browser consumer
 
-Issue #28 keeps the single-query canonical grammar above as the saved/query
+Issue #28 keeps the single-query canonical grammar above as the query
 compiler boundary and adds the D37 browser-only Trend-set envelope over one
 through three ordered queries. Its canonical scalar order is
 `v,from,to,compare,mode,interval`, followed by one through three repeated
@@ -477,11 +490,13 @@ metric/event/goal fields and redirect to canonical state. They do not place a
 whole `~`-separated canonical tuple in a hidden control, because native HTML
 form encoding may encode those structural delimiters as `%7E`.
 
-The #28 route supplies the existing validated empty `FilterSet`. It rejects
-nonempty filter or segment route state rather than silently hiding it; issue
-#30 owns the visible universal filter/segment/saved-view extension. The
-canonical Trend set is already the typed save/export handoff, but #28 renders
-no dead action: #30 owns persistence and #31 owns actual export responses.
+D40 and issue #30 extend the set with one shared ad-hoc FilterSet and optional
+segment UUID. Canonical Trend URL state places optional `segment` after the
+ordered series and repeated sorted `f=` clauses after scalar fields. Each
+materialized ordinary query receives the complete resolved composed set and
+marks the segment resolved; an unresolved/stale segment never executes. The
+canonical Trend set and its exact JSON counterpart are the typed save handoff.
+#31 owns actual export responses.
 
 Sparse Trend rows are aligned to the same site-local generated bucket calendar
 used by Overview. Missing counts are zero, zero-denominator rates are
@@ -558,7 +573,65 @@ dead setup URL before that route exists. A selected-site rejection with no
 accepted event is a distinct tracking-broken state and links to the same Live
 evidence.
 
-## 10. Acceptance evidence
+## 10. Universal filters, suggestions, segments, and saved views
+
+D40 and issue #30 make the same visible FilterSet context executable on the
+current Overview, Analyze Trend, and Analyze Breakdown surfaces. “Current” is
+intentional: Funnel, Path, Retention, and Sessions keep specialized future
+engines, consume this closed FilterSet when implemented, and are not invented
+as placeholders by #30.
+
+The URL contains one optional selected segment UUID plus zero or more ad-hoc
+`f=` clauses. The controller loads the segment for the selected site, validates
+its exact canonical JSON and property references, composes it with the ad-hoc
+clauses, canonicalizes/deduplicates, and then enforces the existing 12-clause
+total. The selected segment and ad-hoc chips remain distinguishable in the view
+model. Only the composed FilterSet reaches `Execution`; the segment UUID is
+provenance and never reaches SQL.
+
+Canonical Overview state is ordered
+`v,from,to,compare,metric,segment,f...`; `v=1` is mandatory after #30 and an
+accepted older filter-empty URL redirects once. Canonical Trend state is
+ordered `v,from,to,compare,mode,interval,series...,segment,highlight,f...`.
+Breakdown retains the D29 order in section 6. Mode/date/site links preserve the
+selected segment and ad-hoc filters whenever the destination can execute them;
+no control hides state that the destination would ignore.
+
+Overview's fixed metric-v2 result uses a period-aware finite filtered plan with
+the same event/session/person clause semantics. Its compact data-health row is
+explicitly outside product filters. D35 remains exactly one complete entry;
+its key includes the entire canonical composed FilterSet, while the established
+empty-filter SQL stays unchanged. Trend attaches the same set to each ordinary
+query under its one deadline. Breakdown executes one direct bounded statement;
+filtered Page Views by Page applies page-view qualification before pagination,
+so a custom event cannot emit a zero-page-view path.
+
+One suggestion request selects a closed field, scope, scalar type, optional
+property, and control-free search text under the selected site/range and all
+preceding resolved clauses. It returns at most 50 exact typed values plus
+`has_more` from one finite bound plan and one interrupt deadline. Values and
+JSON pointers are bound; enums choose reviewed expressions. Null, missing, and
+boolean operators need no arbitrary text value. No suggestion/result cache,
+projection, EAV table, worker, dependency, or client fetch is introduced.
+
+Turso metadata schema 7 stores at most 32 exact segments and 32 exact saved
+views per site. Breakdown views use canonical Query JSON; Trend views use
+canonical Trend-set JSON. Segment changes affect future view loads because a
+view retains its segment ID plus ad-hoc clauses. Page and highlight are not
+saved. Creating a new segment snapshots the complete currently composed
+FilterSet and never creates a segment-to-segment reference. Missing segments,
+removed allowed properties, deleted saved goals,
+site mismatches, malformed JSON, and noncanonical stored bytes are visible
+typed stale/corrupt states. They block execution and provide an explicit
+remove/reset path; no clause is silently discarded.
+
+Native apply and suggestion forms are authenticated, exact-origin and CSRF
+checked, and bounded to the route-specific 64 KiB body accepted by D40.
+Successful application uses POST/303/canonical GET. Chip removal and row
+`Filter`/`Exclude` actions are ordinary inspectable canonical links. HTMX may
+boost the same routes and history but does not retain a shadow copy.
+
+## 11. Acceptance evidence
 
 Issue #24 must provide:
 

@@ -30,6 +30,7 @@ comptime {
     _ = @import("web/components.zig");
     _ = @import("web/charts.zig");
     _ = @import("web/controller.zig");
+    _ = @import("web/render.zig");
     _ = @import("web/dashboard.zig");
     _ = @import("http/request.zig");
     _ = @import("http/response.zig");

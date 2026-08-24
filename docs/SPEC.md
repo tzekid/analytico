@@ -63,8 +63,14 @@
   typed single-query Breakdown successor: bounded search, sort, pagination,
   standard and explicit property dimensions, a labeled latest-2,000-event
   property suggestion catalog with one 30-second process entry, exact result
-  cardinality/table/bar output, and one-redirect legacy list presets. Metric-v1 CLI output remains
-  frozen; the browser does not retain it as a second analysis system.
+  cardinality/table/bar output, and one-redirect legacy list presets. D40 and
+  issue #30 advance metadata to schema 7 and add one visible canonical segment
+  plus ad-hoc FilterSet context across current Overview, Trend, and Breakdown,
+  bounded server suggestions, explicit row Filter/Exclude actions, and private
+  saved segments/views. Stale state remains visible and removable. Native
+  forms and 303 canonical GETs remain the baseline; no client state or startup
+  data request is added. Metric-v1 CLI output remains frozen; the browser does
+  not retain it as a second analysis system.
 
 ## 1. Product statement
 

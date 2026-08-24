@@ -48,6 +48,7 @@ semantic, or application state model is consequential and must be added here.
 | D37 | Bounded Analyze Trend query set | Preserve one-metric queries under one server-rendered shared-deadline envelope | Accepted for 1.0 issue #28 |
 | D38 | Installation verification state | Session-bound signed URL watermark plus durable event lookup and restart-scoped rejection guidance | Accepted for 1.0 issue #20 |
 | D39 | Server-rendered Analyze Breakdown | Extend the single D29 query with bounded aggregate-label search and a shared-deadline typed property catalog | Accepted for 1.0 issue #29 |
+| D40 | Universal filters, segments, and saved views | Resolve one canonical FilterSet context; persist exact site-owned state in metadata schema 7 | Accepted for 1.0 issue #30 |
 
 ## D01. MVP interface
 
@@ -2455,3 +2456,173 @@ behavior; exact table/bar equivalence; timeout and post-interrupt reuse; real
 on-disk million-row Breakdown/catalog latency; JavaScript-off and enhanced
 desktop/mobile browser behavior; no startup data request; metric-v1 CLI
 preservation; and separate Debug and ReleaseSafe gates.
+
+## D40. Resolve one canonical filter context and persist exact saved state
+
+**Status:** Accepted for Analytico 1.0 issue #30
+
+**Date:** 2026-08-24
+
+**Issue:** #30
+
+**Extends:** D29's closed `FilterSet`, D37's Trend-set browser envelope, D39's
+direct Breakdown consumer, and D35's one exact complete Overview-result entry.
+It preserves D19's durable Turso autocommit boundary.
+
+### Context
+
+D29 already validates, canonicalizes, and compiles event-, session-, and
+person-scoped clauses, but no shipped browser surface accepts a nonempty
+FilterSet. D37 fixes Trend to an empty set, D39 makes Breakdown reject filters
+and segments that it cannot display, and the specialized Overview has neither
+filter input nor filter-aware cache identity. Metadata schema 6 has no durable
+segment or saved-view entity. Adding only chips or URL parameters would claim
+universal filtering while returning unfiltered Overview data; saving opaque
+URLs would also bypass the accepted canonical-JSON compatibility boundary.
+
+### Candidates
+
+| Candidate | Runtime and product behavior | Maintenance, migration, and rollback |
+| --- | --- | --- |
+| Add separate filter parsers and saved URL strings to each route | Small first route diff | Duplicates semantics, makes stale state and canonical equivalence route-specific, and gives later consumers no typed context |
+| Introduce a generic expression/query/dashboard framework | Could model future screens and arbitrary saved state | Breaks D29's closed grammar, enlarges the SQL and validation surface, and adds abstractions without accepted consumers |
+| Extend the existing FilterSet plus the two real browser envelopes, resolve one controller-owned context, and persist exact canonical JSON in Turso | Reuses finite bound SQL; current Overview, Trend, and Breakdown share visible semantics; future specialized engines receive the same closed input | One additive metadata migration and bounded controller/store/UI work; rollback requires the matched pre-migration database pair |
+
+Select the third candidate.
+
+### Canonical and persisted state
+
+- A segment is exactly one schema-1 `FilterSet` in `all` mode. Its canonical
+  JSON has fixed field order, sorted/deduplicated clauses and values, no unknown
+  fields, and at most 32 KiB. Stored bytes must parse, validate, and reserialize
+  byte-for-byte before use.
+- A saved Breakdown view stores D29 canonical query JSON. A saved Trend view
+  stores an exact schema-1/metric-v2 Trend-set JSON counterpart containing its
+  ordered one-to-three series, shared range/comparison/interval, optional
+  segment, and sorted ad-hoc filters. Page number and highlighted interval are
+  transient and are never saved.
+- A saved view references its selected segment ID and stores ad-hoc clauses.
+  Segment edits therefore affect future loads. The controller resolves the
+  selected site's segment, composes segment clauses before ad-hoc clauses,
+  canonicalizes/deduplicates them, and enforces the existing total of 12
+  clauses and 20 OR values per clause. Only the composed FilterSet enters an
+  execution value. Segment IDs remain provenance and never enter DuckDB SQL.
+- Creating a segment snapshots the complete currently composed FilterSet and
+  creates no nested segment reference. Canonical Overview parameters are
+  `v,from,to,compare,metric,segment,f...`; canonical Trend parameters are
+  `v,from,to,compare,mode,interval,series...,segment,highlight,f...`.
+  Existing filter-empty Overview URLs redirect once to mandatory `v=1`.
+- Missing segments, removed property keys, removed saved goals, malformed
+  canonical bytes, and site mismatches are typed stale/corrupt states before
+  DuckDB. The server shows the affected clause/entity and an explicit remove or
+  reset action. It never silently omits a stale clause or converts the result
+  to zero.
+
+### Metadata schema 7 and mutations
+
+Metadata schema 7 adds `segments` and `saved_views`. Each row has a canonical
+UUID, site foreign key with cascade deletion, unique site/name, explicit schema
+version, bounded canonical JSON, and created/updated UTC microseconds. Each
+site has at most 32 rows of either kind. Names retain the existing 120-byte
+validated UTF-8 bound. Public sharing, teams, ownership tables, revisions,
+layout/widgets, and background synchronization are not added.
+
+Create, rename, duplicate, and delete are individual D19 durable autocommits.
+No operation writes DuckDB or requires a cross-store or explicit Turso
+transaction. Delete requires an exact typed name. Canonical state is generated
+and validated by the application before insertion; site-scoped reads and
+mutation predicates prevent cross-site inference or modification.
+
+### Execution and suggestions
+
+Trend materializes each series from the same D29 grammar with the complete
+resolved FilterSet under its existing shared deadline. Breakdown executes one
+bounded statement after controller resolution; filtered Page Views by Page uses
+a direct page-view-qualified statement so custom-only paths cannot create zero
+rows. The fixed Overview gains a period-aware finite filtered plan so
+event/session/person scope has the same meaning as D29. Health facts remain
+visibly outside product filters.
+
+The accepted D35 unfiltered SQL remains unchanged. A nonempty resolved set may
+use the same single complete-result cache entry, whose length-prefixed key adds
+the complete canonical composed FilterSet. The cache is not multiplied, made
+durable, or generalized to ordinary AnalysisQuery results. A segment rename
+does not affect result identity; a changed definition produces different
+canonical bytes. Filtered cold execution must remain inside the two-second
+deadline, and repeated normal/strict Overview calls retain the existing
+below-250-ms and at-most-500-ms p95 gates.
+
+The accepted million-row plan keeps count and bit-mask goal projections
+separate. Deriving the count with `bit_count(goal_mask)` repeated every active
+selector only once but worsened the strict profile from 2.03 to 2.14 seconds;
+it was rejected rather than accepted on appearance. Strict classifier work
+materializes persistent candidate keys before looking for cross-session
+contradictions, so an empty persistent build side does not scan the million
+identity rows. When every clause is a stored session fact, session cardinality
+comes from the existing one-row-per-session relation; mixed, event, and person
+filters retain the exact qualified-event path.
+
+The native builder requests suggestions for one validated field, scope, scalar
+type, search value, selected site/range, and the already resolved preceding
+filters. One finite reviewed SQL plan binds every value, runs under a two-second
+interrupt, returns at most 50 values plus a `has_more` flag, and exposes exact
+typed values for the resulting canonical clause. There is no preload-all,
+suggestion/result cache, projection, EAV table, worker, network request, or new
+dependency. Null, missing, and boolean operators remain explicit even when no
+text value is required.
+
+### Browser, security, and rollback
+
+Overview, Trend, and Breakdown render the same selected segment and filter
+chips in the first authenticated HTML. Native POST applies or previews a
+filter, verifies exact origin and CSRF, and redirects successful application
+with 303 to an inspectable canonical GET. Removal and explicit row `Filter` /
+`Exclude` actions are ordinary canonical links. HTMX may boost the same forms
+and links but owns no state. Renderer inputs contain owned labels and URLs;
+renderers perform no allocation or I/O.
+
+The accepted 32 KiB saved JSON cannot fit the general 8 KiB body limit after
+form encoding. Only the authenticated filter/saved-state routes receive a
+64 KiB body ceiling and a specialized bounded field parser; the canonical
+saved-state matcher mirrors that exact ceiling. Only those mutation routes set
+`request_buffers 65536`, which forces complete bounded validation before
+upstream dispatch; the exact `max_size 65536` supplies 413 for the first
+oversized byte. No generic or global request buffering is introduced. Every
+other route keeps its existing application limit, and passkey routes retain
+their 192 KiB outer proxy ceiling. Stored/query values remain behind the
+passkey owner boundary, are context-safely escaped, are never logged as raw
+query strings, and never become SQL structure. Bounded exact string values may
+retain percent-encoded control bytes present in legacy observed dimensions so
+every rendered Breakdown row remains filterable; suggestion search itself
+remains control-free.
+
+Schema 7 is metadata-only; event schema 7, tracker, Caddy, process topology,
+and backup format do not change. Deployment stops the sole writer, backs up
+and independently restores the exact metadata-6/event-7 pair, proves the
+`a2d71c0` predecessor opens the restored pair, then migrates and verifies the
+candidate. The old binary must refuse migrated metadata. Rollback stops the
+writer, restores the matched pair, and only then switches to the predecessor;
+switching the executable alone is forbidden.
+
+### Consequences and acceptance evidence
+
+Runtime gains bounded metadata reads, at most one suggestion statement per
+preview, and filtered report work under existing deadlines. Maintenance gains
+one numbered migration, pure serializers, site-scoped CRUD, one resolved
+context seam, filtered Overview SQL, and explicit browser models. Memory and
+input work remain bounded by 32 saved entities per kind/site, 32 KiB canonical
+JSON, a 64 KiB route-specific form body, 12 clauses, 20 values, 50 suggestions,
+and the existing URL/query/result limits.
+
+Issue #30 must prove exact AND/OR/scope/type semantics; URL and JSON delimiter,
+canonicality, and size bounds; composed-limit and stale/corrupt behavior;
+two-site CRUD isolation; exact metadata-6-to-7 upgrade, replay, backup, restore,
+and pair rollback; real JavaScript-off and enhanced desktop/mobile/history
+flows; explicit row actions; timeout/reuse; million-row filtered Overview,
+Trend, Breakdown, and suggestion budgets; metric-v1 preservation; and separate
+Debug and ReleaseSafe gates.
+
+**Affected contracts:** `SPEC.md`, `ARCHITECTURE.md`, `DATA_MODEL.md`,
+`ANALYSIS_QUERY.md`, `DESIGN_SYSTEM.md`, `PERFORMANCE.md`, `OPERATIONS.md`,
+`RELEASE_CONTRACT_1.0.md`, and issue #30. Issues #31, #38, #39, #41, #47, and
+#48 consume or verify this boundary later without broadening its grammar.
