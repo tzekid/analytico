@@ -276,8 +276,10 @@ session/user/event ID, title, referrer, campaign value, property value, trait
 key or value, payload JSON, request body, database path, or classifier rule.
 Unknown and malformed site IDs remain unassigned, so they cannot appear in an
 authenticated site-filtered view model. The authenticated dashboard boundary
-can request a copied, newest-first snapshot for the selected site; issue #43
-owns rendering that model and the Live refresh/polling behavior.
+can request a copied, newest-first snapshot for the selected site. D38 and
+issue #20 may consume only the latest post-watermark attributable outcome for
+Install correction guidance and label it since process restart. Issue #43 owns
+rendering the full model and the Live refresh/polling behavior.
 
 The closed governing vocabulary is `site_unknown`, `site_disabled`,
 `origin_missing`, `origin_not_allowed`, `protocol_unsupported`,

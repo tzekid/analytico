@@ -441,7 +441,8 @@ These apply only when the dashboard exists:
 | Compressed application-authored JS | ≤ 2 KiB |
 | Compressed vendored HTMX core | ≤ 16 KiB |
 | Blocking third-party requests | 0 |
-| Initial requests | ≤ 3: HTML, CSS, optional HTMX |
+| Initial requests | ≤ 3: HTML, CSS, optional HTMX or page-specific JS |
+| Install verification fragment p95 over 1,000,000 events | < 150 ms |
 | Largest server-rendered table page | 100 rows |
 | Trend points per rendered series | ≤ 400 |
 | Funnel steps | 2–8 |
@@ -450,6 +451,11 @@ These apply only when the dashboard exists:
 
 With JavaScript disabled, the same navigation, filters, date forms,
 pagination, goal management, and funnel management must work.
+
+D38's Install page may use one dedicated application-authored script instead
+of HTMX. It remains within the compressed application-JavaScript budget and
+makes no data request at startup; the first verification fragment is scheduled
+five seconds after load only while the page is visible, waiting, and unpaused.
 
 ### M6 measured baseline
 
@@ -556,6 +562,33 @@ The final Debug run measured the same 734-byte HTML and 5,722-byte CSS, with
 0 KiB warm-view RSS growth. Its separate cold workflow observation was 23,008
 KiB. Both modes passed the same response, request, JavaScript-off, keyboard,
 authentication, validation, and immediate-collection assertions.
+
+### Installation verification confirmation
+
+Issue #20's PR-readiness Debug run measured a 17.781 ms warm
+p95 for 30 signed verification fragments over 1,000,000 stored events and
+18.099 ms for the first successful post-watermark event lookup. The real
+passkey-authenticated Caddy/Chromium journey made zero startup data requests,
+measured 1,783 bytes gzip for the complete success HTML, and measured the
+Install-only enhancement at 3,891 bytes raw and 1,204 bytes gzip. The 100-view
+RSS observation was 11,432 KiB below the warmed starting sample. The same signed
+success URL remained valid after the real writer process stopped and restarted.
+
+The exact ReleaseSafe candidate measured 15.948 ms fragment p95, 14.539 ms
+first-success latency, the same 1,783-byte gzip HTML and 1,204-byte gzip script,
+zero startup data requests, and a 13,468 KiB-below-warm RSS observation. It
+passed the same real passkey, Caddy, on-disk store, restart, tracked-page,
+JavaScript-disabled, desktop, and mobile assertions as Debug.
+
+The accepted query shape was selected from measured failures, not treated as a
+cold result. A per-row UUID cast plus compound predicate measured 358.825 ms
+p95, and native UUID ordering under one compound `OR` measured 417.711 ms p95;
+both violated the unchanged 150 ms gate. Adding the signed row-count guard and
+two zone-prunable tie/later queries first passed at 25.359 ms p95, then measured
+16.013 ms, 16.641 ms, 17.084 ms, 16.282 ms, 16.399 ms, and 16.061 ms in
+independent pre-final runs. The exact PR-readiness candidates above include the
+selected-site maximum-receipt equality lookup, explicit excluded-traffic
+acceptance, and exact visible type/time assertions.
 
 ## 8. Regression policy
 

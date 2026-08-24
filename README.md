@@ -248,6 +248,12 @@ The safer site-specific form is generated from stored metadata:
 analytico site install ./data example https://analytics.example
 ```
 
+The passkey-protected browser flow generates the same exact snippet at
+`/admin/sites/{site}/install`. Opening that bare route starts a signed
+site-scoped verification session. A normal **Check again** GET works without
+JavaScript; the optional Install-only script adds copy and a five-second
+visible/unpaused refresh until a new committed event appears.
+
 For a direct replacement, follow [the cutover runbook](docs/CUTOVER.md).
 
 The same process also serves a complete private dashboard. `/admin` resolves

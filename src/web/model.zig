@@ -274,6 +274,40 @@ pub const SiteSubmission = union(enum) {
 
 pub const InstallPage = struct {
     site: meta.SiteConfiguration,
+    collector_origin: []const u8,
+    tracker_path: []const u8,
+    tracker_protocol_version: u8,
+    snippet: []const u8,
     policy_active: bool,
+    verification: InstallVerification,
+};
+
+pub const InstallWatermark = struct {
+    started_at_utc_micros: i64,
+    event_count: i64,
+    after_received_at_utc_micros: i64,
+    after_event_id: []const u8,
+    signature: []const u8,
+};
+
+pub const InstallEvent = struct {
+    protocol_version: u8,
+    event_type: []const u8,
+    event_name: []const u8,
+    path: []const u8,
+    received_at_utc: []const u8,
+};
+
+pub const InstallGuidance = struct {
+    category: []const u8,
+    consequence: []const u8,
+    correction: []const u8,
+};
+
+pub const InstallVerification = struct {
+    site_slug: []const u8,
+    watermark: InstallWatermark,
+    event: ?InstallEvent = null,
+    guidance: ?InstallGuidance = null,
     collection_available: bool,
 };

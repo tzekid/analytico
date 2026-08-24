@@ -112,6 +112,20 @@ pub const SiteEventBounds = struct {
     maximum_utc_micros: i64,
 };
 
+pub const InstallationWatermark = struct {
+    event_count: i64,
+    received_at_utc_micros: i64,
+    event_id: []const u8,
+};
+
+pub const InstallationEvent = struct {
+    protocol_version: i64,
+    kind: i64,
+    event_name: []u8,
+    path: []u8,
+    received_at_utc_micros: i64,
+};
+
 pub const LegacyMigrationEvidence = struct {
     event_migration_version: i64,
     rows: i64,
@@ -1589,6 +1603,140 @@ pub const Store = struct {
         };
     }
 
+    pub fn installationWatermark(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        site_id: []const u8,
+    ) !InstallationWatermark {
+        try domain.validateUuid(site_id);
+        const bounds = try self.siteEventBounds(site_id);
+        if (bounds.count == 0) return .{
+            .event_count = 0,
+            .received_at_utc_micros = 0,
+            .event_id = try allocator.dupe(
+                u8,
+                "00000000-0000-0000-0000-000000000000",
+            ),
+        };
+        var statement = try self.database.prepare(
+            \\SELECT received_at_utc_micros, CAST(event_id AS VARCHAR)
+            \\FROM events
+            \\WHERE site_id = ? AND protocol_version IN (1, 2)
+            \\  AND received_at_utc_micros = ?
+            \\ORDER BY event_id DESC
+            \\LIMIT 1
+        );
+        defer statement.deinit();
+        try statement.bindText(1, site_id);
+        try statement.bindInt64(2, bounds.maximum_utc_micros);
+        var result = try statement.execute();
+        defer result.deinit();
+        if (result.columnCount() != 2 or result.rowCount() > 1) {
+            return error.InvalidInstallationWatermark;
+        }
+        if (result.rowCount() == 0) return error.InvalidInstallationWatermark;
+        const event_id = try result.text(allocator, 1, 0);
+        errdefer allocator.free(event_id);
+        try domain.validateUuid(event_id);
+        const received_at_utc_micros = result.int64(0, 0);
+        if (received_at_utc_micros < 0) return error.InvalidInstallationWatermark;
+        return .{
+            .event_count = bounds.count,
+            .received_at_utc_micros = received_at_utc_micros,
+            .event_id = event_id,
+        };
+    }
+
+    pub fn firstInstallationEventAfter(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        site_id: []const u8,
+        watermark: InstallationWatermark,
+    ) !?InstallationEvent {
+        try domain.validateUuid(site_id);
+        try domain.validateUuid(watermark.event_id);
+        if (watermark.event_count < 0 or watermark.received_at_utc_micros < 0) {
+            return error.InvalidInstallationWatermark;
+        }
+        const current_count = try self.siteEventCount(site_id);
+        if (current_count <= watermark.event_count) return null;
+
+        var tie_statement = try self.database.prepare(
+            \\SELECT protocol_version, kind, event_name, path,
+            \\       received_at_utc_micros
+            \\FROM events
+            \\WHERE site_id = ? AND protocol_version IN (1, 2)
+            \\  AND received_at_utc_micros = ?
+            \\  AND event_id > CAST(? AS UUID)
+            \\ORDER BY event_id
+            \\LIMIT 1
+        );
+        defer tie_statement.deinit();
+        try tie_statement.bindText(1, site_id);
+        try tie_statement.bindInt64(2, watermark.received_at_utc_micros);
+        try tie_statement.bindText(3, watermark.event_id);
+        if (try executeInstallationEvent(allocator, &tie_statement)) |event| {
+            return event;
+        }
+
+        var later_statement = try self.database.prepare(
+            \\SELECT protocol_version, kind, event_name, path,
+            \\       received_at_utc_micros
+            \\FROM events
+            \\WHERE site_id = ? AND protocol_version IN (1, 2)
+            \\  AND received_at_utc_micros > ?
+            \\ORDER BY received_at_utc_micros, event_id
+            \\LIMIT 1
+        );
+        defer later_statement.deinit();
+        try later_statement.bindText(1, site_id);
+        try later_statement.bindInt64(2, watermark.received_at_utc_micros);
+        return executeInstallationEvent(allocator, &later_statement);
+    }
+
+    fn siteEventCount(self: *Store, site_id: []const u8) !i64 {
+        var statement = try self.database.prepare(
+            "SELECT count(*) FROM events WHERE site_id = ?",
+        );
+        defer statement.deinit();
+        try statement.bindText(1, site_id);
+        var result = try statement.execute();
+        defer result.deinit();
+        if (result.columnCount() != 1 or result.rowCount() != 1) {
+            return error.InvalidInstallationEventCount;
+        }
+        const count = result.int64(0, 0);
+        if (count < 0) return error.InvalidInstallationEventCount;
+        return count;
+    }
+
+    fn executeInstallationEvent(
+        allocator: std.mem.Allocator,
+        statement: *duckdb.Statement,
+    ) !?InstallationEvent {
+        var result = try statement.execute();
+        defer result.deinit();
+        if (result.columnCount() != 5 or result.rowCount() > 1) {
+            return error.InvalidInstallationEvent;
+        }
+        if (result.rowCount() == 0) return null;
+        const protocol_version = result.int64(0, 0);
+        const kind = result.int64(1, 0);
+        const received_at_utc_micros = result.int64(4, 0);
+        if ((protocol_version != 1 and protocol_version != 2) or
+            kind < 1 or kind > 4 or received_at_utc_micros < 0)
+        {
+            return error.InvalidInstallationEvent;
+        }
+        return .{
+            .protocol_version = protocol_version,
+            .kind = kind,
+            .event_name = try result.text(allocator, 2, 0),
+            .path = try result.text(allocator, 3, 0),
+            .received_at_utc_micros = received_at_utc_micros,
+        };
+    }
+
     pub fn rebucketSite(
         self: *Store,
         site_id: []const u8,
@@ -2299,4 +2447,100 @@ fn decodeStoredEvent(
         .client_hint_consistency = result.int64(19, 0),
         .accept_language_present = result.int64(20, 0) != 0,
     };
+}
+
+test "installation watermark orders higher ties and fails closed otherwise" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const backing_allocator = std.testing.allocator;
+    const path = try std.fmt.allocPrint(
+        backing_allocator,
+        ".zig-cache/tmp/{s}/events.duckdb",
+        .{temporary.sub_path},
+    );
+    defer backing_allocator.free(path);
+    var store = try Store.open(backing_allocator, path);
+    defer store.deinit();
+    try store.migrate();
+
+    const site = "00000000-0000-4000-8000-000000000020";
+    const base = domain.Event{
+        .event_id = "00000000-0000-4000-8000-000000000010",
+        .site_id = site,
+        .received_at_utc_micros = 100,
+        .received_date_utc = "2026-08-24",
+        .site_local_date = "2026-08-24",
+        .site_utc_offset_minutes = 0,
+        .kind = 1,
+        .event_name = "page_view",
+        .path = "/before",
+        .visitor_day_id = @splat(1),
+    };
+    try store.insert(base);
+    var arena = std.heap.ArenaAllocator.init(backing_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const watermark = try store.installationWatermark(allocator, site);
+    try std.testing.expectEqual(@as(i64, 1), watermark.event_count);
+
+    var tied = base;
+    tied.event_id = "00000000-0000-4000-8000-000000000011";
+    tied.path = "/tied";
+    tied.visitor_day_id = @splat(2);
+    try store.insert(tied);
+    const tied_result = (try store.firstInstallationEventAfter(
+        allocator,
+        site,
+        watermark,
+    )).?;
+    try std.testing.expectEqualStrings("/tied", tied_result.path);
+
+    const tied_watermark = try store.installationWatermark(allocator, site);
+    var lower_tied = base;
+    lower_tied.event_id = "00000000-0000-4000-8000-00000000000f";
+    lower_tied.path = "/lower-tied";
+    lower_tied.visitor_day_id = @splat(3);
+    try store.insert(lower_tied);
+    try std.testing.expect(
+        try store.firstInstallationEventAfter(
+            allocator,
+            site,
+            tied_watermark,
+        ) == null,
+    );
+
+    var clock_rollback = base;
+    clock_rollback.event_id = "00000000-0000-4000-8000-000000000012";
+    clock_rollback.received_at_utc_micros = 99;
+    clock_rollback.path = "/clock-rollback";
+    clock_rollback.visitor_day_id = @splat(4);
+    try store.insert(clock_rollback);
+    try std.testing.expect(
+        try store.firstInstallationEventAfter(
+            allocator,
+            site,
+            tied_watermark,
+        ) == null,
+    );
+
+    var other_site = base;
+    other_site.event_id = "00000000-0000-4000-8000-000000000014";
+    other_site.site_id = "00000000-0000-4000-8000-000000000021";
+    other_site.received_at_utc_micros = 102;
+    other_site.path = "/other-site";
+    other_site.visitor_day_id = @splat(5);
+    try store.insert(other_site);
+
+    var later = base;
+    later.event_id = "00000000-0000-4000-8000-000000000013";
+    later.received_at_utc_micros = 101;
+    later.path = "/later";
+    later.visitor_day_id = @splat(6);
+    try store.insert(later);
+    const later_result = (try store.firstInstallationEventAfter(
+        allocator,
+        site,
+        tied_watermark,
+    )).?;
+    try std.testing.expectEqualStrings("/later", later_result.path);
 }

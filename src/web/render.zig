@@ -15,6 +15,8 @@ pub const dashboard_js = @embedFile("dashboard.js");
 pub const dashboard_js_previous = @embedFile("dashboard.5f88a716.js");
 pub const dashboard_js_previous_path = "/admin/dashboard.5f88a716.js";
 pub const dashboard_js_path = "/admin/dashboard.9c3ac396.js";
+pub const install_js = @embedFile("install.js");
+pub const install_js_path = "/admin/install.fe0cc47b.js";
 
 const html_headers =
     "Cache-Control: private, no-store, max-age=0\r\n" ++
@@ -24,6 +26,12 @@ const html_headers =
     "Referrer-Policy: same-origin\r\n";
 
 pub const headers = html_headers;
+pub const install_headers =
+    "Cache-Control: private, no-store, max-age=0\r\n" ++
+    "Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; " ++
+    "connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'\r\n" ++
+    "X-Content-Type-Options: nosniff\r\n" ++
+    "Referrer-Policy: no-referrer\r\n";
 
 pub fn page(output: *std.Io.Writer, value: model.Page) !void {
     try head(output, value.destination.label());
@@ -234,7 +242,7 @@ pub fn siteFormPage(output: *std.Io.Writer, value: model.SiteFormPage) !void {
 }
 
 pub fn installPage(output: *std.Io.Writer, value: model.InstallPage) !void {
-    try onboardingHead(output, "Install tracker");
+    try documentHead(output, "Install tracker", .install);
     try onboardingHeader(output);
     try output.writeAll(
         "<main id=\"main\" tabindex=\"-1\" class=\"first-run-main onboarding-main\">" ++
@@ -250,7 +258,7 @@ pub fn installPage(output: *std.Io.Writer, value: model.InstallPage) !void {
                 "in this running process. Restart the service or submit the same site form after recovery.</p>",
         );
     }
-    if (!value.collection_available) {
+    if (!value.verification.collection_available) {
         try output.writeAll(
             "<p role=\"alert\"><strong>Collection unavailable:</strong> collector storage is not " ++
                 "ready in this running process. Restore the configured paths and confirm readiness " ++
@@ -278,14 +286,164 @@ pub fn installPage(output: *std.Io.Writer, value: model.InstallPage) !void {
         try output.writeAll("</code></li>");
     }
     try output.writeAll(
-        "</ul></section><section class=\"panel\"><h2>Tracker setup</h2>" ++
-            "<p>The canonical snippet and first-event verification are not available in this build yet. " ++
-            "This URL remains the site-scoped setup destination.</p>" ++
-            "<p><a class=\"button button-secondary\" href=\"/admin/sites/",
+        "</ul></section><section class=\"panel\" aria-labelledby=\"tracker-setup-heading\">" ++
+            "<h2 id=\"tracker-setup-heading\">Tracker setup</h2>" ++
+            "<dl class=\"configuration-list\"><div><dt>Collector origin</dt><dd><code>",
     );
-    try attribute(output, value.site.slug);
-    try output.writeAll("/overview\">Open Overview</a></p></section></main>");
+    try text(output, value.collector_origin);
+    try output.print(
+        "</code></dd></div><div><dt>Tracker protocol</dt><dd>v{d}</dd></div>" ++
+            "<div><dt>Immutable asset</dt><dd><code>",
+        .{value.tracker_protocol_version},
+    );
+    try text(output, value.tracker_path);
+    try output.writeAll(
+        "</code></dd></div></dl><label for=\"tracker-snippet\">Canonical snippet</label>" ++
+            "<textarea id=\"tracker-snippet\" rows=\"9\" readonly spellcheck=\"false\">",
+    );
+    try text(output, value.snippet);
+    try output.writeAll(
+        "</textarea><div class=\"form-actions\"><button type=\"button\" " ++
+            "data-copy-target=\"tracker-snippet\" data-copy-status=\"tracker-copy-status\">" ++
+            "Copy snippet</button></div><p id=\"tracker-copy-status\" class=\"muted\" " ++
+            "role=\"status\" aria-live=\"polite\">Select the snippet manually if clipboard access is unavailable.</p>" ++
+            "<details><summary>Optional automatic events</summary><p>Add only the attributes you need: " ++
+            "<code>data-outbound=\"true\"</code>, <code>data-downloads=\"true\"</code>, " ++
+            "<code>data-forms=\"true\"</code>, or <code>data-not-found=\"true\"</code>. " ++
+            "No configuration request runs at page startup.</p></details>" ++
+            "<h3>Manual API</h3><label for=\"manual-track-example\">Track an event</label>" ++
+            "<textarea id=\"manual-track-example\" rows=\"2\" readonly spellcheck=\"false\">window.analytico?.track(&quot;signup&quot;, { plan: &quot;basic&quot; });</textarea>" ++
+            "<label for=\"manual-identify-example\">Identify a user</label>" ++
+            "<textarea id=\"manual-identify-example\" rows=\"2\" readonly spellcheck=\"false\">window.analytico?.identify(&quot;user_123&quot;, { plan: &quot;basic&quot; });</textarea>" ++
+            "<p class=\"muted\">Call <code>window.analytico?.reset();</code> on logout or user switch.</p>" ++
+            "</section>",
+    );
+    try installVerificationFragment(output, value.verification);
+    try output.writeAll("</main>");
     try foot(output);
+}
+
+pub fn installVerificationFragment(
+    output: *std.Io.Writer,
+    value: model.InstallVerification,
+) !void {
+    const state = if (value.event != null)
+        "success"
+    else if (!value.collection_available)
+        "unavailable"
+    else
+        "waiting";
+    try output.writeAll(
+        "<section id=\"installation-verification\" class=\"panel\" " ++
+            "aria-labelledby=\"installation-verification-heading\" " ++
+            "data-install-verification data-state=\"",
+    );
+    try attribute(output, state);
+    try output.writeAll("\" data-fragment-url=\"");
+    try installVerificationUrl(output, value, true);
+    try output.writeAll(
+        "\"><h2 id=\"installation-verification-heading\">Verify collection</h2>",
+    );
+    if (value.event) |event| {
+        try output.writeAll(
+            "<p class=\"notice\" role=\"status\"><strong>Tracker verified.</strong> " ++
+                "A new event was committed after this verification started.</p>",
+        );
+        if (event.protocol_version == 1) {
+            try output.writeAll(
+                "<p class=\"warning\" role=\"status\"><strong>Protocol v1 compatibility:</strong> " ++
+                    "collection works, but replace the old tracker with the generated v2 snippet above.</p>",
+            );
+        }
+        try output.print(
+            "<dl class=\"configuration-list\"><div><dt>Protocol</dt><dd>v{d}</dd></div>" ++
+                "<div><dt>Type</dt><dd>",
+            .{event.protocol_version},
+        );
+        try text(output, event.event_type);
+        try output.writeAll("</dd></div><div><dt>Event</dt><dd><code>");
+        try text(output, event.event_name);
+        try output.writeAll("</code></dd></div><div><dt>Path</dt><dd><code>");
+        try text(output, event.path);
+        try output.writeAll("</code></dd></div><div><dt>Received</dt><dd>");
+        try text(output, event.received_at_utc);
+        try output.writeAll("</dd></div></dl><div class=\"form-actions\"><a class=\"button\" href=\"/admin/sites/");
+        try attribute(output, value.site_slug);
+        try output.writeAll("/overview\">Open Overview</a><a class=\"button button-secondary\" href=\"/admin/sites/");
+        try attribute(output, value.site_slug);
+        try output.writeAll("/live\">View Live diagnostics</a></div>");
+    } else {
+        if (value.collection_available) {
+            try output.writeAll(
+                "<p role=\"status\">Waiting for a new committed event. Open the tracked site after installing the snippet, then check again.</p>",
+            );
+        } else {
+            try output.writeAll(
+                "<p class=\"error\" role=\"alert\"><strong>Verification unavailable:</strong> " ++
+                    "collector storage is not ready. Restore readiness, reload the bare Install page to start a new verification, then send a fresh event.</p>",
+            );
+        }
+        if (value.guidance) |guidance| {
+            try output.writeAll(
+                "<div class=\"warning\" role=\"status\"><strong>Recent attempt since process restart: ",
+            );
+            try text(output, guidance.category);
+            try output.writeAll(".</strong> ");
+            try text(output, guidance.consequence);
+            try output.writeByte(' ');
+            try text(output, guidance.correction);
+            try output.writeAll("</div>");
+        }
+        try output.writeAll(
+            "<details><summary>Common rejection corrections</summary><ul>" ++
+                "<li><strong>Origin:</strong> match one configured scheme, host, and port exactly.</li>" ++
+                "<li><strong>Payload:</strong> use the generated tracker or bounded v2 examples; remove unknown, nested, or oversized fields.</li>" ++
+                "<li><strong>Identity/session:</strong> use generated UUID/session state and reset before switching users.</li>" ++
+                "<li><strong>Storage or rate limit:</strong> restore readiness or wait before sending a fresh event.</li>" ++
+                "</ul><p class=\"muted\">Malformed or oversized attempts without a validated Site ID cannot be attributed to this site.</p></details>" ++
+                "<form method=\"get\" action=\"/admin/sites/",
+        );
+        try attribute(output, value.site_slug);
+        try output.writeAll("/install\"><input type=\"hidden\" name=\"started\" value=\"");
+        try output.print("{d}", .{value.watermark.started_at_utc_micros});
+        try output.writeAll("\"><input type=\"hidden\" name=\"count\" value=\"");
+        try output.print("{d}", .{value.watermark.event_count});
+        try output.writeAll("\"><input type=\"hidden\" name=\"after\" value=\"");
+        try output.print("{d}", .{value.watermark.after_received_at_utc_micros});
+        try output.writeAll("\"><input type=\"hidden\" name=\"event\" value=\"");
+        try attribute(output, value.watermark.after_event_id);
+        try output.writeAll("\"><input type=\"hidden\" name=\"sig\" value=\"");
+        try attribute(output, value.watermark.signature);
+        try output.writeAll(
+            "\"><div class=\"form-actions\"><button type=\"submit\">Check again</button>" ++
+                "<button type=\"button\" class=\"button-secondary\" hidden " ++
+                "data-verification-pause aria-pressed=\"false\">Pause automatic checks</button>" ++
+                "</div></form><p class=\"muted\" role=\"status\" aria-live=\"polite\" " ++
+                "data-verification-client-status></p>",
+        );
+    }
+    try output.writeAll("</section>");
+}
+
+fn installVerificationUrl(
+    output: *std.Io.Writer,
+    value: model.InstallVerification,
+    fragment: bool,
+) !void {
+    try output.writeAll("/admin/sites/");
+    try attribute(output, value.site_slug);
+    try output.print(
+        "/install?started={d}&amp;count={d}&amp;after={d}&amp;event=",
+        .{
+            value.watermark.started_at_utc_micros,
+            value.watermark.event_count,
+            value.watermark.after_received_at_utc_micros,
+        },
+    );
+    try attribute(output, value.watermark.after_event_id);
+    try output.writeAll("&amp;sig=");
+    try attribute(output, value.watermark.signature);
+    if (fragment) try output.writeAll("&amp;fragment=verification");
 }
 
 fn onboardingHeader(output: *std.Io.Writer) !void {
@@ -317,33 +475,41 @@ fn siteFieldError(
 }
 
 fn head(output: *std.Io.Writer, title: []const u8) !void {
-    try documentHead(output, title, true);
+    try documentHead(output, title, .dashboard);
 }
 
 fn onboardingHead(output: *std.Io.Writer, title: []const u8) !void {
-    try documentHead(output, title, false);
+    try documentHead(output, title, .none);
 }
+
+const ScriptSet = enum { none, dashboard, install };
 
 fn documentHead(
     output: *std.Io.Writer,
     title: []const u8,
-    include_scripts: bool,
+    scripts: ScriptSet,
 ) !void {
     try output.writeAll("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>");
     try text(output, title);
     try output.writeAll(" · Analytico</title><link rel=\"stylesheet\" href=\"");
     try attribute(output, stylesheet_path);
-    if (include_scripts) {
-        try output.writeAll("\"><script defer src=\"");
-        try attribute(output, htmx_path);
-        try output.writeAll("\"></script><script defer src=\"");
-        try attribute(output, dashboard_js_path);
-        try output.writeAll("\"></script></head><body hx-boost:inherited=\"true\" hx-indicator:inherited=\"#loading-region\">");
-    } else {
-        try output.writeAll("\"></head><body>");
+    switch (scripts) {
+        .dashboard => {
+            try output.writeAll("\"><script defer src=\"");
+            try attribute(output, htmx_path);
+            try output.writeAll("\"></script><script defer src=\"");
+            try attribute(output, dashboard_js_path);
+            try output.writeAll("\"></script></head><body hx-boost:inherited=\"true\" hx-indicator:inherited=\"#loading-region\">");
+        },
+        .install => {
+            try output.writeAll("\"><script defer src=\"");
+            try attribute(output, install_js_path);
+            try output.writeAll("\"></script></head><body>");
+        },
+        .none => try output.writeAll("\"></head><body>"),
     }
     try output.writeAll("<a class=\"skip-link\" href=\"#main\">Skip to main content</a>");
-    if (include_scripts) {
+    if (scripts == .dashboard) {
         try output.writeAll("<p id=\"loading-region\" class=\"loading-region htmx-indicator\" role=\"status\" aria-live=\"polite\" aria-atomic=\"true\">Updating view…</p>");
     }
 }

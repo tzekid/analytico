@@ -46,7 +46,10 @@ are not passes.
   and the required evidence for the same candidate.
 - A blank installation reaches a verified first event through the browser after
   passkey setup without requiring the CLI for site creation, origins, timezone,
-  or tracker installation.
+  or tracker installation. A newly issued D38 watermark rejects old rows and
+  duplicate retries as proof; ordinary GET refresh, protocol-v1 compatibility,
+  protocol-v2 success, and safe actionable rejection guidance remain usable
+  with JavaScript disabled.
 - Overview, Analyze, Journeys, Sessions, Live, and Settings answer their scoped
   questions with shared canonical context and useful empty/error states.
 - Goals and funnels require no raw syntax. Paths, retention, sessions, and
