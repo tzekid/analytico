@@ -112,8 +112,10 @@ not rollback. Event schema 7 adds no service-unit, environment, dependency,
 process, runtime data file, tracker, or Caddy change.
 
 DuckDB is configured before its configuration is locked: one query thread,
-128 MiB memory, 256 MiB temp limit, insertion-order preservation off,
-community extensions off, and external access off.
+128 MiB memory, 256 MiB temp limit, the native allocator flush threshold at
+8 MiB, insertion-order preservation off, community extensions off, and
+external access off. The independent bulk-deallocation threshold retains the
+pinned engine default.
 
 ### Existing-site timezone assignment
 
@@ -580,6 +582,7 @@ zig build e2e-m0 e2e-m1 e2e-m2 e2e-timezone e2e-properties \
   e2e-m6 e2e-m7 e2e-filters e2e-goals e2e-passkey-p1 \
   e2e-metadata7-migration e2e-metadata8-migration \
   e2e-metadata9-migration e2e-funnels e2e-metadata10-migration \
+  e2e-sessions \
   -Doptimize=ReleaseSafe -Dturso-native-path=<exact-prefix>
 zig build bench-properties \
   -Doptimize=ReleaseSafe -Dturso-native-path=<exact-prefix>
@@ -592,11 +595,11 @@ zig build e2e-release-full \
 `e2e-release-full` checks the outer and inner checksums, private DuckDB linkage,
 Caddy syntax, systemd security, and a fresh real-data report from the extracted
 archive, then runs the complete packaged real-process set including classifier,
-traffic-quality, universal filters, guided goals, and exact schema-4, schema-5,
-schema-6, metadata-6, metadata-7, metadata-8, metadata-9, and metadata-10
-predecessors. The named `e2e-filters`, `e2e-goals`,
+traffic-quality, universal filters, guided goals, Sessions, and exact schema-4,
+schema-5, schema-6, metadata-6, metadata-7, metadata-8, metadata-9, and
+metadata-10 predecessors. The named `e2e-filters`, `e2e-goals`,
 `e2e-metadata7-migration`,
-`e2e-metadata8-migration`, `e2e-metadata9-migration`, `e2e-funnels`, and
-`e2e-metadata10-migration` gates run independently above and again inside this
-full packaged qualification. Large event/browser fixtures are acceptance
-tooling only and are not shipped.
+`e2e-metadata8-migration`, `e2e-metadata9-migration`, `e2e-funnels`,
+`e2e-metadata10-migration`, and `e2e-sessions` gates run independently above
+and again inside this full packaged qualification. Large event/browser
+fixtures are acceptance tooling only and are not shipped.

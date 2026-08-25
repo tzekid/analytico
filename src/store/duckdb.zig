@@ -42,6 +42,7 @@ pub const Database = struct {
             .{ "threads", "1" },
             .{ "memory_limit", "128MB" },
             .{ "max_temp_directory_size", "256MB" },
+            .{ "allocator_flush_threshold", "8MiB" },
             .{ "preserve_insertion_order", "false" },
             .{ "allow_community_extensions", "false" },
             .{ "enable_external_access", "false" },
@@ -217,4 +218,29 @@ fn logResultError(result: *c.duckdb_result) void {
     } else {
         std.log.err("DuckDB query failed without a native message", .{});
     }
+}
+
+test "production allocator threshold is exact and locked" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const allocator = std.testing.allocator;
+    const path = try std.fmt.allocPrint(
+        allocator,
+        ".zig-cache/tmp/{s}/events.duckdb",
+        .{temporary.sub_path},
+    );
+    defer allocator.free(path);
+    var database = try Database.open(allocator, path);
+    defer database.deinit();
+    var result = try database.query(
+        "SELECT" ++
+            " current_setting('allocator_flush_threshold')::VARCHAR," ++
+            " current_setting('lock_configuration')::BOOLEAN",
+    );
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+    const first = try result.text(allocator, 0, 0);
+    defer allocator.free(first);
+    try std.testing.expectEqualStrings("8.0 MiB", first);
+    try std.testing.expectEqual(@as(i64, 1), result.int64(1, 0));
 }

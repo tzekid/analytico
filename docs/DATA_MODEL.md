@@ -964,3 +964,19 @@ D34 version 5 adds query candidate/current-suspect/contradiction evidence,
 strict state, accepted-ceiling health, and keyed identity-mint anomaly counts.
 The operational ceiling returns an explicit 429 for a new over-cap request;
 every successfully accepted event remains stored and visible.
+
+## 17. Derived session-list facts
+
+D45 adds no durable session row. A list request derives candidate session UUIDs
+from schema-7 product-eligible Page/custom events in one site-local range, then
+expands only the bounded page from the same `events` and `identity_links`
+tables. Full retained summaries use the site plus session UUID as the key;
+session UUID alone is never treated as globally authoritative.
+
+Derived fields are start/last plausible occurrence, latest authoritative
+receipt, Page/custom counts, engagement sum, first-page acquisition and
+landing, first-meaningful geography/client dimensions, canonical identity,
+current active-Goal match count, and exact per-currency value totals. These are
+query results, not mutable facts. Retention or a late accepted event may change
+a later result honestly. Event schema 7, metadata schema 10, backup format, and
+all migration rows remain unchanged.

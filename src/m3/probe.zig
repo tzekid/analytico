@@ -415,6 +415,70 @@ pub fn million(
     try output.writeAll("M3 million-event fixture committed events=1000000\n");
 }
 
+pub fn sessionsFixture(
+    allocator: std.mem.Allocator,
+    output: *std.Io.Writer,
+    directory: []const u8,
+    site_id: []const u8,
+) !void {
+    try domain.validateUuid(site_id);
+    const event_path = try std.fs.path.join(
+        allocator,
+        &.{ directory, "events.duckdb" },
+    );
+    var store = try events.Store.open(allocator, event_path);
+    defer store.deinit();
+    try store.requireCurrent();
+    const template =
+        \\INSERT INTO events SELECT template.* REPLACE (
+        \\  CAST('00000000-0000-4000-8000-000000000201' AS UUID) AS event_id,
+        \\  '__SITE__' AS site_id,
+        \\  1767398410000000 AS received_at_utc_micros,
+        \\  1767398410000000 AS occurred_at_utc_micros,
+        \\  DATE '2026-01-03' AS received_date_utc,
+        \\  DATE '2026-01-03' AS site_local_date,
+        \\  2 AS kind, 'custom-only' AS event_name,
+        \\  '/custom-only' AS path, 'Custom only' AS page_title,
+        \\  CAST('00000000-0000-4000-8000-0000000000a6' AS UUID) AS anonymous_id,
+        \\  1 AS identity_quality, '' AS user_id,
+        \\  CAST('00000000-0000-4000-8000-0000000000b6' AS UUID) AS session_id,
+        \\  0 AS sequence, TRUE AS session_start, 'tablet' AS device_category,
+        \\  CAST('00000000-0000-4000-8000-000000000201' AS BLOB) AS visitor_day_id,
+        \\  TRUE AS visitor_day_start, repeat('c', 64) AS event_payload_digest
+        \\) FROM events template
+        \\WHERE template.site_id = '__SITE__'
+        \\  AND template.event_id = CAST('00000000-0000-4000-8000-000000000107' AS UUID);
+        \\INSERT INTO events SELECT template.* REPLACE (
+        \\  CAST('41000000-0000-4000-8000-' || lpad(i::VARCHAR, 12, '0') AS UUID) AS event_id,
+        \\  '__SITE__' AS site_id,
+        \\  1767484800000000 + (i // 2) * 1000000 AS received_at_utc_micros,
+        \\  1767484800000000 + (i // 2) * 1000000 AS occurred_at_utc_micros,
+        \\  DATE '2026-01-04' AS received_date_utc,
+        \\  DATE '2026-01-04' AS site_local_date,
+        \\  CAST('43000000-0000-4000-8000-' || lpad(i::VARCHAR, 12, '0') AS UUID) AS anonymous_id,
+        \\  CAST('42000000-0000-4000-8000-' || lpad(i::VARCHAR, 12, '0') AS UUID) AS session_id,
+        \\  0 AS sequence, TRUE AS session_start,
+        \\  CAST('41000000-0000-4000-8000-' || lpad(i::VARCHAR, 12, '0') AS BLOB) AS visitor_day_id,
+        \\  TRUE AS visitor_day_start, repeat('e', 64) AS event_payload_digest
+        \\) FROM events template, range(27) source(i)
+        \\WHERE template.site_id = '__SITE__'
+        \\  AND template.event_id = CAST('00000000-0000-4000-8000-000000000107' AS UUID);
+    ;
+    const rendered = try std.mem.replaceOwned(
+        u8,
+        allocator,
+        template,
+        "__SITE__",
+        site_id,
+    );
+    defer allocator.free(rendered);
+    const sql = try allocator.dupeSentinel(u8, rendered, 0);
+    defer allocator.free(sql);
+    try store.database.exec(sql);
+    try store.checkpoint();
+    try output.writeAll("Sessions fixture committed custom=1 paginated=27\n");
+}
+
 pub fn timeout(
     allocator: std.mem.Allocator,
     output: *std.Io.Writer,
@@ -1906,6 +1970,150 @@ pub fn filtersV2(
         .suggestion_micros = suggestion_micros,
         .suggestion_values = suggestions.values.len,
         .suggestion_has_more = suggestions.has_more,
+    }, .{}, output);
+    try output.writeByte('\n');
+}
+
+pub fn sessionList(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    output: *std.Io.Writer,
+    directory: []const u8,
+    site_slug: []const u8,
+    start_date: []const u8,
+    end_date: []const u8,
+    profile: bool,
+) !void {
+    try domain.validateSlug(site_slug);
+    const range = analysis.LocalDateRange{
+        .start = start_date,
+        .end = end_date,
+    };
+    try range.validate();
+    const metadata_path = try std.fs.path.join(
+        allocator,
+        &.{ directory, "meta.db" },
+    );
+    var metadata = try meta.Store.open(allocator, metadata_path);
+    defer metadata.deinit();
+    try metadata.requireCurrent();
+    const site_id = try metadata.siteIdBySlug(allocator, site_slug);
+    const goals = try metadata.listGoals(allocator, site_slug);
+    const policy = try metadata.sitePolicy(allocator, site_id);
+    const resolved = try allocator.alloc(analysis.ResolvedGoal, goals.len);
+    for (resolved, goals) |*target, goal| target.* = .{
+        .id = goal.id,
+        .selector = .{
+            .kind = switch (goal.match_kind) {
+                .event => .exact_event,
+                .path => .exact_page,
+                .prefix => .page_prefix,
+            },
+            .value = goal.match_value,
+            .predicates = goal.predicates,
+        },
+    };
+    const request = analysis.SessionListRequest{
+        .site_id = site_id,
+        .range = range,
+        .active_goals = resolved,
+        .strict_traffic_mode = policy.strict_mode,
+        .now_utc_micros = 1_800_000_000_000_000,
+        .timeout_ms = analysis.maximum_timeout_ms,
+    };
+    const event_path = try std.fs.path.join(
+        allocator,
+        &.{ directory, "events.duckdb" },
+    );
+    var store = try events.Store.open(allocator, event_path);
+    defer store.deinit();
+    try store.requireCurrent();
+    if (profile) {
+        try output.writeAll(try analysis_store.profileSessionList(
+            allocator,
+            &store,
+            request,
+        ));
+        return;
+    }
+    if (builtin.mode == .debug) {
+        const page = try analysis_store.executeSessionList(
+            allocator,
+            &store,
+            request,
+        );
+        try writeSessionListEvidence(
+            output,
+            policy.strict_mode,
+            page,
+            false,
+            &.{},
+            false,
+            false,
+        );
+        return;
+    }
+    var timeout_request = request;
+    timeout_request.timeout_ms = 1;
+    if (analysis_store.executeSessionList(
+        allocator,
+        &store,
+        timeout_request,
+    )) |_| {
+        return error.ExpectedSessionListTimeout;
+    } else |err| if (err != error.AnalysisTimeout) return err;
+
+    _ = try analysis_store.executeSessionList(allocator, &store, request);
+    var samples: [10]i64 = undefined;
+    var last: analysis.SessionPage = undefined;
+    for (&samples) |*elapsed| {
+        const started = std.Io.Clock.awake.now(io).nanoseconds;
+        last = try analysis_store.executeSessionList(
+            allocator,
+            &store,
+            request,
+        );
+        elapsed.* = @intCast(@divTrunc(
+            std.Io.Clock.awake.now(io).nanoseconds - started,
+            std.time.ns_per_us,
+        ));
+    }
+    std.mem.sort(i64, &samples, {}, std.sort.asc(i64));
+    try writeSessionListEvidence(
+        output,
+        policy.strict_mode,
+        last,
+        true,
+        &samples,
+        true,
+        true,
+    );
+    if (samples[9] >= 400_000) return error.SessionListPerformanceBudgetExceeded;
+}
+
+fn writeSessionListEvidence(
+    output: *std.Io.Writer,
+    strict_mode: bool,
+    page: analysis.SessionPage,
+    performance_enforced: bool,
+    samples: []const i64,
+    timeout_interrupted: bool,
+    connection_reused: bool,
+) !void {
+    var currencies: usize = 0;
+    for (page.rows) |row| currencies += row.revenue.len;
+    try std.json.Stringify.value(.{
+        .strict_mode = strict_mode,
+        .page_rows = page.rows.len,
+        .has_more = page.has_more,
+        .currency_rows = currencies,
+        .performance_enforced = performance_enforced,
+        .sample_micros = samples,
+        .p50_micros = if (samples.len == 0) @as(?i64, null) else samples[4],
+        .p95_micros = if (samples.len == 0) @as(?i64, null) else samples[9],
+        .p99_micros = if (samples.len == 0) @as(?i64, null) else samples[9],
+        .timeout_interrupted = timeout_interrupted,
+        .connection_reused = connection_reused,
     }, .{}, output);
     try output.writeByte('\n');
 }

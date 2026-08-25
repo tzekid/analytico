@@ -494,3 +494,29 @@ opening the same file concurrently. The supported candidates are:
 M8 selected candidate 1: Analytico remains standalone and Cloudio may expose an
 ordinary link to it. Decision D22 records the evidence. No identity forwarding,
 shared session, generic API, or shared package was added.
+
+## 12. Bounded Sessions query path
+
+D45 keeps Sessions as a specialized typed consumer beside the D29 grammar.
+The controller resolves site configuration, timezone, active Goals, selected
+Goal, segment, FilterSet, strict policy, page, and request time before the
+store is called. Turso never reads event rows and DuckDB never resolves a Goal
+ID.
+
+The store executes a narrow filtered/ranked-key statement and then a detail
+statement for at most 25 bound session UUIDs. Both use the same DuckDB owner
+and interrupt budget. The sequential HTTP accept loop prevents a collector
+write from interleaving the two statements. The store returns owned typed
+facts; the controller formats local times and short identity labels; the
+renderer performs no I/O or clock work. There is no Sessions JSON endpoint,
+startup request, result cache, projection, or second application state model.
+The Store retains one exact-SQL prepared detail template and rebinds every
+request value. A shape change, migration, execution failure, or Store teardown
+destroys it before DuckDB closes.
+
+The same sequential loop owns one resettable request arena. It resets before
+and after every request, retains only bounded capacity for reuse, and never
+retains request values. DuckDB keeps its 128 MiB query-memory limit while its
+native allocator flush threshold is fixed at 8 MiB. These lifecycle bounds
+avoid treating allocator oscillation as result state and add no worker,
+connection, cache entry, or concurrency path.

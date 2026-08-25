@@ -125,6 +125,7 @@ The serving connection configures and then locks:
 SET threads = 1;
 SET memory_limit = '128MB';
 SET max_temp_directory_size = '256MB';
+SET allocator_flush_threshold = '8MiB';
 SET preserve_insertion_order = false;
 SET allow_community_extensions = false;
 SET enable_external_access = false;
@@ -141,6 +142,13 @@ count and memory limit under constraints:
 Explicit report ordering makes insertion-order preservation unnecessary.
 Disabling it also keeps analytical intermediates within the configured memory
 limit; it does not change event or metric ordering.
+
+The allocator threshold does not reduce the 128 MiB query-memory limit. It
+makes the pinned engine flush freed native allocations after 8 MiB instead of
+retaining its 128 MiB default. D45 records the repeated-view evidence and why
+the explicit value is part of the serving contract. The separate bulk-
+deallocation threshold retains the pinned default because the review found no
+measured need to change it.
 
 ## 6. Protocol-v1 tracker budgets
 
@@ -851,6 +859,101 @@ two zone-prunable tie/later queries first passed at 25.359 ms p95, then measured
 independent pre-final runs. The exact PR-readiness candidates above include the
 selected-site maximum-receipt equality lookup, explicit excluded-traffic
 acceptance, and exact visible type/time assertions.
+
+### Sessions list budget
+
+D45 keeps the package Session-list p95 below 400 ms without changing the
+one-thread, 128 MiB DuckDB memory, 256 MiB temporary-space, or two-second
+interrupt contracts. The standard fixture has 1,000,000 events, 100,000
+sessions, classifier-signal rows, and ten active Goals. The separate semantic
+and browser corpus supplies persistent, identified, ephemeral, legacy,
+excluded, typed-property, and exact-value cases without misrepresenting the
+scale fixture as mixed production traffic.
+
+The focused ReleaseSafe gate opens one real on-disk Store, performs one explicit
+warmup, then records ten complete two-statement calls in default mode and ten
+in strict mode. It reports p50/p95/p99 for the complete shared-deadline call;
+both p95 values are blocking below 400 ms. Separate EXPLAIN ANALYZE evidence
+must show the narrow candidate/rank stage and the bounded detail-key stage.
+Page-key lookahead, exact currencies, timeout, post-timeout reuse, response
+bytes, and repeated-view RSS remain part of the same candidate evidence.
+
+The first ReleaseSafe complete-call candidate applied a session-device filter
+and selected Goal inside the scale timing. Its default samples were 746269,
+755127, 768473, 784724, 788584, 791436, 798665, 800263, 825118, and 856177
+microseconds, so its 856177-microsecond p95 failed. Narrowing materialized
+range columns still failed at 752643 microseconds. Those rejected results are
+retained as filtered stress evidence; they are not presented as the package's
+ordinary first-list budget.
+
+The pre-final post-template candidate measured the canonical unfiltered first
+list while retaining all ten active Goals for the bounded detail conversion
+work. Its default samples were 110591, 112337, 114986, 115716, 116567, 120285,
+120819, 126000, 133103, and 144926 microseconds. Strict samples were 147571,
+158308, 162425, 165281, 175977, 177562, 185197, 193405, 194125, and 205011
+microseconds.
+
+The exact final candidate also clears the retained statement after every
+destroyed result, drives the maximum 25-record page, reuses one resettable
+request arena, and fixes the native allocator flush threshold at 8 MiB. Two
+independent ReleaseSafe runs measured default samples of 131792, 134253,
+138933, 139805, 143012, 154614, 165231, 165564, 173236, and 185488
+microseconds, then 114949, 119101, 119511, 121246, 124790, 126026, 128934,
+129484, 143326, and 149448 microseconds. Their p95 values were 185488 and
+149448 microseconds. Strict samples were 157880, 165893, 169880, 171590,
+176790, 177722, 180674, 185546, 191926, and 192028 microseconds, then 159518,
+163845, 165377, 175024, 178241, 178429, 179037, 196292, 202609, and 205600
+microseconds. Their p95 values were 192028 and 205600 microseconds. All four
+remain below the unchanged 400000-microsecond gate.
+
+Final EXPLAIN ANALYZE totals for the same SQL shape were 0.123/0.0820 seconds
+for the default key/detail statements and 0.177/0.0396 seconds for strict. The
+key compiler omits row-level filter qualification when neither filters nor a
+selected Goal exist, carries the retained start in the bounded key relation,
+and projects only demanded range columns for filtered requests. The real
+one-millisecond interrupt then reused the same connection successfully.
+
+The repeated-view review rejected preparing and destroying the same detail
+shape on every request. Debug first grew 52,300 KiB over 50 views and then
+48,112 KiB over the next 50; ReleaseSafe grew 96,236 KiB and then 24,920 KiB.
+Keeping the statement alive only through result destruction produced isolated
+passing samples, but did not converge: a later Debug run grew 14,700 KiB after
+50 warmups, ReleaseSafe grew 22,108 KiB after 200, and a one-row detail shape
+still grew 29,776 KiB after 200. These measurements falsified row volume and a
+shorter lifetime as fixes.
+
+D45 therefore retains one exact-SQL prepared detail template, rebinds every
+request value, destroys each result, and clears the statement before reuse.
+The repeated-view gate initially treated one endpoint after 200 requests as a
+stable observation. That was falsified: one ReleaseSafe process warmed by
+85,284 KiB and then grew 21,260 KiB, while another reached 131,048 KiB and then
+released 12,148 KiB. A 400-request warmup also later grew 18,008 KiB. Adjacent
+cohorts then showed large positive and negative allocator movements, so a
+single endpoint and a three-cohort median were both rejected as leak tests.
+
+The final gate reports 600 warmup requests separately, measures three more
+200-request cohorts, prints every signed change, and applies the unchanged
+8 MiB-per-200 sustained-growth rate to their complete 600-request total. A
+candidate without the reusable request arena averaged 20,797 KiB and failed.
+After arena reuse, removing the prepared template produced one 6,211 KiB pass
+and then a 10,756 KiB failure. The pinned 128/512 MiB native allocator defaults
+remained unstable; explicit 16 MiB flush thresholds still averaged 8,472 KiB
+and failed.
+
+The exact `8MiB` threshold passed two independent ReleaseSafe processes while
+the bulk-deallocation threshold retained its default. Their warmups were
+96,776 and 84,428 KiB; cohort changes were -6,988, +4,424, and -21,872 KiB,
+then -22,340, +44,216, and -17,172 KiB. Their sustained averages were -8,145
+and +1,568 KiB per 200 requests. Debug warmed by 77,348 KiB; its cohorts were
++10,308, -20,324, and +11,076 KiB, averaging +353 KiB. The raw oscillations
+remain visible, but continued growth is still blocking. No result, session
+membership, event watermark, or request value is cached.
+
+A miss follows the existing regression order: reproduce and profile, preserve
+semantics, narrow selected columns/predicates and prefilters, then record a new
+decision before any result cache, projection, rollup, index, memory, thread, or
+budget change. A warm or partial statement measurement is not presented as
+the complete Session-list p95.
 
 ## 8. Regression policy
 

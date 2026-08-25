@@ -128,6 +128,8 @@ pub fn run(
     );
     defer event_store.deinit();
     try event_store.requireCurrent();
+    var request_arena = std.heap.ArenaAllocator.init(allocator);
+    defer request_arena.deinit();
     var policy_arena = std.heap.ArenaAllocator.init(allocator);
     defer policy_arena.deinit();
     const policies = try loadPolicies(
@@ -141,6 +143,7 @@ pub fn run(
     );
     var context = Context{
         .allocator = allocator,
+        .request_arena = &request_arena,
         .io = io,
         .metadata = &metadata,
         .events = &event_store,
@@ -257,6 +260,7 @@ const Counters = struct {
 
 const Context = struct {
     allocator: std.mem.Allocator,
+    request_arena: *std.heap.ArenaAllocator,
     io: std.Io,
     metadata: *meta.Store,
     events: *events.Store,
@@ -294,9 +298,9 @@ fn handle(context: *Context, stream: std.Io.net.Stream) !void {
     var writer = stream.writer(context.io, &write_buffer);
     const output = &writer.interface;
 
-    var arena_state = std.heap.ArenaAllocator.init(context.allocator);
-    defer arena_state.deinit();
-    const allocator = arena_state.allocator();
+    _ = context.request_arena.reset(.retain_capacity);
+    defer _ = context.request_arena.reset(.retain_capacity);
+    const allocator = context.request_arena.allocator();
     var observation: request_mod.Observation = .{};
     const request = (request_mod.read(
         allocator,

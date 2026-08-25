@@ -223,6 +223,16 @@ ephemeral and legacy-daily step-one identities. The selected local-date range
 bounds every participating event; the conversion window narrows rather than
 expands that range. #37 owns session drill-through.
 
+D45 replaces the Sessions placeholder with a fixed 25-record server-rendered
+list over the selected site-local range. It applies the shared segment and
+FilterSet, optional active Goal participation, D34 traffic policy, stable
+start-descending/UUID ordering, and bounded previous/next pagination. Each
+record expands to full retained duration, engagement, acquisition, device,
+identity, Page/custom counts, active-Goal conversions, exact per-currency
+values, last activity, and an explicitly inferred current state. Native forms,
+JavaScript-disabled use, and phone records are the baseline. #42 retains the
+timeline and cross-session profile.
+
 ### F5. CLI
 
 The production MVP provides these command families:

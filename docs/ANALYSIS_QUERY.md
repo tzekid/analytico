@@ -583,11 +583,11 @@ evidence.
 
 ## 10. Universal filters, suggestions, segments, and saved views
 
-D40 and issue #30 make the same visible FilterSet context executable on the
-current Overview, Analyze Trend, and Analyze Breakdown surfaces. “Current” is
-intentional: Funnel, Path, Retention, and Sessions keep specialized future
-engines, consume this closed FilterSet when implemented, and are not invented
-as placeholders by #30.
+D40 and issue #30 made the same visible FilterSet context executable first on
+Overview, Analyze Trend, and Analyze Breakdown. The original boundary was
+intentional: later specialized engines consume the closed FilterSet only in
+their owning issues. D45 now adds Sessions; Funnel, Path, and Retention retain
+their specialized issue-owned consumers and are not invented as placeholders.
 
 The URL contains one optional selected segment UUID plus zero or more ad-hoc
 `f=` clauses. The controller loads the segment for the selected site, validates
@@ -778,3 +778,43 @@ Issue #34 additionally proves canonical predicate JSON collision separation,
 event-row versus same-session semantics, filter/segment composition, typed
 errors, exact result components, zero/timeout no-write and reuse, selector-
 scoped property conflicts, and the goal-detail million-row budget.
+
+## 13. Specialized Sessions list
+
+D45 adds a specialized session-record request without extending the ordinary
+metric-by-dimension grammar. It contains one site-local range, the preserved
+comparison choice, the composed FilterSet and optional segment provenance, an
+optional resolved active Goal, a bounded page, the active-Goal traffic
+snapshot, strict-policy state, a precise microsecond request clock, and one
+timeout. Goal IDs are resolved in Turso before DuckDB; only reviewed selectors
+enter the store.
+
+The first statement selects sessions from product-eligible meaningful rows in
+the range, applies the existing event/session/person clause compiler, optional
+Goal participation, and D34 veto, then orders retained starts descending with
+session UUID ascending. It returns a fixed 25 keys plus one lookahead. The
+second statement expands only the first 25 bound keys into full retained facts
+and exact currency rows. Both statements share one deadline and result
+validation bounds rows, ordering, counts, timestamps, identity forms,
+decimals, and the 16-currency ceiling.
+
+The event Store owns at most one prepared second-statement template. Reuse
+requires byte-for-byte generated SQL equality; every site, session UUID, Goal,
+and predicate value is rebound for the current request. A shape change,
+migration, or execution failure destroys the prior template. No result,
+membership set, or user value is cached.
+
+Canonical state is `v=1`, `from`, `to`, `compare`, optional `goal`, optional
+nondefault `page`, optional `segment`, then repeated canonical `f` clauses.
+Equivalent accepted state has one URL. Unknown, duplicate, empty, stale,
+cross-site, overlong, out-of-range, or noncanonical fields reject or take the
+documented single canonical redirect before DuckDB. Filter and segment native
+forms carry one exact `sessions` state kind and reset pagination after a state
+change.
+
+The result contains at most 25 typed records with start/last receipt and
+occurrence times, canonical identity state, acquisition/landing, geography and
+client family, duration, engagement, Page/custom counts, active-Goal match
+count, and exact per-currency values. It exposes previous/next page state, not
+raw identity membership. Session timelines/profiles and generated
+funnel/path participation remain separate specialized consumers.

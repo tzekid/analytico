@@ -999,7 +999,7 @@ fn getPage(
     output: *std.Io.Writer,
     route: Route,
 ) !void {
-    const now = currentSeconds() catch {
+    const now_micros = currentMicros() catch {
         try writeError(output, .{
             .status = 503,
             .title = "Clock unavailable",
@@ -1007,6 +1007,7 @@ fn getPage(
         });
         return;
     };
+    const now = @divFloor(now_micros, 1_000_000);
     const sites = try dependencies.metadata.listSites(dependencies.allocator);
     if (sites.len == 0) {
         try writeFirstRun(output, dependencies.collection_available);
@@ -1052,17 +1053,26 @@ fn getPage(
     };
     if (parsed.site.len != 0 or !kindAllowed(route, parsed.kind) or
         (parsed.goal_fields_set and route.goal_screen == .none) or
-        (parsed.funnel_fields_set and route.funnel_screen == .none))
+        (parsed.funnel_fields_set and route.funnel_screen == .none) or
+        (parsed.session_fields_set and route.destination != .sessions))
     {
         try invalidQueryPage(dependencies.allocator, output, route.destination, default_query);
         return;
     }
-    var query = controller.finishQuery(
-        parsed,
-        selected.slug,
-        &default_range,
-        .previous,
-    ) catch {
+    var query = (if (route.destination == .sessions)
+        controller.finishSessionsQuery(
+            parsed,
+            selected.slug,
+            &default_range,
+            .previous,
+        )
+    else
+        controller.finishQuery(
+            parsed,
+            selected.slug,
+            &default_range,
+            .previous,
+        )) catch {
         try invalidQueryPage(dependencies.allocator, output, route.destination, default_query);
         return;
     };
@@ -1148,6 +1158,7 @@ fn getPage(
         query,
         resolved_calendar,
         selected_calendar.zone,
+        if (route.destination == .sessions) now_micros else null,
         dependencies.csrf_token,
         noticeMessage(parsed.notice),
         dependencies.report_timeout_ms,
@@ -1173,6 +1184,28 @@ fn getPage(
                 route.destination,
                 query,
             );
+        } else if (err == error.StaleSessionGoal) {
+            var reset = query;
+            reset.session_goal_id = "";
+            reset.session_page = 1;
+            var return_url = std.Io.Writer.Allocating.init(
+                dependencies.allocator,
+            );
+            defer return_url.deinit();
+            try canonicalUrl(&return_url.writer, .sessions, reset);
+            try writeError(output, .{
+                .status = 422,
+                .title = "Selected goal is no longer active",
+                .message = "The Sessions result was not run. Remove the stale Goal restriction and retry.",
+                .return_url = return_url.written(),
+            });
+        } else if (err == error.TooManyAnalysisCurrencies) {
+            try writeError(output, .{
+                .status = 422,
+                .title = "Too many session currencies",
+                .message = "A selected session contains more than 16 exact currencies. Narrow the date, Goal, segment, or filter context and retry.",
+                .return_url = request.target,
+            });
         } else if (err == error.SiteNotFound or err == error.GoalNotFound or
             err == error.FunnelNotFound)
         {
@@ -2002,10 +2035,11 @@ fn loadAnalysisTargetPage(
         return error.SiteCalendarUnavailable;
     const selected_calendar = lookup.find(selected.id) orelse
         return error.SiteCalendarUnavailable;
+    const now_micros = try currentMicros();
     const context = try calendar.resolve(
         selected_calendar.zone,
         selected_calendar.timezone_name,
-        try currentSeconds(),
+        @divFloor(now_micros, 1_000_000),
         target.query.range,
         target.query.comparison,
     );
@@ -2018,6 +2052,7 @@ fn loadAnalysisTargetPage(
             target.query,
             context,
             selected_calendar.zone,
+            null,
             dependencies.csrf_token,
             "",
             dependencies.report_timeout_ms,
@@ -2029,6 +2064,21 @@ fn loadAnalysisTargetPage(
             selected.id,
         );
         return page;
+    }
+    if (target.destination == .sessions) {
+        return controller.loadPage(
+            dependencies.allocator,
+            dependencies.metadata,
+            dependencies.events,
+            .sessions,
+            target.query,
+            context,
+            selected_calendar.zone,
+            now_micros,
+            dependencies.csrf_token,
+            "",
+            dependencies.report_timeout_ms,
+        );
     }
     if (target.query.analysis_breakdown != null) {
         return controller.loadBreakdownPage(
@@ -2484,6 +2534,7 @@ fn goalPreviewPage(
         query,
         resolved_calendar,
         null,
+        null,
         dependencies.csrf_token,
         "",
         dependencies.report_timeout_ms,
@@ -2567,6 +2618,7 @@ fn funnelSubmissionPage(
         .journeys,
         query,
         resolved_calendar,
+        null,
         null,
         dependencies.csrf_token,
         "",
@@ -2745,6 +2797,7 @@ fn formErrorPage(
         },
         query,
         resolved_calendar,
+        null,
         null,
         dependencies.csrf_token,
         "",
@@ -3171,6 +3224,16 @@ fn canonicalUrl(
         }
         return;
     }
+    if (destination == .sessions) {
+        const parameters = try controller.canonicalSessionParameters(
+            std.heap.page_allocator,
+            query,
+        );
+        defer std.heap.page_allocator.free(parameters);
+        try output.writeByte('?');
+        try output.writeAll(parameters);
+        return;
+    }
     if (destination == .analyze and query.analysis_breakdown != null) {
         const parameters = try analysis.canonicalUrl(
             std.heap.page_allocator,
@@ -3306,6 +3369,10 @@ fn isInvalidInput(err: anyerror) bool {
         error.InvalidOverviewHighlight,
         error.OverviewMetricNotApplicable,
         error.OverviewHighlightNotApplicable,
+        error.InvalidSessionPage,
+        error.InvalidSessionGoal,
+        error.InvalidSessionClock,
+        error.SessionOptionsNotApplicable,
         error.AnalysisOptionsNotApplicable,
         error.InvalidBreakdownMetric,
         error.InvalidAnalysisSite,
@@ -3345,6 +3412,7 @@ fn staleFilterPage(
 ) !void {
     var reset = query;
     reset.analysis_filters = .{};
+    if (destination == .sessions) reset.session_page = 1;
     if (reset.analysis_breakdown) |*breakdown| breakdown.filters = .{};
     var return_url = std.Io.Writer.Allocating.init(allocator);
     defer return_url.deinit();
@@ -3365,6 +3433,7 @@ fn staleSegmentPage(
 ) !void {
     var reset = query;
     reset.analysis_segment_id = null;
+    if (destination == .sessions) reset.session_page = 1;
     if (reset.analysis_breakdown) |*breakdown| breakdown.segment_id = null;
     var return_url = std.Io.Writer.Allocating.init(allocator);
     defer return_url.deinit();

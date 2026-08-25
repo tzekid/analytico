@@ -53,6 +53,7 @@ semantic, or application state model is consequential and must be added here.
 | D42 | Property-constrained goals and metadata schema 9 | Persist one canonical predicate set per goal and preview one closed goal result under the current context | Accepted for 1.0 issue #34 |
 | D43 | Guided funnel lifecycle and metadata schema 10 | Persist one canonical bounded definition and preview independent selector availability | Accepted for 1.0 issue #35 |
 | D44 | Restart-capable funnel evaluation | Fixed bounded position-link plans with persistent-person visitor scope and one typed result | Accepted for 1.0 issue #36 |
+| D45 | Bounded Sessions list | Two-stage bounded raw-event query and typed records | Accepted for 1.0 issue #41 |
 
 ## D01. MVP interface
 
@@ -3272,3 +3273,172 @@ metric-v1 funnel output remains exact.
 `ANALYSIS_QUERY.md`, `DESIGN_SYSTEM.md`, `PERFORMANCE.md`, `OPERATIONS.md`,
 `RELEASE_CONTRACT_1.0.md`, and issue #36. Issue #37 consumes the typed
 participation semantics without changing this result.
+
+## D45. Expand only a bounded page of filtered session records
+
+**Status:** Accepted for Analytico 1.0 issue #41
+
+**Date:** 2026-08-25
+
+**Issue:** #41
+
+**Extends:** D26 persistent sessions, D27 site-local ranges, D29 specialized
+typed analysis, D34 traffic eligibility, and D40 universal filters. It leaves
+timelines and profiles to #42 and generated funnel participation to #37.
+
+### Context and query-shape candidates
+
+The event table is the only authoritative session history. The product needs
+searchable session records with full retained summaries, but the standard
+fixture contains 100,000 sessions and the list has a p95 below 400 ms under the
+existing one-thread, 128 MiB DuckDB boundary. A wide aggregation of every
+candidate before pagination spends memory and selector work on rows the first
+page will never render.
+
+| Candidate | Correctness and runtime | Maintenance and rollback |
+| --- | --- | --- |
+| Reuse metric-v1 or Breakdown output | Already bounded | Returns aggregates and retains UTC visitor-day assumptions rather than complete metric-v2 records |
+| Build every full session record in one wide statement, then paginate | Direct result shape | Aggregates wide strings, values, and active-goal predicates for every candidate before the limit |
+| Select and rank narrow session keys, then expand only that bounded page under one shared deadline | Keeps exact filter/order semantics while bounding detail and currency work | Two finite statements on the accepted sequential connection; re-preparing the identical detail shape retained process memory in the measured browser loop |
+| The same bounded two-stage query with one exact-SQL prepared detail template | Preserves the selected semantics and request-specific bindings while avoiding repeated native preparation | One store-owned statement and at most 128 KiB of copied SQL; exact-shape replacement and Store teardown are the only lifecycle |
+| Result cache or session projection | Could avoid repeated execution | Adds invalidation or durable data semantics when preparation, not execution or aggregation, is the measured fault |
+
+Select the fourth candidate. The first bound statement applies the composed
+D40 FilterSet to product-eligible Page and custom-event rows in the selected
+site-local date range. Event clauses match one event row; session and person
+clauses retain their documented D29 meanings. D34 strict mode additionally
+removes only current suspected sessions. The statement derives the retained
+session start needed for ordering, orders by start descending then session UUID
+ascending, and returns at most 25 keys plus one lookahead at a bounded offset.
+
+The second statement receives only those bound UUIDs and derives complete
+retained summaries. Both statements execute on the one production DuckDB
+owner under one interrupt budget. The accepted server handles connections
+sequentially, so no collector write can interleave the two statements. A
+timeout in either statement fails the complete request; partial records are
+never rendered.
+
+The Store retains at most one prepared detail template keyed by the complete
+generated SQL bytes. Every site, session UUID, Goal selector value, and
+predicate value remains a fresh bound parameter; no result row or user value
+is part of the key or retained by the template. A different SQL shape,
+migration, or execution failure discards it, and Store teardown destroys the
+statement before closing DuckDB. The copied SQL is capped by the existing
+128 KiB compiler limit. This is query-template reuse from the accepted
+optimization order, not D35 result caching: it has no TTL, event invalidation,
+or correctness state, and a miss only performs the same preparation that was
+previously done on every request.
+
+Repeated-view qualification then compared the runtime-lifetime candidates
+separately:
+
+| Candidate | Runtime and maintenance | Result |
+| --- | --- | --- |
+| New backing arena for every request with the pinned DuckDB allocator defaults | Existing ownership, but repeatedly returns large bounded pages through the process allocator | Rejected: three warmed 200-request cohorts averaged 20,797 KiB growth |
+| Reuse one resettable arena on the already-sequential HTTP loop | Retains bounded capacity, not values, and adds no concurrency or cache state | Necessary but insufficient with the native defaults |
+| Add the exact-SQL detail template and set the supported native allocator flush threshold to 8 MiB | One Store statement plus one locked engine setting; query memory remains 128 MiB | Selected: two independent ReleaseSafe runs averaged -8,145 and +1,568 KiB per 200 requests |
+| Also lower the independent bulk-deallocation threshold | Could flush another native pool | Rejected as YAGNI after the singular threshold passed twice |
+| Drop the template after arena reuse, retain 16 MiB flushes, reset the DuckDB connection, or widen the RSS/query limits | Less Store lifecycle, a looser native cache, disruptive ownership, or a weaker contract | Rejected: no-template later averaged 10,756 KiB, 16 MiB flushes averaged 8,472 KiB, and the other choices were unnecessary |
+
+The HTTP server is sequential already, so it owns one request arena and resets
+it before and after every request. Only its capacity survives. Parsed input,
+typed results, rendered HTML, credentials, identities, and filter values do
+not. The event Store still owns one connection and one prepared detail
+template. The 8 MiB allocator threshold controls when freed native memory is
+returned; it does not reduce the 128 MiB query-memory or 256 MiB temporary
+limits. The independent bulk threshold retains its default. Rollback is the
+predecessor artifact and restores the prior allocator setting without touching
+data.
+
+### Range, summary, identity, and value semantics
+
+A session participates when it has at least one product-eligible Page or
+custom event inside the selected site-local range that satisfies the complete
+filter context. Once selected, its summary uses all retained product-eligible
+events for the same site and session UUID, including activity outside the
+selected range. This preserves crossing-session context without broadening
+which sessions qualify.
+
+The displayed start, last activity, and duration use deterministic plausible
+occurrence order with sequence, receipt time, and event UUID tie-breaks where
+a first value is required. Page views, custom events, and active engagement
+cover the full retained selected session. Acquisition and landing come from
+the first retained page view. A custom-event-only session is `Direct / Unknown`
+with no landing. Country, device, and browser come from the first retained Page
+or custom event.
+
+Identity is the same derived canonical identity used by metric v2: linked user
+ID when present, otherwise a visibly labeled short persistent, ephemeral, or
+legacy anonymous ID. Legacy rows remain daily identities and are never linked
+across dates. Raw IP, network evidence, full User-Agent, arbitrary query
+strings, and identity UUID lists never enter the URL, HTML, or logs.
+
+The conversion count is the sum of matches across the current active Goal
+definitions, consistent with metric-v2 Conversions. One event may count once
+for each distinct Goal it satisfies. The separate converted state means at
+least one such match. Revenue is the exact sum and value count per observed
+three-letter currency across eligible Page/custom events in the full retained
+session. Currencies are never combined or converted; a seventeenth currency
+fails closed instead of truncating.
+
+`Current` is a bounded inference, not a browser-presence claim. It is true only
+when the latest retained authoritative receipt is not in the future and is no
+more than exactly 30 minutes before the precise microsecond request clock. The
+page labels that rule. A later request may move a session after a late retained
+event; the ordering is deterministic per request, not a persisted snapshot.
+
+### Canonical state, participation, and UI boundary
+
+The Sessions URL uses one versioned canonical state ordered as `v`, `from`,
+`to`, `compare`, optional active `goal`, nondefault `page`, optional `segment`,
+then repeated canonical `f` clauses. Page is limited to 1 through 1,000,000;
+the page size is fixed at 25. Comparison remains shared navigation context but
+does not execute a second list. A selected active Goal requires an in-range
+match and composes independently with the FilterSet.
+
+Sessions adds one server-owned filter-state kind so the existing native
+filter, suggestion, and segment POST/303/GET flows return to the same typed
+list. There is no saved-view variant. #37 later adds its closed funnel
+step/drop-off participation compiler to this consumer. #41 does not invent a
+raw session-ID parameter, generic membership AST, or claim that generated
+participation already shipped.
+
+The controller owns time/identity/value formatting and builds one typed view
+model. The renderer performs no database, clock, session, filesystem, or
+network work. Desktop records become labeled stacked records at phone width.
+No link to an unimplemented #42 detail route is emitted.
+
+### Performance, security, deployment, and acceptance
+
+Every site, date, Goal, page number, filter value, and session UUID is validated and
+bound. SQL text comes only from reviewed finite fragments. Key rows are capped
+at 26 and rendered records at 25; each record has at most 16 exact currency
+rows. Inputs remain inside D29 URL/filter/binding bounds and the existing
+two-second interrupt ceiling.
+
+No event or metadata migration, table, index, result cache, projection,
+rollup, background process, dependency, Caddy route, tracker change, or client
+data request is introduced. The one prepared template has one consumer, one
+entry, exact SQL equality, fixed compiler memory bounds, and no data
+invalidation surface. The resettable request arena and native allocator flush
+settings retain no result or user value. Deployment changes only the
+application artifact. The normal matched backup and independent restore still
+precede promotion. Rollback selects the predecessor artifact; metadata 10 and
+event schema 7 are unchanged.
+
+Issue #41 must prove a hand-checkable on-disk corpus covering crossing and
+custom-only sessions, identity qualities, active Goal matches, exact
+multi-currency values, filters/segments/selected Goal, late/tied ordering,
+pagination, current-time edges, excluded/strict traffic, timeout, connection
+reuse, and site isolation. The named real-browser gate proves authenticated
+direct/native/JavaScript-disabled flows, keyboard use, 390-pixel records, and
+zero startup data requests. The standard million-event fixture records one
+warmup and ten complete calls in default and strict modes; both p95 values must
+remain below 400 ms with one DuckDB thread and 128 MiB memory, and the final
+plans are retained with the compact result.
+
+**Affected contracts:** `SPEC.md`, `ARCHITECTURE.md`, `DATA_MODEL.md`,
+`ANALYSIS_QUERY.md`, `METRIC_SEMANTICS_V2.md`, `DESIGN_SYSTEM.md`,
+`PERFORMANCE.md`, `OPERATIONS.md`, `RELEASE_CONTRACT_1.0.md`, and issue #41.
+Issue #37 extends participation and #42 extends a selected record; neither
+changes this list contract silently.

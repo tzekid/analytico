@@ -221,11 +221,22 @@ are not passes.
   65,536/65,537-byte Caddy requests
   prove complete matcher coverage, application reachability, and deterministic
   413 rather than 502.
+- Sessions acceptance runs the real authenticated direct list with the same
+  event/session/person FilterSet and optional active Goal. Its on-disk corpus
+  proves crossing/custom-only sessions, full summaries, identities, exact
+  currencies, late/tied ordering, current-time edges, site isolation, strict
+  traffic, stable pagination, timeout, and reuse. A same-second nonzero-microsecond
+  receipt proves the production clock does not mislabel it as future.
+  JavaScript-disabled desktop and 390-pixel browser paths use native
+  context/filter/segment/Goal/page controls with no startup data request. Three
+  warmed 200-request RSS cohorts retain the 8 MiB-per-200 sustained-growth
+  limit. Default and strict complete two-statement p95 remain below 400 ms on
+  one million events and 100,000 sessions with ten active Goals.
 - The named `e2e-filters`, `e2e-goals`, `e2e-metadata7-migration`,
-  `e2e-metadata8-migration`, `e2e-metadata9-migration`, `e2e-funnels`, and
-  `e2e-metadata10-migration` gates pass independently. All seven are mandatory
-  parts of `e2e-release-full`; the full packaged gate is not a substitute for
-  reproducing any focused boundary.
+  `e2e-metadata8-migration`, `e2e-metadata9-migration`, `e2e-funnels`,
+  `e2e-metadata10-migration`, and `e2e-sessions` gates pass independently. All
+  eight are mandatory parts of `e2e-release-full`; the full packaged gate is
+  not a substitute for reproducing any focused boundary.
 - Server-rendered chart families validate bounded typed inputs and stable IDs,
   handle empty/single/constant/missing data honestly, expose no inline handlers,
   and pair every visual value with an exact captioned table/details alternative.

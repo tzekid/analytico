@@ -6,10 +6,11 @@ const report = @import("../report.zig");
 const meta = @import("../store/meta.zig");
 const charts = @import("charts.zig");
 const components = @import("components.zig");
+const controller = @import("controller.zig");
 const model = @import("model.zig");
 
 pub const stylesheet = @embedFile("style.css");
-pub const stylesheet_path = "/admin/app.v14.css";
+pub const stylesheet_path = "/admin/app.v15.css";
 pub const htmx = @embedFile("htmx_js");
 pub const htmx_gzip = @embedFile("htmx_gzip");
 pub const htmx_path = "/admin/htmx.28fae7bb.js";
@@ -105,11 +106,7 @@ pub fn page(output: *std.Io.Writer, value: model.Page) !void {
                 try definitions(output, value);
             }
         },
-        .sessions => try components.emptyState(output, .{
-            .id = "sessions-empty",
-            .title = "Session explorer is not available yet",
-            .message = "Session lists and details are not available in this build.",
-        }),
+        .sessions => try sessionSection(output, value),
         .live => try reportSection(output, value),
         .settings => {
             try trafficPolicy(output, value);
@@ -1049,6 +1046,16 @@ fn analysisStateHiddenFields(output: *std.Io.Writer, value: model.Page) !void {
             "segment",
             value.query.analysis_segment_id orelse "",
         );
+    } else if (std.mem.eql(u8, value.analysis_state_kind, "sessions")) {
+        try hidden(output, "from", value.query.range.start);
+        try hidden(output, "to", value.query.range.end);
+        try hidden(output, "compare", value.query.comparison.name());
+        try hidden(output, "goal", value.query.session_goal_id);
+        try hidden(
+            output,
+            "segment",
+            value.query.analysis_segment_id orelse "",
+        );
     }
 }
 
@@ -1069,6 +1076,11 @@ fn destinationHiddenFields(output: *std.Io.Writer, value: model.Page) !void {
             try output.writeAll("\">");
         } else {
             try hidden(output, "metric", value.query.overview_metric.name());
+        }
+    } else if (value.destination == .sessions) {
+        try hidden(output, "v", "1");
+        if (value.query.session_goal_id.len != 0) {
+            try hidden(output, "goal", value.query.session_goal_id);
         }
     } else if (value.destination == .analyze and value.query.analysis_breakdown != null) {
         const breakdown = value.query.analysis_breakdown.?;
@@ -1173,7 +1185,9 @@ fn destinationHiddenFields(output: *std.Io.Writer, value: model.Page) !void {
         try output.print("{d}", .{value.query.limit});
         try output.writeAll("\"><input type=\"hidden\" name=\"page\" value=\"1\">");
     }
-    if (value.destination == .overview or value.destination == .analyze) {
+    if (value.destination == .overview or value.destination == .analyze or
+        value.destination == .sessions)
+    {
         try analysisContextHiddenFields(output, value);
     }
 }
@@ -2570,6 +2584,124 @@ fn reportNavigation(output: *std.Io.Writer, value: model.Page) !void {
         try reportLink(output, value.query, item.kind, "", item.label);
     }
     try output.writeAll("</nav></div>");
+}
+
+fn sessionSection(output: *std.Io.Writer, value: model.Page) !void {
+    const sessions = value.session_list orelse return error.MissingSessionList;
+    try output.writeAll(
+        "<section class=\"session-workspace\" aria-labelledby=\"session-list-heading\">" ++
+            "<div class=\"analysis-heading\"><div><h2 id=\"session-list-heading\">Session list</h2>" ++
+            "<p class=\"muted\">Meaningful activity in the selected site-local range, then complete retained session summaries. Newest starts appear first. Current means the latest authoritative receipt is not in the future and is no more than 30 minutes old.</p></div></div>" ++
+            "<form class=\"session-goal-filter\" method=\"get\" action=\"",
+    );
+    try canonicalPath(output, .sessions, value.query);
+    try output.writeAll("\"><input type=\"hidden\" name=\"v\" value=\"1\">");
+    try calendarHiddenFields(output, value.query);
+    try analysisContextHiddenFields(output, value);
+    try output.writeAll(
+        "<label>Goal restriction<select name=\"goal\"><option value=\"\">All sessions</option>",
+    );
+    for (sessions.goals) |goal| {
+        try output.writeAll("<option value=\"");
+        try attribute(output, goal.id);
+        if (goal.selected) {
+            try output.writeAll("\" selected>");
+        } else try output.writeAll("\">");
+        try text(output, goal.name);
+        try output.writeAll("</option>");
+    }
+    try output.writeAll(
+        "</select></label><button type=\"submit\">Apply Goal</button></form>",
+    );
+    if (sessions.selected_goal_name.len != 0) {
+        try output.writeAll("<p class=\"analysis-focus\">Showing sessions with an in-range match for <strong>");
+        try text(output, sessions.selected_goal_name);
+        try output.writeAll("</strong>.</p>");
+    }
+    if (sessions.rows.len == 0) {
+        try components.emptyState(output, .{
+            .id = "sessions-empty",
+            .title = "No matching sessions",
+            .message = "No eligible sessions match this date range, Goal restriction, segment, and filter context.",
+        });
+    } else {
+        try output.writeAll("<ol class=\"session-list\">");
+        for (sessions.rows) |session| {
+            try output.writeAll("<li><article class=\"session-record\"><header><div><span class=\"eyebrow\">Session</span><h3>");
+            try text(output, session.short_id);
+            try output.writeAll("</h3></div><strong class=\"session-status\">");
+            try output.writeAll(if (session.current)
+                "Current · activity received within 30 minutes"
+            else
+                "Ended");
+            try output.writeAll("</strong></header><dl class=\"session-facts\">");
+            try sessionFact(output, "Identity", session.identity);
+            try sessionFact(output, "Identity state", session.identity_state);
+            try sessionFact(output, "Started", session.started_at);
+            try sessionFact(output, "Last activity", session.last_activity);
+            try sessionFact(output, "Last received", session.last_received);
+            try sessionFact(output, "Landing page", session.landing_page);
+            try sessionFact(output, "Acquisition", session.acquisition);
+            try sessionFact(output, "Country", session.country);
+            try sessionFact(output, "Device and browser", session.client);
+            try sessionFact(output, "Duration", session.duration);
+            try sessionFact(output, "Active engagement", session.engagement);
+            try output.print(
+                "<div><dt>Page views</dt><dd>{d}</dd></div>" ++
+                    "<div><dt>Custom events</dt><dd>{d}</dd></div>" ++
+                    "<div><dt>Conversions (Goal matches)</dt><dd>{d}</dd></div>",
+                .{
+                    session.page_views,
+                    session.custom_events,
+                    session.conversions,
+                },
+            );
+            try output.writeAll("<div><dt>Exact revenue</dt><dd>");
+            if (session.revenue.len == 0) {
+                try output.writeAll("None");
+            } else {
+                try output.writeAll("<ul class=\"session-revenue\">");
+                for (session.revenue) |amount| {
+                    try output.writeAll("<li>");
+                    try text(output, amount.amount);
+                    try output.print(
+                        " · {d} {s}</li>",
+                        .{
+                            amount.value_count,
+                            if (amount.value_count == 1) "value" else "values",
+                        },
+                    );
+                }
+                try output.writeAll("</ul>");
+            }
+            try output.writeAll("</dd></div></dl></article></li>");
+        }
+        try output.writeAll("</ol>");
+    }
+    try output.writeAll("<nav class=\"session-pagination\" aria-label=\"Sessions pagination\">");
+    if (sessions.previous_url) |url| {
+        try output.writeAll("<a rel=\"prev\" href=\"");
+        try attribute(output, url);
+        try output.writeAll("\">Previous</a>");
+    }
+    if (sessions.next_url) |url| {
+        try output.writeAll("<a rel=\"next\" href=\"");
+        try attribute(output, url);
+        try output.writeAll("\">Next</a>");
+    }
+    try output.writeAll("</nav></section>");
+}
+
+fn sessionFact(
+    output: *std.Io.Writer,
+    label: []const u8,
+    value: []const u8,
+) !void {
+    try output.writeAll("<div><dt>");
+    try text(output, label);
+    try output.writeAll("</dt><dd>");
+    try text(output, value);
+    try output.writeAll("</dd></div>");
 }
 
 fn journeyNavigation(output: *std.Io.Writer, value: model.Page) !void {
@@ -4497,6 +4629,32 @@ fn canonicalUrlSeparated(
         }
         return;
     }
+    if (destination == .sessions) {
+        const sessions_query = model.Query{
+            .site = adjusted.site,
+            .analysis_site_id = adjusted.analysis_site_id,
+            .range = adjusted.range,
+            .comparison = adjusted.comparison,
+            .analysis_filters = adjusted.analysis_filters,
+            .analysis_segment_id = adjusted.analysis_segment_id,
+            .session_goal_id = adjusted.session_goal_id,
+            .session_page = page_number,
+        };
+        const parameters = try controller.canonicalSessionParameters(
+            std.heap.page_allocator,
+            sessions_query,
+        );
+        defer std.heap.page_allocator.free(parameters);
+        try output.writeByte('?');
+        var parts = std.mem.splitScalar(u8, parameters, '&');
+        var first = true;
+        while (parts.next()) |part| {
+            if (!first) try output.writeAll(separator);
+            first = false;
+            try output.writeAll(part);
+        }
+        return;
+    }
     if (destination == .analyze and adjusted.analysis_breakdown != null) {
         var breakdown = adjusted.analysis_breakdown.?;
         breakdown.page = page_number;
@@ -4839,6 +4997,81 @@ test "report percentages format zero and positive signed counts exactly" {
     try std.testing.expectEqualStrings("Unavailable", unavailable.written());
 }
 
+test "Sessions render exact semantic summaries and native controls" {
+    const revenue = [_]model.SessionRevenue{.{
+        .amount = "EUR 12.500000",
+        .value_count = 1,
+    }};
+    const rows = [_]model.SessionRecord{.{
+        .short_id = "000000b1",
+        .identity = "user-a",
+        .identity_state = "Identified user",
+        .started_at = "2026-01-03 01:00:00 UTC+01:00",
+        .last_activity = "2026-01-03 01:00:04 UTC+01:00",
+        .last_received = "2026-01-03 01:00:05 UTC+01:00",
+        .landing_page = "/landing",
+        .acquisition = "Paid Search · google · winter",
+        .country = "DE",
+        .client = "desktop · Chrome",
+        .duration = "4s",
+        .engagement = "10s",
+        .page_views = 2,
+        .custom_events = 3,
+        .conversions = 4,
+        .current = true,
+        .revenue = &revenue,
+    }};
+    const goals = [_]model.SessionGoalOption{.{
+        .id = "00000000-0000-4000-8000-000000000041",
+        .name = "Purchases",
+        .selected = true,
+    }};
+    const page_value = model.Page{
+        .destination = .sessions,
+        .sites = &.{},
+        .selected_site = null,
+        .query = .{
+            .site = "example",
+            .range = .{ .start = "2026-01-01", .end = "2026-01-03" },
+            .comparison = .none,
+            .session_goal_id = goals[0].id,
+        },
+        .calendar_context = null,
+        .report_time_basis = .none,
+        .result = null,
+        .session_list = .{
+            .rows = &rows,
+            .goals = &goals,
+            .selected_goal_name = "Purchases",
+            .previous_url = null,
+            .next_url = "/admin/sites/example/sessions?v=1&from=2026-01-01&to=2026-01-03&compare=none&goal=00000000-0000-4000-8000-000000000041&page=2",
+        },
+        .goals = &.{},
+        .funnels = &.{},
+        .self_exclusion_origins = &.{},
+        .excluded_networks = &.{},
+        .csrf_token = "csrf-token",
+    };
+    var rendered = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer rendered.deinit();
+    try sessionSection(&rendered.writer, page_value);
+    const html = rendered.written();
+    try std.testing.expect(std.mem.indexOf(u8, html, "Session list") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "Current") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "UTC+01:00") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "EUR 12.500000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "1 value") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "no more than 30 minutes old") != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        html,
+        "Conversions (Goal matches)</dt><dd>4",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "name=\"goal\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "rel=\"next\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "/sessions/") == null);
+}
+
 test "Analyze chart coordinates retain exact rate and average components" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -4981,5 +5214,5 @@ test "production stylesheet mirrors the approved accessible design tokens" {
 
     try std.testing.expect(std.mem.indexOf(u8, stylesheet, "@import") == null);
     try std.testing.expect(std.mem.indexOf(u8, stylesheet, "url(") == null);
-    try std.testing.expectEqualStrings("/admin/app.v14.css", stylesheet_path);
+    try std.testing.expectEqualStrings("/admin/app.v15.css", stylesheet_path);
 }

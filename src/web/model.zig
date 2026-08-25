@@ -75,6 +75,8 @@ pub const Query = struct {
     funnel_id: []const u8 = "",
     funnel_page: u32 = 1,
     funnel_preview_response: bool = false,
+    session_goal_id: []const u8 = "",
+    session_page: u32 = 1,
 };
 
 pub const GoalScreen = enum {
@@ -384,6 +386,45 @@ pub const FunnelManagement = struct {
     next_definitions_url: ?[]const u8 = null,
 };
 
+pub const SessionGoalOption = struct {
+    id: []const u8,
+    name: []const u8,
+    selected: bool,
+};
+
+pub const SessionRevenue = struct {
+    amount: []const u8,
+    value_count: i64,
+};
+
+pub const SessionRecord = struct {
+    short_id: []const u8,
+    identity: []const u8,
+    identity_state: []const u8,
+    started_at: []const u8,
+    last_activity: []const u8,
+    last_received: []const u8,
+    landing_page: []const u8,
+    acquisition: []const u8,
+    country: []const u8,
+    client: []const u8,
+    duration: []const u8,
+    engagement: []const u8,
+    page_views: i64,
+    custom_events: i64,
+    conversions: i64,
+    current: bool,
+    revenue: []const SessionRevenue,
+};
+
+pub const SessionList = struct {
+    rows: []const SessionRecord,
+    goals: []const SessionGoalOption,
+    selected_goal_name: []const u8,
+    previous_url: ?[]const u8,
+    next_url: ?[]const u8,
+};
+
 pub const FormErrorTarget = enum {
     none,
     goal,
@@ -413,6 +454,7 @@ pub const Page = struct {
     collection_diagnostics: ?diagnostics.Snapshot = null,
     goal_management: ?GoalManagement = null,
     funnel_management: ?FunnelManagement = null,
+    session_list: ?SessionList = null,
     goals: []const meta.Goal,
     funnels: []const meta.Funnel,
     saved_views: []const meta.SavedView = &.{},

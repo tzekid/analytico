@@ -25,6 +25,7 @@ pub const maximum_property_names: u16 = 100;
 pub const maximum_property_catalog_events: u32 = 2_000;
 pub const maximum_suggestions: u8 = 50;
 pub const maximum_goal_path_rows: u8 = 10;
+pub const session_page_size: u8 = 25;
 
 pub const LocalDateRange = struct {
     start: []const u8,
@@ -1319,6 +1320,99 @@ pub const GoalResult = struct {
 pub const GoalPreviewResult = struct {
     result: GoalResult,
     properties: PropertyCatalog,
+};
+
+pub const SessionListRequest = struct {
+    site_id: []const u8,
+    range: LocalDateRange,
+    filters: FilterSet = .{},
+    active_goals: []const ResolvedGoal = &.{},
+    selected_goal_index: ?u8 = null,
+    strict_traffic_mode: bool = false,
+    page: u32 = 1,
+    now_utc_micros: i64,
+    timeout_ms: u32 = maximum_timeout_ms,
+
+    pub fn validate(self: SessionListRequest) !void {
+        try domain.validateUuid(self.site_id);
+        try self.range.validate();
+        try self.filters.validate();
+        try validateActiveGoals(self.active_goals);
+        if (self.selected_goal_index) |index| {
+            if (index >= self.active_goals.len) {
+                return error.InvalidSessionGoal;
+            }
+        }
+        if (self.page == 0 or self.page > maximum_page) {
+            return error.InvalidSessionPage;
+        }
+        if (self.now_utc_micros < 0) return error.InvalidSessionClock;
+        if (self.timeout_ms == 0 or self.timeout_ms > maximum_timeout_ms) {
+            return error.InvalidAnalysisTimeout;
+        }
+        try self.execution().validate();
+    }
+
+    pub fn offset(self: SessionListRequest) !i64 {
+        try self.validate();
+        const value = std.math.mul(
+            u64,
+            @as(u64, self.page - 1),
+            session_page_size,
+        ) catch return error.InvalidSessionPage;
+        if (value > std.math.maxInt(i64)) return error.InvalidSessionPage;
+        return @intCast(value);
+    }
+
+    pub fn execution(self: SessionListRequest) Execution {
+        return .{
+            .query = .{
+                .site_id = self.site_id,
+                .range = self.range,
+                .mode = .breakdown,
+                .metric = .{ .kind = .sessions },
+                .dimension = .{ .kind = .page },
+                .filters = self.filters,
+            },
+            .active_goals = self.active_goals,
+            .strict_traffic_mode = self.strict_traffic_mode,
+            .timeout_ms = self.timeout_ms,
+        };
+    }
+};
+
+pub const SessionRevenue = struct {
+    decimal: []const u8,
+    currency: []const u8,
+    value_count: i64,
+};
+
+pub const SessionRow = struct {
+    session_id: []const u8,
+    person_key: []const u8,
+    started_at_utc_micros: i64,
+    last_activity_utc_micros: i64,
+    last_received_at_utc_micros: i64,
+    landing_page: []const u8,
+    channel: []const u8,
+    referrer: []const u8,
+    utm_source: []const u8,
+    utm_campaign: []const u8,
+    country: []const u8,
+    device: []const u8,
+    browser: []const u8,
+    duration_ms: i64,
+    engagement_ms: i64,
+    page_views: i64,
+    custom_events: i64,
+    conversions: i64,
+    current: bool,
+    revenue: []const SessionRevenue,
+};
+
+pub const SessionPage = struct {
+    rows: []const SessionRow,
+    has_more: bool,
 };
 
 pub const FunnelAvailabilityRequest = struct {

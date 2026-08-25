@@ -78,6 +78,7 @@ if [[ ${3:-} == "--full" ]]; then
         tests/e2e-filters.sh \
         tests/e2e-goals.sh \
         tests/e2e-funnels.sh \
+        tests/e2e-sessions.sh \
         tests/e2e-passkey-p1.sh
     do
         printf 'running full release gate: %s\n' "$gate"
