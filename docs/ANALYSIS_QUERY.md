@@ -818,3 +818,33 @@ client family, duration, engagement, Page/custom counts, active-Goal match
 count, and exact per-currency values. It exposes previous/next page state, not
 raw identity membership. Session timelines/profiles and generated
 funnel/path participation remain separate specialized consumers.
+
+## 14. Specialized session detail and compatible-person profile
+
+D46 extends a selected D45 record without extending the ordinary metric-by-
+dimension grammar. `SessionDetailRequest` contains one site UUID, one session
+UUID, the current active-Goal snapshot, one fixed timeline page, one precise
+request clock, and one timeout. Existence, exact D45 summary expansion, and the
+50-entry-plus-lookahead timeline share one interrupt budget. The timeline
+compiler projects only the stored Page/custom/engagement/identify fields,
+groups engagement fragments by deterministic page-visit occurrence plus path,
+and orders the resulting meaningful entries by occurrence, sequence, receipt,
+and event UUID. Goal selectors produce one bounded mask and remain compiled
+finite SQL with bound values.
+
+`PersonProfileRequest` accepts only one validated compatible canonical key.
+Its retained-history statement derives first/last meaningful activity,
+sessions, engagement, active-Goal matches, latest traits, linked anonymous
+count, and exact currency totals. The same request carries a D45 session-list
+context with one internal exact-person restriction. That restriction composes
+with the site-local range, FilterSet, segment resolution, selected Goal, and
+strict traffic state before the usual 25-key expansion. The lifetime summary
+and contextual list share one deadline but remain separately labeled answers.
+
+Canonical detail/profile state preserves `v`, `from`, `to`, `compare`, optional
+Goal, contextual `page`, optional detail-only `timeline-page`, segment, and
+filters. The route path supplies the validated session or percent-decoded
+person key. Unknown, duplicate, empty, overlong, cross-site, incompatible, or
+noncanonical state rejects before DuckDB or takes the one documented canonical
+redirect. Neither route accepts a raw membership list or creates a result
+cache, profile projection, data API, or client state model.

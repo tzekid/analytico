@@ -150,6 +150,13 @@ pub fn main(init: std.process.Init) !void {
     }
     if (args.len == 5 and
         std.mem.eql(u8, args[1], "m3") and
+        std.mem.eql(u8, args[2], "sessions-scale-fixture"))
+    {
+        try m3_probe.sessionsScaleFixture(allocator, output, args[3], args[4]);
+        return;
+    }
+    if (args.len == 5 and
+        std.mem.eql(u8, args[1], "m3") and
         std.mem.eql(u8, args[2], "goal-predicates-fixture"))
     {
         try m3_probe.goalPredicatesFixture(
@@ -429,6 +436,7 @@ pub fn main(init: std.process.Init) !void {
         \\  analytico m3 seed <directory> <site-id>
         \\  analytico m3 million <directory> <site-id>
         \\  analytico m3 sessions-fixture <directory> <site-id>
+        \\  analytico m3 sessions-scale-fixture <directory> <site-id>
         \\  analytico m3 timeout <directory>
         \\  analytico m3 traffic-quality-profile <directory> <site-slug> <start-date> <end-date>
         \\  analytico m3 goal-discovery <directory> <site-slug> <start-date> <end-date>

@@ -463,6 +463,24 @@ pub fn sessionsFixture(
         \\) FROM events template, range(27) source(i)
         \\WHERE template.site_id = '__SITE__'
         \\  AND template.event_id = CAST('00000000-0000-4000-8000-000000000107' AS UUID);
+        \\INSERT INTO events SELECT template.* REPLACE (
+        \\  CAST('44000000-0000-4000-8000-' || lpad(i::VARCHAR, 12, '0') AS UUID) AS event_id,
+        \\  '__SITE__' AS site_id,
+        \\  1767484800000000 + i * 1000 AS received_at_utc_micros,
+        \\  1767484800000000 + i * 1000 AS occurred_at_utc_micros,
+        \\  DATE '2026-01-04' AS received_date_utc,
+        \\  DATE '2026-01-04' AS site_local_date,
+        \\  2 AS kind, 'timeline-' || lpad(i::VARCHAR, 2, '0') AS event_name,
+        \\  '/timeline-heavy' AS path, 'Timeline heavy' AS page_title,
+        \\  CAST('43000000-0000-4000-8000-000000000000' AS UUID) AS anonymous_id,
+        \\  1 AS identity_quality, '' AS user_id,
+        \\  CAST('42000000-0000-4000-8000-000000000000' AS UUID) AS session_id,
+        \\  i AS sequence, FALSE AS session_start,
+        \\  from_hex(md5('timeline-' || CAST(i AS VARCHAR))) AS visitor_day_id,
+        \\  FALSE AS visitor_day_start, repeat('f', 64) AS event_payload_digest
+        \\) FROM events template, range(1, 52) source(i)
+        \\WHERE template.site_id = '__SITE__'
+        \\  AND template.event_id = CAST('00000000-0000-4000-8000-000000000107' AS UUID);
     ;
     const rendered = try std.mem.replaceOwned(
         u8,
@@ -477,6 +495,71 @@ pub fn sessionsFixture(
     try store.database.exec(sql);
     try store.checkpoint();
     try output.writeAll("Sessions fixture committed custom=1 paginated=27\n");
+}
+
+pub fn sessionsScaleFixture(
+    allocator: std.mem.Allocator,
+    output: *std.Io.Writer,
+    directory: []const u8,
+    site_id: []const u8,
+) !void {
+    try domain.validateUuid(site_id);
+    const event_path = try std.fs.path.join(
+        allocator,
+        &.{ directory, "events.duckdb" },
+    );
+    var store = try events.Store.open(allocator, event_path);
+    defer store.deinit();
+    try store.requireCurrent();
+    if (try store.eventCount() != 1_000_000) {
+        return error.InvalidSessionsScaleFixture;
+    }
+    const template =
+        \\UPDATE events SET
+        \\  anonymous_id = CAST(v.anonymous_id AS UUID),
+        \\  identity_quality = 1, user_id = v.user_id,
+        \\  session_id = CAST(v.session_id AS UUID), sequence = v.sequence,
+        \\  session_start = v.sequence = 0, kind = v.kind,
+        \\  event_name = v.event_name, path = v.path,
+        \\  page_title = v.page_title, properties_json = v.properties,
+        \\  user_traits_json = v.traits,
+        \\  traffic_class = 1, classifier_version = 2, bot_rule = ''
+        \\FROM (VALUES
+        \\  ('00000000-0000-4000-8000-000000999990','00000000-0000-4000-8000-00000000fa01','00000000-0000-4000-8000-00000000fb01',0,1,'pageview','/scale-profile','Scale profile','{}','{}',''),
+        \\  ('00000000-0000-4000-8000-000000999991','00000000-0000-4000-8000-00000000fa01','00000000-0000-4000-8000-00000000fb01',1,2,'purchase','/scale-profile','Scale profile','{"plan":"scale"}','{}',''),
+        \\  ('00000000-0000-4000-8000-000000999992','00000000-0000-4000-8000-00000000fa02','00000000-0000-4000-8000-00000000fb02',0,1,'pageview','/scale-second','Scale second','{}','{}',''),
+        \\  ('00000000-0000-4000-8000-000000999993','00000000-0000-4000-8000-00000000fa02','00000000-0000-4000-8000-00000000fb02',1,4,'identify','/account','Account','{}','{"plan":"scale"}','scale-user'),
+        \\  ('00000000-0000-4000-8000-000000999994','00000000-0000-4000-8000-00000000fa03','00000000-0000-4000-8000-00000000fb03',0,1,'pageview','/scale-anonymous','Scale anonymous','{}','{}','')
+        \\) v(event_id,anonymous_id,session_id,sequence,kind,event_name,path,
+        \\    page_title,properties,traits,user_id)
+        \\WHERE events.site_id = '__SITE__'
+        \\  AND events.event_id = CAST(v.event_id AS UUID);
+        \\INSERT INTO identity_links VALUES
+        \\  ('__SITE__', CAST('00000000-0000-4000-8000-00000000fa01' AS UUID),
+        \\   'scale-user', 1736689593000000,
+        \\   CAST('00000000-0000-4000-8000-000000999993' AS UUID)),
+        \\  ('__SITE__', CAST('00000000-0000-4000-8000-00000000fa02' AS UUID),
+        \\   'scale-user', 1736689593000000,
+        \\   CAST('00000000-0000-4000-8000-000000999993' AS UUID));
+    ;
+    const rendered = try std.mem.replaceOwned(
+        u8,
+        allocator,
+        template,
+        "__SITE__",
+        site_id,
+    );
+    defer allocator.free(rendered);
+    const sql = try allocator.dupeSentinel(u8, rendered, 0);
+    defer allocator.free(sql);
+    try store.database.exec(sql);
+    if (try store.eventCount() != 1_000_000) {
+        return error.InvalidSessionsScaleFixture;
+    }
+    try store.checkpoint();
+    try output.writeAll(
+        "Sessions scale fixture retained events=1000000 identified_profiles=1 anonymous_profiles=1\n",
+    );
 }
 
 pub fn timeout(
@@ -2021,6 +2104,18 @@ pub fn sessionList(
         .now_utc_micros = 1_800_000_000_000_000,
         .timeout_ms = analysis.maximum_timeout_ms,
     };
+    const detail_request = analysis.SessionDetailRequest{
+        .site_id = site_id,
+        .session_id = "00000000-0000-4000-8000-00000000fb01",
+        .active_goals = resolved,
+        .now_utc_micros = request.now_utc_micros,
+        .timeout_ms = request.timeout_ms,
+    };
+    var profile_request = request;
+    profile_request.profile_person_key = "u:scale-user";
+    var anonymous_profile_request = request;
+    anonymous_profile_request.profile_person_key =
+        "a:00000000-0000-4000-8000-00000000fa03";
     const event_path = try std.fs.path.join(
         allocator,
         &.{ directory, "events.duckdb" },
@@ -2034,6 +2129,16 @@ pub fn sessionList(
             &store,
             request,
         ));
+        try output.writeAll(try analysis_store.profileSessionDetail(
+            allocator,
+            &store,
+            detail_request,
+        ));
+        try output.writeAll(try analysis_store.profilePersonProfile(
+            allocator,
+            &store,
+            profile_request,
+        ));
         return;
     }
     if (builtin.mode == .debug) {
@@ -2042,12 +2147,34 @@ pub fn sessionList(
             &store,
             request,
         );
+        const detail = try analysis_store.executeSessionDetail(
+            allocator,
+            &store,
+            detail_request,
+        );
+        const person = try analysis_store.executePersonProfile(
+            allocator,
+            &store,
+            profile_request,
+        );
+        const anonymous_person = try analysis_store.executePersonProfile(
+            allocator,
+            &store,
+            anonymous_profile_request,
+        );
         try writeSessionListEvidence(
             output,
             policy.strict_mode,
             page,
             false,
             &.{},
+            detail,
+            person,
+            anonymous_person,
+            &.{},
+            null,
+            false,
+            false,
             false,
             false,
         );
@@ -2061,6 +2188,24 @@ pub fn sessionList(
         timeout_request,
     )) |_| {
         return error.ExpectedSessionListTimeout;
+    } else |err| if (err != error.AnalysisTimeout) return err;
+    var timeout_detail = detail_request;
+    timeout_detail.timeout_ms = 1;
+    if (analysis_store.executeSessionDetail(
+        allocator,
+        &store,
+        timeout_detail,
+    )) |_| {
+        return error.ExpectedSessionDetailTimeout;
+    } else |err| if (err != error.AnalysisTimeout) return err;
+    var timeout_profile = profile_request;
+    timeout_profile.timeout_ms = 1;
+    if (analysis_store.executePersonProfile(
+        allocator,
+        &store,
+        timeout_profile,
+    )) |_| {
+        return error.ExpectedPersonProfileTimeout;
     } else |err| if (err != error.AnalysisTimeout) return err;
 
     _ = try analysis_store.executeSessionList(allocator, &store, request);
@@ -2079,16 +2224,64 @@ pub fn sessionList(
         ));
     }
     std.mem.sort(i64, &samples, {}, std.sort.asc(i64));
+    _ = try analysis_store.executeSessionDetail(
+        allocator,
+        &store,
+        detail_request,
+    );
+    var detail_samples: [10]i64 = undefined;
+    var detail: analysis.SessionDetail = undefined;
+    for (&detail_samples) |*elapsed| {
+        const started = std.Io.Clock.awake.now(io).nanoseconds;
+        detail = try analysis_store.executeSessionDetail(
+            allocator,
+            &store,
+            detail_request,
+        );
+        elapsed.* = @intCast(@divTrunc(
+            std.Io.Clock.awake.now(io).nanoseconds - started,
+            std.time.ns_per_us,
+        ));
+    }
+    std.mem.sort(i64, &detail_samples, {}, std.sort.asc(i64));
+    const profile_started = std.Io.Clock.awake.now(io).nanoseconds;
+    const person = try analysis_store.executePersonProfile(
+        allocator,
+        &store,
+        profile_request,
+    );
+    const profile_micros: i64 = @intCast(@divTrunc(
+        std.Io.Clock.awake.now(io).nanoseconds - profile_started,
+        std.time.ns_per_us,
+    ));
+    const anonymous_person = try analysis_store.executePersonProfile(
+        allocator,
+        &store,
+        anonymous_profile_request,
+    );
     try writeSessionListEvidence(
         output,
         policy.strict_mode,
         last,
         true,
         &samples,
+        detail,
+        person,
+        anonymous_person,
+        &detail_samples,
+        profile_micros,
+        true,
+        true,
         true,
         true,
     );
     if (samples[9] >= 400_000) return error.SessionListPerformanceBudgetExceeded;
+    if (detail_samples[9] >= 250_000) {
+        return error.SessionDetailPerformanceBudgetExceeded;
+    }
+    if (profile_micros >= analysis.maximum_timeout_ms * 1_000) {
+        return error.PersonProfilePerformanceBudgetExceeded;
+    }
 }
 
 fn writeSessionListEvidence(
@@ -2097,8 +2290,15 @@ fn writeSessionListEvidence(
     page: analysis.SessionPage,
     performance_enforced: bool,
     samples: []const i64,
+    detail: analysis.SessionDetail,
+    profile: analysis.PersonProfile,
+    anonymous_profile: analysis.PersonProfile,
+    detail_samples: []const i64,
+    profile_micros: ?i64,
     timeout_interrupted: bool,
     connection_reused: bool,
+    detail_timeout_interrupted: bool,
+    profile_timeout_interrupted: bool,
 ) !void {
     var currencies: usize = 0;
     for (page.rows) |row| currencies += row.revenue.len;
@@ -2114,6 +2314,26 @@ fn writeSessionListEvidence(
         .p99_micros = if (samples.len == 0) @as(?i64, null) else samples[9],
         .timeout_interrupted = timeout_interrupted,
         .connection_reused = connection_reused,
+        .detail_timeline_rows = detail.timeline.len,
+        .detail_has_more = detail.has_more,
+        .detail_sample_micros = detail_samples,
+        .detail_p50_micros = if (detail_samples.len == 0)
+            @as(?i64, null)
+        else
+            detail_samples[4],
+        .detail_p95_micros = if (detail_samples.len == 0)
+            @as(?i64, null)
+        else
+            detail_samples[9],
+        .profile_retained_sessions = profile.summary.sessions,
+        .profile_linked_anonymous_ids = profile.summary.linked_anonymous_ids,
+        .profile_context_rows = profile.sessions.rows.len,
+        .anonymous_profile_retained_sessions = anonymous_profile.summary.sessions,
+        .anonymous_profile_context_rows = anonymous_profile.sessions.rows.len,
+        .anonymous_profile_linked_anonymous_ids = anonymous_profile.summary.linked_anonymous_ids,
+        .profile_micros = profile_micros,
+        .detail_timeout_interrupted = detail_timeout_interrupted,
+        .profile_timeout_interrupted = profile_timeout_interrupted,
     }, .{}, output);
     try output.writeByte('\n');
 }

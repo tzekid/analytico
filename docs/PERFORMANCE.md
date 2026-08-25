@@ -955,6 +955,83 @@ decision before any result cache, projection, rollup, index, memory, thread, or
 budget change. A warm or partial statement measurement is not presented as
 the complete Session-list p95.
 
+### Session detail and profile budget
+
+D46 retains the package's complete session-detail p95 below 250 milliseconds
+on the standard one-million-event fixture. The measurement includes bound
+existence/start lookup, one exact D45 summary expansion, and one 50-entry
+meaningful timeline page under a shared two-second deadline. One explicit
+warmup precedes ten complete calls; p50/p95/p99, timeout interruption,
+connection reuse, plan evidence, response bytes, and repeated detail/profile
+RSS cohorts remain blocking evidence. A timeline-only or prepared-statement
+duration is not the complete detail measurement.
+
+The compatible-person retained summary plus contextual 25-record session page
+must remain inside the unchanged two-second deadline. Its D45 list component
+continues to satisfy the below-400-millisecond p95. The standard fixture must
+contain an explicit multi-device user and a persistent anonymous person rather
+than presenting legacy-only rows as profile evidence.
+
+No query cache, second prepared-template entry, projection, profile table,
+index, memory/thread/deadline increase, or background work is authorized. A
+miss follows the existing reproduce, profile, narrow-column/predicate, and
+prefilter order before a new decision considers broader machinery.
+
+The ReleaseSafe review retained two failed list-RSS processes at 12,544 and
+15,614 KiB average growth against the unchanged 8,192 KiB ceiling. A third
+process passed the list at 4,541 KiB but exposed that the new alternating
+detail/profile cohort had no warmup: its first 200 requests absorbed the
+DuckDB and request-arena high-water allocation and the un-warmed average was
+16,929 KiB. The corrected gate mirrors the established list contract with 600
+explicit warmup requests before three measured 200-request cohorts. The
+accepted process recorded 56,592 KiB list warmup and 2,182 KiB measured
+average, then 65,244 KiB detail/profile warmup and -3,361 KiB measured average.
+Cold warmup growth remains evidence; it is not mislabeled as a leak or as a
+measured cohort. The same real Caddy/passkey/JavaScript-off run produced 4,332
+gzip bytes for 25 list records and 3,861 gzip bytes for a 50-entry timeline.
+
+A later accepted-configuration Debug repeat also failed the list boundary at
+15,018 KiB per 200 requests. Further Debug and ReleaseSafe processes that
+measured the inherited list only after the new collector/profile corpus had
+been written failed at 16,225 and 14,326 KiB. The merged #41 ReleaseSafe
+control passed its pre-collector list corpus at 5,484 KiB. The final gate
+therefore keeps D45's list/RSS phase before #42's collector additions, then
+stops the writer, proves the duplicate counter, restarts, and exercises the
+persisted detail/profile corpus. This separates two lifetime measurements; it
+does not omit either workload or weaken either bound.
+
+Lowering only `allocator_flush_threshold` to
+`4MiB` was tested and rejected rather than accepted as a new memory mechanism:
+two Debug processes measured list/detail-profile averages of 7,252/0 and
+96/1,356 KiB, but the independent ReleaseSafe list measured 18,757 KiB and
+failed before its detail/profile cohort. The exact 8 MiB D45 setting remains
+authoritative; no bulk-deallocation setting or wider RSS allowance is added.
+
+After separating the lifetimes, the pre-optimization ReleaseSafe source passed
+once at -2,498 KiB but two fresh processes missed narrowly at 8,352 and 8,565
+KiB. Profiling the #42 list-only delta found that each of 25 visible records
+recompiled the identical canonical parameter suffix. The final bounded view
+model compiles that suffix once and varies only each validated session UUID;
+it adds no cache or lifetime setting.
+
+The exact final lifecycle measured Debug list and detail/profile averages at
+-7,140 and -3,888 KiB per 200 requests. ReleaseSafe measured 2,021 and 5,928
+KiB. Its 25-record list and 50-entry timeline were 4,330 and 3,860 gzip bytes.
+Normal list/detail p95 and complete profile time were 148,859/40,178/587,443
+microseconds; strict values were 184,732/40,046/642,536 microseconds. Both modes
+interrupted one-millisecond list, detail, and profile requests and reused the
+same connection.
+
+On the exact post-YAGNI ReleaseSafe source, two further independent million-
+row CLI runs retained one million events while adding identified multi-device
+and unlinked persistent-anonymous evidence. Normal-mode list/detail p95 and
+complete identified-profile time were respectively 171,459/43,364/634,100
+microseconds and 131,491/40,066/568,004 microseconds. Strict-mode values were
+198,133/44,438/692,460 microseconds and 184,664/45,414/646,406 microseconds.
+All four runs interrupted 1-millisecond list, detail, and profile requests,
+then reused the same connection. The detail budget kept more than 200
+milliseconds of headroom without a cache, projection, index, or wider limit.
+
 ## 8. Regression policy
 
 For a stable benchmark environment:

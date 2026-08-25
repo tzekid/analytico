@@ -11,9 +11,23 @@ async function nativeSubmit(page, form, label) {
 }
 
 async function main() {
-  const [origin, session, goalId, segmentId, today, desktopShot, mobileShot] =
+  const [
+    origin,
+    session,
+    goalId,
+    segmentId,
+    today,
+    profileUserPath,
+    desktopShot,
+    mobileShot,
+    detailDesktopShot,
+    profileMobileShot,
+  ] =
     process.argv.slice(2);
-  assert.ok(origin && session && goalId && segmentId && today && desktopShot && mobileShot);
+  assert.ok(
+    origin && session && goalId && segmentId && today && profileUserPath &&
+      desktopShot && mobileShot && detailDesktopShot && profileMobileShot,
+  );
   const browser = await chromium.launch({
     executablePath: process.env.ANALYTICO_CHROMIUM_PATH,
     headless: true,
@@ -49,11 +63,31 @@ async function main() {
   assert.match(initialText, /user-a/);
   assert.doesNotMatch(initialText, /00000000-0000-4000-8000-0000000000a2/);
   assert.doesNotMatch(initialText, /beta-secret/);
-  assert.equal(await page.locator('a[href*="/sessions/"]').count(), 0);
+  assert.equal(await page.locator('a[href*="/sessions/"]').count(), 5);
   assert.equal(
     startupRequests.filter((kind) => kind === "fetch" || kind === "xhr").length,
     0,
   );
+  for (const incompatibleIdentity of [
+    "Ephemeral anonymous",
+    "Legacy daily anonymous",
+  ]) {
+    const record = page.locator("article.session-record", {
+      hasText: incompatibleIdentity,
+    });
+    const detailHref = await record.locator("h3 a").getAttribute("href");
+    response = await page.goto(`${origin}${detailHref}`, { waitUntil: "load" });
+    assert.equal(response.status(), 200);
+    assert.equal(
+      await page.getByRole("link", {
+        name: "Open compatible profile",
+        exact: true,
+      }).count(),
+      0,
+    );
+    response = await page.goto(route(historical), { waitUntil: "load" });
+    assert.equal(response.status(), 200);
+  }
 
   response = await page.goto(
     `${origin}/admin/sites/beta/sessions?${historical}`,
@@ -157,20 +191,173 @@ async function main() {
   assert.equal(secondPageIds.length, 7);
   assert.equal(await page.getByRole("link", { name: "Previous", exact: true }).count(), 1);
   assert.equal(firstPageIds.filter((id) => secondPageIds.includes(id)).length, 0);
+  response = await Promise.all([
+    page.waitForNavigation({ waitUntil: "load" }),
+    page.getByRole("link", { name: "00000000", exact: true }).click(),
+  ]).then(([navigation]) => navigation);
+  assert.equal(response.status(), 200);
+  assert.equal(new URL(page.url()).searchParams.get("page"), "2");
+  assert.equal(await page.locator("ol.session-timeline > li").count(), 50);
+  response = await Promise.all([
+    page.waitForNavigation({ waitUntil: "load" }),
+    page.getByRole("link", { name: "Next", exact: true }).click(),
+  ]).then(([navigation]) => navigation);
+  assert.equal(response.status(), 200);
+  assert.equal(new URL(page.url()).searchParams.get("page"), "2");
+  assert.equal(new URL(page.url()).searchParams.get("timeline-page"), "2");
+  assert.equal(await page.locator("ol.session-timeline > li").count(), 2);
+  response = await Promise.all([
+    page.waitForNavigation({ waitUntil: "load" }),
+    page.getByRole("link", { name: "Back to Sessions", exact: true }).click(),
+  ]).then(([navigation]) => navigation);
+  assert.equal(response.status(), 200);
+  assert.equal(new URL(page.url()).searchParams.get("page"), "2");
 
   response = await page.goto(
     route(`v=1&from=${today}&to=${today}&compare=none`),
     { waitUntil: "load" },
   );
   assert.equal(response.status(), 200);
-  assert.equal(await page.locator("article.session-record").count(), 1);
+  assert.equal(await page.locator("article.session-record").count(), 4);
   assert.equal(
-    await page.getByText("Current · activity received within 30 minutes", {
-      exact: true,
-    }).count(),
-    1,
+    await page.getByText(
+      "Current · activity received within 30 minutes; activity may be incomplete",
+      { exact: true },
+    ).count(),
+    4,
   );
   assert.match(await page.locator("main").innerText(), /\/current/);
+
+  const currentContext = `v=1&from=${today}&to=${today}&compare=none`;
+  response = await page.goto(route(currentContext), { waitUntil: "load" });
+  assert.equal(response.status(), 200);
+  const richRecord = page.locator("article.session-record", { hasText: "/profile-start" });
+  assert.equal(await richRecord.count(), 1);
+  response = await Promise.all([
+    page.waitForNavigation({ waitUntil: "load" }),
+    richRecord.locator("h3 a").click(),
+  ]).then(([navigation]) => navigation);
+  assert.equal(response.status(), 200);
+  assert.match(page.url(), /\/sessions\/00000000-0000-4000-8000-000000000f11\?/);
+  assert.equal(
+    await page.getByRole("heading", { name: /Session 00000f11/ }).count(),
+    1,
+  );
+  const detailText = await page.locator("main").innerText();
+  assert.match(detailText, /Profile start/);
+  assert.match(detailText, /purchase/);
+  assert.match(detailText, /late-arrival/);
+  assert.match(detailText, /PROPERTIES\s*\{"note":"<img src=x onerror=alert\(1\)>","plan":"team"\}/i);
+  assert.equal(await page.locator("ol.session-timeline img").count(), 0);
+  assert.match(detailText, /EXACT VALUE\s*USD 19\.990000/i);
+  assert.match(detailText, /ACTIVE ENGAGEMENT\s*12s/i);
+  assert.match(detailText, /MAXIMUM SCROLL DEPTH\s*80%/i);
+  assert.match(detailText, /TRANSPORT FRAGMENTS COMBINED\s*2/i);
+  assert.match(detailText, /ACTIVE ENGAGEMENT\s*3s/i);
+  assert.match(detailText, /Purchases/);
+  assert.doesNotMatch(detailText, /rejected-user/);
+  const timelineKinds = await page.locator("ol.session-timeline .eyebrow").allTextContents();
+  assert.deepEqual(timelineKinds, [
+    "Page view",
+    "Custom event",
+    "Custom event",
+    "Engagement",
+    "Identify",
+    "Page view",
+    "Engagement",
+  ]);
+  const timelineTitles = await page.locator("ol.session-timeline h4").allTextContents();
+  assert.deepEqual(timelineTitles.slice(0, 3), [
+    "Profile start",
+    "purchase",
+    "late-arrival",
+  ]);
+  await page.screenshot({ path: detailDesktopShot, fullPage: true });
+  const detailCanonicalUrl = page.url();
+  await page.locator("details.filter-builder").locator("summary").click();
+  const detailFilterForm = page.locator('form[action="/admin/filters/apply"]');
+  await detailFilterForm.locator('select[name="scope"]').selectOption("session");
+  await detailFilterForm.locator('select[name="field"]').selectOption("device");
+  await detailFilterForm.locator('select[name="scalar_type"]').selectOption("string");
+  await detailFilterForm.locator('select[name="operator"]').selectOption("is");
+  await detailFilterForm.locator('textarea[name="values"]').fill("desktop");
+  response = await nativeSubmit(page, detailFilterForm, "Apply filter");
+  assert.equal(response.status(), 200);
+  assert.match(page.url(), /\/sessions\/00000000-0000-4000-8000-000000000f11\?/);
+  assert.equal(new URL(page.url()).searchParams.getAll("f").length, 1);
+  assert.equal(
+    await page.getByRole("heading", { name: /Session 00000f11/ }).count(),
+    1,
+  );
+  response = await page.goto(detailCanonicalUrl, { waitUntil: "load" });
+  assert.equal(response.status(), 200);
+  const profileLink = page.getByRole("link", { name: "Open compatible profile", exact: true });
+  const profileHref = await profileLink.getAttribute("href");
+  assert.match(profileHref, new RegExp(`/users/${profileUserPath}\\?`));
+  response = await Promise.all([
+    page.waitForNavigation({ waitUntil: "load" }),
+    profileLink.click(),
+  ]).then(([navigation]) => navigation);
+  assert.equal(response.status(), 200);
+  assert.equal(new URL(page.url()).pathname, `/admin/sites/quality/users/${profileUserPath}`);
+  const profileText = await page.locator("main").innerText();
+  assert.match(profileText, /Explicitly linked identity/);
+  assert.match(profileText, /RETAINED HISTORY/i);
+  assert.match(profileText, /SESSIONS\s*2/i);
+  assert.match(profileText, /EXPLICITLY LINKED ANONYMOUS IDENTITIES\s*2/i);
+  assert.match(
+    profileText,
+    /LATEST IDENTIFY TRAITS\s*\{"device":"secondary","nickname":"<script>bad<\/script>","plan":"team"\}/i,
+  );
+  assert.equal(await page.locator("main script").count(), 0);
+  assert.match(profileText, /USD 19\.990000/);
+  assert.match(profileText, /Sessions matching this context/);
+  assert.equal(await page.locator("article.session-record").count(), 2);
+  assert.doesNotMatch(profileText, /rejected-user/);
+  assert.doesNotMatch(profileText, /second-user/);
+  const canonicalProfileUrl = page.url();
+
+  response = await page.goto(route(currentContext), { waitUntil: "load" });
+  const resetRecord = page.locator("article.session-record", { hasText: "/reset-separated" });
+  assert.equal(await resetRecord.count(), 1);
+  response = await Promise.all([
+    page.waitForNavigation({ waitUntil: "load" }),
+    resetRecord.locator("h3 a").click(),
+  ]).then(([navigation]) => navigation);
+  assert.equal(response.status(), 200);
+  const resetDetailText = await page.locator("main").innerText();
+  assert.match(resetDetailText, /Identified user/);
+  assert.match(resetDetailText, /second-user/);
+  assert.match(resetDetailText, /ACTIVE ENGAGEMENT\s*0ms/i);
+  const resetProfileLink = page.getByRole("link", {
+    name: "Open compatible profile",
+    exact: true,
+  });
+  assert.equal(await resetProfileLink.count(), 1);
+  const resetProfileHref = await resetProfileLink.getAttribute("href");
+  assert.notEqual(resetProfileHref, profileHref);
+  response = await Promise.all([
+    page.waitForNavigation({ waitUntil: "load" }),
+    resetProfileLink.click(),
+  ]).then(([navigation]) => navigation);
+  assert.equal(response.status(), 200);
+  const resetProfileText = await page.locator("main").innerText();
+  assert.match(resetProfileText, /Explicitly linked identity/);
+  assert.match(resetProfileText, /second-user/);
+  assert.match(resetProfileText, /SESSIONS\s*1/i);
+  assert.match(resetProfileText, /EXPLICITLY LINKED ANONYMOUS IDENTITIES\s*1/i);
+  assert.doesNotMatch(resetProfileText, /second-device/);
+
+  response = await page.goto(
+    `${origin}/admin/sites/beta/sessions/00000000-0000-4000-8000-000000000f11?${currentContext}`,
+    { waitUntil: "load" },
+  );
+  assert.equal(response.status(), 404);
+  response = await page.goto(
+    `${origin}/admin/sites/beta/users/${profileUserPath}?${currentContext}`,
+    { waitUntil: "load" },
+  );
+  assert.equal(response.status(), 404);
 
   await page.goto(route(historical), { waitUntil: "load" });
   await page.screenshot({ path: desktopShot, fullPage: true });
@@ -196,6 +383,13 @@ async function main() {
     "Sessions",
   );
   await mobilePage.screenshot({ path: mobileShot, fullPage: true });
+  response = await mobilePage.goto(canonicalProfileUrl, { waitUntil: "load" });
+  assert.equal(response.status(), 200);
+  assert.equal(
+    await mobilePage.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+    true,
+  );
+  await mobilePage.screenshot({ path: profileMobileShot, fullPage: true });
   await mobile.close();
   await browser.close();
 
@@ -207,7 +401,17 @@ async function main() {
     person_filter_native: true,
     segment_native: true,
     stable_pagination: true,
+    timeline_pagination: true,
     current_session: true,
+    detail_native: true,
+    detail_context_mutation_preserved: true,
+    profile_native: true,
+    identity_conflict_not_merged: true,
+    duplicate_idempotent: true,
+    per_visit_engagement: true,
+    encoded_profile_route: true,
+    reset_separation: true,
+    incompatible_profiles_omitted: true,
     site_isolation: true,
     startup_data_requests: 0,
     mobile_width: 390,

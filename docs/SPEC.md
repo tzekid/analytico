@@ -233,6 +233,16 @@ values, last activity, and an explicitly inferred current state. Native forms,
 JavaScript-disabled use, and phone records are the baseline. #42 retains the
 timeline and cross-session profile.
 
+D46 adds the selected-session and compatible-person destinations without a
+durable session or profile model. A detail page returns one full D45 summary
+and a fixed 50-entry page of Page, custom, successful identify, and aggregated
+per-visit engagement timeline facts in deterministic plausible order. An
+identified or persistent-anonymous profile derives retained-history totals and
+shows a separate 25-record related-session page under the visible shared
+context. Ephemeral/legacy sessions remain labeled and have no profile link;
+rejected identity conflicts never merge histories. Both pages are complete
+server HTML and introduce no data API, replay, tracker, schema, or client state.
+
 ### F5. CLI
 
 The production MVP provides these command families:

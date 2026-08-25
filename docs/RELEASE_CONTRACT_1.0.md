@@ -232,6 +232,17 @@ are not passes.
   warmed 200-request RSS cohorts retain the 8 MiB-per-200 sustained-growth
   limit. Default and strict complete two-statement p95 remain below 400 ms on
   one million events and 100,000 sessions with ten active Goals.
+- Session detail/profile acceptance extends that same real executable and
+  browser gate with the package's direct routes, one full summary, deterministic
+  50-entry paged timeline, per-visit engagement aggregation, active-Goal names,
+  escaped properties/traits/exact values, current/missing-engagement states,
+  and related sessions. Two explicit anonymous devices may combine only through
+  an equal user ID; reset creates a separate user and a rejected conflict never
+  merges. Persistent-anonymous history remains one device identity; legacy and
+  ephemeral sessions have no profile link. Retained-history/profile-context
+  labels, site isolation, encoded IDs, JavaScript-off/keyboard/390-pixel use,
+  timeout/reuse, response/RSS bounds, detail p95 below 250 ms, and unchanged
+  contextual list p95 below 400 ms all pass on the standard fixture.
 - The named `e2e-filters`, `e2e-goals`, `e2e-metadata7-migration`,
   `e2e-metadata8-migration`, `e2e-metadata9-migration`, `e2e-funnels`,
   `e2e-metadata10-migration`, and `e2e-sessions` gates pass independently. All

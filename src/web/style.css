@@ -418,6 +418,16 @@ nav[aria-label="Pagination"] { display: flex; gap: .75rem; margin-top: 1rem; }
 .session-facts dd { margin: var(--space-1) 0 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums lining-nums; }
 .session-revenue { margin: 0; padding-left: var(--space-4); }
 .session-pagination { display: flex; gap: var(--space-3); margin-top: var(--space-4); }
+.session-detail-layout { display: grid; grid-template-columns: minmax(18rem, .8fr) minmax(0, 1.2fr); gap: var(--space-5); align-items: start; }
+.session-detail-layout > div { min-width: 0; }
+.session-timeline { display: grid; gap: var(--space-3); margin: 0; padding: 0; }
+.session-timeline > li { list-style: none; }
+.session-timeline article { border-left: .25rem solid var(--color-brandStrong); padding: var(--space-3); background: var(--color-surfaceSubtle); border-radius: var(--radius-sm); }
+.session-timeline header { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: var(--space-3); align-items: baseline; }
+.session-timeline header .eyebrow { grid-column: 1 / -1; }
+.session-timeline h4 { margin: 0; overflow-wrap: anywhere; }
+.session-timeline time { color: var(--color-inkMuted); font-size: var(--font-sm); font-variant-numeric: tabular-nums lining-nums; }
+.person-profile > section + section { margin-top: var(--space-5); }
 
 .auth-page header, .auth-page main, .auth-page footer { width: min(100% - 2rem, 42rem); }
 .auth-page main { padding-top: clamp(2rem, 8vh, 6rem); }
@@ -486,6 +496,7 @@ nav[aria-label="Pagination"] { display: flex; gap: .75rem; margin-top: 1rem; }
   .funnel-settings { grid-template-columns: 1fr; }
   .funnel-step-heading { align-items: stretch; flex-direction: column; }
   .session-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .session-detail-layout { grid-template-columns: 1fr; }
   .answer-grid, .health-grid { grid-template-columns: 1fr; }
   .chart-data > summary { min-height: var(--layout-touchTarget); }
   .mobile-records { overflow: visible; border: 0; background: transparent; }
@@ -513,6 +524,7 @@ nav[aria-label="Pagination"] { display: flex; gap: .75rem; margin-top: 1rem; }
   .session-goal-filter { display: grid; grid-template-columns: 1fr; }
   .session-goal-filter label { width: 100%; }
   .session-facts { grid-template-columns: 1fr; }
+  .session-timeline header { grid-template-columns: 1fr; }
 }
 
 @media (prefers-color-scheme: dark) {
