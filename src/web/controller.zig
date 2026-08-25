@@ -702,6 +702,8 @@ pub const ParsedQuery = struct {
     goal_entity_set: bool = false,
     funnel_page: u32 = 1,
     funnel_fields_set: bool = false,
+    session_goal_id: []const u8 = "",
+    session_fields_set: bool = false,
 };
 
 pub fn parseQuery(
@@ -805,6 +807,10 @@ pub fn parseQuery(
         } else if (std.mem.eql(u8, name, "segment")) {
             try domain.validateUuid(value);
             query.segment_id = value;
+        } else if (std.mem.eql(u8, name, "goal")) {
+            if (value.len != 0) try domain.validateUuid(value);
+            query.session_goal_id = value;
+            query.session_fields_set = true;
         } else if (std.mem.eql(u8, name, "goal-page")) {
             query.goal_fields_set = true;
             query.goal_page = std.fmt.parseInt(u32, value, 10) catch
@@ -897,7 +903,8 @@ fn parseAnalysisActionContext(
         parsed.campaign_dimension != .all or parsed.sort != .count or
         parsed.limit != report.default_limit or parsed.page != 1 or
         parsed.overview_selection_set or parsed.highlighted_interval.len != 0 or
-        parsed.goal_fields_set or parsed.funnel_fields_set)
+        parsed.goal_fields_set or parsed.funnel_fields_set or
+        parsed.session_fields_set)
     {
         return error.InvalidAnalysisActionContext;
     }
@@ -967,6 +974,36 @@ pub fn finishQuery(
         .goal_entity_set = parsed.goal_entity_set,
         .funnel_page = parsed.funnel_page,
     };
+    try validateQuery(query);
+    return query;
+}
+
+pub fn finishSessionsQuery(
+    parsed: ParsedQuery,
+    selected_site: []const u8,
+    default_range: *const calendar.Range,
+    default_comparison: analysis.Comparison,
+) !model.Query {
+    if (parsed.site.len != 0 or parsed.report_set or parsed.kind != .overview or
+        parsed.subject.len != 0 or parsed.campaign_dimension != .all or
+        parsed.sort != .count or parsed.limit != report.default_limit or
+        parsed.overview_selection_set or parsed.highlighted_interval.len != 0 or
+        parsed.goal_fields_set or parsed.funnel_fields_set)
+    {
+        return error.SessionOptionsNotApplicable;
+    }
+    var common = parsed;
+    common.page = 1;
+    common.session_goal_id = "";
+    common.session_fields_set = false;
+    var query = try finishQuery(
+        common,
+        selected_site,
+        default_range,
+        default_comparison,
+    );
+    query.session_goal_id = parsed.session_goal_id;
+    query.session_page = parsed.page;
     try validateQuery(query);
     return query;
 }
@@ -1484,6 +1521,7 @@ pub fn loadPage(
     query_input: model.Query,
     calendar_context: ?calendar.Context,
     site_zone: ?timezone.Zone,
+    session_now_utc_micros: ?i64,
     csrf_token: []const u8,
     notice: []const u8,
     report_timeout_ms: u32,
@@ -1532,8 +1570,10 @@ pub fn loadPage(
         &.{};
     const collection_policy = try metadata.sitePolicy(allocator, selected.id);
     const has_analysis_context = destination == .overview or
+        destination == .sessions or
         query.goal_screen != .none or query.funnel_screen != .none;
-    const segments: []const meta.Segment = if (destination == .overview)
+    const segments: []const meta.Segment = if (destination == .overview or
+        destination == .sessions)
         try metadata.listSegments(allocator, selected.slug)
     else
         &.{};
@@ -1780,7 +1820,51 @@ pub fn loadPage(
                 null,
         };
     }
-    const state = if (destination == .overview)
+    const session_list: ?model.SessionList = if (destination == .sessions) value: {
+        const zone = site_zone orelse return error.MissingCalendarZone;
+        const resolved_goals = try resolveAnalysisGoals(allocator, goals);
+        var selected_goal_index: ?u8 = null;
+        var selected_goal_name: []const u8 = "";
+        if (query.session_goal_id.len != 0) {
+            for (goals, 0..) |goal, index| {
+                if (std.mem.eql(u8, goal.id, query.session_goal_id)) {
+                    selected_goal_index = @intCast(index);
+                    selected_goal_name = goal.name;
+                    break;
+                }
+            }
+            if (selected_goal_index == null) return error.StaleSessionGoal;
+        }
+        const now_micros = session_now_utc_micros orelse
+            return error.MissingSessionClock;
+        const page = analysis_store.executeSessionList(
+            allocator,
+            event_store,
+            .{
+                .site_id = selected.id,
+                .range = query.range,
+                .filters = resolved_filters.filters,
+                .active_goals = resolved_goals,
+                .selected_goal_index = selected_goal_index,
+                .strict_traffic_mode = collection_policy.strict_mode,
+                .page = query.session_page,
+                .now_utc_micros = now_micros,
+                .timeout_ms = report_timeout_ms,
+            },
+        ) catch |err| {
+            if (err == error.AnalysisTimeout) return error.ReportTimeout;
+            return err;
+        };
+        break :value try buildSessionList(
+            allocator,
+            query,
+            page,
+            goals,
+            selected_goal_name,
+            zone,
+        );
+    } else null;
+    const state = if (destination == .overview or destination == .sessions)
         try analysisState(allocator, destination, query)
     else
         AnalysisState{ .kind = "", .json = "" };
@@ -1788,7 +1872,8 @@ pub fn loadPage(
         try analysisGrammarParameters(allocator, query)
     else
         AnalysisGrammarParameters{ .filters = &.{}, .predicates = &.{} };
-    const filter_navigation = if (destination == .overview)
+    const filter_navigation = if (destination == .overview or
+        destination == .sessions)
         try buildFilterNavigation(allocator, destination, query, segments)
     else
         FilterNavigation{ .chips = &.{}, .segments = &.{} };
@@ -1941,6 +2026,7 @@ pub fn loadPage(
         .overview_details = overview_details,
         .goal_management = goal_management,
         .funnel_management = funnel_management,
+        .session_list = session_list,
         .goals = goals,
         .funnels = funnels,
         .selected_segment_name = resolved_filters.segment_name,
@@ -2967,6 +3053,241 @@ fn buildOverviewDetails(
 fn goalById(goals: []const meta.Goal, id: []const u8) ?meta.Goal {
     for (goals) |goal| if (std.mem.eql(u8, goal.id, id)) return goal;
     return null;
+}
+
+fn buildSessionList(
+    allocator: std.mem.Allocator,
+    query: model.Query,
+    page: analysis.SessionPage,
+    goals: []const meta.Goal,
+    selected_goal_name: []const u8,
+    zone: timezone.Zone,
+) !model.SessionList {
+    const rows = try allocator.alloc(model.SessionRecord, page.rows.len);
+    for (rows, page.rows) |*target, source| {
+        const identity = try formatSessionIdentity(allocator, source.person_key);
+        const revenue = try allocator.alloc(
+            model.SessionRevenue,
+            source.revenue.len,
+        );
+        for (revenue, source.revenue) |*amount, exact| amount.* = .{
+            .amount = try std.fmt.allocPrint(
+                allocator,
+                "{s} {s}",
+                .{ exact.currency, exact.decimal },
+            ),
+            .value_count = exact.value_count,
+        };
+        target.* = .{
+            .short_id = source.session_id[source.session_id.len - 8 ..],
+            .identity = identity.label,
+            .identity_state = identity.state,
+            .started_at = try formatSessionLocalMicros(
+                allocator,
+                zone,
+                source.started_at_utc_micros,
+            ),
+            .last_activity = try formatSessionLocalMicros(
+                allocator,
+                zone,
+                source.last_activity_utc_micros,
+            ),
+            .last_received = try formatSessionLocalMicros(
+                allocator,
+                zone,
+                source.last_received_at_utc_micros,
+            ),
+            .landing_page = if (source.landing_page.len == 0)
+                "No page view"
+            else
+                source.landing_page,
+            .acquisition = try formatSessionAcquisition(allocator, source),
+            .country = if (std.mem.eql(u8, source.country, "ZZ"))
+                "Unknown country"
+            else
+                source.country,
+            .client = try std.fmt.allocPrint(
+                allocator,
+                "{s} · {s}",
+                .{ source.device, source.browser },
+            ),
+            .duration = try formatSessionDuration(allocator, source.duration_ms),
+            .engagement = try formatSessionDuration(
+                allocator,
+                source.engagement_ms,
+            ),
+            .page_views = source.page_views,
+            .custom_events = source.custom_events,
+            .conversions = source.conversions,
+            .current = source.current,
+            .revenue = revenue,
+        };
+    }
+
+    const options = try allocator.alloc(model.SessionGoalOption, goals.len);
+    for (options, goals) |*option, goal| option.* = .{
+        .id = goal.id,
+        .name = goal.name,
+        .selected = std.mem.eql(u8, goal.id, query.session_goal_id),
+    };
+
+    var previous_url: ?[]const u8 = null;
+    if (query.session_page > 1) {
+        var previous = query;
+        previous.session_page -= 1;
+        previous_url = try canonicalAnalysisUrl(allocator, .sessions, previous);
+    }
+    var next_url: ?[]const u8 = null;
+    if (page.has_more and query.session_page < analysis.maximum_page) {
+        var next = query;
+        next.session_page += 1;
+        next_url = try canonicalAnalysisUrl(allocator, .sessions, next);
+    }
+    return .{
+        .rows = rows,
+        .goals = options,
+        .selected_goal_name = selected_goal_name,
+        .previous_url = previous_url,
+        .next_url = next_url,
+    };
+}
+
+const SessionIdentity = struct {
+    label: []const u8,
+    state: []const u8,
+};
+
+fn formatSessionIdentity(
+    allocator: std.mem.Allocator,
+    person_key: []const u8,
+) !SessionIdentity {
+    if (person_key.len < 3 or person_key[1] != ':') {
+        return error.InvalidSessionListResult;
+    }
+    if (person_key[0] == 'u') return .{
+        .label = person_key[2..],
+        .state = "Identified user",
+    };
+    const label = switch (person_key[0]) {
+        'a' => "Persistent anonymous",
+        'e' => "Ephemeral anonymous",
+        'l' => "Legacy daily anonymous",
+        else => return error.InvalidSessionListResult,
+    };
+    if (person_key.len < 10) return error.InvalidSessionListResult;
+    return .{
+        .label = try std.fmt.allocPrint(
+            allocator,
+            "{s} …{s}",
+            .{ label, person_key[person_key.len - 8 ..] },
+        ),
+        .state = label,
+    };
+}
+
+fn formatSessionLocalMicros(
+    allocator: std.mem.Allocator,
+    zone: timezone.Zone,
+    micros: i64,
+) ![]const u8 {
+    if (micros < 0) return error.InvalidSessionListResult;
+    const utc_seconds = @divFloor(micros, 1_000_000);
+    const local = try zone.localAt(utc_seconds);
+    const local_seconds = std.math.add(
+        i64,
+        utc_seconds,
+        @as(i64, local.offset_minutes) * std.time.s_per_min,
+    ) catch return error.InvalidSessionListResult;
+    const seconds_in_day: u64 = @intCast(@mod(local_seconds, std.time.s_per_day));
+    const offset: i32 = local.offset_minutes;
+    const offset_magnitude: u32 = @intCast(if (offset < 0) -offset else offset);
+    return std.fmt.allocPrint(
+        allocator,
+        "{s} {d:0>2}:{d:0>2}:{d:0>2} UTC{c}{d:0>2}:{d:0>2}",
+        .{
+            &local.date,
+            seconds_in_day / std.time.s_per_hour,
+            seconds_in_day % std.time.s_per_hour / std.time.s_per_min,
+            seconds_in_day % std.time.s_per_min,
+            if (offset < 0) @as(u8, '-') else @as(u8, '+'),
+            offset_magnitude / 60,
+            offset_magnitude % 60,
+        },
+    );
+}
+
+fn formatSessionDuration(
+    allocator: std.mem.Allocator,
+    millis: i64,
+) ![]const u8 {
+    if (millis < 0) return error.InvalidSessionListResult;
+    if (millis < 1_000) return std.fmt.allocPrint(allocator, "{d}ms", .{millis});
+    const total: u64 = @intCast(millis);
+    const seconds = total / 1_000;
+    const remainder = total % 1_000;
+    if (seconds < 60) return if (remainder == 0)
+        std.fmt.allocPrint(allocator, "{d}s", .{seconds})
+    else
+        std.fmt.allocPrint(allocator, "{d}s {d}ms", .{ seconds, remainder });
+    if (seconds < 3_600) return if (remainder == 0)
+        std.fmt.allocPrint(
+            allocator,
+            "{d}m {d}s",
+            .{ seconds / 60, seconds % 60 },
+        )
+    else
+        std.fmt.allocPrint(
+            allocator,
+            "{d}m {d}s {d}ms",
+            .{ seconds / 60, seconds % 60, remainder },
+        );
+    return if (remainder == 0)
+        std.fmt.allocPrint(
+            allocator,
+            "{d}h {d}m {d}s",
+            .{ seconds / 3_600, seconds % 3_600 / 60, seconds % 60 },
+        )
+    else
+        std.fmt.allocPrint(
+            allocator,
+            "{d}h {d}m {d}s {d}ms",
+            .{
+                seconds / 3_600,
+                seconds % 3_600 / 60,
+                seconds % 60,
+                remainder,
+            },
+        );
+}
+
+fn formatSessionAcquisition(
+    allocator: std.mem.Allocator,
+    row: analysis.SessionRow,
+) ![]const u8 {
+    if (row.landing_page.len == 0) {
+        return allocator.dupe(u8, "Direct / Unknown");
+    }
+    const source = if (row.utm_source.len != 0)
+        row.utm_source
+    else if (row.referrer.len != 0)
+        row.referrer
+    else
+        "Direct";
+    if (std.mem.eql(u8, row.channel, "Direct") and
+        std.mem.eql(u8, source, "Direct"))
+    {
+        return allocator.dupe(u8, "Direct");
+    }
+    if (row.utm_campaign.len != 0) return std.fmt.allocPrint(
+        allocator,
+        "{s} · {s} · {s}",
+        .{ row.channel, source, row.utm_campaign },
+    );
+    return std.fmt.allocPrint(
+        allocator,
+        "{s} · {s}",
+        .{ row.channel, source },
+    );
 }
 
 fn formatUtcMicros(allocator: std.mem.Allocator, micros: i64) ![]const u8 {
@@ -4764,6 +5085,27 @@ pub fn verifyCsrf(form: Form, expected: []const u8) !void {
 pub fn validateQuery(query: model.Query) !void {
     try domain.validateSlug(query.site);
     query.range.validate() catch return error.InvalidReportRange;
+    if (query.session_page == 0 or query.session_page > analysis.maximum_page) {
+        return error.InvalidSessionPage;
+    }
+    if (query.session_goal_id.len != 0) {
+        try domain.validateUuid(query.session_goal_id);
+    }
+    const has_session_state = query.session_goal_id.len != 0 or
+        query.session_page != 1;
+    if (has_session_state and
+        (query.kind != .overview or query.subject.len != 0 or
+            query.campaign_dimension != .all or query.sort != .count or
+            query.limit != report.default_limit or query.page != 1 or
+            query.overview_metric != .visitors or
+            query.overview_currency.len != 0 or
+            query.highlighted_interval.len != 0 or
+            query.analysis_interval != .auto or
+            query.analysis_series.len != 0 or query.analysis_breakdown != null or
+            query.goal_screen != .none or query.funnel_screen != .none))
+    {
+        return error.SessionOptionsNotApplicable;
+    }
     if (query.goal_screen != .none and query.funnel_screen != .none) {
         return error.InvalidJourneyManagementState;
     }
@@ -4964,6 +5306,13 @@ fn analysisState(
             query.analysis_filters,
         ),
     };
+    if (destination == .sessions) return .{
+        .kind = "sessions",
+        .json = try analysis.canonicalFilterJson(
+            allocator,
+            query.analysis_filters,
+        ),
+    };
     if (destination == .analyze and query.analysis_breakdown != null) {
         return .{
             .kind = "breakdown",
@@ -5109,6 +5458,13 @@ fn canonicalAnalysisUrl(
         try output.writer.writeAll(parameters);
         return output.toOwnedSlice();
     }
+    if (destination == .sessions) {
+        try output.writer.writeAll("sessions?");
+        const parameters = try canonicalSessionParameters(allocator, query);
+        defer allocator.free(parameters);
+        try output.writer.writeAll(parameters);
+        return output.toOwnedSlice();
+    }
     if (destination != .analyze) return error.InvalidFilterDestination;
     try output.writer.writeAll("analyze?");
     if (query.analysis_breakdown) |breakdown| {
@@ -5133,6 +5489,42 @@ fn canonicalAnalysisUrl(
         try output.writer.writeAll(parameters);
     }
     return output.toOwnedSlice();
+}
+
+pub fn canonicalSessionParameters(
+    allocator: std.mem.Allocator,
+    query: model.Query,
+) ![]const u8 {
+    try validateQuery(query);
+    var output = std.Io.Writer.Allocating.init(allocator);
+    errdefer output.deinit();
+    try output.writer.print("v=1&from={s}&to={s}&compare={s}", .{
+        query.range.start,
+        query.range.end,
+        query.comparison.name(),
+    });
+    if (query.session_goal_id.len != 0) {
+        try output.writer.print("&goal={s}", .{query.session_goal_id});
+    }
+    if (query.session_page != 1) {
+        try output.writer.print("&page={d}", .{query.session_page});
+    }
+    const suffix = try analysis.canonicalFilterUrlSuffix(
+        allocator,
+        query.analysis_segment_id,
+        query.analysis_filters,
+    );
+    defer allocator.free(suffix);
+    if (suffix.len != 0) {
+        try output.writer.writeByte('&');
+        try output.writer.writeAll(suffix);
+    }
+    const result = try output.toOwnedSlice();
+    if (result.len > analysis.maximum_url_bytes) {
+        allocator.free(result);
+        return error.AnalysisUrlTooLong;
+    }
+    return result;
 }
 
 const FilterUrls = struct {
@@ -5354,6 +5746,33 @@ pub fn analysisTargetFromForm(
         };
         try validateQuery(query);
         return .{ .destination = .overview, .query = query };
+    }
+    if (std.mem.eql(u8, kind, "sessions")) {
+        const filters = try analysis.parseExactCanonicalFilterJson(
+            allocator,
+            encoded,
+        );
+        const segment_value = form.optional("segment") orelse "";
+        const goal_value = form.optional("goal") orelse "";
+        const query = model.Query{
+            .site = site_slug,
+            .analysis_site_id = configuration.id,
+            .range = .{
+                .start = try form.required("from"),
+                .end = try form.required("to"),
+            },
+            .comparison = try analysis.Comparison.parse(
+                try form.required("compare"),
+            ),
+            .analysis_filters = filters,
+            .analysis_segment_id = if (segment_value.len == 0)
+                null
+            else
+                segment_value,
+            .session_goal_id = goal_value,
+        };
+        try validateQuery(query);
+        return .{ .destination = .sessions, .query = query };
     }
     if (std.mem.eql(u8, kind, "trend")) {
         const set = try analysis.parseExactCanonicalTrendSetJson(
@@ -5975,11 +6394,13 @@ fn targetFilters(query: model.Query) analysis.FilterSet {
 
 fn setTargetFilters(query: *model.Query, filters: analysis.FilterSet) void {
     query.analysis_filters = filters;
+    query.session_page = 1;
     if (query.analysis_breakdown) |*breakdown| breakdown.filters = filters;
 }
 
 fn setTargetSegment(query: *model.Query, segment_id: ?[]const u8) void {
     query.analysis_segment_id = segment_id;
+    query.session_page = 1;
     if (query.analysis_breakdown) |*breakdown| breakdown.segment_id = segment_id;
 }
 
@@ -6343,6 +6764,102 @@ test "calendar query parsing finalizes canonical state and known aliases" {
     );
     try std.testing.expectEqualStrings("2025-01-01", defaults.range.start);
     try std.testing.expectEqual(analysis.Comparison.previous, defaults.comparison);
+}
+
+test "Sessions query is canonical bounded and destination specific" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const default_range = calendar.Range{
+        .start = "2025-01-01".*,
+        .end = "2025-01-30".*,
+    };
+    const goal = "00000000-0000-4000-8000-000000000041";
+    const segment = "00000000-0000-4000-8000-000000000042";
+    const parsed = try parseQuery(
+        allocator,
+        "/admin/sites/example/sessions?v=1&from=2025-01-01&to=2025-01-02&compare=none&goal=" ++
+            goal ++ "&page=2&segment=" ++ segment ++
+            "&f=session~device~is~string~desktop",
+        .overview,
+    );
+    const query = try finishSessionsQuery(
+        parsed,
+        "example",
+        &default_range,
+        .previous,
+    );
+    try std.testing.expectEqualStrings(goal, query.session_goal_id);
+    try std.testing.expectEqual(@as(u32, 2), query.session_page);
+    try std.testing.expectEqualStrings(segment, query.analysis_segment_id.?);
+    try std.testing.expectEqual(@as(usize, 1), query.analysis_filters.clauses.len);
+    try std.testing.expectEqualStrings(
+        "v=1&from=2025-01-01&to=2025-01-02&compare=none&goal=" ++ goal ++
+            "&page=2&segment=" ++ segment ++
+            "&f=session~device~is~string~desktop",
+        try canonicalSessionParameters(allocator, query),
+    );
+
+    const empty_goal = try finishSessionsQuery(
+        try parseQuery(
+            allocator,
+            "/admin/sites/example/sessions?goal=",
+            .overview,
+        ),
+        "example",
+        &default_range,
+        .previous,
+    );
+    try std.testing.expectEqualStrings("", empty_goal.session_goal_id);
+    try std.testing.expectEqualStrings(
+        "v=1&from=2025-01-01&to=2025-01-30&compare=previous",
+        try canonicalSessionParameters(allocator, empty_goal),
+    );
+    try std.testing.expectError(
+        error.DuplicateQueryField,
+        parseQuery(
+            allocator,
+            "/admin/sites/example/sessions?goal=" ++ goal ++ "&goal=" ++ goal,
+            .overview,
+        ),
+    );
+    try std.testing.expectError(
+        error.SessionOptionsNotApplicable,
+        finishSessionsQuery(
+            try parseQuery(
+                allocator,
+                "/admin/sites/example/sessions?metric=sessions",
+                .overview,
+            ),
+            "example",
+            &default_range,
+            .previous,
+        ),
+    );
+}
+
+test "Sessions identity labels preserve distinct canonical quality" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const persistent = try formatSessionIdentity(
+        allocator,
+        "a:00000000-0000-4000-8000-000000000041",
+    );
+    const ephemeral = try formatSessionIdentity(
+        allocator,
+        "e:00000000-0000-4000-8000-000000000041",
+    );
+    const legacy = try formatSessionIdentity(
+        allocator,
+        "l:00000000-0000-4000-8000-000000000041",
+    );
+    const identified = try formatSessionIdentity(allocator, "u:user-41");
+    try std.testing.expectEqualStrings("Persistent anonymous", persistent.state);
+    try std.testing.expectEqualStrings("Ephemeral anonymous", ephemeral.state);
+    try std.testing.expectEqualStrings("Legacy daily anonymous", legacy.state);
+    try std.testing.expectEqualStrings("Identified user", identified.state);
+    try std.testing.expectEqualStrings("user-41", identified.label);
 }
 
 test "Analyze Trend canonical and builder query shapes remain closed" {

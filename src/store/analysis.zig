@@ -579,6 +579,818 @@ pub fn executeGoalPreview(
     return .{ .result = result, .properties = properties };
 }
 
+const SessionKey = struct {
+    id: []const u8,
+    started_at_utc_micros: i64,
+};
+
+pub fn executeSessionList(
+    allocator: std.mem.Allocator,
+    event_store: *events.Store,
+    request: analysis.SessionListRequest,
+) !analysis.SessionPage {
+    try request.validate();
+    var budget = deadline.Budget.init(request.timeout_ms);
+    const keys = try executeSessionKeys(
+        allocator,
+        &event_store.database,
+        request,
+        &budget,
+    );
+    const visible_count = @min(keys.len, @as(usize, analysis.session_page_size));
+    return .{
+        .rows = if (visible_count == 0)
+            &.{}
+        else
+            try executeSessionDetails(
+                allocator,
+                event_store,
+                request,
+                keys[0..visible_count],
+                &budget,
+            ),
+        .has_more = keys.len > visible_count,
+    };
+}
+
+pub fn profileSessionList(
+    allocator: std.mem.Allocator,
+    event_store: *events.Store,
+    request: analysis.SessionListRequest,
+) ![]u8 {
+    try request.validate();
+    var output = std.Io.Writer.Allocating.init(allocator);
+    try output.writer.writeAll("SESSION KEY STATEMENT\n");
+    const key_plan = try compileSessionKeys(allocator, request);
+    try profileOverviewPlan(allocator, event_store, key_plan, &output.writer);
+    var budget = deadline.Budget.init(request.timeout_ms);
+    const keys = try executeSessionKeys(
+        allocator,
+        &event_store.database,
+        request,
+        &budget,
+    );
+    const visible_count = @min(keys.len, @as(usize, analysis.session_page_size));
+    if (visible_count != 0) {
+        try output.writer.writeAll("SESSION DETAIL STATEMENT\n");
+        try profileOverviewPlan(
+            allocator,
+            event_store,
+            try compileSessionDetails(
+                allocator,
+                request,
+                keys[0..visible_count],
+            ),
+            &output.writer,
+        );
+    }
+    return output.toOwnedSlice();
+}
+
+fn executeSessionKeys(
+    allocator: std.mem.Allocator,
+    database: *duckdb.Database,
+    request: analysis.SessionListRequest,
+    budget: *deadline.Budget,
+) ![]const SessionKey {
+    var result = try executePlan(
+        database,
+        try compileSessionKeys(allocator, request),
+        budget,
+    );
+    defer result.deinit();
+    const maximum_keys = @as(usize, analysis.session_page_size) + 1;
+    if (result.columnCount() != 2 or result.rowCount() > maximum_keys) {
+        return error.InvalidSessionListResult;
+    }
+    const keys = try allocator.alloc(SessionKey, result.rowCount());
+    var previous: ?SessionKey = null;
+    for (keys, 0..) |*key, index| {
+        key.* = .{
+            .id = try result.text(allocator, 0, index),
+            .started_at_utc_micros = result.int64(1, index),
+        };
+        domain.validateUuid(key.id) catch return error.InvalidSessionListResult;
+        if (previous) |prior| {
+            if (prior.started_at_utc_micros < key.started_at_utc_micros or
+                (prior.started_at_utc_micros == key.started_at_utc_micros and
+                    std.mem.order(u8, prior.id, key.id) != .lt))
+            {
+                return error.InvalidSessionListResult;
+            }
+        }
+        previous = key.*;
+    }
+    return keys;
+}
+
+fn executeSessionDetails(
+    allocator: std.mem.Allocator,
+    event_store: *events.Store,
+    request: analysis.SessionListRequest,
+    keys: []const SessionKey,
+    budget: *deadline.Budget,
+) ![]const analysis.SessionRow {
+    if (keys.len == 0 or keys.len > analysis.session_page_size) {
+        return error.InvalidSessionListResult;
+    }
+    const plan = try compileSessionDetails(allocator, request, keys);
+    const statement = try event_store.sessionDetailStatement(plan.sql);
+    for (plan.bindings, 1..) |binding, index| switch (binding) {
+        .text => |value| statement.bindText(index, value) catch |err| {
+            event_store.discardSessionDetailTemplate();
+            return err;
+        },
+        .integer => |value| statement.bindInt64(index, value) catch |err| {
+            event_store.discardSessionDetailTemplate();
+            return err;
+        },
+    };
+    var result = budget.execute(&event_store.database, statement) catch |err| {
+        event_store.discardSessionDetailTemplate();
+        if (err == error.ReportTimeout) return error.AnalysisTimeout;
+        return err;
+    };
+    defer {
+        result.deinit();
+        statement.clear() catch event_store.discardSessionDetailTemplate();
+    }
+    const maximum_rows = keys.len *
+        (@as(usize, analysis.maximum_currency_series) + 2);
+    if (result.columnCount() != 24 or result.rowCount() > maximum_rows) {
+        return error.InvalidSessionListResult;
+    }
+    const rows = try allocator.alloc(analysis.SessionRow, keys.len);
+    const seen = try allocator.alloc(bool, keys.len);
+    @memset(seen, false);
+    const revenue = try allocator.alloc(
+        std.ArrayList(analysis.SessionRevenue),
+        keys.len,
+    );
+    for (revenue) |*values| values.* = .empty;
+    var expected_currency_positions = try allocator.alloc(usize, keys.len);
+    @memset(expected_currency_positions, 1);
+
+    for (0..result.rowCount()) |result_row| {
+        const section = try result.text(allocator, 0, result_row);
+        const raw_position = result.int64(1, result_row);
+        if (raw_position < 0 or raw_position >= keys.len) {
+            return error.InvalidSessionListResult;
+        }
+        const position: usize = @intCast(raw_position);
+        const session_id = try result.text(allocator, 2, result_row);
+        if (!std.mem.eql(u8, session_id, keys[position].id)) {
+            return error.InvalidSessionListResult;
+        }
+        if (std.mem.eql(u8, section, "session")) {
+            if (seen[position] or !result.isNull(20, result_row) or
+                result.int64(22, result_row) != 0 or
+                result.int64(23, result_row) != 0)
+            {
+                return error.InvalidSessionListResult;
+            }
+            const person_key = try result.text(allocator, 3, result_row);
+            if (!validSessionPersonKey(person_key)) {
+                return error.InvalidSessionListResult;
+            }
+            const started = result.int64(4, result_row);
+            const last_activity = result.int64(5, result_row);
+            const last_received = result.int64(6, result_row);
+            const duration_ms = result.int64(15, result_row);
+            const engagement_ms = result.int64(16, result_row);
+            const page_views = result.int64(17, result_row);
+            const custom_events = result.int64(18, result_row);
+            const conversions = result.int64(19, result_row);
+            if (started != keys[position].started_at_utc_micros or
+                started < 0 or last_activity < 0 or
+                started > last_activity or last_received < 0 or
+                duration_ms < 0 or engagement_ms < 0 or page_views < 0 or
+                custom_events < 0 or conversions < 0 or
+                page_views + custom_events == 0)
+            {
+                return error.InvalidSessionListResult;
+            }
+            const age = std.math.sub(
+                i64,
+                request.now_utc_micros,
+                last_received,
+            ) catch -1;
+            rows[position] = .{
+                .session_id = session_id,
+                .person_key = person_key,
+                .started_at_utc_micros = started,
+                .last_activity_utc_micros = last_activity,
+                .last_received_at_utc_micros = last_received,
+                .landing_page = try result.text(allocator, 7, result_row),
+                .channel = try result.text(allocator, 8, result_row),
+                .referrer = try result.text(allocator, 9, result_row),
+                .utm_source = try result.text(allocator, 10, result_row),
+                .utm_campaign = try result.text(allocator, 11, result_row),
+                .country = try result.text(allocator, 12, result_row),
+                .device = try result.text(allocator, 13, result_row),
+                .browser = try result.text(allocator, 14, result_row),
+                .duration_ms = duration_ms,
+                .engagement_ms = engagement_ms,
+                .page_views = page_views,
+                .custom_events = custom_events,
+                .conversions = conversions,
+                .current = age >= 0 and age <= 30 * 60 * 1_000_000,
+                .revenue = &.{},
+            };
+            seen[position] = true;
+        } else if (std.mem.eql(u8, section, "revenue")) {
+            if (!seen[position] or result.isNull(20, result_row)) {
+                return error.InvalidSessionListResult;
+            }
+            const currency_position = result.int64(23, result_row);
+            const currency = try result.text(allocator, 21, result_row);
+            const decimal = try result.text(allocator, 20, result_row);
+            const value_count = result.int64(22, result_row);
+            const number_type = property.numberType(decimal) catch
+                return error.InvalidSessionListResult;
+            if (currency_position != expected_currency_positions[position] or
+                value_count <= 0 or number_type != .decimal)
+            {
+                return error.InvalidSessionListResult;
+            }
+            domain.validateCurrency(currency) catch
+                return error.InvalidSessionListResult;
+            if (revenue[position].items.len >= analysis.maximum_currency_series) {
+                return error.TooManyAnalysisCurrencies;
+            }
+            if (revenue[position].items.len != 0) {
+                const prior = revenue[position].items[
+                    revenue[position].items.len - 1
+                ];
+                if (std.mem.order(u8, prior.currency, currency) != .lt) {
+                    return error.InvalidSessionListResult;
+                }
+            }
+            try revenue[position].append(allocator, .{
+                .decimal = decimal,
+                .currency = currency,
+                .value_count = value_count,
+            });
+            expected_currency_positions[position] += 1;
+        } else return error.InvalidSessionListResult;
+    }
+    for (rows, revenue, seen) |*row, *values, was_seen| {
+        if (!was_seen) return error.InvalidSessionListResult;
+        row.revenue = try values.toOwnedSlice(allocator);
+    }
+    return rows;
+}
+
+fn validSessionPersonKey(value: []const u8) bool {
+    if (value.len < 3 or value[1] != ':') return false;
+    return switch (value[0]) {
+        'a', 'e', 'l' => value.len == 38 and value: {
+            domain.validateUuid(value[2..]) catch break :value false;
+            break :value true;
+        },
+        'u' => value.len <= 162 and std.unicode.utf8ValidateSlice(value[2..]) and
+            value: {
+                for (value[2..]) |byte| {
+                    if (byte < 0x20 or byte == 0x7f) break :value false;
+                }
+                break :value true;
+            },
+        else => false,
+    };
+}
+
+fn compileSessionKeys(
+    allocator: std.mem.Allocator,
+    request: analysis.SessionListRequest,
+) !StatementPlan {
+    try request.validate();
+    const session_columns = FilteredSessionColumns.resolve(request.filters, false);
+    const selected_goal = if (request.selected_goal_index) |index|
+        request.active_goals[index].selector
+    else
+        null;
+    const range_columns = SessionRangeColumns.resolve(
+        request.filters,
+        selected_goal,
+    );
+    const include_person = hasPersonClause(request.filters.clauses);
+    const include_engagement = hasSessionFieldClause(
+        request.filters.clauses,
+        .session_engagement_ms,
+    );
+    const include_converted = hasSessionFieldClause(
+        request.filters.clauses,
+        .session_converted,
+    );
+    var builder = Builder.init(allocator);
+    if (request.strict_traffic_mode) {
+        var goals: [analysis.maximum_active_goals]traffic.Goal = undefined;
+        for (request.active_goals, 0..) |goal, index| goals[index] = .{
+            .kind = switch (goal.selector.kind) {
+                .exact_event => .event,
+                .exact_page => .path,
+                .page_prefix => .prefix,
+                .saved_goal => return error.UnresolvedGoalSelector,
+            },
+            .value = goal.selector.value,
+        };
+        try builder.write("WITH ");
+        try builder.appendTraffic(try traffic.classifierFragment(
+            allocator,
+            request.site_id,
+            goals[0..request.active_goals.len],
+            true,
+        ));
+        try builder.write(", ");
+    } else try builder.write("WITH ");
+    try builder.write(
+        "range_events AS NOT MATERIALIZED (SELECT e.session_id, e.kind",
+    );
+    if (range_columns.event_name) try builder.write(", e.event_name");
+    if (range_columns.path) try builder.write(", e.path");
+    if (range_columns.page_title) try builder.write(", e.page_title");
+    if (range_columns.hostname) try builder.write(", e.hostname");
+    if (range_columns.referrer) try builder.write(", e.referrer_host AS referrer");
+    if (range_columns.country) try builder.write(", e.country_code AS country");
+    if (range_columns.language) try builder.write(", e.language");
+    if (range_columns.device) try builder.write(", e.device_category AS device");
+    if (range_columns.browser) try builder.write(", e.browser_family AS browser");
+    if (range_columns.operating_system) try builder.write(", e.os_family AS operating_system");
+    if (range_columns.utm_source) try builder.write(", e.utm_source");
+    if (range_columns.utm_medium) try builder.write(", e.utm_medium");
+    if (range_columns.utm_campaign) try builder.write(", e.utm_campaign");
+    if (range_columns.utm_term) try builder.write(", e.utm_term");
+    if (range_columns.utm_content) try builder.write(", e.utm_content");
+    if (range_columns.properties) try builder.write(", e.properties_json");
+    if (include_person) try builder.write(
+        ", e.identity_quality, CASE" ++
+            " WHEN e.identity_quality = 1" ++
+            " AND COALESCE(l.user_id, e.user_id, '') <> ''" ++
+            " THEN 'u:' || COALESCE(l.user_id, e.user_id)" ++
+            " WHEN e.identity_quality = 1" ++
+            " THEN 'a:' || CAST(e.anonymous_id AS VARCHAR)" ++
+            " WHEN e.identity_quality = 2" ++
+            " THEN 'e:' || CAST(e.anonymous_id AS VARCHAR)" ++
+            " WHEN e.identity_quality = 3" ++
+            " THEN 'l:' || CAST(e.anonymous_id AS VARCHAR)" ++
+            " ELSE NULL END AS person_key",
+    );
+    try builder.write(" FROM events e");
+    if (include_person) try builder.write(
+        " LEFT JOIN identity_links l ON l.site_id = e.site_id" ++
+            " AND l.anonymous_id = e.anonymous_id",
+    );
+    try builder.write(" WHERE e.site_id = ");
+    try builder.bindText(request.site_id);
+    try builder.write(" AND e.site_local_date BETWEEN CAST(");
+    try builder.bindText(request.range.start);
+    try builder.write(" AS DATE) AND CAST(");
+    try builder.bindText(request.range.end);
+    try builder.write(
+        " AS DATE) AND e.kind IN (1, 2)" ++
+            " AND e.traffic_class IN (1, 5))," ++
+            " base AS NOT MATERIALIZED (SELECT * FROM range_events)," ++
+            " range_sessions AS NOT MATERIALIZED" ++
+            " (SELECT DISTINCT session_id FROM base)," ++
+            " session_events AS NOT MATERIALIZED" ++
+            " (SELECT e.session_id, e.kind, e.occurred_at_utc_micros," ++
+            " e.sequence, e.received_at_utc_micros, e.event_id",
+    );
+    if (include_engagement) try builder.write(", e.engagement_ms");
+    if (session_columns.landing_page or session_columns.exit_page or
+        include_converted)
+    {
+        try builder.write(", e.path");
+    }
+    if (include_converted) try builder.write(", e.event_name, e.properties_json");
+    if (session_columns.referrer) try builder.write(", e.referrer_host");
+    if (session_columns.utm_source) try builder.write(", e.utm_source");
+    if (session_columns.utm_medium) try builder.write(", e.utm_medium");
+    if (session_columns.utm_campaign) try builder.write(", e.utm_campaign");
+    if (session_columns.utm_term) try builder.write(", e.utm_term");
+    if (session_columns.utm_content) try builder.write(", e.utm_content");
+    if (session_columns.country) try builder.write(", e.country_code");
+    if (session_columns.language) try builder.write(", e.language");
+    if (session_columns.device) try builder.write(", e.device_category");
+    if (session_columns.browser) try builder.write(", e.browser_family");
+    if (session_columns.operating_system) try builder.write(", e.os_family");
+    try builder.write(
+        " FROM events e JOIN range_sessions r" ++
+            " ON r.session_id = e.session_id WHERE e.site_id = ",
+    );
+    try builder.bindText(request.site_id);
+    try builder.write(
+        " AND e.traffic_class IN (1, 5))," ++
+            " session_summary AS NOT MATERIALIZED" ++
+            " (SELECT session_id",
+    );
+    if (session_columns.landing_page) try writeSessionFirst(
+        &builder,
+        "path",
+        "landing_page",
+        "''",
+        "= 1",
+        false,
+    );
+    if (session_columns.exit_page) try writeSessionFirst(
+        &builder,
+        "path",
+        "exit_page",
+        "''",
+        "= 1",
+        true,
+    );
+    if (session_columns.referrer) try writeSessionFirst(
+        &builder,
+        "referrer_host",
+        "referrer",
+        "''",
+        "= 1",
+        false,
+    );
+    if (session_columns.utm_source) try writeSessionFirst(
+        &builder,
+        "utm_source",
+        "utm_source",
+        "''",
+        "= 1",
+        false,
+    );
+    if (session_columns.utm_medium) try writeSessionFirst(
+        &builder,
+        "utm_medium",
+        "utm_medium",
+        "''",
+        "= 1",
+        false,
+    );
+    if (session_columns.utm_campaign) try writeSessionFirst(
+        &builder,
+        "utm_campaign",
+        "utm_campaign",
+        "''",
+        "= 1",
+        false,
+    );
+    if (session_columns.utm_term) try writeSessionFirst(
+        &builder,
+        "utm_term",
+        "utm_term",
+        "''",
+        "= 1",
+        false,
+    );
+    if (session_columns.utm_content) try writeSessionFirst(
+        &builder,
+        "utm_content",
+        "utm_content",
+        "''",
+        "= 1",
+        false,
+    );
+    if (session_columns.country) try writeSessionFirst(
+        &builder,
+        "country_code",
+        "country",
+        "'ZZ'",
+        "IN (1, 2)",
+        false,
+    );
+    if (session_columns.language) try writeSessionFirst(
+        &builder,
+        "language",
+        "language",
+        "''",
+        "IN (1, 2)",
+        false,
+    );
+    if (session_columns.device) try writeSessionFirst(
+        &builder,
+        "device_category",
+        "device",
+        "'unknown'",
+        "IN (1, 2)",
+        false,
+    );
+    if (session_columns.browser) try writeSessionFirst(
+        &builder,
+        "browser_family",
+        "browser",
+        "'Unknown'",
+        "IN (1, 2)",
+        false,
+    );
+    if (session_columns.operating_system) try writeSessionFirst(
+        &builder,
+        "os_family",
+        "operating_system",
+        "'Unknown'",
+        "IN (1, 2)",
+        false,
+    );
+    try builder.write(
+        ", min(occurred_at_utc_micros) AS first_at," ++
+            " max(occurred_at_utc_micros) AS last_at",
+    );
+    if (include_engagement) try builder.write(
+        ", COALESCE(sum(engagement_ms), 0)::BIGINT AS engagement_ms",
+    );
+    if (include_converted) {
+        try builder.write(", bool_or(CASE WHEN kind IN (1, 2) THEN ");
+        try writeAnyGoalMatch(&builder, request.active_goals, "session_events");
+        try builder.write(" ELSE FALSE END) AS converted");
+    }
+    try builder.write(
+        " FROM session_events GROUP BY session_id)," ++
+            " session_facts AS NOT MATERIALIZED (SELECT st.session_id",
+    );
+    if (session_columns.landing_page) try builder.write(", st.landing_page");
+    if (session_columns.exit_page) try builder.write(", st.exit_page");
+    if (session_columns.referrer) try builder.write(", st.referrer");
+    if (session_columns.utm_source) try builder.write(", st.utm_source");
+    if (session_columns.utm_medium) try builder.write(", st.utm_medium");
+    if (session_columns.utm_campaign) try builder.write(", st.utm_campaign");
+    if (session_columns.utm_term) try builder.write(", st.utm_term");
+    if (session_columns.utm_content) try builder.write(", st.utm_content");
+    if (session_columns.country) try builder.write(", st.country");
+    if (session_columns.language) try builder.write(", st.language");
+    if (session_columns.device) try builder.write(", st.device");
+    if (session_columns.browser) try builder.write(", st.browser");
+    if (session_columns.operating_system) try builder.write(", st.operating_system");
+    if (session_columns.channel) try builder.write(
+        ", CASE WHEN st.utm_source = '' AND st.utm_medium = ''" ++
+            " AND st.referrer = '' THEN 'Direct'" ++
+            " WHEN lower(st.utm_medium) IN ('cpc', 'ppc', 'paidsearch')" ++
+            " THEN 'Paid Search'" ++
+            " WHEN lower(st.utm_medium) = 'organic' THEN 'Organic Search'" ++
+            " WHEN lower(st.utm_medium) IN" ++
+            " ('social', 'social-network', 'social-media', 'sm') THEN 'Social'" ++
+            " WHEN lower(st.utm_medium) = 'email' THEN 'Email'" ++
+            " WHEN lower(st.utm_medium) = 'referral' OR" ++
+            " (st.referrer <> '' AND st.utm_source = ''" ++
+            " AND st.utm_medium = '') THEN 'Referral'" ++
+            " ELSE 'Other / Unknown' END AS channel",
+    );
+    try builder.write(
+        ", st.first_at, st.last_at," ++
+            " greatest(0, (st.last_at - st.first_at) / 1000)::BIGINT" ++
+            " AS duration_ms",
+    );
+    if (include_engagement) try builder.write(", st.engagement_ms");
+    if (include_converted) try builder.write(", st.converted");
+    try builder.write(" FROM session_summary st)");
+    if (hasUserTraitClause(request.filters.clauses)) {
+        try writePersonTraits(
+            &builder,
+            request.site_id,
+            request.strict_traffic_mode,
+            false,
+        );
+    }
+    const has_row_qualification = request.filters.clauses.len != 0 or
+        selected_goal != null;
+    if (has_row_qualification) {
+        try builder.write(
+            ", qualified_sessions AS (SELECT DISTINCT e.session_id," ++
+                " s.first_at FROM base e JOIN session_facts s" ++
+                " USING (session_id) WHERE TRUE",
+        );
+        for (request.filters.clauses) |clause| {
+            try builder.write(" AND ");
+            try writeClause(&builder, clause, "e", "s");
+        }
+        if (request.strict_traffic_mode) try builder.write(
+            " AND e.session_id NOT IN (SELECT session_id" ++
+                " FROM d34_current_suspected_sessions)",
+        );
+        if (selected_goal) |selector| {
+            try builder.write(
+                " AND EXISTS (SELECT 1 FROM base sg" ++
+                    " WHERE sg.session_id = e.session_id AND ",
+            );
+            try writeSelector(&builder, selector, "sg");
+            try builder.write(")");
+        }
+        try builder.write(
+            ") SELECT CAST(q.session_id AS VARCHAR), q.first_at" ++
+                " FROM qualified_sessions q ORDER BY q.first_at DESC," ++
+                " q.session_id ASC",
+        );
+    } else {
+        try builder.write(
+            " SELECT CAST(s.session_id AS VARCHAR), s.first_at" ++
+                " FROM session_facts s WHERE TRUE",
+        );
+        if (request.strict_traffic_mode) try builder.write(
+            " AND s.session_id NOT IN (SELECT session_id" ++
+                " FROM d34_current_suspected_sessions)",
+        );
+        try builder.write(" ORDER BY s.first_at DESC, s.session_id ASC");
+    }
+    try builder.write(" LIMIT ");
+    try builder.bindInteger(@as(i64, analysis.session_page_size) + 1);
+    try builder.write(" OFFSET ");
+    try builder.bindInteger(try request.offset());
+    return builder.finish();
+}
+
+fn compileSessionDetails(
+    allocator: std.mem.Allocator,
+    request: analysis.SessionListRequest,
+    keys: []const SessionKey,
+) !StatementPlan {
+    try request.validate();
+    if (keys.len == 0 or keys.len > analysis.session_page_size) {
+        return error.InvalidSessionListResult;
+    }
+    var builder = Builder.init(allocator);
+    try builder.write("WITH page_sessions(position, session_id) AS (VALUES ");
+    for (keys, 0..) |key, index| {
+        domain.validateUuid(key.id) catch return error.InvalidSessionListResult;
+        if (index != 0) try builder.write(", ");
+        try builder.write("(");
+        try builder.bindInteger(@intCast(index));
+        try builder.write("::BIGINT, CAST(");
+        try builder.bindText(key.id);
+        try builder.write(" AS UUID))");
+    }
+    try builder.write(
+        "), session_events AS NOT MATERIALIZED" ++
+            " (SELECT p.position, e.session_id, e.kind, e.event_name, e.path," ++
+            " e.referrer_host, e.utm_source, e.utm_medium, e.utm_campaign," ++
+            " e.country_code, e.device_category, e.browser_family," ++
+            " e.properties_json, e.value_amount, e.value_currency," ++
+            " e.engagement_ms, e.occurred_at_utc_micros, e.sequence," ++
+            " e.received_at_utc_micros, e.event_id," ++
+            " CASE WHEN e.identity_quality = 1" ++
+            " AND COALESCE(l.user_id, e.user_id, '') <> ''" ++
+            " THEN 'u:' || COALESCE(l.user_id, e.user_id)" ++
+            " WHEN e.identity_quality = 1" ++
+            " THEN 'a:' || CAST(e.anonymous_id AS VARCHAR)" ++
+            " WHEN e.identity_quality = 2" ++
+            " THEN 'e:' || CAST(e.anonymous_id AS VARCHAR)" ++
+            " WHEN e.identity_quality = 3" ++
+            " THEN 'l:' || CAST(e.anonymous_id AS VARCHAR)" ++
+            " ELSE NULL END AS person_key" ++
+            " FROM events e JOIN page_sessions p" ++
+            " ON p.session_id = e.session_id" ++
+            " LEFT JOIN identity_links l ON l.site_id = e.site_id" ++
+            " AND l.anonymous_id = e.anonymous_id WHERE e.site_id = ",
+    );
+    try builder.bindText(request.site_id);
+    try builder.write(
+        " AND e.traffic_class IN (1, 5))," ++
+            " session_summary AS MATERIALIZED" ++
+            " (SELECT position, session_id," ++
+            " first(person_key ORDER BY occurred_at_utc_micros, sequence," ++
+            " received_at_utc_micros, event_id)" ++
+            " FILTER (WHERE kind IN (1, 2)) AS person_key",
+    );
+    try writeSessionFirst(
+        &builder,
+        "path",
+        "landing_page",
+        "''",
+        "= 1",
+        false,
+    );
+    try writeSessionFirst(
+        &builder,
+        "referrer_host",
+        "referrer",
+        "''",
+        "= 1",
+        false,
+    );
+    try writeSessionFirst(
+        &builder,
+        "utm_source",
+        "utm_source",
+        "''",
+        "= 1",
+        false,
+    );
+    try writeSessionFirst(
+        &builder,
+        "utm_medium",
+        "utm_medium",
+        "''",
+        "= 1",
+        false,
+    );
+    try writeSessionFirst(
+        &builder,
+        "utm_campaign",
+        "utm_campaign",
+        "''",
+        "= 1",
+        false,
+    );
+    try writeSessionFirst(
+        &builder,
+        "country_code",
+        "country",
+        "'ZZ'",
+        "IN (1, 2)",
+        false,
+    );
+    try writeSessionFirst(
+        &builder,
+        "device_category",
+        "device",
+        "'unknown'",
+        "IN (1, 2)",
+        false,
+    );
+    try writeSessionFirst(
+        &builder,
+        "browser_family",
+        "browser",
+        "'Unknown'",
+        "IN (1, 2)",
+        false,
+    );
+    try builder.write(
+        ", min(occurred_at_utc_micros)::BIGINT AS first_at," ++
+            " max(occurred_at_utc_micros)::BIGINT AS last_at," ++
+            " max(received_at_utc_micros)::BIGINT AS last_received," ++
+            " count(*) FILTER (WHERE kind = 1)::BIGINT AS page_views," ++
+            " count(*) FILTER (WHERE kind = 2)::BIGINT AS custom_events," ++
+            " COALESCE(sum(engagement_ms), 0)::BIGINT AS engagement_ms," ++
+            " sum(CASE WHEN kind IN (1, 2) THEN ",
+    );
+    try writeGoalMatchCount(&builder, request.active_goals, "session_events");
+    try builder.write(
+        " ELSE 0 END)::BIGINT AS conversions" ++
+            " FROM session_events GROUP BY position, session_id)," ++
+            " session_rows AS MATERIALIZED" ++
+            " (SELECT s.position, CAST(s.session_id AS VARCHAR) AS session_id," ++
+            " s.person_key, s.first_at, s.last_at, s.last_received," ++
+            " s.landing_page," ++
+            " CASE WHEN s.utm_source = '' AND s.utm_medium = ''" ++
+            " AND s.referrer = '' THEN 'Direct'" ++
+            " WHEN lower(s.utm_medium) IN ('cpc', 'ppc', 'paidsearch')" ++
+            " THEN 'Paid Search'" ++
+            " WHEN lower(s.utm_medium) = 'organic' THEN 'Organic Search'" ++
+            " WHEN lower(s.utm_medium) IN" ++
+            " ('social', 'social-network', 'social-media', 'sm') THEN 'Social'" ++
+            " WHEN lower(s.utm_medium) = 'email' THEN 'Email'" ++
+            " WHEN lower(s.utm_medium) = 'referral' OR" ++
+            " (s.referrer <> '' AND s.utm_source = ''" ++
+            " AND s.utm_medium = '') THEN 'Referral'" ++
+            " ELSE 'Other / Unknown' END AS channel," ++
+            " s.referrer, s.utm_source, s.utm_campaign, s.country, s.device," ++
+            " s.browser," ++
+            " greatest(0, (s.last_at - s.first_at) / 1000)::BIGINT" ++
+            " AS duration_ms, s.engagement_ms, s.page_views," ++
+            " s.custom_events, s.conversions FROM session_summary s)," ++
+            " revenue_rows AS (SELECT position," ++
+            " CAST(session_id AS VARCHAR) AS session_id, value_currency," ++
+            " CAST(sum(value_amount) AS VARCHAR) AS amount," ++
+            " count(*)::BIGINT AS value_count," ++
+            " row_number() OVER (PARTITION BY position" ++
+            " ORDER BY value_currency ASC)::BIGINT AS currency_position" ++
+            " FROM session_events WHERE kind IN (1, 2)" ++
+            " AND value_amount IS NOT NULL AND value_currency <> ''" ++
+            " GROUP BY position, session_id, value_currency)" ++
+            " SELECT * FROM (SELECT 'session' AS section, position, session_id," ++
+            " person_key, first_at, last_at, last_received, landing_page," ++
+            " channel, referrer, utm_source, utm_campaign, country, device," ++
+            " browser, duration_ms, engagement_ms, page_views, custom_events," ++
+            " conversions, CAST(NULL AS VARCHAR) AS amount, '' AS currency," ++
+            " 0::BIGINT AS value_count, 0::BIGINT AS currency_position" ++
+            " FROM session_rows UNION ALL SELECT 'revenue', position," ++
+            " session_id, '', 0::BIGINT, 0::BIGINT, 0::BIGINT, '', '', ''," ++
+            " '', '', '', '', '', 0::BIGINT, 0::BIGINT, 0::BIGINT," ++
+            " 0::BIGINT, 0::BIGINT, amount, value_currency, value_count," ++
+            " currency_position FROM revenue_rows WHERE currency_position <= ",
+    );
+    try builder.bindInteger(@as(i64, analysis.maximum_currency_series) + 1);
+    try builder.write(
+        ") result ORDER BY position," ++
+            " CASE section WHEN 'session' THEN 0 ELSE 1 END," ++
+            " currency_position",
+    );
+    return builder.finish();
+}
+
+fn hasPersonClause(clauses: []const analysis.Clause) bool {
+    for (clauses) |clause| {
+        if (clause.scope == .person) return true;
+    }
+    return false;
+}
+
+fn hasSessionFieldClause(
+    clauses: []const analysis.Clause,
+    field: analysis.FieldKind,
+) bool {
+    for (clauses) |clause| {
+        if (clause.scope == .session and clause.field.kind == field) return true;
+    }
+    return false;
+}
+
 pub fn profileGoalResult(
     allocator: std.mem.Allocator,
     event_store: *events.Store,
@@ -2460,6 +3272,82 @@ pub fn compileOverviewDetails(
     );
     return builder.finish();
 }
+
+const SessionRangeColumns = struct {
+    event_name: bool = false,
+    path: bool = false,
+    page_title: bool = false,
+    hostname: bool = false,
+    referrer: bool = false,
+    country: bool = false,
+    language: bool = false,
+    device: bool = false,
+    browser: bool = false,
+    operating_system: bool = false,
+    utm_source: bool = false,
+    utm_medium: bool = false,
+    utm_campaign: bool = false,
+    utm_term: bool = false,
+    utm_content: bool = false,
+    properties: bool = false,
+
+    fn include(result: *SessionRangeColumns, field: analysis.FieldKind) void {
+        switch (field) {
+            .page => result.path = true,
+            .page_title => result.page_title = true,
+            .hostname => result.hostname = true,
+            .referrer => result.referrer = true,
+            .country => result.country = true,
+            .language => result.language = true,
+            .device => result.device = true,
+            .browser => result.browser = true,
+            .operating_system => result.operating_system = true,
+            .utm_source => result.utm_source = true,
+            .utm_medium => result.utm_medium = true,
+            .utm_campaign => result.utm_campaign = true,
+            .utm_term => result.utm_term = true,
+            .utm_content => result.utm_content = true,
+            .event_name => result.event_name = true,
+            .event_property => result.properties = true,
+            .landing_page,
+            .exit_page,
+            .channel,
+            .user_trait,
+            .identity_state,
+            .session_converted,
+            .session_duration_ms,
+            .session_engagement_ms,
+            => {},
+        }
+    }
+
+    fn resolve(
+        filters: analysis.FilterSet,
+        selected_goal: ?analysis.EventSelector,
+    ) SessionRangeColumns {
+        var result = SessionRangeColumns{};
+        for (filters.clauses) |clause| switch (clause.scope) {
+            .event => result.include(clause.field.kind),
+            .session => if (!hasSessionFact(clause.field.kind)) {
+                result.include(clause.field.kind);
+            },
+            .person => if (clause.field.kind != .identity_state and
+                clause.field.kind != .user_trait)
+            {
+                result.include(clause.field.kind);
+            },
+        };
+        if (selected_goal) |selector| {
+            switch (selector.kind) {
+                .exact_event => result.event_name = true,
+                .exact_page, .page_prefix => result.path = true,
+                .saved_goal => {},
+            }
+            if (selector.predicates.len != 0) result.properties = true;
+        }
+        return result;
+    }
+};
 
 const FilteredSessionColumns = struct {
     landing_page: bool = false,
@@ -6335,6 +7223,35 @@ test "declared maximum filters selectors and active goals still compile bounded"
     });
     try std.testing.expect(compiled.primary_rows.sql.len <= maximum_sql_bytes);
     try std.testing.expect(compiled.primary_rows.bindings.len <= maximum_bindings);
+
+    const session_request = analysis.SessionListRequest{
+        .site_id = "00000000-0000-4000-8000-000000000024",
+        .range = .{ .start = "2026-01-01", .end = "2026-01-02" },
+        .filters = .{ .clauses = &clauses },
+        .active_goals = &goals,
+        .selected_goal_index = 0,
+        .strict_traffic_mode = true,
+        .now_utc_micros = 1_800_000_000_000_000,
+    };
+    const session_keys = try compileSessionKeys(allocator, session_request);
+    try std.testing.expect(session_keys.sql.len <= maximum_sql_bytes);
+    try std.testing.expect(session_keys.bindings.len <= maximum_bindings);
+    var page_keys: [analysis.session_page_size]SessionKey = undefined;
+    for (&page_keys, 0..) |*key, index| key.* = .{
+        .id = try std.fmt.allocPrint(
+            allocator,
+            "00000000-0000-4000-8000-{d:0>12}",
+            .{index + 100},
+        ),
+        .started_at_utc_micros = @intCast(index),
+    };
+    const session_details = try compileSessionDetails(
+        allocator,
+        session_request,
+        &page_keys,
+    );
+    try std.testing.expect(session_details.sql.len <= maximum_sql_bytes);
+    try std.testing.expect(session_details.bindings.len <= maximum_bindings);
 }
 
 test "simple empty-filter Trend plans omit unused session facts" {
@@ -6461,6 +7378,543 @@ test "ordered funnel executes typed session and visitor results on disk" {
         .ephemeral_step_one = 1,
         .legacy_step_one = 1,
     }, visitor_result.current.identity_coverage.?);
+}
+
+test "session list expands bounded full records on disk" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const allocator = std.testing.allocator;
+    const path = try std.fmt.allocPrint(
+        allocator,
+        ".zig-cache/tmp/{s}/events.duckdb",
+        .{temporary.sub_path},
+    );
+    defer allocator.free(path);
+    var event_store = try events.Store.open(allocator, path);
+    defer event_store.deinit();
+    try event_store.migrate();
+    try seedSemanticFixture(&event_store.database);
+    try event_store.database.exec(
+        \\INSERT INTO events SELECT * REPLACE (
+        \\  CAST('00000000-0000-4000-8000-000000000201' AS UUID) AS event_id,
+        \\  1767398410000000 AS received_at_utc_micros,
+        \\  1767398410000000 AS occurred_at_utc_micros,
+        \\  DATE '2026-01-03' AS received_date_utc,
+        \\  DATE '2026-01-03' AS site_local_date,
+        \\  2 AS kind, 'custom-only' AS event_name,
+        \\  '/custom-only' AS path, 'Custom only' AS page_title,
+        \\  CAST('00000000-0000-4000-8000-0000000000a6' AS UUID) AS anonymous_id,
+        \\  2 AS identity_quality, '' AS user_id,
+        \\  CAST('00000000-0000-4000-8000-0000000000b6' AS UUID) AS session_id,
+        \\  0 AS sequence, TRUE AS session_start,
+        \\  'tablet' AS device_category,
+        \\  CAST('00000000-0000-4000-8000-000000000201' AS BLOB) AS visitor_day_id,
+        \\  TRUE AS visitor_day_start, repeat('c', 64) AS event_payload_digest
+        \\) FROM events
+        \\WHERE event_id = CAST('00000000-0000-4000-8000-000000000107' AS UUID);
+        \\INSERT INTO events SELECT * REPLACE (
+        \\  CAST('00000000-0000-4000-8000-000000000202' AS UUID) AS event_id,
+        \\  '00000000-0000-4000-8000-000000000099' AS site_id,
+        \\  1767398420000000 AS received_at_utc_micros,
+        \\  1767398420000000 AS occurred_at_utc_micros,
+        \\  CAST('00000000-0000-4000-8000-0000000000f6' AS UUID) AS anonymous_id,
+        \\  CAST('00000000-0000-4000-8000-0000000000b6' AS UUID) AS session_id,
+        \\  CAST('00000000-0000-4000-8000-000000000202' AS BLOB) AS visitor_day_id,
+        \\  repeat('d', 64) AS event_payload_digest
+        \\) FROM events
+        \\WHERE event_id = CAST('00000000-0000-4000-8000-000000000201' AS UUID)
+        \\  AND site_id = '00000000-0000-4000-8000-000000000024';
+        \\INSERT INTO events SELECT * REPLACE (
+        \\  CAST('00000000-0000-4000-8000-000000000203' AS UUID) AS event_id,
+        \\  1767398411000000 AS received_at_utc_micros,
+        \\  1767398411000000 AS occurred_at_utc_micros,
+        \\  '/suspected' AS path, 'Suspected' AS page_title,
+        \\  CAST('00000000-0000-4000-8000-0000000000a7' AS UUID) AS anonymous_id,
+        \\  1 AS identity_quality, '' AS user_id,
+        \\  CAST('00000000-0000-4000-8000-0000000000b7' AS UUID) AS session_id,
+        \\  'desktop' AS device_category,
+        \\  CAST('00000000-0000-4000-8000-000000000203' AS BLOB) AS visitor_day_id,
+        \\  repeat('f', 64) AS event_payload_digest,
+        \\  1 AS signal_version, FALSE AS was_visible,
+        \\  1 AS viewport_bucket, 1 AS beacon_timing_bucket,
+        \\  3 AS client_hint_consistency, FALSE AS accept_language_present
+        \\) FROM events
+        \\WHERE event_id = CAST('00000000-0000-4000-8000-000000000107' AS UUID);
+        \\INSERT INTO events SELECT * REPLACE (
+        \\  CAST('00000000-0000-4000-8000-000000000204' AS UUID) AS event_id,
+        \\  1767398412000000 AS received_at_utc_micros,
+        \\  1767398412000000 AS occurred_at_utc_micros,
+        \\  '/excluded' AS path, 'Excluded' AS page_title,
+        \\  CAST('00000000-0000-4000-8000-0000000000a8' AS UUID) AS anonymous_id,
+        \\  CAST('00000000-0000-4000-8000-0000000000b8' AS UUID) AS session_id,
+        \\  CAST('00000000-0000-4000-8000-000000000204' AS BLOB) AS visitor_day_id,
+        \\  repeat('0', 64) AS event_payload_digest, 4 AS traffic_class
+        \\) FROM events
+        \\WHERE event_id = CAST('00000000-0000-4000-8000-000000000107' AS UUID);
+    );
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const goals = [_]analysis.ResolvedGoal{
+        .{
+            .id = "00000000-0000-4000-8000-000000000041",
+            .selector = .{ .kind = .exact_event, .value = "purchase" },
+        },
+        .{
+            .id = "00000000-0000-4000-8000-000000000042",
+            .selector = .{ .kind = .exact_event, .value = "purchase" },
+        },
+    };
+    const request = analysis.SessionListRequest{
+        .site_id = "00000000-0000-4000-8000-000000000024",
+        .range = .{ .start = "2026-01-03", .end = "2026-01-03" },
+        .active_goals = &goals,
+        .now_utc_micros = 1_767_400_209_000_000,
+    };
+    const page = try executeSessionList(arena.allocator(), &event_store, request);
+    try std.testing.expectEqual(@as(usize, 6), page.rows.len);
+    try std.testing.expect(!page.has_more);
+    const identified = findSessionRow(
+        page.rows,
+        "00000000-0000-4000-8000-0000000000b1",
+    ) orelse return error.MissingSessionFixtureRow;
+    try std.testing.expectEqualStrings(
+        "00000000-0000-4000-8000-0000000000b1",
+        identified.session_id,
+    );
+    try std.testing.expectEqualStrings("u:user-a", identified.person_key);
+    try std.testing.expectEqualStrings("/landing", identified.landing_page);
+    try std.testing.expectEqualStrings("Paid Search", identified.channel);
+    try std.testing.expectEqual(@as(i64, 2), identified.page_views);
+    try std.testing.expectEqual(@as(i64, 3), identified.custom_events);
+    try std.testing.expectEqual(@as(i64, 4), identified.conversions);
+    try std.testing.expectEqual(@as(i64, 86_403_000), identified.duration_ms);
+    try std.testing.expectEqual(@as(i64, 0), identified.engagement_ms);
+    try std.testing.expectEqual(@as(usize, 2), identified.revenue.len);
+    try std.testing.expectEqualStrings("EUR", identified.revenue[0].currency);
+    try std.testing.expectEqualStrings("12.500000", identified.revenue[0].decimal);
+    try std.testing.expectEqual(@as(i64, 1), identified.revenue[0].value_count);
+    try std.testing.expectEqualStrings("USD", identified.revenue[1].currency);
+    try std.testing.expectEqualStrings("7.500000", identified.revenue[1].decimal);
+    try std.testing.expectEqual(@as(i64, 1), identified.revenue[1].value_count);
+    try std.testing.expect(identified.current);
+    const engaged_session = findSessionRow(
+        page.rows,
+        "00000000-0000-4000-8000-0000000000b2",
+    ) orelse return error.MissingSessionFixtureRow;
+    try std.testing.expectEqual(@as(i64, 1_000), engaged_session.duration_ms);
+    try std.testing.expectEqual(@as(i64, 10_000), engaged_session.engagement_ms);
+    const custom_only = findSessionRow(
+        page.rows,
+        "00000000-0000-4000-8000-0000000000b6",
+    ) orelse return error.MissingSessionFixtureRow;
+    try std.testing.expectEqual(@as(i64, 0), custom_only.page_views);
+    try std.testing.expectEqual(@as(i64, 1), custom_only.custom_events);
+    try std.testing.expectEqualStrings("", custom_only.landing_page);
+    try std.testing.expect(findSessionRow(
+        page.rows,
+        "00000000-0000-4000-8000-0000000000b7",
+    ) != null);
+    try std.testing.expect(findSessionRow(
+        page.rows,
+        "00000000-0000-4000-8000-0000000000b8",
+    ) == null);
+    var strict_request = request;
+    strict_request.strict_traffic_mode = true;
+    const strict_page = try executeSessionList(
+        arena.allocator(),
+        &event_store,
+        strict_request,
+    );
+    try std.testing.expectEqual(@as(usize, 5), strict_page.rows.len);
+    try std.testing.expect(findSessionRow(
+        strict_page.rows,
+        "00000000-0000-4000-8000-0000000000b7",
+    ) == null);
+
+    var selected = request;
+    selected.selected_goal_index = 0;
+    const goal_page = try executeSessionList(
+        arena.allocator(),
+        &event_store,
+        selected,
+    );
+    try std.testing.expectEqual(@as(usize, 1), goal_page.rows.len);
+    try std.testing.expectEqualStrings(identified.session_id, goal_page.rows[0].session_id);
+
+    const plan_values = [_][]const u8{"pro"};
+    const plan_predicates = [_]analysis.PropertyPredicate{.{
+        .property_ref = .{ .name = "plan", .scalar_type = .string },
+        .operator = .is,
+        .values = &plan_values,
+    }};
+    const predicate_goals = [_]analysis.ResolvedGoal{.{
+        .id = "00000000-0000-4000-8000-000000000043",
+        .selector = .{
+            .kind = .exact_event,
+            .value = "purchase",
+            .predicates = &plan_predicates,
+        },
+    }};
+    var predicate_goal = request;
+    predicate_goal.active_goals = &predicate_goals;
+    predicate_goal.selected_goal_index = 0;
+    const predicate_page = try executeSessionList(
+        arena.allocator(),
+        &event_store,
+        predicate_goal,
+    );
+    try std.testing.expectEqual(@as(usize, 1), predicate_page.rows.len);
+    try std.testing.expectEqualStrings(identified.session_id, predicate_page.rows[0].session_id);
+
+    const page_goal = [_]analysis.ResolvedGoal{.{
+        .id = "00000000-0000-4000-8000-000000000044",
+        .selector = .{ .kind = .page_prefix, .value = "/pric" },
+    }};
+    var selected_page_goal = request;
+    selected_page_goal.active_goals = &page_goal;
+    selected_page_goal.selected_goal_index = 0;
+    const page_goal_page = try executeSessionList(
+        arena.allocator(),
+        &event_store,
+        selected_page_goal,
+    );
+    try std.testing.expectEqual(@as(usize, 1), page_goal_page.rows.len);
+    try std.testing.expectEqualStrings(
+        identified.session_id,
+        page_goal_page.rows[0].session_id,
+    );
+
+    const page_values = [_][]const u8{"/pric"};
+    const event_values = [_][]const u8{"purch"};
+    const event_filters = [_]analysis.Clause{
+        .{
+            .scope = .event,
+            .field = .{ .kind = .page },
+            .operator = .contains,
+            .scalar_type = .string,
+            .values = &page_values,
+        },
+        .{
+            .scope = .event,
+            .field = .{ .kind = .event_name },
+            .operator = .contains,
+            .scalar_type = .string,
+            .values = &event_values,
+        },
+    };
+    var page_and_event = request;
+    page_and_event.filters = .{ .clauses = &event_filters };
+    const page_event_page = try executeSessionList(
+        arena.allocator(),
+        &event_store,
+        page_and_event,
+    );
+    try std.testing.expectEqual(@as(usize, 1), page_event_page.rows.len);
+    try std.testing.expectEqualStrings(
+        identified.session_id,
+        page_event_page.rows[0].session_id,
+    );
+
+    const mobile_values = [_][]const u8{"mobile"};
+    const mobile_filter = [_]analysis.Clause{.{
+        .scope = .session,
+        .field = .{ .kind = .device },
+        .operator = .is,
+        .scalar_type = .string,
+        .values = &mobile_values,
+    }};
+    var mobile = request;
+    mobile.filters = .{ .clauses = &mobile_filter };
+    const mobile_page = try executeSessionList(
+        arena.allocator(),
+        &event_store,
+        mobile,
+    );
+    try std.testing.expectEqual(@as(usize, 1), mobile_page.rows.len);
+    try std.testing.expectEqualStrings(
+        "00000000-0000-4000-8000-0000000000b2",
+        mobile_page.rows[0].session_id,
+    );
+
+    const source_values = [_][]const u8{"google"};
+    const campaign_values = [_][]const u8{"winter"};
+    const acquisition_filters = [_]analysis.Clause{
+        .{
+            .scope = .session,
+            .field = .{ .kind = .utm_source },
+            .operator = .is,
+            .scalar_type = .string,
+            .values = &source_values,
+        },
+        .{
+            .scope = .session,
+            .field = .{ .kind = .utm_campaign },
+            .operator = .is,
+            .scalar_type = .string,
+            .values = &campaign_values,
+        },
+    };
+    var acquisition = request;
+    acquisition.filters = .{ .clauses = &acquisition_filters };
+    const acquisition_page = try executeSessionList(
+        arena.allocator(),
+        &event_store,
+        acquisition,
+    );
+    try std.testing.expectEqual(@as(usize, 1), acquisition_page.rows.len);
+    try std.testing.expectEqualStrings(
+        identified.session_id,
+        acquisition_page.rows[0].session_id,
+    );
+
+    const property_values = [_][]const u8{"pro"};
+    const property_filter = [_]analysis.Clause{.{
+        .scope = .event,
+        .field = .{ .kind = .event_property, .property_ref = .{
+            .name = "plan",
+            .scalar_type = .string,
+        } },
+        .operator = .is,
+        .scalar_type = .string,
+        .values = &property_values,
+    }};
+    var property_event = request;
+    property_event.filters = .{ .clauses = &property_filter };
+    const property_page = try executeSessionList(
+        arena.allocator(),
+        &event_store,
+        property_event,
+    );
+    try std.testing.expectEqual(@as(usize, 1), property_page.rows.len);
+    try std.testing.expectEqualStrings(identified.session_id, property_page.rows[0].session_id);
+
+    const trait_values = [_][]const u8{"enterprise"};
+    const trait_filter = [_]analysis.Clause{.{
+        .scope = .person,
+        .field = .{ .kind = .user_trait, .property_ref = .{
+            .name = "plan",
+            .scalar_type = .string,
+        } },
+        .operator = .is,
+        .scalar_type = .string,
+        .values = &trait_values,
+    }};
+    var person_trait = request;
+    person_trait.filters = .{ .clauses = &trait_filter };
+    const trait_page = try executeSessionList(
+        arena.allocator(),
+        &event_store,
+        person_trait,
+    );
+    try std.testing.expectEqual(@as(usize, 1), trait_page.rows.len);
+    try std.testing.expectEqualStrings(identified.session_id, trait_page.rows[0].session_id);
+
+    const converted_filter = [_]analysis.Clause{.{
+        .scope = .session,
+        .field = .{ .kind = .session_converted },
+        .operator = .is_true,
+        .scalar_type = .boolean,
+    }};
+    var converted = request;
+    converted.filters = .{ .clauses = &converted_filter };
+    converted.active_goals = &predicate_goals;
+    const converted_page = try executeSessionList(
+        arena.allocator(),
+        &event_store,
+        converted,
+    );
+    try std.testing.expectEqual(@as(usize, 1), converted_page.rows.len);
+    try std.testing.expectEqualStrings(identified.session_id, converted_page.rows[0].session_id);
+
+    const engagement_values = [_][]const u8{"10000"};
+    const engagement_filter = [_]analysis.Clause{.{
+        .scope = .session,
+        .field = .{ .kind = .session_engagement_ms },
+        .operator = .gte,
+        .scalar_type = .integer,
+        .values = &engagement_values,
+    }};
+    var engaged = request;
+    engaged.filters = .{ .clauses = &engagement_filter };
+    const engaged_page = try executeSessionList(
+        arena.allocator(),
+        &event_store,
+        engaged,
+    );
+    try std.testing.expectEqual(@as(usize, 1), engaged_page.rows.len);
+    try std.testing.expectEqualStrings(
+        "00000000-0000-4000-8000-0000000000b2",
+        engaged_page.rows[0].session_id,
+    );
+
+    const duration_values = [_][]const u8{"86400000"};
+    const duration_filter = [_]analysis.Clause{.{
+        .scope = .session,
+        .field = .{ .kind = .session_duration_ms },
+        .operator = .gte,
+        .scalar_type = .integer,
+        .values = &duration_values,
+    }};
+    var long_session = request;
+    long_session.filters = .{ .clauses = &duration_filter };
+    const duration_page = try executeSessionList(
+        arena.allocator(),
+        &event_store,
+        long_session,
+    );
+    try std.testing.expectEqual(@as(usize, 1), duration_page.rows.len);
+    try std.testing.expectEqualStrings(
+        identified.session_id,
+        duration_page.rows[0].session_id,
+    );
+
+    const identified_values = [_][]const u8{"identified"};
+    const identified_filter = [_]analysis.Clause{.{
+        .scope = .person,
+        .field = .{ .kind = .identity_state },
+        .operator = .is,
+        .scalar_type = .string,
+        .values = &identified_values,
+    }};
+    var identified_only = request;
+    identified_only.filters = .{ .clauses = &identified_filter };
+    const identified_page = try executeSessionList(
+        arena.allocator(),
+        &event_store,
+        identified_only,
+    );
+    try std.testing.expectEqual(@as(usize, 1), identified_page.rows.len);
+    try std.testing.expectEqualStrings(identified.session_id, identified_page.rows[0].session_id);
+
+    var current_edge = request;
+    current_edge.now_utc_micros = identified.last_received_at_utc_micros +
+        30 * 60 * 1_000_000;
+    const current_edge_page = try executeSessionList(
+        arena.allocator(),
+        &event_store,
+        current_edge,
+    );
+    try std.testing.expect((findSessionRow(
+        current_edge_page.rows,
+        identified.session_id,
+    ) orelse return error.MissingSessionFixtureRow).current);
+    current_edge.now_utc_micros += 1;
+    const ended_edge_page = try executeSessionList(
+        arena.allocator(),
+        &event_store,
+        current_edge,
+    );
+    try std.testing.expect(!(findSessionRow(
+        ended_edge_page.rows,
+        identified.session_id,
+    ) orelse return error.MissingSessionFixtureRow).current);
+    current_edge.now_utc_micros = identified.last_received_at_utc_micros - 1;
+    const future_receipt_page = try executeSessionList(
+        arena.allocator(),
+        &event_store,
+        current_edge,
+    );
+    try std.testing.expect(!(findSessionRow(
+        future_receipt_page.rows,
+        identified.session_id,
+    ) orelse return error.MissingSessionFixtureRow).current);
+    try std.testing.expect(
+        identified.last_activity_utc_micros <
+            identified.last_received_at_utc_micros,
+    );
+
+    try event_store.database.exec(
+        \\INSERT INTO events SELECT template.* REPLACE (
+        \\  CAST('41000000-0000-4000-8000-' || lpad(i::VARCHAR, 12, '0') AS UUID) AS event_id,
+        \\  1767484800000000 + (i // 2) * 1000000 AS received_at_utc_micros,
+        \\  1767484800000000 + (i // 2) * 1000000 AS occurred_at_utc_micros,
+        \\  DATE '2026-01-04' AS received_date_utc,
+        \\  DATE '2026-01-04' AS site_local_date,
+        \\  CAST('43000000-0000-4000-8000-' || lpad(i::VARCHAR, 12, '0') AS UUID) AS anonymous_id,
+        \\  CAST('42000000-0000-4000-8000-' || lpad(i::VARCHAR, 12, '0') AS UUID) AS session_id,
+        \\  0 AS sequence, TRUE AS session_start,
+        \\  CAST('41000000-0000-4000-8000-' || lpad(i::VARCHAR, 12, '0') AS BLOB) AS visitor_day_id,
+        \\  TRUE AS visitor_day_start, repeat('e', 64) AS event_payload_digest
+        \\) FROM events template, range(27) source(i)
+        \\WHERE template.event_id = CAST('00000000-0000-4000-8000-000000000107' AS UUID);
+    );
+    var first_page_request = request;
+    first_page_request.range.end = "2026-01-04";
+    const first_page = try executeSessionList(
+        arena.allocator(),
+        &event_store,
+        first_page_request,
+    );
+    try std.testing.expectEqual(@as(usize, 25), first_page.rows.len);
+    try std.testing.expect(first_page.has_more);
+    try std.testing.expectEqualStrings(
+        "42000000-0000-4000-8000-000000000026",
+        first_page.rows[0].session_id,
+    );
+    try std.testing.expectEqualStrings(
+        "42000000-0000-4000-8000-000000000024",
+        first_page.rows[1].session_id,
+    );
+    try std.testing.expectEqualStrings(
+        "42000000-0000-4000-8000-000000000025",
+        first_page.rows[2].session_id,
+    );
+    var second_page_request = first_page_request;
+    second_page_request.page = 2;
+    const second_page = try executeSessionList(
+        arena.allocator(),
+        &event_store,
+        second_page_request,
+    );
+    try std.testing.expectEqual(@as(usize, 8), second_page.rows.len);
+    try std.testing.expect(!second_page.has_more);
+    try std.testing.expectEqualStrings(
+        "42000000-0000-4000-8000-000000000000",
+        second_page.rows[0].session_id,
+    );
+    try std.testing.expectEqualStrings(
+        "42000000-0000-4000-8000-000000000001",
+        second_page.rows[1].session_id,
+    );
+    for (first_page.rows) |first| for (second_page.rows) |second| {
+        try std.testing.expect(!std.mem.eql(u8, first.session_id, second.session_id));
+    };
+    var empty_page_request = first_page_request;
+    empty_page_request.page = 3;
+    const empty_page = try executeSessionList(
+        arena.allocator(),
+        &event_store,
+        empty_page_request,
+    );
+    try std.testing.expectEqual(@as(usize, 0), empty_page.rows.len);
+    try std.testing.expect(!empty_page.has_more);
+
+    try event_store.database.exec(
+        \\INSERT INTO events SELECT template.* REPLACE (
+        \\  CAST('44000000-0000-4000-8000-' || lpad(i::VARCHAR, 12, '0') AS UUID) AS event_id,
+        \\  1767398500000000 + i AS received_at_utc_micros,
+        \\  1767398500000000 + i AS occurred_at_utc_micros,
+        \\  100 + i AS sequence, 'value-only' AS event_name,
+        \\  CAST(1 AS DECIMAL(18,6)) AS value_amount,
+        \\  chr(65 + i::INTEGER) || 'AA' AS value_currency,
+        \\  md5(i::VARCHAR) || md5(i::VARCHAR) AS event_payload_digest
+        \\) FROM events template, range(15) source(i)
+        \\WHERE template.event_id = CAST('00000000-0000-4000-8000-000000000104' AS UUID);
+    );
+    try std.testing.expectError(
+        error.TooManyAnalysisCurrencies,
+        executeSessionList(arena.allocator(), &event_store, request),
+    );
+}
+
+fn findSessionRow(
+    rows: []const analysis.SessionRow,
+    session_id: []const u8,
+) ?analysis.SessionRow {
+    for (rows) |row| {
+        if (std.mem.eql(u8, row.session_id, session_id)) return row;
+    }
+    return null;
 }
 
 test "metric v2 executes against a real on-disk schema four store" {

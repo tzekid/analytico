@@ -537,6 +537,17 @@ pub fn build(b: *std.Build) void {
         "e2e-metadata10-migration",
         "Migrate and roll back the exact deployed metadata-9/event-7 predecessor",
     ).dependOn(&metadata10_migration_e2e.step);
+
+    const sessions_e2e = b.addSystemCommand(&.{
+        "bash",
+        "tests/e2e-sessions.sh",
+    });
+    sessions_e2e.addArtifactArg(app);
+    sessions_e2e.step.dependOn(b.getInstallStep());
+    b.step(
+        "e2e-sessions",
+        "Run the bounded Sessions list through real stores, Caddy, and Chromium",
+    ).dependOn(&sessions_e2e.step);
 }
 
 fn addHtmxAssets(

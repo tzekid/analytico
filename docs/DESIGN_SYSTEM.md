@@ -213,13 +213,29 @@ unavailable medians,
 and comparison are distinguishable without color. At phone width the figure
 and labeled table records stack without page-level horizontal overflow.
 
+D45 renders Sessions as a dense ordered record list rather than a chart or a
+clipped wide table. Each record keeps visible Start, Identity, Acquisition,
+Landing, Country, Device/browser, Duration, Active engagement, Page views,
+custom events, Conversions (Goal matches), Revenue, and Last activity labels.
+Exact currencies remain separate lines. `Current` includes the text
+`activity received within 30 minutes`; color is supplementary and no status
+implies a live connection.
+Custom-only and missing-engagement states use explicit text rather than empty
+layout gaps.
+
+The active Goal selector is an ordinary GET form and FilterSet/segment controls
+reuse the existing native forms. Previous and next are named links. At phone
+width every record becomes a single labeled grid, primary controls retain
+44-pixel targets, and no field requires horizontal page scrolling. #41 emits no
+dead session-detail link before #42 supplies that destination.
+
 Server validation renders one focused error summary and associates only the
 affected form fields with that summary while preserving submitted values.
 Notices use restrained status semantics, errors use alerts, and loading is
 limited to the region whose existing native navigation or form is in flight.
 None of these enhancement states may replace the JavaScript-free baseline.
 
-The component stylesheet is self-hosted at a versioned `/admin/app.v14.css` path.
+The component stylesheet is self-hosted at a versioned `/admin/app.v15.css` path.
 Changing its bytes requires another path revision because existing responses
 may be cached privately for 24 hours.
 

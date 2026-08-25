@@ -242,3 +242,33 @@ product predicate above supersedes the completed D32 shadow. D34's soft result
 exists only in versioned query SQL and is human-evidence-vetoed. Every
 successfully accepted event remains stored. A new event beyond the explicit
 daily operator ceiling receives 429 and is never falsely acknowledged.
+
+## Session list records
+
+D45 selects a session when at least one product-eligible Page or custom event
+inside the chosen site-local range satisfies the complete FilterSet and any
+selected active Goal. The returned record then summarizes every retained
+product-eligible event for that same site and session UUID, including retained
+activity outside the range. Crossing sessions therefore keep their full
+context without allowing an out-of-range-only session into the list.
+
+Start and last activity are the minimum and maximum plausible occurrence times
+in the retained session. Duration is their nonnegative difference; active
+engagement is the sum of retained engagement fragments. Page/custom counts are
+separate. Acquisition and landing use the first retained page view; a
+custom-event-only session is Direct / Unknown with no landing. Country,
+device, and browser use the first retained meaningful event.
+
+The record conversion count is the sum of matches across current active Goal
+definitions, including one count per distinct Goal when selectors overlap.
+The converted state is count greater than zero. Exact value rows sum each
+currency independently and retain its contributing value count. The list does
+not combine currencies, apply exchange rates, or relabel archived definitions
+as active conversions.
+
+Current state is inferred only from the latest authoritative receipt. It is
+true through exactly 30 minutes after that receipt, false after the boundary,
+and false for a future receipt relative to the precise microsecond request
+clock. It does not assert a live connection. Persistent, ephemeral, and legacy
+identity qualities remain visibly distinct; only an explicit stored identity
+link produces an identified user.

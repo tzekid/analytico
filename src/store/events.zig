@@ -133,12 +133,17 @@ pub const LegacyMigrationEvidence = struct {
 };
 
 pub const Store = struct {
+    allocator: std.mem.Allocator,
     database: duckdb.Database,
     overview_result_cache: ?OverviewResultCache = null,
     property_catalog_cache: ?PropertyCatalogCache = null,
+    session_detail_template: ?SessionDetailTemplate = null,
 
     pub fn open(allocator: std.mem.Allocator, path: []const u8) !Store {
-        return .{ .database = try duckdb.Database.open(allocator, path) };
+        return .{
+            .allocator = allocator,
+            .database = try duckdb.Database.open(allocator, path),
+        };
     }
 
     pub fn openWithTemp(
@@ -147,6 +152,7 @@ pub const Store = struct {
         temp_directory: []const u8,
     ) !Store {
         return .{
+            .allocator = allocator,
             .database = try duckdb.Database.openWithTemp(
                 allocator,
                 path,
@@ -158,28 +164,66 @@ pub const Store = struct {
     pub fn deinit(self: *Store) void {
         if (self.overview_result_cache) |*cache| cache.deinit();
         if (self.property_catalog_cache) |*cache| cache.deinit();
+        self.discardSessionDetailTemplate();
         self.database.deinit();
     }
 
+    pub fn sessionDetailStatement(
+        self: *Store,
+        sql: [:0]const u8,
+    ) !*duckdb.Statement {
+        if (self.session_detail_template) |*template| {
+            if (std.mem.eql(u8, template.sql, sql)) {
+                template.statement.clear() catch |err| {
+                    self.discardSessionDetailTemplate();
+                    return err;
+                };
+                return &template.statement;
+            }
+        }
+        self.discardSessionDetailTemplate();
+        const owned_sql = try self.allocator.dupeSentinel(u8, sql, 0);
+        errdefer self.allocator.free(owned_sql);
+        var statement = try self.database.prepare(owned_sql);
+        errdefer statement.deinit();
+        self.session_detail_template = .{
+            .sql = owned_sql,
+            .statement = statement,
+        };
+        return &self.session_detail_template.?.statement;
+    }
+
+    pub fn discardSessionDetailTemplate(self: *Store) void {
+        if (self.session_detail_template) |*template| {
+            template.statement.deinit();
+            self.allocator.free(template.sql);
+        }
+        self.session_detail_template = null;
+    }
+
     pub fn migrate(self: *Store) !void {
+        self.discardSessionDetailTemplate();
         try self.migrateThrough(schema_version);
         self.invalidateAnalysisCache();
         self.invalidatePropertyCatalogCache();
     }
 
     pub fn migrateFixtureV4(self: *Store) !void {
+        self.discardSessionDetailTemplate();
         try self.migrateThrough(4);
         self.invalidateAnalysisCache();
         self.invalidatePropertyCatalogCache();
     }
 
     pub fn migrateFixtureV5(self: *Store) !void {
+        self.discardSessionDetailTemplate();
         try self.migrateThrough(5);
         self.invalidateAnalysisCache();
         self.invalidatePropertyCatalogCache();
     }
 
     pub fn migrateFixtureV6(self: *Store) !void {
+        self.discardSessionDetailTemplate();
         try self.migrateThrough(6);
         self.invalidateAnalysisCache();
         self.invalidatePropertyCatalogCache();
@@ -2386,6 +2430,11 @@ pub const PropertyCatalogCache = struct {
     }
 };
 
+pub const SessionDetailTemplate = struct {
+    sql: [:0]u8,
+    statement: duckdb.Statement,
+};
+
 fn validateTrafficClassification(
     traffic_class: domain.TrafficClass,
     classifier_version: u16,
@@ -2469,6 +2518,48 @@ fn decodeStoredEvent(
         .client_hint_consistency = result.int64(19, 0),
         .accept_language_present = result.int64(20, 0) != 0,
     };
+}
+
+test "session detail template rebinds exact SQL and clears for migration" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const allocator = std.testing.allocator;
+    const path = try std.fmt.allocPrint(
+        allocator,
+        ".zig-cache/tmp/{s}/events.duckdb",
+        .{temporary.sub_path},
+    );
+    defer allocator.free(path);
+    var store = try Store.open(allocator, path);
+    defer store.deinit();
+    try store.migrate();
+
+    const first = try store.sessionDetailStatement("SELECT ?::BIGINT");
+    try first.bindInt64(1, 1);
+    var first_result = try first.execute();
+    try std.testing.expectEqual(@as(i64, 1), first_result.int64(0, 0));
+    first_result.deinit();
+
+    const rebound = try store.sessionDetailStatement("SELECT ?::BIGINT");
+    try rebound.bindInt64(1, 2);
+    var rebound_result = try rebound.execute();
+    try std.testing.expectEqual(@as(i64, 2), rebound_result.int64(0, 0));
+    rebound_result.deinit();
+
+    const replaced = try store.sessionDetailStatement(
+        "SELECT (?::BIGINT) + 1",
+    );
+    try replaced.bindInt64(1, 3);
+    var replaced_result = try replaced.execute();
+    try std.testing.expectEqual(@as(i64, 4), replaced_result.int64(0, 0));
+    replaced_result.deinit();
+    try std.testing.expectEqualStrings(
+        "SELECT (?::BIGINT) + 1",
+        store.session_detail_template.?.sql,
+    );
+
+    try store.migrate();
+    try std.testing.expect(store.session_detail_template == null);
 }
 
 test "installation watermark orders higher ties and fails closed otherwise" {

@@ -143,6 +143,13 @@ pub fn main(init: std.process.Init) !void {
     }
     if (args.len == 5 and
         std.mem.eql(u8, args[1], "m3") and
+        std.mem.eql(u8, args[2], "sessions-fixture"))
+    {
+        try m3_probe.sessionsFixture(allocator, output, args[3], args[4]);
+        return;
+    }
+    if (args.len == 5 and
+        std.mem.eql(u8, args[1], "m3") and
         std.mem.eql(u8, args[2], "goal-predicates-fixture"))
     {
         try m3_probe.goalPredicatesFixture(
@@ -320,6 +327,23 @@ pub fn main(init: std.process.Init) !void {
         );
         return;
     }
+    if (args.len == 7 and
+        std.mem.eql(u8, args[1], "m3") and
+        (std.mem.eql(u8, args[2], "sessions-list") or
+            std.mem.eql(u8, args[2], "sessions-profile")))
+    {
+        try m3_probe.sessionList(
+            allocator,
+            init.io,
+            output,
+            args[3],
+            args[4],
+            args[5],
+            args[6],
+            std.mem.eql(u8, args[2], "sessions-profile"),
+        );
+        return;
+    }
     if (args.len == 4 and
         std.mem.eql(u8, args[1], "m4") and
         std.mem.eql(u8, args[2], "legacy-million"))
@@ -404,6 +428,7 @@ pub fn main(init: std.process.Init) !void {
         \\  analytico m2 property-million <directory>
         \\  analytico m3 seed <directory> <site-id>
         \\  analytico m3 million <directory> <site-id>
+        \\  analytico m3 sessions-fixture <directory> <site-id>
         \\  analytico m3 timeout <directory>
         \\  analytico m3 traffic-quality-profile <directory> <site-slug> <start-date> <end-date>
         \\  analytico m3 goal-discovery <directory> <site-slug> <start-date> <end-date>
@@ -417,6 +442,8 @@ pub fn main(init: std.process.Init) !void {
         \\  analytico m3 goal-cap-recovery <directory> <site-slug>
         \\  analytico m3 filters-v2-series <directory> <site-slug> <current-start> <current-end> <comparison-start> <comparison-end>
         \\  analytico m3 filters-v2-profile <directory> <site-slug> <current-start> <current-end> <comparison-start> <comparison-end>
+        \\  analytico m3 sessions-list <directory> <site-slug> <start-date> <end-date>
+        \\  analytico m3 sessions-profile <directory> <site-slug> <start-date> <end-date>
         \\  analytico m3 legacy-create <directory>
         \\  analytico m3 legacy-verify <directory>
         \\  analytico m3 legacy-evidence <directory>
