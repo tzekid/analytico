@@ -114,7 +114,7 @@ curl --silent --fail --cookie "$cookie" \
     >"$page"
 grep -Fq 'hx-boost:inherited="true"' "$page"
 grep -Fq '/admin/htmx.28fae7bb.js' "$page"
-grep -Fq '/admin/dashboard.9c3ac396.js' "$page"
+grep -Fq '/admin/dashboard.96caab5d.js' "$page"
 if grep -Eq 'https?://[^"]+htmx|cdn\\.' "$page"; then
     echo "dashboard referenced a remote HTMX asset" >&2
     exit 1
@@ -139,14 +139,14 @@ gzip --decompress --stdout "$fixture/htmx.js.gz" >"$fixture/htmx.unpacked.js"
 cmp "$fixture/htmx.js" "$fixture/htmx.unpacked.js"
 test "$(wc -c <"$fixture/htmx.js.gz")" -le 16384
 curl --silent --fail --cookie "$cookie" \
-    "$dashboard/admin/dashboard.9c3ac396.js" >"$fixture/dashboard.js"
-test "$(wc -c <"$fixture/dashboard.js")" = 1802
+    "$dashboard/admin/dashboard.96caab5d.js" >"$fixture/dashboard.js"
+test "$(wc -c <"$fixture/dashboard.js")" = 4421
 test "$(sha256sum "$fixture/dashboard.js" | awk '{ print $1 }')" = \
-    9c3ac3966ac0cbbd5dd36c5a38453acdaf16b93b058e8d2c5978fccffdf48cd5
+    96caab5d9f1366f9122f01910f261ba07df1c3236c0b93a293090d9db784eb97
 curl --silent --fail --cookie "$cookie" \
-    "$dashboard/admin/dashboard.5f88a716.js" >"$fixture/dashboard.previous.js"
+    "$dashboard/admin/dashboard.9c3ac396.js" >"$fixture/dashboard.previous.js"
 test "$(sha256sum "$fixture/dashboard.previous.js" | awk '{ print $1 }')" = \
-    5f88a716358d2672418fb55c4cc4f08389dfa1467304741787474b54e121cbde
+    9c3ac3966ac0cbbd5dd36c5a38453acdaf16b93b058e8d2c5978fccffdf48cd5
 
 TMPDIR=/tmp NODE_PATH="$module_root" \
     PLAYWRIGHT_BROWSERS_PATH="$browser_root" \

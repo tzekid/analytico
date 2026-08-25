@@ -15,9 +15,9 @@ pub const htmx = @embedFile("htmx_js");
 pub const htmx_gzip = @embedFile("htmx_gzip");
 pub const htmx_path = "/admin/htmx.28fae7bb.js";
 pub const dashboard_js = @embedFile("dashboard.js");
-pub const dashboard_js_previous = @embedFile("dashboard.5f88a716.js");
-pub const dashboard_js_previous_path = "/admin/dashboard.5f88a716.js";
-pub const dashboard_js_path = "/admin/dashboard.9c3ac396.js";
+pub const dashboard_js_previous = @embedFile("dashboard.9c3ac396.js");
+pub const dashboard_js_previous_path = "/admin/dashboard.9c3ac396.js";
+pub const dashboard_js_path = "/admin/dashboard.96caab5d.js";
 pub const install_js = @embedFile("install.js");
 pub const install_js_path = "/admin/install.fe0cc47b.js";
 
@@ -107,7 +107,11 @@ pub fn page(output: *std.Io.Writer, value: model.Page) !void {
             }
         },
         .sessions => try sessionSection(output, value),
-        .live => try reportSection(output, value),
+        .live => {
+            try liveRegion(output, value.live_region orelse
+                return error.MissingLiveRegion);
+            try reportSection(output, value);
+        },
         .settings => {
             try trafficPolicy(output, value);
             try selfExclusions(output, value);
@@ -1309,6 +1313,170 @@ fn reportSection(output: *std.Io.Writer, value: model.Page) !void {
         try output.writeAll("<p class=\"muted\">Create a definition below to run this report.</p>");
     }
     try output.writeAll("</section>");
+}
+
+pub fn liveRegion(output: *std.Io.Writer, value: model.LiveRegion) !void {
+    try output.writeAll(
+        "<section id=\"live-region\" data-live-region data-live-paused=\"false\"" ++
+            " hx-get=\"",
+    );
+    try attribute(output, value.refresh_url);
+    try output.writeAll(
+        "\" hx-trigger=\"every 5s\" hx-target=\"this\"" ++
+            " hx-swap=\"outerHTML focus-scroll:false\" hx-sync=\"this:drop\"" ++
+            " hx-status:4xx=\"swap:none\" hx-status:5xx=\"swap:none\"" ++
+            " aria-labelledby=\"live-current-heading\">" ++
+            "<div class=\"overview-section-heading\"><div>" ++
+            "<h2 id=\"live-current-heading\">Current traffic</h2>" ++
+            "<p class=\"muted\">Product activity uses authoritative receipt time: the last 30 minutes, with Active now covering the last 5 minutes.</p>" ++
+            "</div><div class=\"form-actions\"><a class=\"button button-secondary\" href=\"",
+    );
+    try attribute(output, value.refresh_url);
+    try output.writeAll(
+        "\">Refresh Live</a><button id=\"live-pause\" type=\"button\"" ++
+            " class=\"button-secondary\" data-live-pause aria-pressed=\"false\"" ++
+            " hidden>Pause automatic refresh</button>" ++
+            "</div></div><p class=\"muted\" role=\"status\" aria-live=\"polite\"" ++
+            " data-live-client-status>Updated <time data-live-generated datetime=\"",
+    );
+    try attribute(output, value.generated_at_utc_datetime);
+    try output.writeAll("\">");
+    try text(output, value.generated_at_utc);
+    try output.writeAll("</time>. Latest accepted receipt: ");
+    try text(output, value.latest_accepted_at_utc);
+    try output.writeAll(".</p><ul class=\"metrics\">");
+    try liveKpi(output, "Active now", value.active_sessions);
+    try liveKpi(output, "Page views", value.page_views);
+    try liveKpi(output, "Custom events", value.custom_events);
+    try liveKpi(output, "Conversions", value.conversions);
+    try output.writeAll("</ul><section class=\"answer-grid\" aria-label=\"Current traffic breakdowns\">");
+    try liveCountPanel(output, "Pages", "Page", value.pages);
+    try liveCountPanel(output, "Sources", "Source", value.sources);
+    try liveCountPanel(output, "Events", "Event", value.events);
+    try liveCountPanel(output, "Conversions", "Goal", value.goals);
+    try liveCountPanel(output, "Countries", "Country", value.countries);
+    try liveCountPanel(output, "Devices", "Device", value.devices);
+    try output.writeAll("</section><section class=\"data-health\" aria-labelledby=\"live-protocol-heading\">" ++
+        "<div class=\"answer-heading\"><div><h3 id=\"live-protocol-heading\">Collection protocol</h3>" ++
+        "<p class=\"muted\">Stored accepted events in the current 30-minute receipt window.</p></div></div>");
+    try liveCountTable(output, "Protocol", value.protocols);
+    try output.writeAll("</section><section class=\"data-health\" aria-labelledby=\"live-attempts-heading\">" ++
+        "<div class=\"answer-heading\"><div><h3 id=\"live-attempts-heading\">Recent collection attempts</h3>" ++
+        "<p class=\"muted\">Safe protocol summaries from this process only. They reset on restart, are capped at 200 globally, and are filtered to this site before every count and row below.</p>" ++
+        "</div></div><dl class=\"health-grid\">");
+    try liveHealthCount(output, "Accepted", value.accepted_attempts);
+    try liveHealthCount(output, "Rejected", value.rejected_attempts);
+    try liveHealthCount(output, "Duplicates", value.duplicate_attempts);
+    try liveHealthCount(output, "Store failures", value.store_failure_attempts);
+    try liveHealthCount(output, "Selected-site retained", value.retained_attempts);
+    try liveHealthCount(output, "Newest rows shown", value.shown_attempts);
+    try output.writeAll("</dl>");
+    if (value.attempts.len == 0) {
+        try output.writeAll("<p class=\"answer-empty\">No selected-site collection attempts are retained since this process started.</p>");
+    } else {
+        try output.writeAll("<div class=\"table-scroll mobile-records\"><table>" ++
+            "<caption>Newest safe selected-site attempts</caption><thead><tr>" ++
+            "<th scope=\"col\">Receipt</th><th scope=\"col\">Protocol</th>" ++
+            "<th scope=\"col\">Type</th><th scope=\"col\">Outcome</th>" ++
+            "<th scope=\"col\">Safe context</th></tr></thead><tbody>");
+        for (value.attempts) |attempt| try liveAttemptRow(output, attempt);
+        try output.writeAll("</tbody></table></div>");
+    }
+    try output.writeAll("</section></section>");
+}
+
+fn liveKpi(output: *std.Io.Writer, label: []const u8, count: i64) !void {
+    try output.writeAll("<li class=\"kpi\"><span>");
+    try text(output, label);
+    try output.print("</span><strong>{d}</strong></li>", .{count});
+}
+
+fn liveCountPanel(
+    output: *std.Io.Writer,
+    title: []const u8,
+    label_heading: []const u8,
+    rows: []const model.LiveCountRow,
+) !void {
+    try output.writeAll("<article class=\"answer-panel\"><h3>");
+    try text(output, title);
+    try output.writeAll("</h3>");
+    try liveCountTableHeading(output, label_heading, rows);
+    try output.writeAll("</article>");
+}
+
+fn liveCountTable(
+    output: *std.Io.Writer,
+    label_heading: []const u8,
+    rows: []const model.LiveCountRow,
+) !void {
+    try output.writeAll("<div class=\"table-scroll mobile-records\">");
+    try liveCountTableHeading(output, label_heading, rows);
+    try output.writeAll("</div>");
+}
+
+fn liveCountTableHeading(
+    output: *std.Io.Writer,
+    label_heading: []const u8,
+    rows: []const model.LiveCountRow,
+) !void {
+    if (rows.len == 0) {
+        try output.writeAll("<p class=\"answer-empty\">No matching activity in this window.</p>");
+        return;
+    }
+    try output.writeAll("<table><thead><tr><th scope=\"col\">");
+    try text(output, label_heading);
+    try output.writeAll("</th><th scope=\"col\">Count</th></tr></thead><tbody>");
+    for (rows) |row| {
+        try output.writeAll("<tr><th scope=\"row\" data-label=\"");
+        try attribute(output, label_heading);
+        try output.writeAll("\">");
+        try text(output, row.label);
+        try output.print("</th><td data-label=\"Count\">{d}</td></tr>", .{row.count});
+    }
+    try output.writeAll("</tbody></table>");
+}
+
+fn liveHealthCount(output: *std.Io.Writer, label: []const u8, count: usize) !void {
+    try output.writeAll("<div><dt>");
+    try text(output, label);
+    try output.print("</dt><dd>{d}</dd></div>", .{count});
+}
+
+fn liveAttemptRow(output: *std.Io.Writer, attempt: model.LiveAttempt) !void {
+    try output.writeAll("<tr><th scope=\"row\" data-label=\"Receipt\">");
+    try text(output, attempt.received_at_utc);
+    try output.writeAll("<br><span class=\"muted\">#");
+    try output.print("{d}</span></th><td data-label=\"Protocol\">", .{attempt.correlation});
+    try text(output, attempt.protocol);
+    try output.writeAll("</td><td data-label=\"Type\">");
+    try text(output, attempt.category);
+    try output.writeAll("</td><td data-label=\"Outcome\">");
+    try text(output, attempt.outcome);
+    if (attempt.rejection_code.len != 0) {
+        try output.writeAll("<br><span class=\"muted\">");
+        try text(output, attempt.rejection_code);
+        try output.writeAll("</span>");
+    }
+    try output.writeAll("</td><td data-label=\"Safe context\">");
+    var wrote = false;
+    if (attempt.subject.len != 0) {
+        try text(output, attempt.subject);
+        wrote = true;
+    }
+    if (attempt.origin_host.len != 0) {
+        if (wrote) try output.writeAll(" · ");
+        try text(output, attempt.origin_host);
+        wrote = true;
+    }
+    for (attempt.properties) |property| {
+        if (wrote) try output.writeAll(" · ");
+        try text(output, property.key);
+        try output.writeByte(':');
+        try text(output, property.scalar_type);
+        wrote = true;
+    }
+    if (!wrote) try output.writeAll("None retained");
+    try output.writeAll("</td></tr>");
 }
 
 fn analyzeTrendSection(output: *std.Io.Writer, value: model.Page) !void {

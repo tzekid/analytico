@@ -245,11 +245,24 @@ are not passes.
   labels, site isolation, encoded IDs, JavaScript-off/keyboard/390-pixel use,
   timeout/reuse, response/RSS bounds, detail p95 below 250 ms, and unchanged
   contextual list p95 below 400 ms all pass on the standard fixture.
+- Live acceptance uses one authenticated complete first response and one exact
+  current-region fragment. Its real on-disk/HTTP/browser fixture proves the
+  fixed 30-minute receipt window, five-minute Active now, product/strict
+  semantics, current pages/sources/events/Goals/audience, stored protocol
+  distribution, and the separately retained D30 date-range section. The
+  selected-site ring shows only its newest 50 safe summaries plus exact
+  since-restart counts; two-site isolation, escaping, restart clear, 205-row
+  wrap, store failure, and absence of sensitive fields remain blocking.
+  Five-second polling makes no startup data request, stops while paused/hidden,
+  retains and labels the last successful timestamp on failure, and recovers.
+  JavaScript-disabled Refresh, keyboard/focus, 390-pixel layout,
+  timeout/reuse, and default/strict statement plus fragment p95 below 150 ms
+  pass on the standard million-event fixture.
 - The named `e2e-filters`, `e2e-goals`, `e2e-metadata7-migration`,
   `e2e-metadata8-migration`, `e2e-metadata9-migration`, `e2e-funnels`,
-  `e2e-metadata10-migration`, and `e2e-sessions` gates pass independently. All
-  eight are mandatory parts of `e2e-release-full`; the full packaged gate is
-  not a substitute for reproducing any focused boundary.
+  `e2e-metadata10-migration`, `e2e-sessions`, and `e2e-diagnostics` gates pass
+  independently. All nine are mandatory parts of `e2e-release-full`; the full
+  packaged gate is not a substitute for reproducing any focused boundary.
 - Server-rendered chart families validate bounded typed inputs and stable IDs,
   handle empty/single/constant/missing data honestly, expose no inline handlers,
   and pair every visual value with an exact captioned table/details alternative.

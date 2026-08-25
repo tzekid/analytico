@@ -105,10 +105,10 @@
     "status": "accepted M7 optional enhancement; exact core asset embedded and self-hosted"
   },
   "dashboard_enhancement": {
-    "source_bytes": 1802,
-    "sha256": "9c3ac3966ac0cbbd5dd36c5a38453acdaf16b93b058e8d2c5978fccffdf48cd5",
+    "source_bytes": 4421,
+    "sha256": "96caab5d9f1366f9122f01910f261ba07df1c3236c0b93a293090d9db784eb97",
     "third_party_dependencies": 0,
-    "purpose": "submit the native site form and complete the origin-bound self-exclusion handshake",
+    "purpose": "submit the native site form, complete the origin-bound self-exclusion handshake, and pause or annotate the bounded Live HTMX poll",
     "status": "accepted optional enhancement; native forms remain the dashboard baseline"
   },
   "installation_enhancement": {

@@ -475,6 +475,53 @@ pub const PersonProfile = struct {
     back_url: []const u8,
 };
 
+pub const LiveCountRow = struct {
+    label: []const u8,
+    count: i64,
+};
+
+pub const LiveProperty = struct {
+    key: []const u8,
+    scalar_type: []const u8,
+};
+
+pub const LiveAttempt = struct {
+    correlation: u64,
+    received_at_utc: []const u8,
+    protocol: []const u8,
+    category: []const u8,
+    outcome: []const u8,
+    rejection_code: []const u8,
+    subject: []const u8,
+    origin_host: []const u8,
+    properties: []const LiveProperty,
+};
+
+pub const LiveRegion = struct {
+    refresh_url: []const u8,
+    generated_at_utc: []const u8,
+    generated_at_utc_datetime: []const u8,
+    latest_accepted_at_utc: []const u8,
+    active_sessions: i64,
+    page_views: i64,
+    custom_events: i64,
+    conversions: i64,
+    pages: []const LiveCountRow,
+    sources: []const LiveCountRow,
+    events: []const LiveCountRow,
+    goals: []const LiveCountRow,
+    countries: []const LiveCountRow,
+    devices: []const LiveCountRow,
+    protocols: []const LiveCountRow,
+    attempts: []const LiveAttempt,
+    retained_attempts: usize,
+    shown_attempts: usize,
+    accepted_attempts: usize,
+    rejected_attempts: usize,
+    duplicate_attempts: usize,
+    store_failure_attempts: usize,
+};
+
 pub const FormErrorTarget = enum {
     none,
     goal,
@@ -507,6 +554,7 @@ pub const Page = struct {
     session_list: ?SessionList = null,
     session_detail: ?SessionDetail = null,
     person_profile: ?PersonProfile = null,
+    live_region: ?LiveRegion = null,
     goals: []const meta.Goal,
     funnels: []const meta.Funnel,
     saved_views: []const meta.SavedView = &.{},

@@ -148,6 +148,19 @@ pub fn main(init: std.process.Init) !void {
         try m3_probe.sessionsFixture(allocator, output, args[3], args[4]);
         return;
     }
+    if (args.len == 6 and
+        std.mem.eql(u8, args[1], "m3") and
+        std.mem.eql(u8, args[2], "live-scale-fixture"))
+    {
+        try m3_probe.liveScaleFixture(
+            allocator,
+            output,
+            args[3],
+            args[4],
+            args[5],
+        );
+        return;
+    }
     if (args.len == 5 and
         std.mem.eql(u8, args[1], "m3") and
         std.mem.eql(u8, args[2], "sessions-scale-fixture"))
@@ -185,6 +198,23 @@ pub fn main(init: std.process.Init) !void {
             args[4],
             args[5],
             args[6],
+        );
+        return;
+    }
+    if (args.len == 7 and
+        std.mem.eql(u8, args[1], "m3") and
+        (std.mem.eql(u8, args[2], "live-profile") or
+            std.mem.eql(u8, args[2], "live-explain")))
+    {
+        try m3_probe.liveProfile(
+            allocator,
+            init.io,
+            output,
+            args[3],
+            args[4],
+            args[5],
+            args[6],
+            std.mem.eql(u8, args[2], "live-explain"),
         );
         return;
     }
@@ -437,8 +467,11 @@ pub fn main(init: std.process.Init) !void {
         \\  analytico m3 million <directory> <site-id>
         \\  analytico m3 sessions-fixture <directory> <site-id>
         \\  analytico m3 sessions-scale-fixture <directory> <site-id>
+        \\  analytico m3 live-scale-fixture <directory> <site-id> <now-utc-micros>
         \\  analytico m3 timeout <directory>
         \\  analytico m3 traffic-quality-profile <directory> <site-slug> <start-date> <end-date>
+        \\  analytico m3 live-profile <directory> <site-slug> <now-utc-micros> <normal|strict>
+        \\  analytico m3 live-explain <directory> <site-slug> <now-utc-micros> <normal|strict>
         \\  analytico m3 goal-discovery <directory> <site-slug> <start-date> <end-date>
         \\  analytico m3 goal-predicates-profile <directory> <site-slug> <start-date> <end-date>
         \\  analytico m3 goal-predicates-explain <directory> <site-slug> <start-date> <end-date>

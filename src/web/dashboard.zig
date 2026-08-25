@@ -1187,6 +1187,37 @@ fn getPage(
         );
         return;
     }
+    if (route.destination == .live and exactLiveFragment(request)) {
+        const diagnostics = dependencies.diagnostics orelse
+            return error.MissingDiagnosticsLookup;
+        const snapshot = try diagnostics.get(
+            dependencies.allocator,
+            selected.id,
+        );
+        const region = controller.loadLiveRegion(
+            dependencies.allocator,
+            dependencies.metadata,
+            dependencies.events,
+            selected,
+            request.target,
+            now_micros,
+            snapshot,
+            dependencies.report_timeout_ms,
+        ) catch |err| {
+            if (err == error.ReportTimeout) {
+                try writeError(output, .{
+                    .status = 503,
+                    .title = "Live update timed out",
+                    .message = "The current Live snapshot exceeded its server deadline. The previous browser snapshot remains visible.",
+                    .return_url = request.target,
+                });
+                return;
+            }
+            return err;
+        };
+        try writeLiveRegion(output, region);
+        return;
+    }
     var loaded = controller.loadPage(
         dependencies.allocator,
         dependencies.metadata,
@@ -1277,12 +1308,44 @@ fn getPage(
     if (route.destination == .overview or route.destination == .live) {
         const diagnostics = dependencies.diagnostics orelse
             return error.MissingDiagnosticsLookup;
-        loaded.collection_diagnostics = try diagnostics.get(
+        const snapshot = try diagnostics.get(
             dependencies.allocator,
             selected.id,
         );
+        if (route.destination == .overview) {
+            loaded.collection_diagnostics = snapshot;
+        } else {
+            loaded.live_region = controller.loadLiveRegion(
+                dependencies.allocator,
+                dependencies.metadata,
+                dependencies.events,
+                selected,
+                request.target,
+                now_micros,
+                snapshot,
+                dependencies.report_timeout_ms,
+            ) catch |err| {
+                if (err == error.ReportTimeout) {
+                    try writeError(output, .{
+                        .status = 503,
+                        .title = "Live report timed out",
+                        .message = "The current Live snapshot exceeded its server deadline. Retry this page.",
+                        .return_url = request.target,
+                    });
+                    return;
+                }
+                return err;
+            };
+        }
     }
     try writePage(output, 200, loaded);
+}
+
+fn exactLiveFragment(request: request_mod.Request) bool {
+    const enhanced = request.header("hx-request") catch return false;
+    const target = request.header("hx-target") catch return false;
+    return enhanced != null and std.ascii.eqlIgnoreCase(enhanced.?, "true") and
+        target != null and std.mem.eql(u8, target.?, "section#live-region");
 }
 
 fn getAnalyzePage(
@@ -2967,6 +3030,19 @@ fn writePage(output: *std.Io.Writer, status: u16, page: model.Page) !void {
     try response.write(
         output,
         status,
+        "text/html; charset=utf-8",
+        render.headers,
+        body.written(),
+    );
+}
+
+fn writeLiveRegion(output: *std.Io.Writer, region: model.LiveRegion) !void {
+    var body = std.Io.Writer.Allocating.init(std.heap.page_allocator);
+    defer body.deinit();
+    try render.liveRegion(&body.writer, region);
+    try response.write(
+        output,
+        200,
         "text/html; charset=utf-8",
         render.headers,
         body.written(),

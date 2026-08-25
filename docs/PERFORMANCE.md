@@ -1055,6 +1055,55 @@ Debug gate then measured -6,865/-2,105 KiB. Two independent tracked ReleaseSafe
 processes measured -281/4,414 KiB and 4,850/-2,849 KiB for list/detail-profile,
 with all four results inside the unchanged boundary.
 
+### Live traffic budget
+
+D47 requires both the complete typed Live statement and the authenticated
+current-region fragment to retain p95 below 150 milliseconds on the standard
+one-million-event fixture. The representative fixture shifts only its
+disposable receipt/occurrence/date fields so the final 30 minutes are populated
+at the exact request clock; an empty historical window is not performance
+evidence. Default and strict modes retain the same one DuckDB thread, 128 MiB
+memory, and two-second deadline. The result includes all bounded breakdowns,
+active Goal predicates, protocol distribution, and latest receipt.
+
+One warmup precedes at least ten complete statement samples and repeated real
+HTTP fragment samples. Evidence records p50/p95/p99, Debug versus ReleaseSafe,
+one-millisecond interruption, connection reuse, response bytes, and the final
+plan when optimization is required. The D30 date-range traffic-quality section
+is a separate full-document query and is not mislabeled as part of fragment
+latency.
+
+No Live cache, index, projection, rollup, prepared-template entry, new thread,
+memory/deadline increase, or background refresh is authorized. A miss follows
+the existing reproduce/profile, column and predicate narrowing, then receipt
+prefilter order before a new decision considers broader machinery.
+
+The exact pre-commit ReleaseSafe candidate ran two independent final-source
+qualifications on 2026-08-25. Complete statement p95 was 65,956 and 66,644
+microseconds in default mode, then 133,402 and 121,015 microseconds in strict
+mode. The corresponding conservative maximum-of-ten authenticated fragment
+measurements were 83,049 and 67,620 microseconds in default mode, then 122,317
+and 122,706 microseconds in strict mode. Fragment bodies remained between
+4,673 and 4,686 bytes. Every run interrupted a one-millisecond query and reused
+the same connection; both modes retained nonzero pages, custom events,
+conversions, a predicate-bearing active Goal, and the expected strict-only
+session/event exclusions. These are warm statement/HTTP measurements after
+one explicit warmup, not cold-start claims. The unchanged limit is strict
+`< 150,000` microseconds for both the complete statement and authenticated
+fragment. After the D45/D46 sampling correction merged and the exact Live
+candidate was restored on that master, the final combined-source repeat
+measured statement p95 at 69,254 microseconds default and 107,928 microseconds
+strict; fragment maxima were 79,388 and 116,675 microseconds. Interruption and
+connection reuse remained green.
+
+A subsequent source-attribution falsification restricted session source to the
+earliest retained page view and added an earlier custom-event counterexample.
+The exact post-fix ReleaseSafe repeat measured statement p95 at 68,868
+microseconds default and 105,069 microseconds strict. Fragment maxima were
+84,663 and 126,749 microseconds. Both modes again passed the unchanged limit,
+one-millisecond interruption, connection reuse, browser lifecycle, restart,
+and bounded response checks.
+
 ## 8. Regression policy
 
 For a stable benchmark environment:

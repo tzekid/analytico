@@ -1523,6 +1523,69 @@ pub const PersonProfile = struct {
     sessions: SessionPage,
 };
 
+pub const live_window_micros: i64 = 30 * std.time.us_per_min;
+pub const live_active_window_micros: i64 = 5 * std.time.us_per_min;
+pub const maximum_live_breakdown_rows: u8 = 5;
+
+pub const LiveRequest = struct {
+    site_id: []const u8,
+    active_goals: []const ResolvedGoal = &.{},
+    strict_traffic_mode: bool = false,
+    now_utc_micros: i64,
+    timeout_ms: u32 = maximum_timeout_ms,
+
+    pub fn validate(self: LiveRequest) !void {
+        try domain.validateUuid(self.site_id);
+        try validateActiveGoals(self.active_goals);
+        if (self.now_utc_micros < live_window_micros) {
+            return error.InvalidLiveClock;
+        }
+        if (self.timeout_ms == 0 or self.timeout_ms > maximum_timeout_ms) {
+            return error.InvalidAnalysisTimeout;
+        }
+    }
+
+    pub fn windowStart(self: LiveRequest) !i64 {
+        try self.validate();
+        return self.now_utc_micros - live_window_micros;
+    }
+
+    pub fn activeStart(self: LiveRequest) !i64 {
+        try self.validate();
+        return self.now_utc_micros - live_active_window_micros;
+    }
+};
+
+pub const LiveRow = struct {
+    label: []const u8,
+    count: i64,
+};
+
+pub const LiveGoalRow = struct {
+    goal_id: []const u8,
+    count: i64,
+};
+
+pub const LiveProtocolRow = struct {
+    version: u8,
+    count: i64,
+};
+
+pub const LiveResult = struct {
+    active_sessions: i64,
+    page_views: i64,
+    custom_events: i64,
+    conversions: i64,
+    pages: []const LiveRow,
+    sources: []const LiveRow,
+    events: []const LiveRow,
+    goals: []const LiveGoalRow,
+    countries: []const LiveRow,
+    devices: []const LiveRow,
+    protocols: []const LiveProtocolRow,
+    latest_accepted_at_utc_micros: ?i64,
+};
+
 pub const FunnelAvailabilityRequest = struct {
     site_id: []const u8,
     range: LocalDateRange,
