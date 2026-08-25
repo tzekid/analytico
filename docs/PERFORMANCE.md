@@ -592,9 +592,9 @@ independent matching-event count per step from one specialized statement under
 the unchanged two-second interrupt deadline. The production-path gate uses the
 standard million-event fixture, records the exact statement plan and repeated
 ReleaseSafe timings, and asserts timeout plus connection reuse. This is
-selector-availability evidence only: #36 retains the 1.2-second ordered funnel
-target and owns progression, scope/window semantics, timing, comparison, and
-result visualization.
+selector-availability evidence only. D44 retains the 1.2-second ordered funnel
+target and separately owns progression, scope/window semantics, timing,
+comparison, and result visualization.
 
 Two independent 2026-08-25 post-review ReleaseSafe runs exercised the same
 final code. The focused run measured the eight-selector strict statement at
@@ -619,6 +619,62 @@ it does not authorize a larger deadline or speculative storage mechanism.
 The same production-path gate proves every full-draft route is in the bounded
 Caddy matcher, an exact 65,536-byte declared request reaches the application,
 and 65,537 bytes returns 413 rather than 502.
+
+### Analytico 1.0 ordered-funnel gate
+
+D44 keeps the existing two-through-eight step, 400-day local-range, one-thread,
+128 MB memory, 256 MB temporary-space, and two-second interrupt ceilings. Ten
+complete samples of each populated eight-step range over the million-event
+fixture with ten active goals must have p95 below the package's 1.2-second
+Funnel target. Current and comparison ranges are measured independently in
+default and strict traffic modes; an empty comparison is not accepted as
+evidence. Their paired sample
+cost must remain below two seconds, and a real populated preview must return
+all eight availability rows plus the pair under one shared interrupt budget
+after an intentional timeout. D44 records
+the target interpretation and rejected stronger combined target explicitly.
+D43 availability and D44 progression share one request budget during preview.
+
+The plan may number the filtered meaningful relation once and emit at most
+eight fixed position-link CTEs. It may not use a per-entrant query, recursive
+general engine, cache, projection, rollup, extra thread, larger memory/temp
+limit, or wider deadline to meet the target. The profile must retain the
+selector and traffic predicates plus current row counts so a fast but broader
+or narrower result cannot pass. Debug executes the same semantic path but does
+not claim performance. Final measured observations and any rejected candidates
+are appended here before #36 release acceptance.
+
+The first ReleaseSafe compiler used full-relation next-selector windows. Its
+current and comparison profiles took 3.84 and 4.10 seconds and the real paired
+request timed out. All-start position joins improved those profiles to 1.79
+and 1.81 seconds; materialized candidate ASOF links measured 1.75 and 1.85
+seconds. Both still timed out as pairs. Struct-key participant selection and a
+tuple-only ordering experiment each exhausted the locked 128 MiB limit near
+121 MiB used. The first memory-safe greedy same-session plan passed the hard
+deadline but measured paired p95 at 1,940,503 microseconds default and
+1,968,804 microseconds strict, which lacked stable headroom.
+
+An earlier otherwise final run used only one active goal, below the package's
+standard-fixture minimum. Its default current/comparison/paired p95 values were
+709,104/789,551/1,451,073 microseconds; strict values were
+768,047/853,704/1,574,438 microseconds. Those values remain rejected fixture
+evidence in the result JSON and are not the accepted qualification.
+
+The accepted plan evaluates selectors once for eligible progression rows and
+keeps narrow candidates. Visitor coverage separately evaluates only step one
+over excluded identity qualities. Sequential same-session requests greedily
+retain the earliest valid prefix; session scope
+then omits a redundant participant rank because its chain and count keys are
+identical. Timed sequential requests retain all starts and nearest later
+candidate links, while consecutive requests require the exact next meaningful
+position. The final ten-goal ReleaseSafe default current/comparison p95 values
+were 723,300/786,253 microseconds, with paired p95 1,509,553 microseconds.
+Strict values were 851,091/882,645 microseconds, with paired p95 1,733,714
+microseconds. Each mode completed a real populated preview, including all eight
+availability rows and both ranges, after an intentional one-millisecond timeout
+on the same connection. Exact arrays, environment,
+row counts, and rejected observations are in
+`bench/results/funnel-result-release-safe.json`.
 
 ### M4 production-MVP baseline
 

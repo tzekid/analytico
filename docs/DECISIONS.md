@@ -52,6 +52,7 @@ semantic, or application state model is consequential and must be added here.
 | D41 | Guided goal lifecycle and metadata schema 8 | Replace raw goal administration with bounded discovery, archive-first lifecycle, and reference-safe deletion | Accepted for 1.0 issue #33 |
 | D42 | Property-constrained goals and metadata schema 9 | Persist one canonical predicate set per goal and preview one closed goal result under the current context | Accepted for 1.0 issue #34 |
 | D43 | Guided funnel lifecycle and metadata schema 10 | Persist one canonical bounded definition and preview independent selector availability | Accepted for 1.0 issue #35 |
+| D44 | Restart-capable funnel evaluation | Fixed bounded position-link plans with persistent-person visitor scope and one typed result | Accepted for 1.0 issue #36 |
 
 ## D01. MVP interface
 
@@ -3000,7 +3001,10 @@ one scalar value. Predicate strings are bytewise
 sorted and deduplicated. A Goal step contains only one stable goal UUID and
 resolves that goal's complete current D42 selector; it cannot layer a second
 predicate set. Every read parses, validates, reserializes, and requires
-byte-identical JSON. No expression engine, regex, arbitrary SQL, workflow
+byte-identical JSON. Its decoded strings are allocator-owned rather than
+borrowed from the Turso row cursor, so current and comparison compilation
+cannot observe invalidated metadata memory. No expression engine, regex,
+arbitrary SQL, workflow
 schema, or definition history is introduced.
 
 ### Migration, compatibility, and references
@@ -3105,3 +3109,166 @@ body boundary and complete route-set match.
 `ANALYSIS_QUERY.md`, `DESIGN_SYSTEM.md`, `PERFORMANCE.md`, `OPERATIONS.md`,
 `RELEASE_CONTRACT_1.0.md`, and issue #35. Issues #36 and #37 extend results and
 drill-through without changing D43's stored definition.
+
+## D44. Evaluate funnels with bounded restart-capable position links
+
+**Status:** Accepted for Analytico 1.0 issue #36
+
+**Date:** 2026-08-25
+
+**Issue:** #36
+
+**Extends:** D26 persistent identity, D27 site-local ranges, D29 specialized
+typed analysis, D34 traffic eligibility, D40 universal filters, and D43's
+canonical funnel definition. It leaves generated session drill-through to
+#37 and does not change D43 persistence.
+
+### Context and query-shape candidates
+
+The frozen metric-v1 funnel is sequential, Sessions, same-session,
+predicate-free, receipt-ordered, and UTC-date-scoped. Generalizing it would
+silently reinterpret its CLI and compatibility output. D43 therefore stops at
+independent selector availability. #36 needs progression, deterministic
+restarts, windows, visitor identity, timing, comparison, and a complete
+server-rendered result over the metric-v2 context.
+
+| Candidate | Runtime and correctness | Maintenance, memory, and rollback |
+| --- | --- | --- |
+| Generalize the metric-v1 CTE | Small initial diff | Breaks the frozen grammar and mixes UTC visitor-day assumptions into metric v2 |
+| Recursive per-event state machine | Can express retries directly | Adds recursive-state complexity and makes million-row work harder to bound and profile |
+| Join every later match from every start | Direct relational expression | Can create combinatorial intermediate rows under repeated selectors |
+| Number meaningful events once and follow bounded next positions | At most eight fixed steps; supports retries without per-entrant queries | Adds one specialized compiler and result that can be removed without data rollback |
+
+Select the fourth candidate. The finite compiler starts from D40's resolved
+eligible relation after event, session, and person filters and D34's current
+traffic predicate. It retains only Page and custom-event rows. Identify and
+engagement rows therefore cannot break `consecutive` order.
+
+For each chain participant, events receive a deterministic position ordered by
+`occurred_at_utc_micros`, `sequence`, `received_at_utc_micros`, then
+`event_id`. The finite plan evaluates selector predicates once for eligible
+progression rows and emits narrow candidate positions. Visitor coverage
+separately evaluates step one over the excluded identity qualities only.
+Sequential elapsed-window modes use nearest later
+candidate links from every step-one occurrence. Consecutive mode requires the
+exact next meaningful position. Two through eight fixed CTEs follow those
+positions, and every transition is strict, so one event cannot satisfy two
+steps. Keeping all step-one occurrences in those modes allows a later valid
+retry after an earlier detour or expired window without recursion or N+1
+queries.
+
+Sequential same-session mode has no elapsed cutoff: choosing the earliest
+matching position for every prefix is equivalent to any valid ordered
+sequence, because an earlier prefix cannot make a later match unavailable.
+That measured path therefore collapses each chain to its earliest prefix while
+retaining every selector and the same deterministic order. Session scope also
+omits a redundant participant rank because `count_key` and `chain_key` are
+identical. Visitor same-session scope retains participant ranking across
+sessions.
+
+### Scope, range, window, and result semantics
+
+The inclusive selected local-date range bounds every participating event. A
+conversion window further restricts elapsed plausible occurrence time from
+the chosen step-one event; it never reads beyond the report range.
+
+- Sessions scope partitions and counts by stored session UUID. Every step is
+  in that session. A nonzero window additionally bounds first-to-step elapsed
+  time.
+- Visitors with `same_session` partition by session but count distinct
+  canonical persistent people. Timed visitor windows partition and count by
+  canonical persistent person across sessions.
+- Visitor results accept only `identity_quality=persistent`. Ephemeral and
+  `legacy_daily` step-one identities are excluded and returned as explicit
+  bounded coverage counts. They are never linked or relabeled as people.
+
+Entrants are distinct scope participants with step one. Each later step count
+is the distinct subset with at least one valid chain through that step. When a
+participant has multiple successful chains, timing uses the earliest
+deterministic completion of that step; ties use the same order tuple and then
+the chosen start tuple. Per-step time is the median elapsed time from the
+prior matched step. Summary time is the median from step one to final
+completion. The integer result rounds DuckDB's exact median to the nearest
+microsecond before presentation; display formatting never replaces the raw
+count or duration.
+
+Current and resolved comparison ranges execute the same finite plan under one
+shared interrupt budget and return separate typed runs. Comparison never
+changes the current participant set or crosses periods.
+
+The package specifies an eight-step Funnel p95 below 1.2 seconds but does not
+redefine that one-funnel budget as the sum of two populated periods. Three
+interpretations were reviewed after measuring the final query shape:
+
+| Candidate | Runtime and product consequence |
+| --- | --- |
+| Require current plus comparison below 1.2 seconds | Stronger than the package; the measured exact SQL needs a fused period engine, cache, or rollup solely for optional comparison |
+| Require each populated range below 1.2 seconds and their sequential pair below the existing two-second deadline | Preserves the package's per-funnel target, comparison, and the established interactive ceiling without storage machinery |
+| Omit or defer comparison | Meets the single-range target but drops accepted issue scope |
+
+Select the second candidate. ReleaseSafe records ten current samples and ten
+comparison samples independently in default and strict modes; each p95 must be
+below 1.2 seconds. The paired samples must remain below two seconds, and an
+actual populated preview must return all eight availability rows plus current
+and comparison under one shared interrupt budget after an intentional timeout.
+This is an explicit
+reconciliation of the measured contract, not permission to present paired
+work as a sub-1.2-second observation. The fixture retains ten active goals, one
+DuckDB thread, 128 MB memory, and 256 MB temporary space.
+
+The builder retains D43's independent selector-availability counts so a zero
+selector remains distinguishable from zero progression. Preview and save use
+the same resolved definition and context as saved detail; save/edit still
+perform no metadata write after a timeout. Missing or archived Goal references
+refuse execution. Zero entrants, entrants with no progression, consecutive
+detours, timeout, and visitor coverage are explicit states.
+
+### Product and YAGNI boundary
+
+The saved detail and draft preview receive one owned specialized result.
+Renderers show proportional horizontal step bars, exact scope-labeled counts,
+entrant and prior-step rates, drop-off count/rate, prior-step medians, total
+conversion, and current/comparison values. SVG geometry derives only from raw
+counts and an exact table remains authoritative. No renderer performs I/O or
+recomputes the query.
+
+The package calls a funnel breakdown optional, while #36 and the current route
+define no chosen dimension, grouping scope, canonical URL, or acceptance
+state. #36 therefore adds comparison but no public breakdown input/result.
+That is an explicit bounded omission, not a claim that breakdown shipped. A
+later issue must define its funnel-specific semantics and budget before reusing
+D29 dimensions. #37 solely owns step/drop-off session queries. No generic AST,
+query cache, projection, rollup, background process, dependency, client state,
+frontend data request, schema, or migration is introduced.
+
+### Security, deployment, rollback, and acceptance
+
+Every selector, predicate, site, date, window, and filter value is validated
+before DuckDB and bound as data. Only reviewed SQL fragments are emitted.
+Result rows and decoded steps are bounded by eight; no raw identity list enters
+HTML, URLs, logs, or metadata. Turso never reads events and DuckDB never
+resolves a Goal ID.
+
+Deployment changes only the application artifact. There is no event or
+metadata migration, Caddy route, service, tracker, backup format, or runtime
+data file change. The canonical pre-deployment matched backup is still
+created and independently restored. Rollback stops the writer and restores the
+predecessor release symlink; the unchanged metadata-10/event-7 pair remains
+readable, so no database restore is required unless ordinary deployment
+verification detects unrelated corruption.
+
+Issue #36 must prove a real on-disk hand corpus for modes, retries, repeated
+steps, equal timestamps, windows, filters, Goal predicates, identity links,
+legacy/ephemeral coverage, comparison, zero, timeout, and connection reuse.
+The million-row ReleaseSafe gate profiles the final plan with ten active goals
+and measures populated current and comparison ranges in default and strict
+traffic modes. The real
+authenticated browser proves native draft preview and saved detail, exact
+SVG/table agreement, no JavaScript, keyboard use, 390-pixel mobile layout, no
+startup data request, site isolation, and timeout no-write behavior. Frozen
+metric-v1 funnel output remains exact.
+
+**Affected contracts:** `SPEC.md`, `ARCHITECTURE.md`, `DATA_MODEL.md`,
+`ANALYSIS_QUERY.md`, `DESIGN_SYSTEM.md`, `PERFORMANCE.md`, `OPERATIONS.md`,
+`RELEASE_CONTRACT_1.0.md`, and issue #36. Issue #37 consumes the typed
+participation semantics without changing this result.

@@ -104,7 +104,10 @@ are not passes.
 - The D43 funnel builder persists one exact bounded definition with two through
   eight ordered Page, Event, or Goal steps, guarded lifecycle state, and exact
   Goal references. Preview reports independent selector availability under the
-  current context; it does not claim #36 progression, timing, or conversion.
+  current context. D44 adds restart-capable sequential/consecutive progression,
+  Sessions or persistent-Visitor scope, bounded windows, exact drop-off/timing,
+  explicit incompatible-identity coverage, and current/comparison results.
+  All participating events remain inside the selected local-date range.
   Its two full-draft routes reuse the exact 65,536-byte saved-state proxy and
   application bound; all other funnel actions retain the ordinary 8 KiB limit.
 - D34 query classification is reversible, default-off parity is exact, every
@@ -206,7 +209,16 @@ are not passes.
   predicates, settings, zero/stale/timeout states, site isolation, Goal delete
   conflicts, JavaScript-disabled operation, enhanced equivalence, keyboard use,
   phone layout, and no startup data request. Selector availability is visibly
-  distinct from #36's ordered result. Exact 65,536/65,537-byte Caddy requests
+  distinct from D44's ordered result. The on-disk corpus additionally proves
+  modes, retries, repeated steps, one-event traps, deterministic timestamp
+  ties, scope/windows, filters, identity links, legacy/ephemeral coverage, and
+  populated comparison. The ordered SVG and exact table agree in desktop and
+  mobile browser states. In default and strict modes, each populated
+  eight-step range has p95 below 1.2 seconds on one million events with ten
+  active goals, the paired samples remain below two seconds, and a real preview
+  returns all eight availability rows plus current and comparison under the
+  shared interrupt deadline. Exact
+  65,536/65,537-byte Caddy requests
   prove complete matcher coverage, application reachability, and deterministic
   413 rather than 502.
 - The named `e2e-filters`, `e2e-goals`, `e2e-metadata7-migration`,

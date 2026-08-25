@@ -1013,13 +1013,20 @@ async function main() {
     const reports = [
       route("example", "live"),
       route("example", "journeys/goals", "&subject=Signup"),
-      route("example", "journeys/funnels", "&subject=Journey"),
     ];
     for (const reportUrl of reports) {
       response = await page.goto(reportUrl, { waitUntil: "load" });
       assert.equal(response.status(), 200, reportUrl);
       assert.equal(await page.locator("#report").count(), 1, reportUrl);
     }
+    const funnelReportUrl = route(
+      "example",
+      "journeys/funnels",
+      "&subject=Journey",
+    );
+    response = await page.goto(funnelReportUrl, { waitUntil: "load" });
+    assert.equal(response.status(), 200, funnelReportUrl);
+    assert.equal(await page.locator("section.funnel-ordered-result").count(), 1);
 
     response = await page.goto(
       route("example", "analyze", "&report=pages&sort=count&limit=1&page=1"),
@@ -1411,8 +1418,14 @@ function overviewKpi(page, label) {
 async function assertFunnelFigure(page, mobile) {
   const figure = page.locator("figure.funnel-figure");
   assert.equal(await figure.count(), 1);
-  assert.equal(await figure.getAttribute("aria-labelledby"), "funnel-result-title");
-  assert.equal(await figure.getAttribute("aria-describedby"), "funnel-result-summary");
+  assert.equal(
+    await figure.getAttribute("aria-labelledby"),
+    "ordered-funnel-result-title",
+  );
+  assert.equal(
+    await figure.getAttribute("aria-describedby"),
+    "ordered-funnel-result-summary",
+  );
   assert.equal(
     await figure.locator('svg[role="img"][focusable="false"]').count(),
     1,
@@ -1423,7 +1436,7 @@ async function assertFunnelFigure(page, mobile) {
   );
   assert.equal(
     await figure.locator("table caption").textContent(),
-    "Funnel result — exact values",
+    "Ordered funnel progression — exact values",
   );
   if (mobile) {
     const widths = await figure.locator("table caption").evaluate((caption) => ({
@@ -1435,20 +1448,32 @@ async function assertFunnelFigure(page, mobile) {
       `mobile caption ${widths.caption}px did not fill ${widths.table}px table`,
     );
   }
-  assert.equal(await figure.locator('thead th[scope="col"]').count(), 6);
+  assert.equal(await figure.locator('thead th[scope="col"]').count(), 13);
   assert.equal(await figure.locator('tbody th[scope="row"]').count(), 3);
   assert.equal(
-    await figure.locator('tbody tr').last().locator('td[data-label="Sessions"]').textContent(),
+    await figure
+      .locator("tbody tr")
+      .last()
+      .locator('td[data-label="Current count"]')
+      .textContent(),
     "2",
+  );
+  assert.equal(
+    await figure
+      .locator("tbody tr")
+      .last()
+      .locator('td[data-label="Current drop-off rate before step"]')
+      .textContent(),
+    "0.00%",
   );
   assert.equal(await figure.locator("[onclick]").count(), 0);
   assert.equal(
-    await page.getByRole("figure", { name: "Funnel result" }).count(),
+    await page.getByRole("figure", { name: "Ordered funnel progression" }).count(),
     1,
   );
   assert.equal(
     await page.getByRole("table", {
-      name: "Funnel result — exact values",
+      name: "Ordered funnel progression — exact values",
       includeHidden: true,
     }).count(),
     1,

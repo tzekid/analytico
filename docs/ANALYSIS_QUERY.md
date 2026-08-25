@@ -730,9 +730,49 @@ completion, conversion, drop-off, or timing.
 
 Sequential/consecutive order, one-event/one-step use, Sessions/Visitors and
 window semantics, comparison, progression, timing, and result visualization
-remain #36's separate closed funnel result. D43 adds no query cache,
+are D44's separate closed funnel result. D43 adds no query cache,
 projection, rollup, background process, network request, or SQL supplied by a
 request.
+
+D44 adds that separate closed result without extending the ordinary
+metric-by-dimension grammar or changing metric-v1. Its request contains one
+site, current and optional resolved comparison local-date ranges, two through
+eight resolved selectors, closed order/scope/window settings, the composed
+FilterSet, and the current active-goal traffic snapshot. Goal IDs never enter
+DuckDB. Validation rejects an unresolved selector, invalid range/window,
+unresolved segment, excess step, or stale Goal before execution.
+
+The plan first applies D40 filter semantics and D34 traffic eligibility, then
+keeps Page and custom-event rows only. It orders each chain by
+`occurred_at_utc_micros`, `sequence`, `received_at_utc_micros`, and `event_id`.
+Sequential mode precomputes the next matching position for every later
+selector; consecutive mode requires the immediately following meaningful
+position. Two through eight fixed CTEs follow those links from every step-one
+occurrence. Strict transitions prevent one event from satisfying two steps,
+while retaining all starts permits a later valid retry after a detour or an
+expired window.
+
+Sessions partition and count by session. Same-session Visitors partition by
+session but count distinct canonical persistent people. Timed Visitors
+partition and count by canonical persistent person across sessions. Visitor
+progression excludes ephemeral and `legacy_daily` rows and returns their
+distinct step-one counts as coverage evidence. Every event remains inside the
+selected local-date range; a nonzero window additionally bounds elapsed
+occurrence time from step one.
+
+One run returns exactly one ordered row per step with a nonnegative distinct
+participant count and an optional integer-microsecond median from the prior
+step, plus entrants, completions, median total time, and bounded visitor
+coverage. Current and comparison runs execute the same plan under one shared
+deadline. Preview coordinates that result with D43's independent availability
+under the same deadline. Result validation requires step indexes and count
+monotonicity to match the request. No raw participant key, arbitrary SQL,
+cache, projection, rollup, recursion, or per-entrant query is exposed.
+
+D44 deliberately adds no funnel-breakdown input. The package describes it as
+optional, while the current route has no accepted dimension, grouping scope,
+canonical URL, or performance state. #37 owns the generated participation
+query used for later step/drop-off drill-through.
 
 Issue #34 additionally proves canonical predicate JSON collision separation,
 event-row versus same-session semantics, filter/segment composition, typed

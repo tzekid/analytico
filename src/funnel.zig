@@ -100,6 +100,137 @@ pub const Definition = struct {
     }
 };
 
+pub const ResultRequest = struct {
+    site_id: []const u8,
+    range: analysis.LocalDateRange,
+    comparison_range: ?analysis.LocalDateRange = null,
+    order: Order,
+    scope: Scope,
+    window: Window,
+    selectors: []const analysis.EventSelector,
+    filters: analysis.FilterSet = .{},
+    active_goals: []const analysis.ResolvedGoal = &.{},
+    strict_traffic_mode: bool = false,
+    timeout_ms: u32 = analysis.maximum_timeout_ms,
+
+    pub fn validate(self: ResultRequest) !void {
+        try domain.validateUuid(self.site_id);
+        try self.range.validate();
+        if (self.comparison_range) |range| try range.validate();
+        if (self.selectors.len < minimum_steps or
+            self.selectors.len > maximum_steps)
+        {
+            return error.InvalidFunnelLength;
+        }
+        for (self.selectors) |selector| {
+            try selector.validate();
+            if (selector.kind == .saved_goal) {
+                return error.UnresolvedGoalSelector;
+            }
+        }
+        try self.filters.validate();
+        if (self.timeout_ms == 0 or self.timeout_ms > analysis.maximum_timeout_ms) {
+            return error.InvalidAnalysisTimeout;
+        }
+        const resolved_execution = self.execution(self.range);
+        try resolved_execution.validate();
+    }
+
+    pub fn execution(
+        self: ResultRequest,
+        range: analysis.LocalDateRange,
+    ) analysis.Execution {
+        return .{
+            .query = .{
+                .site_id = self.site_id,
+                .range = range,
+                .mode = .breakdown,
+                .metric = .{ .kind = .page_views },
+                .dimension = .{ .kind = .page },
+                .filters = self.filters,
+            },
+            .active_goals = self.active_goals,
+            .strict_traffic_mode = self.strict_traffic_mode,
+            .timeout_ms = self.timeout_ms,
+        };
+    }
+};
+
+pub const IdentityCoverage = struct {
+    persistent_step_one: i64,
+    ephemeral_step_one: i64,
+    legacy_step_one: i64,
+};
+
+pub const ResultStep = struct {
+    step_index: u8,
+    participants: i64,
+    median_from_prior_micros: ?i64,
+};
+
+pub const Run = struct {
+    entrants: i64,
+    completions: i64,
+    median_total_micros: ?i64,
+    steps: []const ResultStep,
+    identity_coverage: ?IdentityCoverage,
+
+    pub fn validate(self: Run, expected_steps: usize, scope: Scope) !void {
+        if (self.steps.len != expected_steps or expected_steps < minimum_steps or
+            expected_steps > maximum_steps or self.entrants < 0 or
+            self.completions < 0)
+        {
+            return error.InvalidFunnelResult;
+        }
+        var prior = self.entrants;
+        for (self.steps, 0..) |step, index| {
+            if (step.step_index != @as(u8, @intCast(index)) or
+                step.participants < 0 or step.participants > prior or
+                (index == 0 and step.median_from_prior_micros != null) or
+                (index != 0 and
+                    (step.participants == 0) !=
+                        (step.median_from_prior_micros == null)) or
+                (step.median_from_prior_micros orelse 0) < 0)
+            {
+                return error.InvalidFunnelResult;
+            }
+            prior = step.participants;
+        }
+        if (self.steps[0].participants != self.entrants or
+            self.steps[self.steps.len - 1].participants != self.completions or
+            (self.median_total_micros orelse 0) < 0 or
+            (self.completions == 0) != (self.median_total_micros == null))
+        {
+            return error.InvalidFunnelResult;
+        }
+        switch (scope) {
+            .sessions => if (self.identity_coverage != null) {
+                return error.InvalidFunnelResult;
+            },
+            .visitors => {
+                const coverage = self.identity_coverage orelse
+                    return error.InvalidFunnelResult;
+                if (coverage.persistent_step_one != self.entrants or
+                    coverage.ephemeral_step_one < 0 or
+                    coverage.legacy_step_one < 0)
+                {
+                    return error.InvalidFunnelResult;
+                }
+            },
+        }
+    }
+};
+
+pub const Result = struct {
+    current: Run,
+    comparison: ?Run,
+};
+
+pub const PreviewResult = struct {
+    availability: []const analysis.FunnelAvailabilityRow,
+    result: Result,
+};
+
 const JsonDefinition = struct {
     schema: u8,
     order: []const u8,
@@ -179,7 +310,7 @@ pub fn parseExactCanonicalJson(
         JsonDefinition,
         allocator,
         encoded,
-        .{ .ignore_unknown_fields = false },
+        .{ .ignore_unknown_fields = false, .allocate = .alloc_always },
     ) catch return error.InvalidFunnelDefinition;
     if (state.schema != schema_version) return error.UnsupportedFunnelDefinition;
     const steps = try allocator.alloc(Step, state.steps.len);
@@ -374,6 +505,19 @@ test "funnel definition is exact canonical bounded JSON" {
     try std.testing.expectError(
         error.NonCanonicalFunnelDefinition,
         parseExactCanonicalJson(allocator, noncanonical),
+    );
+    @memset(encoded, 0);
+    try std.testing.expectEqualStrings(
+        "/pricing/<safe>",
+        parsed.steps[0].direct.selector.value,
+    );
+    try std.testing.expectEqualStrings(
+        "00000000-0000-4000-8000-000000000035",
+        parsed.steps[1].goal,
+    );
+    try std.testing.expectEqualStrings(
+        "plan",
+        parsed.steps[0].direct.selector.predicates[1].property_ref.name,
     );
 }
 

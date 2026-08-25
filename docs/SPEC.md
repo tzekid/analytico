@@ -84,7 +84,8 @@
 - D43 and issue #35 advance metadata to schema 10 and replace raw multi-row
   funnels with one canonical bounded definition. Stable native management
   routes compose Page, Event, and Goal steps, preserve shared context, and
-  preview independent selector availability; #36 retains ordered evaluation.
+  preview independent selector availability. D44 and issue #36 add the
+  separate ordered result without changing that stored definition.
 
 ## 1. Product statement
 
@@ -211,12 +212,16 @@ request-owned draft containing two through eight Page, Event, or Goal steps;
 direct steps may add up to three D29 predicates with at most one scalar value
 each. Native forms add, remove, and
 move steps, choose sequential/consecutive order, Sessions/Visitors scope, and
-one closed same-session or bounded window, preview selector availability, and
-save or archive one stable definition. Archived or missing Goal references are
-visible and block preview/save until replaced or restored. D43 preview reports
-independent matching-event counts only. #36 owns ordered funnel evaluation,
-conversion/timing results, comparison, and visualization; #37 owns session
-drill-through.
+one closed same-session or bounded window, preview, and save or archive one
+stable definition. Archived or missing Goal references are visible and block
+preview/save until replaced or restored. D43 retains independent matching-
+event availability per selector. D44 additionally evaluates every step-one
+attempt in deterministic plausible-event order, returns ordered progression,
+drop-off and timing for Sessions or persistent Visitors, and renders current
+plus resolved comparison. Visitor results explicitly exclude and count
+ephemeral and legacy-daily step-one identities. The selected local-date range
+bounds every participating event; the conversion window narrows rather than
+expands that range. #37 owns session drill-through.
 
 ### F5. CLI
 

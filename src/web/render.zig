@@ -9,7 +9,7 @@ const components = @import("components.zig");
 const model = @import("model.zig");
 
 pub const stylesheet = @embedFile("style.css");
-pub const stylesheet_path = "/admin/app.v13.css";
+pub const stylesheet_path = "/admin/app.v14.css";
 pub const htmx = @embedFile("htmx_js");
 pub const htmx_gzip = @embedFile("htmx_gzip");
 pub const htmx_path = "/admin/htmx.28fae7bb.js";
@@ -2737,7 +2737,7 @@ fn renderResult(
             for (funnel.steps, 0..) |step, index| {
                 steps[index] = .{
                     .name = step.name,
-                    .sessions = try nonnegative(step.sessions),
+                    .count = try nonnegative(step.sessions),
                 };
             }
             try charts.renderFunnel(output, .{
@@ -2965,7 +2965,7 @@ fn funnelBuilder(
     try output.writeAll(
         "</h2><p>Compose two through eight ordered Page, Event, or Goal steps. " ++
             "Preview reports each selector's independent event availability; " ++
-            "ordered conversion and timing remain a separate result.</p>" ++
+            "the ordered conversion result appears below the form.</p>" ++
             "<form class=\"funnel-builder\" method=\"post\" action=\"",
     );
     try attribute(output, if (management.screen == .edit)
@@ -3005,8 +3005,8 @@ fn funnelBuilder(
     try output.writeAll(
         "</select></label></div><p class=\"muted\">Consecutive checks the next" ++
             " qualifying tracked Page/Event. Visitor scope and cross-session" ++
-            " windows require compatible persistent identity; #36 owns their" ++
-            " evaluated results.</p><ol class=\"funnel-steps\">",
+            " windows require compatible persistent identity.</p>" ++
+            "<ol class=\"funnel-steps\">",
     );
     for (steps) |step| try funnelStepEditor(
         output,
@@ -3022,10 +3022,13 @@ fn funnelBuilder(
         "<button class=\"button-secondary\" type=\"submit\" name=\"intent\"" ++
             " formnovalidate value=\"refresh\">Update step controls</button>" ++
             "<button class=\"button-secondary\" type=\"submit\" name=\"intent\"" ++
-            " value=\"preview\">Preview selector availability</button>" ++
+            " value=\"preview\">Preview funnel</button>" ++
             "<button type=\"submit\" name=\"intent\" value=\"save\">" ++
             "Save funnel</button></div></form></section>",
     );
+    if (management.result) |result| {
+        try orderedFunnelResult(output, value, steps, order, scope, result);
+    }
 }
 
 fn funnelStepEditor(
@@ -3179,19 +3182,6 @@ fn funnelDetail(
         .kind = .warning,
         .message = "This funnel has an archived or unavailable Goal reference. Edit the step or reactivate the goal before previewing or running it.",
     });
-    if (value.result != null) {
-        try output.writeAll(
-            "<p class=\"muted\">The compatibility result below preserves the" ++
-                " original sequential, Sessions, same-session report. #36 owns" ++
-                " the complete settings-aware funnel result.</p>",
-        );
-    } else {
-        try output.writeAll(
-            "<p class=\"muted\">Ordered conversion, drop-off, timing, and" ++
-                " comparison arrive with the dedicated funnel result. This page" ++
-                " does not infer them from selector counts.</p>",
-        );
-    }
     try output.writeAll("<form method=\"post\" action=\"");
     try output.writeAll(if (definition.archived)
         "/admin/funnels/reactivate"
@@ -3204,6 +3194,194 @@ fn funnelDetail(
     try output.writeAll("<button class=\"button-secondary\" type=\"submit\">");
     try output.writeAll(if (definition.archived) "Reactivate" else "Archive");
     try output.writeAll("</button></form></section>");
+    if (management.result) |result| {
+        try orderedFunnelResult(
+            output,
+            value,
+            definition.steps,
+            definition.order,
+            definition.scope,
+            result,
+        );
+    }
+}
+
+fn orderedFunnelResult(
+    output: *std.Io.Writer,
+    value: model.Page,
+    step_views: []const model.FunnelStepView,
+    order: funnel_domain.Order,
+    scope: funnel_domain.Scope,
+    result: funnel_domain.Result,
+) !void {
+    if (result.current.steps.len != step_views.len or
+        (result.comparison != null and
+            result.comparison.?.steps.len != step_views.len))
+    {
+        return error.InvalidFunnelResult;
+    }
+    var chart_steps: [funnel_domain.maximum_steps]charts.FunnelStep = undefined;
+    for (chart_steps[0..step_views.len], step_views, result.current.steps, 0..) |*target, step_view, step, index| {
+        if (step.step_index != index) return error.InvalidFunnelResult;
+        const comparison_step = if (result.comparison) |comparison|
+            comparison.steps[index]
+        else
+            null;
+        if (comparison_step) |candidate| {
+            if (candidate.step_index != index) return error.InvalidFunnelResult;
+        }
+        target.* = .{
+            .name = step_view.label,
+            .count = try nonnegative(step.participants),
+            .median_from_prior_micros = if (step.median_from_prior_micros) |micros|
+                try nonnegative(micros)
+            else
+                null,
+            .comparison_count = if (comparison_step) |candidate|
+                try nonnegative(candidate.participants)
+            else
+                null,
+            .comparison_median_from_prior_micros = if (comparison_step) |candidate|
+                if (candidate.median_from_prior_micros) |micros|
+                    try nonnegative(micros)
+                else
+                    null
+            else
+                null,
+        };
+    }
+    const count_label = if (scope == .sessions)
+        "Sessions"
+    else
+        "Persistent visitors";
+    try output.writeAll("<section class=\"panel funnel-ordered-result\">" ++
+        "<h2>Ordered funnel result</h2><p class=\"muted\">Current ");
+    try text(output, value.query.range.start);
+    try output.writeAll(" through ");
+    try text(output, value.query.range.end);
+    try output.writeAll(" · ");
+    try text(output, count_label);
+    try output.writeAll(" · ");
+    try text(output, @tagName(order));
+    try output.writeAll("</p>");
+    if (order == .consecutive) try components.feedback(output, .{
+        .kind = .notice,
+        .message = "Consecutive mode stops an attempt when the next meaningful Page/Event does not match; identify and engagement events are ignored.",
+    });
+    if (result.current.entrants == 0) {
+        try components.feedback(output, .{
+            .kind = .notice,
+            .message = "No entrants matched step one in the current range and filters.",
+        });
+    } else if (result.current.completions == 0) {
+        try components.feedback(output, .{
+            .kind = .notice,
+            .message = "Entrants matched step one, but none completed every step in scope and window.",
+        });
+    }
+    try output.writeAll("<ul class=\"metrics\">");
+    try metric(output, "Entrants", result.current.entrants);
+    try metric(output, "Completions", result.current.completions);
+    try ratioKpi(
+        output,
+        "Overall conversion rate",
+        result.current.completions,
+        result.current.entrants,
+    );
+    try funnelDurationKpi(
+        output,
+        "Median total time",
+        result.current.median_total_micros,
+    );
+    try output.writeAll("</ul>");
+    if (result.comparison) |comparison| {
+        const comparison_range = value.calendar_context.?.comparison_range orelse
+            return error.MissingComparisonResolution;
+        try output.writeAll("<h3>Comparison summary · ");
+        try text(output, comparison_range.start[0..]);
+        try output.writeAll(" through ");
+        try text(output, comparison_range.end[0..]);
+        try output.writeAll("</h3><ul class=\"metrics\">");
+        try metric(output, "Comparison entrants", comparison.entrants);
+        try metric(output, "Comparison completions", comparison.completions);
+        try ratioKpi(
+            output,
+            "Comparison conversion rate",
+            comparison.completions,
+            comparison.entrants,
+        );
+        try funnelDurationKpi(
+            output,
+            "Comparison median total time",
+            comparison.median_total_micros,
+        );
+        try output.writeAll("</ul>");
+    }
+    if (result.current.identity_coverage) |coverage| {
+        try output.print(
+            "<p class=\"funnel-identity-coverage\">Persistent visitor" ++
+                " step-one identities: <strong>{d}</strong>. Excluded" ++
+                " ephemeral identities: <strong>{d}</strong>. Excluded" ++
+                " legacy-daily identities: <strong>{d}</strong>.</p>",
+            .{
+                coverage.persistent_step_one,
+                coverage.ephemeral_step_one,
+                coverage.legacy_step_one,
+            },
+        );
+    }
+    if (result.comparison) |comparison| {
+        if (comparison.identity_coverage) |coverage| {
+            try output.print(
+                "<p class=\"funnel-identity-coverage\">Comparison persistent" ++
+                    " visitor step-one identities: <strong>{d}</strong>." ++
+                    " Excluded comparison ephemeral identities:" ++
+                    " <strong>{d}</strong>. Excluded comparison legacy-daily" ++
+                    " identities: <strong>{d}</strong>.</p>",
+                .{
+                    coverage.persistent_step_one,
+                    coverage.ephemeral_step_one,
+                    coverage.legacy_step_one,
+                },
+            );
+        }
+    }
+    try charts.renderFunnel(output, .{
+        .id = "ordered-funnel-result",
+        .title = "Ordered funnel progression",
+        .summary = if (result.comparison == null)
+            "Current participants reaching each ordered step. Exact counts, rates, drop-off, and timing follow."
+        else
+            "Current filled bars and neutral outlined comparison bars show participants reaching each ordered step. Exact values follow.",
+        .count_label = count_label,
+        .entrants = try nonnegative(result.current.entrants),
+        .comparison_entrants = if (result.comparison) |comparison|
+            try nonnegative(comparison.entrants)
+        else
+            null,
+        .steps = chart_steps[0..step_views.len],
+    });
+    try output.writeAll("</section>");
+}
+
+fn funnelDurationKpi(
+    output: *std.Io.Writer,
+    label: []const u8,
+    micros: ?i64,
+) !void {
+    try output.writeAll("<li class=\"kpi\"><span>");
+    try text(output, label);
+    try output.writeAll("</span><strong>");
+    if (micros) |value| {
+        const raw = try nonnegative(value);
+        try output.print("<span class=\"chart-raw-value\">{d} µs</span> ", .{raw});
+        try output.writeAll("<span class=\"chart-formatted-value\">(");
+        try charts.formattedDurationMicros(output, raw);
+        try output.writeAll(")</span>");
+    } else {
+        try output.writeAll("Unavailable");
+    }
+    try output.writeAll("</strong></li>");
 }
 
 fn funnelIdentityFields(
@@ -4803,5 +4981,5 @@ test "production stylesheet mirrors the approved accessible design tokens" {
 
     try std.testing.expect(std.mem.indexOf(u8, stylesheet, "@import") == null);
     try std.testing.expect(std.mem.indexOf(u8, stylesheet, "url(") == null);
-    try std.testing.expectEqualStrings("/admin/app.v13.css", stylesheet_path);
+    try std.testing.expectEqualStrings("/admin/app.v14.css", stylesheet_path);
 }

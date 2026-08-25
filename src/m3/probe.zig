@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const analysis = @import("../analysis.zig");
 const domain = @import("../domain.zig");
+const funnel = @import("../funnel.zig");
 const report = @import("../report.zig");
 const timezone = @import("../timezone.zig");
 const events = @import("../store/events.zig");
@@ -845,6 +846,547 @@ pub fn funnelAvailabilityProfile(
         .performance_enforced = true,
         .sample_micros = samples,
         .p95_micros = samples[9],
+        .timeout_interrupted = true,
+        .connection_reused = true,
+    }, .{}, output);
+    try output.writeByte('\n');
+}
+
+pub fn funnelResultSemantics(
+    allocator: std.mem.Allocator,
+    output: *std.Io.Writer,
+    directory: []const u8,
+    site_id: []const u8,
+) !void {
+    try domain.validateUuid(site_id);
+    const event_path = try std.fs.path.join(
+        allocator,
+        &.{ directory, "events.duckdb" },
+    );
+    var store = try events.Store.open(allocator, event_path);
+    defer store.deinit();
+    try store.requireCurrent();
+    const sql_template =
+        \\INSERT INTO identity_links VALUES
+        \\ ('__SITE__', CAST('00000000-0000-4000-8000-0000000007a7' AS UUID),
+        \\  'funnel-cross-user', 1738368000000000,
+        \\  CAST('00000000-0000-4000-8000-000000000719' AS UUID)),
+        \\ ('__SITE__', CAST('00000000-0000-4000-8000-0000000007a8' AS UUID),
+        \\  'funnel-cross-user', 1738369800000000,
+        \\  CAST('00000000-0000-4000-8000-000000000720' AS UUID));
+        \\INSERT INTO events
+        \\SELECT template.* REPLACE (
+        \\  7 AS event_schema_version, 2 AS protocol_version,
+        \\  2 AS tracker_version, CAST(v.event_id AS UUID) AS event_id,
+        \\  v.received_at AS received_at_utc_micros,
+        \\  v.occurred_at AS occurred_at_utc_micros,
+        \\  CAST(v.local_date AS DATE) AS received_date_utc,
+        \\  CAST(v.local_date AS DATE) AS site_local_date,
+        \\  0 AS site_utc_offset_minutes, v.kind AS kind,
+        \\  v.event_name AS event_name, '/funnel-fixture' AS path,
+        \\  'Funnel fixture' AS page_title, 'alpha.example' AS hostname,
+        \\  CAST(v.anonymous_id AS UUID) AS anonymous_id,
+        \\  v.identity_quality AS identity_quality, '' AS user_id,
+        \\  CAST(v.session_id AS UUID) AS session_id, v.sequence AS sequence,
+        \\  v.sequence = 0 AS session_start, '' AS referrer_host,
+        \\  v.country AS country_code, 'en' AS language,
+        \\  'Chrome' AS browser_family, 'Linux' AS os_family,
+        \\  'desktop' AS device_category, '' AS utm_source,
+        \\  '' AS utm_medium, '' AS utm_campaign,
+        \\  '' AS utm_term, '' AS utm_content,
+        \\  v.properties AS properties_json, '{}' AS user_traits_json,
+        \\  CAST(NULL AS DECIMAL(18, 6)) AS value_amount,
+        \\  '' AS value_currency, 0 AS engagement_ms,
+        \\  0 AS max_scroll_depth,
+        \\  from_hex(md5(v.anonymous_id)) AS visitor_day_id,
+        \\  v.sequence = 0 AS visitor_day_start,
+        \\  repeat('f', 64) AS event_payload_digest,
+        \\  1 AS traffic_class, 2 AS classifier_version, '' AS bot_rule,
+        \\  0 AS signal_version, FALSE AS navigator_webdriver,
+        \\  0 AS trusted_interactions, FALSE AS was_visible,
+        \\  FALSE AS was_prerendered, 0 AS viewport_bucket,
+        \\  0 AS beacon_timing_bucket, 0 AS client_hint_consistency,
+        \\  FALSE AS accept_language_present,
+        \\  from_hex('77777777777777777777777777777777') AS network_day_id
+        \\) FROM events template CROSS JOIN (VALUES
+        \\ ('00000000-0000-4000-8000-000000000701',1738368000000000,1738368000000000,'2025-02-01',2,'start','00000000-0000-4000-8000-0000000007a1',1,'00000000-0000-4000-8000-0000000007b1',0,'{}','US'),
+        \\ ('00000000-0000-4000-8000-000000000702',1738368001000000,1738368001000000,'2025-02-01',2,'detour','00000000-0000-4000-8000-0000000007a1',1,'00000000-0000-4000-8000-0000000007b1',1,'{}','US'),
+        \\ ('00000000-0000-4000-8000-000000000703',1738368002000000,1738368002000000,'2025-02-01',2,'finish','00000000-0000-4000-8000-0000000007a1',1,'00000000-0000-4000-8000-0000000007b1',2,'{}','US'),
+        \\ ('00000000-0000-4000-8000-000000000704',1738368010000000,1738368010000000,'2025-02-01',2,'internal_start','00000000-0000-4000-8000-0000000007a2',1,'00000000-0000-4000-8000-0000000007b2',0,'{}','US'),
+        \\ ('00000000-0000-4000-8000-000000000705',1738368011000000,1738368011000000,'2025-02-01',2,'detour','00000000-0000-4000-8000-0000000007a2',1,'00000000-0000-4000-8000-0000000007b2',1,'{}','US'),
+        \\ ('00000000-0000-4000-8000-000000000706',1738368012000000,1738368012000000,'2025-02-01',2,'internal_start','00000000-0000-4000-8000-0000000007a2',1,'00000000-0000-4000-8000-0000000007b2',2,'{}','US'),
+        \\ ('00000000-0000-4000-8000-000000000707',1738368013000000,1738368013000000,'2025-02-01',4,'identify','00000000-0000-4000-8000-0000000007a2',1,'00000000-0000-4000-8000-0000000007b2',3,'{}','US'),
+        \\ ('00000000-0000-4000-8000-000000000708',1738368014000000,1738368014000000,'2025-02-01',3,'engagement','00000000-0000-4000-8000-0000000007a2',1,'00000000-0000-4000-8000-0000000007b2',4,'{}','US'),
+        \\ ('00000000-0000-4000-8000-000000000709',1738368015000000,1738368015000000,'2025-02-01',2,'internal_finish','00000000-0000-4000-8000-0000000007a2',1,'00000000-0000-4000-8000-0000000007b2',5,'{}','US'),
+        \\ ('00000000-0000-4000-8000-000000000710',1738368020000000,1738368020000000,'2025-02-01',2,'same','00000000-0000-4000-8000-0000000007a3',1,'00000000-0000-4000-8000-0000000007b3',0,'{}','US'),
+        \\ ('00000000-0000-4000-8000-000000000711',1738368030000000,1738368030000000,'2025-02-01',2,'same','00000000-0000-4000-8000-0000000007a4',1,'00000000-0000-4000-8000-0000000007b4',0,'{}','US'),
+        \\ ('00000000-0000-4000-8000-000000000712',1738368030000000,1738368030000000,'2025-02-01',2,'same','00000000-0000-4000-8000-0000000007a4',1,'00000000-0000-4000-8000-0000000007b4',1,'{}','US'),
+        \\ ('00000000-0000-4000-8000-000000000713',1738368040000000,1738368040000000,'2025-02-01',2,'tie_start','00000000-0000-4000-8000-0000000007a5',1,'00000000-0000-4000-8000-0000000007b5',0,'{}','US'),
+        \\ ('00000000-0000-4000-8000-000000000714',1738368040000000,1738368040000000,'2025-02-01',2,'tie_finish','00000000-0000-4000-8000-0000000007a5',1,'00000000-0000-4000-8000-0000000007b5',1,'{}','US'),
+        \\ ('00000000-0000-4000-8000-000000000715',1738368050000000,1738368050000000,'2025-02-01',2,'window_start','00000000-0000-4000-8000-0000000007a6',1,'00000000-0000-4000-8000-0000000007b6',0,'{}','US'),
+        \\ ('00000000-0000-4000-8000-000000000716',1738375250000000,1738375250000000,'2025-02-01',2,'window_finish','00000000-0000-4000-8000-0000000007a6',1,'00000000-0000-4000-8000-0000000007b6',1,'{}','US'),
+        \\ ('00000000-0000-4000-8000-000000000717',1738378850000000,1738378850000000,'2025-02-01',2,'window_start','00000000-0000-4000-8000-0000000007a6',1,'00000000-0000-4000-8000-0000000007b6',2,'{}','US'),
+        \\ ('00000000-0000-4000-8000-000000000718',1738380650000000,1738380650000000,'2025-02-01',2,'window_finish','00000000-0000-4000-8000-0000000007a6',1,'00000000-0000-4000-8000-0000000007b6',3,'{}','US'),
+        \\ ('00000000-0000-4000-8000-000000000719',1738368060000000,1738368060000000,'2025-02-01',2,'start','00000000-0000-4000-8000-0000000007a7',1,'00000000-0000-4000-8000-0000000007b7',0,'{}','US'),
+        \\ ('00000000-0000-4000-8000-000000000720',1738369860000000,1738369860000000,'2025-02-01',2,'finish','00000000-0000-4000-8000-0000000007a8',1,'00000000-0000-4000-8000-0000000007b8',0,'{}','US'),
+        \\ ('00000000-0000-4000-8000-000000000721',1738368070000000,1738368070000000,'2025-02-01',2,'start','00000000-0000-4000-8000-0000000007a9',3,'00000000-0000-4000-8000-0000000007b9',0,'{}','ZZ'),
+        \\ ('00000000-0000-4000-8000-000000000722',1738368071000000,1738368071000000,'2025-02-01',2,'finish','00000000-0000-4000-8000-0000000007a9',3,'00000000-0000-4000-8000-0000000007b9',1,'{}','ZZ'),
+        \\ ('00000000-0000-4000-8000-000000000723',1738368080000000,1738368080000000,'2025-02-01',2,'start','00000000-0000-4000-8000-0000000007aa',2,'00000000-0000-4000-8000-0000000007ba',0,'{}','FR'),
+        \\ ('00000000-0000-4000-8000-000000000724',1738368081000000,1738368081000000,'2025-02-01',2,'finish','00000000-0000-4000-8000-0000000007aa',2,'00000000-0000-4000-8000-0000000007ba',1,'{}','FR'),
+        \\ ('00000000-0000-4000-8000-000000000725',1738368090000000,1738368090000000,'2025-02-01',2,'start','00000000-0000-4000-8000-0000000007ab',1,'00000000-0000-4000-8000-0000000007bb',0,'{}','US'),
+        \\ ('00000000-0000-4000-8000-000000000726',1738368091000000,1738368091000000,'2025-02-01',2,'finish','00000000-0000-4000-8000-0000000007ab',1,'00000000-0000-4000-8000-0000000007bb',1,'{}','US'),
+        \\ ('00000000-0000-4000-8000-000000000727',1738368100000000,1738368100000000,'2025-02-01',2,'start','00000000-0000-4000-8000-0000000007ac',1,'00000000-0000-4000-8000-0000000007bc',0,'{}','DE'),
+        \\ ('00000000-0000-4000-8000-000000000728',1738368101000000,1738368101000000,'2025-02-01',2,'finish','00000000-0000-4000-8000-0000000007ac',1,'00000000-0000-4000-8000-0000000007bc',1,'{}','DE'),
+        \\ ('00000000-0000-4000-8000-000000000729',1738368110000000,1738368110000000,'2025-02-01',2,'buy','00000000-0000-4000-8000-0000000007ad',1,'00000000-0000-4000-8000-0000000007bd',0,'{"plan":"pro"}','US'),
+        \\ ('00000000-0000-4000-8000-000000000730',1738368111000000,1738368111000000,'2025-02-01',2,'done','00000000-0000-4000-8000-0000000007ad',1,'00000000-0000-4000-8000-0000000007bd',1,'{}','US'),
+        \\ ('00000000-0000-4000-8000-000000000731',1738281600000000,1738281600000000,'2025-01-31',2,'start','00000000-0000-4000-8000-0000000007ae',1,'00000000-0000-4000-8000-0000000007be',0,'{}','US'),
+        \\ ('00000000-0000-4000-8000-000000000732',1738281601000000,1738281601000000,'2025-01-31',2,'finish','00000000-0000-4000-8000-0000000007ae',1,'00000000-0000-4000-8000-0000000007be',1,'{}','US')
+        \\) v(event_id,occurred_at,received_at,local_date,kind,event_name,
+        \\    anonymous_id,identity_quality,session_id,sequence,properties,country)
+        \\WHERE template.site_id = '__SITE__'
+        \\  AND template.event_id = CAST(
+        \\    '00000000-0000-4000-8000-000000000001' AS UUID);
+    ;
+    const rendered_sql = try std.mem.replaceOwned(
+        u8,
+        allocator,
+        sql_template,
+        "__SITE__",
+        site_id,
+    );
+    defer allocator.free(rendered_sql);
+    const sql = try allocator.dupeSentinel(u8, rendered_sql, 0);
+    defer allocator.free(sql);
+    try store.database.exec(sql);
+    try store.checkpoint();
+
+    const base_selectors = [_]analysis.EventSelector{
+        .{ .kind = .exact_event, .value = "start" },
+        .{ .kind = .exact_event, .value = "finish" },
+    };
+    const base = funnel.ResultRequest{
+        .site_id = site_id,
+        .range = .{ .start = "2025-02-01", .end = "2025-02-01" },
+        .comparison_range = .{ .start = "2025-01-31", .end = "2025-01-31" },
+        .order = .sequential,
+        .scope = .sessions,
+        .window = .same_session,
+        .selectors = &base_selectors,
+    };
+    const sequential = try analysis_store.executeFunnelResult(
+        allocator,
+        &store,
+        base,
+    );
+    if (sequential.current.entrants != 6 or
+        sequential.current.completions != 5 or
+        sequential.comparison.?.entrants != 1 or
+        sequential.comparison.?.completions != 1)
+    {
+        return error.InvalidFunnelSemanticFixture;
+    }
+    var consecutive_request = base;
+    consecutive_request.order = .consecutive;
+    const consecutive = try analysis_store.executeFunnelResult(
+        allocator,
+        &store,
+        consecutive_request,
+    );
+    if (consecutive.current.entrants != 6 or
+        consecutive.current.completions != 4)
+    {
+        return error.InvalidFunnelSemanticFixture;
+    }
+
+    const internal_selectors = [_]analysis.EventSelector{
+        .{ .kind = .exact_event, .value = "internal_start" },
+        .{ .kind = .exact_event, .value = "internal_finish" },
+    };
+    var internal_request = base;
+    internal_request.order = .consecutive;
+    internal_request.comparison_range = null;
+    internal_request.selectors = &internal_selectors;
+    const internal = try analysis_store.executeFunnelResult(
+        allocator,
+        &store,
+        internal_request,
+    );
+    if (internal.current.entrants != 1 or internal.current.completions != 1) {
+        return error.InvalidFunnelSemanticFixture;
+    }
+
+    const repeated_selectors = [_]analysis.EventSelector{
+        .{ .kind = .exact_event, .value = "same" },
+        .{ .kind = .exact_event, .value = "same" },
+    };
+    var repeated_request = base;
+    repeated_request.comparison_range = null;
+    repeated_request.selectors = &repeated_selectors;
+    const repeated = try analysis_store.executeFunnelResult(
+        allocator,
+        &store,
+        repeated_request,
+    );
+    if (repeated.current.entrants != 2 or
+        repeated.current.completions != 1 or
+        repeated.current.steps[1].median_from_prior_micros != 0)
+    {
+        return error.InvalidFunnelSemanticFixture;
+    }
+
+    const tie_selectors = [_]analysis.EventSelector{
+        .{ .kind = .exact_event, .value = "tie_start" },
+        .{ .kind = .exact_event, .value = "tie_finish" },
+    };
+    var tie_request = base;
+    tie_request.comparison_range = null;
+    tie_request.order = .consecutive;
+    tie_request.selectors = &tie_selectors;
+    const tie = try analysis_store.executeFunnelResult(
+        allocator,
+        &store,
+        tie_request,
+    );
+    if (tie.current.completions != 1 or
+        tie.current.steps[1].median_from_prior_micros != 0)
+    {
+        return error.InvalidFunnelSemanticFixture;
+    }
+
+    const window_selectors = [_]analysis.EventSelector{
+        .{ .kind = .exact_event, .value = "window_start" },
+        .{ .kind = .exact_event, .value = "window_finish" },
+    };
+    var window_request = base;
+    window_request.comparison_range = null;
+    window_request.window = .one_hour;
+    window_request.selectors = &window_selectors;
+    const window_result = try analysis_store.executeFunnelResult(
+        allocator,
+        &store,
+        window_request,
+    );
+    if (window_result.current.entrants != 1 or
+        window_result.current.completions != 1 or
+        window_result.current.median_total_micros != 1_800_000_000)
+    {
+        return error.InvalidFunnelSemanticFixture;
+    }
+
+    const cross_selectors = [_]analysis.EventSelector{
+        .{ .kind = .exact_event, .value = "start" },
+        .{ .kind = .exact_event, .value = "finish" },
+    };
+    var visitor_request = base;
+    visitor_request.comparison_range = null;
+    visitor_request.scope = .visitors;
+    visitor_request.selectors = &cross_selectors;
+    const same_session = try analysis_store.executeFunnelResult(
+        allocator,
+        &store,
+        visitor_request,
+    );
+    if (same_session.current.entrants != 4 or
+        same_session.current.completions != 3)
+    {
+        return error.InvalidFunnelSemanticFixture;
+    }
+    inline for (.{
+        funnel.Window.one_hour,
+        funnel.Window.one_day,
+        funnel.Window.seven_days,
+        funnel.Window.thirty_days,
+    }) |window| {
+        visitor_request.window = window;
+        const result = try analysis_store.executeFunnelResult(
+            allocator,
+            &store,
+            visitor_request,
+        );
+        if (result.current.entrants != 4 or result.current.completions != 4 or
+            result.current.identity_coverage.?.ephemeral_step_one != 1 or
+            result.current.identity_coverage.?.legacy_step_one != 1)
+        {
+            return error.InvalidFunnelSemanticFixture;
+        }
+    }
+
+    const filter = [_]analysis.Clause{.{
+        .scope = .event,
+        .field = .{ .kind = .country },
+        .operator = .is,
+        .scalar_type = .string,
+        .values = &.{"DE"},
+    }};
+    var filtered_request = base;
+    filtered_request.filters = .{ .clauses = &filter };
+    const filtered = try analysis_store.executeFunnelResult(
+        allocator,
+        &store,
+        filtered_request,
+    );
+    if (filtered.current.entrants != 1 or filtered.current.completions != 1 or
+        filtered.comparison == null or
+        filtered.comparison.?.entrants != 0 or
+        filtered.comparison.?.completions != 0)
+    {
+        return error.InvalidFunnelSemanticFixture;
+    }
+
+    const plan_values = [_][]const u8{"pro"};
+    const plan_predicates = [_]analysis.PropertyPredicate{.{
+        .property_ref = .{ .name = "plan", .scalar_type = .string },
+        .operator = .is,
+        .values = &plan_values,
+    }};
+    const property_selectors = [_]analysis.EventSelector{
+        .{
+            .kind = .exact_event,
+            .value = "buy",
+            .predicates = &plan_predicates,
+        },
+        .{ .kind = .exact_event, .value = "done" },
+    };
+    var property_request = base;
+    property_request.comparison_range = null;
+    property_request.selectors = &property_selectors;
+    const property_result = try analysis_store.executeFunnelResult(
+        allocator,
+        &store,
+        property_request,
+    );
+    if (property_result.current.entrants != 1 or
+        property_result.current.completions != 1)
+    {
+        return error.InvalidFunnelSemanticFixture;
+    }
+
+    var zero_request = base;
+    zero_request.comparison_range = null;
+    zero_request.selectors = &.{
+        .{ .kind = .exact_event, .value = "never_start" },
+        .{ .kind = .exact_event, .value = "never_finish" },
+    };
+    const zero = try analysis_store.executeFunnelResult(
+        allocator,
+        &store,
+        zero_request,
+    );
+    if (zero.current.entrants != 0 or zero.current.completions != 0 or
+        zero.current.median_total_micros != null)
+    {
+        return error.InvalidFunnelSemanticFixture;
+    }
+
+    try std.json.Stringify.value(.{
+        .sequential = true,
+        .consecutive = true,
+        .restart_and_internal_events = true,
+        .repeated_one_event_trap = true,
+        .same_timestamp_sequence = true,
+        .window_retry = true,
+        .visitor_identity_links = true,
+        .all_windows = true,
+        .legacy_ephemeral_coverage = true,
+        .event_filter = true,
+        .property_goal_selector = true,
+        .comparison = true,
+        .zero = true,
+    }, .{}, output);
+    try output.writeByte('\n');
+}
+
+pub fn funnelResultProfile(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    output: *std.Io.Writer,
+    directory: []const u8,
+    site_slug: []const u8,
+    current_start: []const u8,
+    current_end: []const u8,
+    comparison_start: []const u8,
+    comparison_end: []const u8,
+    explain: bool,
+) !void {
+    try domain.validateSlug(site_slug);
+    const metadata_path = try std.fs.path.join(
+        allocator,
+        &.{ directory, "meta.db" },
+    );
+    var metadata = try meta.Store.open(allocator, metadata_path);
+    defer metadata.deinit();
+    try metadata.requireCurrent();
+    const site_id = try metadata.siteIdBySlug(allocator, site_slug);
+    const policy = try metadata.sitePolicy(allocator, site_id);
+    const goals = try metadata.listGoals(allocator, site_slug);
+    const resolved = try allocator.alloc(analysis.ResolvedGoal, goals.len);
+    for (resolved, goals) |*target, goal| target.* = .{
+        .id = goal.id,
+        .selector = .{
+            .kind = switch (goal.match_kind) {
+                .event => .exact_event,
+                .path => .exact_page,
+                .prefix => .page_prefix,
+            },
+            .value = goal.match_value,
+            .predicates = goal.predicates,
+        },
+    };
+    const event_path = try std.fs.path.join(
+        allocator,
+        &.{ directory, "events.duckdb" },
+    );
+    var store = try events.Store.open(allocator, event_path);
+    defer store.deinit();
+    try store.requireCurrent();
+    const selectors = [_]analysis.EventSelector{
+        .{ .kind = .exact_page, .value = "/" },
+        .{ .kind = .exact_page, .value = "/pricing" },
+        .{ .kind = .exact_page, .value = "/docs" },
+        .{ .kind = .exact_page, .value = "/features" },
+        .{ .kind = .exact_page, .value = "/download" },
+        .{ .kind = .exact_page, .value = "/install" },
+        .{ .kind = .exact_page, .value = "/account" },
+        .{ .kind = .exact_page, .value = "/checkout" },
+    };
+    const request = funnel.ResultRequest{
+        .site_id = site_id,
+        .range = .{ .start = current_start, .end = current_end },
+        .comparison_range = .{
+            .start = comparison_start,
+            .end = comparison_end,
+        },
+        .order = .sequential,
+        .scope = .sessions,
+        .window = .same_session,
+        .selectors = &selectors,
+        .active_goals = if (policy.strict_mode) resolved else &.{},
+        .strict_traffic_mode = policy.strict_mode,
+        .timeout_ms = analysis.maximum_timeout_ms,
+    };
+    if (explain) {
+        try output.writeAll(try analysis_store.profileFunnelResult(
+            allocator,
+            &store,
+            request,
+        ));
+        return;
+    }
+    if (builtin.mode == .debug) {
+        try std.json.Stringify.value(.{
+            .strict_mode = policy.strict_mode,
+            .active_goal_count = goals.len,
+            .selector_count = selectors.len,
+            .comparison_populated = false,
+            .performance_enforced = false,
+            .preview_availability_rows = 0,
+            .current_entrants = @as(?i64, null),
+            .comparison_entrants = @as(?i64, null),
+            .current_sample_micros = &[_]i64{},
+            .comparison_sample_micros = &[_]i64{},
+            .sample_micros = &[_]i64{},
+            .current_p95_micros = @as(?i64, null),
+            .comparison_p95_micros = @as(?i64, null),
+            .p95_micros = @as(?i64, null),
+            .timeout_interrupted = false,
+            .connection_reused = false,
+        }, .{}, output);
+        try output.writeByte('\n');
+        return;
+    }
+    var timeout_request = request;
+    timeout_request.timeout_ms = 1;
+    if (analysis_store.executeFunnelPreview(
+        allocator,
+        &store,
+        timeout_request,
+    )) |_| {
+        return error.ExpectedFunnelResultTimeout;
+    } else |err| if (err != error.AnalysisTimeout) return err;
+    const preview = try analysis_store.executeFunnelPreview(
+        allocator,
+        &store,
+        request,
+    );
+    const last = preview.result;
+    var current_request = request;
+    current_request.comparison_range = null;
+    var comparison_request = request;
+    comparison_request.range = request.comparison_range.?;
+    comparison_request.comparison_range = null;
+    _ = try analysis_store.executeFunnelResult(
+        allocator,
+        &store,
+        current_request,
+    );
+    _ = try analysis_store.executeFunnelResult(
+        allocator,
+        &store,
+        comparison_request,
+    );
+    var current_samples: [10]i64 = undefined;
+    var comparison_samples: [10]i64 = undefined;
+    var combined_samples: [10]i64 = undefined;
+    for (&current_samples, &comparison_samples, &combined_samples) |
+        *current_elapsed,
+        *comparison_elapsed,
+        *combined_elapsed,
+    | {
+        const started = std.Io.Clock.awake.now(io).nanoseconds;
+        _ = try analysis_store.executeFunnelResult(
+            allocator,
+            &store,
+            current_request,
+        );
+        current_elapsed.* = @intCast(@divTrunc(
+            std.Io.Clock.awake.now(io).nanoseconds - started,
+            std.time.ns_per_us,
+        ));
+        const comparison_started = std.Io.Clock.awake.now(io).nanoseconds;
+        _ = try analysis_store.executeFunnelResult(
+            allocator,
+            &store,
+            comparison_request,
+        );
+        comparison_elapsed.* = @intCast(@divTrunc(
+            std.Io.Clock.awake.now(io).nanoseconds - comparison_started,
+            std.time.ns_per_us,
+        ));
+        combined_elapsed.* = std.math.add(
+            i64,
+            current_elapsed.*,
+            comparison_elapsed.*,
+        ) catch return error.InvalidFunnelProfileResult;
+    }
+    std.mem.sort(i64, &current_samples, {}, std.sort.asc(i64));
+    std.mem.sort(i64, &comparison_samples, {}, std.sort.asc(i64));
+    std.mem.sort(i64, &combined_samples, {}, std.sort.asc(i64));
+    if (preview.availability.len != selectors.len or
+        last.current.steps.len != selectors.len or last.comparison == null or
+        last.comparison.?.steps.len != selectors.len or
+        last.current.entrants == 0 or last.current.completions == 0 or
+        last.comparison.?.entrants == 0 or last.comparison.?.completions == 0)
+    {
+        return error.InvalidFunnelProfileResult;
+    }
+    try std.json.Stringify.value(.{
+        .strict_mode = policy.strict_mode,
+        .active_goal_count = goals.len,
+        .selector_count = selectors.len,
+        .comparison_populated = true,
+        .performance_enforced = true,
+        .preview_availability_rows = preview.availability.len,
+        .current_entrants = last.current.entrants,
+        .current_completions = last.current.completions,
+        .comparison_entrants = last.comparison.?.entrants,
+        .comparison_completions = last.comparison.?.completions,
+        .current_sample_micros = current_samples,
+        .comparison_sample_micros = comparison_samples,
+        .sample_micros = combined_samples,
+        .current_p95_micros = current_samples[9],
+        .comparison_p95_micros = comparison_samples[9],
+        .p50_micros = combined_samples[4],
+        .p95_micros = combined_samples[9],
         .timeout_interrupted = true,
         .connection_reused = true,
     }, .{}, output);

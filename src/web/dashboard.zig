@@ -2190,6 +2190,34 @@ fn postAction(
         });
         return;
     };
+    const funnel_result_context: ?controller.FunnelResultContext = if (funnel_form) value: {
+        const funnel_calendar = resolvePageCalendar(dependencies, .{
+            .site = form.required("site") catch {
+                try writeError(output, .{
+                    .status = 400,
+                    .title = "Invalid form",
+                    .message = "The submitted funnel site was missing.",
+                });
+                return;
+            },
+            .range = form_context.range,
+            .comparison = form_context.comparison,
+        }) catch {
+            try writeError(output, .{
+                .status = 503,
+                .title = "Site calendar unavailable",
+                .message = "The funnel cannot be evaluated because this site's validated calendar is unavailable.",
+            });
+            return;
+        };
+        break :value .{
+            .range = form_context.range,
+            .comparison_range = if (funnel_calendar.comparison_range) |*range|
+                range.view()
+            else
+                null,
+        };
+    } else null;
     if (action == .add_goal or action == .edit_goal) {
         const submission = (if (action == .add_goal)
             controller.addGoal(
@@ -2247,6 +2275,7 @@ fn postAction(
                 dependencies.events,
                 form,
                 goal_action_context,
+                funnel_result_context.?,
                 now,
                 dependencies.report_timeout_ms,
             )
@@ -2257,6 +2286,7 @@ fn postAction(
                 dependencies.events,
                 form,
                 goal_action_context,
+                funnel_result_context.?,
                 now,
                 dependencies.report_timeout_ms,
             )) catch |err| {
@@ -2558,6 +2588,7 @@ fn funnelSubmissionPage(
     page.funnel_draft = submission.draft;
     if (page.funnel_management) |*management| {
         management.draft_steps = submission.steps;
+        management.result = submission.result;
     } else return error.MissingFunnelManagement;
     try writePage(output, 200, page);
 }

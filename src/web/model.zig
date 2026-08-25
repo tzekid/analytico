@@ -371,6 +371,7 @@ pub const FunnelManagement = struct {
     definitions: []const FunnelDefinitionView = &.{},
     selected: ?FunnelDefinitionView = null,
     draft_steps: []const FunnelStepView = &.{},
+    result: ?funnel.Result = null,
     goals: []const GoalDefinitionView = &.{},
     filter_count: usize = 0,
     segment_name: []const u8 = "",

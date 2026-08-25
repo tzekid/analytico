@@ -1704,6 +1704,40 @@ pub fn loadPage(
             try funnelDefinitionView(allocator, query, definition, goals)
         else
             null;
+        const ordered_result: ?funnel.Result = if (query.funnel_screen == .detail and
+            selected_funnel_definition != null and selected_view != null and
+            !funnelStepsStale(selected_view.?.steps))
+        value: {
+            const context = calendar_context orelse
+                return error.MissingCalendarContext;
+            const definition = selected_funnel_definition.?;
+            const request = try funnelResultRequest(
+                allocator,
+                metadata,
+                selected.id,
+                selected.slug,
+                definition.definition,
+                .{
+                    .range = query.range,
+                    .comparison_range = if (context.comparison_range) |*range|
+                        range.view()
+                    else
+                        null,
+                },
+                resolved_filters.filters,
+                goals,
+                collection_policy.strict_mode,
+                report_timeout_ms,
+            );
+            break :value analysis_store.executeFunnelResult(
+                allocator,
+                event_store,
+                request,
+            ) catch |err| {
+                if (err == error.AnalysisTimeout) return error.ReportTimeout;
+                return err;
+            };
+        } else null;
         funnel_management = .{
             .screen = query.funnel_screen,
             .definitions = try funnelDefinitionViews(
@@ -1719,6 +1753,7 @@ pub fn loadPage(
                 try defaultFunnelStepViews(allocator)
             else
                 &.{},
+            .result = ordered_result,
             .goals = try goalDefinitionViews(allocator, query, goals),
             .filter_count = query.analysis_filters.clauses.len,
             .segment_name = resolved_filters.segment_name,
@@ -1782,20 +1817,6 @@ pub fn loadPage(
                 query.subject,
             );
         }
-        if (query.funnel_screen == .detail) {
-            const definition = selected_funnel_definition orelse
-                break :value null;
-            const compatible = metadata.funnelSteps(
-                allocator,
-                selected.slug,
-                definition.name,
-            ) catch |err| switch (err) {
-                error.UnsupportedLegacyFunnel, error.FunnelArchived => break :value null,
-                else => return err,
-            };
-            query.subject = definition.name;
-            break :value compatible;
-        }
         break :value null;
     };
     const has_subject = switch (query.kind) {
@@ -1820,8 +1841,7 @@ pub fn loadPage(
     const result: ?report.Result = if (destination.runsReport() and
         destination != .overview and has_subject and
         (query.kind != .goal or query.goal_screen == .none) and
-        (query.kind != .funnel or query.funnel_screen == .none or
-            query.funnel_screen == .detail))
+        (query.kind != .funnel or query.funnel_screen == .none))
         try reports.runWithTimeout(
             allocator,
             event_store,
@@ -3243,6 +3263,11 @@ fn funnelDefinitionView(
     };
 }
 
+fn funnelStepsStale(steps: []const model.FunnelStepView) bool {
+    for (steps) |step| if (step.stale) return true;
+    return false;
+}
+
 fn funnelStepViews(
     allocator: std.mem.Allocator,
     steps: []const funnel.Step,
@@ -4075,7 +4100,13 @@ pub fn goalDraftFromForm(
 pub const FunnelSubmission = struct {
     draft: model.FunnelDraft,
     steps: []const model.FunnelStepView,
+    result: ?funnel.Result = null,
     previewed: bool,
+};
+
+pub const FunnelResultContext = struct {
+    range: analysis.LocalDateRange,
+    comparison_range: ?analysis.LocalDateRange,
 };
 
 const FunnelIntent = union(enum) {
@@ -4095,6 +4126,7 @@ pub fn addFunnel(
     event_store: *events.Store,
     form: Form,
     action_context: GoalActionContext,
+    result_context: FunnelResultContext,
     now_micros: i64,
     report_timeout_ms: u32,
 ) !?FunnelSubmission {
@@ -4117,28 +4149,31 @@ pub fn addFunnel(
     }
     try domain.validateName(draft.name, 120);
     const definition = try funnelDefinitionFromDraft(allocator, draft);
-    const availability = try evaluateFunnelAvailability(
+    const preview_intent = switch (intent) {
+        .preview => true,
+        else => false,
+    };
+    const evaluation = try evaluateFunnel(
         allocator,
         metadata,
         event_store,
         site,
-        try formContext(form),
+        result_context,
         action_context,
         definition,
         report_timeout_ms,
+        preview_intent,
     );
     const active_goals = try metadata.listGoals(allocator, site);
-    if (switch (intent) {
-        .preview => true,
-        else => false,
-    }) return .{
+    if (preview_intent) return .{
         .draft = draft,
         .steps = try funnelDraftStepViews(
             allocator,
             draft.steps,
             active_goals,
-            availability,
+            evaluation.availability,
         ),
+        .result = evaluation.result,
         .previewed = true,
     };
     const id = try domain.randomUuid(io);
@@ -4159,6 +4194,7 @@ pub fn editFunnel(
     event_store: *events.Store,
     form: Form,
     action_context: GoalActionContext,
+    result_context: FunnelResultContext,
     now_micros: i64,
     report_timeout_ms: u32,
 ) !?FunnelSubmission {
@@ -4182,28 +4218,31 @@ pub fn editFunnel(
     }
     try domain.validateName(draft.name, 120);
     const definition = try funnelDefinitionFromDraft(allocator, draft);
-    const availability = try evaluateFunnelAvailability(
+    const preview_intent = switch (intent) {
+        .preview => true,
+        else => false,
+    };
+    const evaluation = try evaluateFunnel(
         allocator,
         metadata,
         event_store,
         site,
-        try formContext(form),
+        result_context,
         action_context,
         definition,
         report_timeout_ms,
+        preview_intent,
     );
     const active_goals = try metadata.listGoals(allocator, site);
-    if (switch (intent) {
-        .preview => true,
-        else => false,
-    }) return .{
+    if (preview_intent) return .{
         .draft = draft,
         .steps = try funnelDraftStepViews(
             allocator,
             draft.steps,
             active_goals,
-            availability,
+            evaluation.availability,
         ),
+        .result = evaluation.result,
         .previewed = true,
     };
     try metadata.editFunnel(
@@ -4482,16 +4521,22 @@ fn funnelDefinitionFromDraft(
     return definition;
 }
 
-fn evaluateFunnelAvailability(
+const FunnelEvaluation = struct {
+    availability: ?[]const analysis.FunnelAvailabilityRow,
+    result: ?funnel.Result,
+};
+
+fn evaluateFunnel(
     allocator: std.mem.Allocator,
     metadata: *meta.Store,
     event_store: *events.Store,
     site_slug: []const u8,
-    context: FormContext,
+    result_context: FunnelResultContext,
     action_context: GoalActionContext,
     definition: funnel.Definition,
     report_timeout_ms: u32,
-) ![]const analysis.FunnelAvailabilityRow {
+    include_availability: bool,
+) !FunnelEvaluation {
     const site = try metadata.siteConfigurationBySlug(allocator, site_slug);
     const policy = try metadata.sitePolicy(allocator, site.id);
     const active_goals = try metadata.listGoals(allocator, site_slug);
@@ -4503,6 +4548,55 @@ fn evaluateFunnelAvailability(
         action_context.filters,
         action_context.segment_id,
     );
+    const request = try funnelResultRequest(
+        allocator,
+        metadata,
+        site.id,
+        site_slug,
+        definition,
+        result_context,
+        resolved_filters.filters,
+        active_goals,
+        policy.strict_mode,
+        report_timeout_ms,
+    );
+    if (include_availability) {
+        const preview = analysis_store.executeFunnelPreview(
+            allocator,
+            event_store,
+            request,
+        ) catch |err| {
+            if (err == error.AnalysisTimeout) return error.ReportTimeout;
+            return err;
+        };
+        return .{
+            .availability = preview.availability,
+            .result = preview.result,
+        };
+    }
+    _ = analysis_store.executeFunnelResult(
+        allocator,
+        event_store,
+        request,
+    ) catch |err| {
+        if (err == error.AnalysisTimeout) return error.ReportTimeout;
+        return err;
+    };
+    return .{ .availability = null, .result = null };
+}
+
+fn funnelResultRequest(
+    allocator: std.mem.Allocator,
+    metadata: *meta.Store,
+    site_id: []const u8,
+    site_slug: []const u8,
+    definition: funnel.Definition,
+    result_context: FunnelResultContext,
+    filters: analysis.FilterSet,
+    active_goals: []const meta.Goal,
+    strict_traffic_mode: bool,
+    report_timeout_ms: u32,
+) !funnel.ResultRequest {
     const selectors = try allocator.alloc(
         analysis.EventSelector,
         definition.steps.len,
@@ -4522,24 +4616,21 @@ fn evaluateFunnelAvailability(
             break :value goalSelector(goal);
         },
     };
-    return analysis_store.executeFunnelAvailability(
-        allocator,
-        event_store,
-        .{
-            .site_id = site.id,
-            .range = context.range,
-            .selectors = selectors,
-            .filters = resolved_filters.filters,
-            .active_goals = if (policy.strict_mode)
-                try resolveAnalysisGoals(allocator, active_goals)
-            else
-                &.{},
-            .strict_traffic_mode = policy.strict_mode,
-            .timeout_ms = report_timeout_ms,
-        },
-    ) catch |err| {
-        if (err == error.AnalysisTimeout) return error.ReportTimeout;
-        return err;
+    return .{
+        .site_id = site_id,
+        .range = result_context.range,
+        .comparison_range = result_context.comparison_range,
+        .order = definition.order,
+        .scope = definition.scope,
+        .window = definition.window,
+        .selectors = selectors,
+        .filters = filters,
+        .active_goals = if (strict_traffic_mode)
+            try resolveAnalysisGoals(allocator, active_goals)
+        else
+            &.{},
+        .strict_traffic_mode = strict_traffic_mode,
+        .timeout_ms = report_timeout_ms,
     };
 }
 
