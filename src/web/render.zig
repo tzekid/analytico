@@ -7,7 +7,7 @@ const components = @import("components.zig");
 const model = @import("model.zig");
 
 pub const stylesheet = @embedFile("style.css");
-pub const stylesheet_path = "/admin/app.v11.css";
+pub const stylesheet_path = "/admin/app.v12.css";
 pub const htmx = @embedFile("htmx_js");
 pub const htmx_gzip = @embedFile("htmx_gzip");
 pub const htmx_path = "/admin/htmx.28fae7bb.js";
@@ -86,8 +86,15 @@ pub fn page(output: *std.Io.Writer, value: model.Page) !void {
         },
         .journeys => {
             try journeyNavigation(output, value);
-            try reportSection(output, value);
-            try definitions(output, value);
+            if (value.goal_management != null) {
+                try goalManagement(output, value);
+                if (value.goal_management.?.screen == .detail) {
+                    try reportSection(output, value);
+                }
+            } else {
+                try reportSection(output, value);
+                try definitions(output, value);
+            }
         },
         .sessions => try components.emptyState(output, .{
             .id = "sessions-empty",
@@ -571,6 +578,11 @@ fn primaryNavigation(
     try output.writeAll("\" aria-label=\"Primary\">");
     inline for (std.meta.tags(model.Destination)) |destination| {
         var destination_query = value.query;
+        destination_query.goal_screen = .none;
+        destination_query.goal_id = "";
+        destination_query.goal_page = 1;
+        destination_query.goal_search = "";
+        destination_query.goal_entity_page = 1;
         var default_analysis_series = [_]analysis.Metric{.{ .kind = .visitors }};
         if (destination == .analyze and
             destination_query.analysis_series.len == 0 and
@@ -2556,16 +2568,23 @@ fn journeyNavigation(output: *std.Io.Writer, value: model.Page) !void {
     try journeyTypeLink(output, value.query, .goal, "Goals");
     try journeyTypeLink(output, value.query, .funnel, "Funnels");
     try output.writeAll("</nav>");
-    if (value.goals.len != 0 or value.funnels.len != 0) {
+    const show_legacy_goals = value.goal_management == null;
+    if ((show_legacy_goals and value.goals.len != 0) or
+        value.funnels.len != 0)
+    {
         try output.writeAll("<div class=\"conversion-navigation\"><span class=\"eyebrow\">Definitions</span><nav aria-label=\"Journey definitions\">");
     }
-    for (value.goals) |goal| {
-        try reportLink(output, value.query, .goal, goal.name, goal.name);
+    if (show_legacy_goals) {
+        for (value.goals) |goal| {
+            try reportLink(output, value.query, .goal, goal.name, goal.name);
+        }
     }
     for (value.funnels) |funnel| {
         try reportLink(output, value.query, .funnel, funnel.name, funnel.name);
     }
-    if (value.goals.len != 0 or value.funnels.len != 0) {
+    if ((show_legacy_goals and value.goals.len != 0) or
+        value.funnels.len != 0)
+    {
         try output.writeAll("</nav></div>");
     }
     try output.writeAll("</div>");
@@ -2877,53 +2896,319 @@ fn campaignTabs(output: *std.Io.Writer, query: model.Query) !void {
     try output.writeAll("</nav>");
 }
 
+fn goalManagement(output: *std.Io.Writer, value: model.Page) !void {
+    const management = value.goal_management.?;
+    try output.writeAll(
+        "<nav class=\"management-actions\" aria-label=\"Goal management\">" ++
+            "<a href=\"",
+    );
+    try attribute(output, management.list_url);
+    try output.writeAll("\"");
+    if (management.screen == .list) try output.writeAll(" aria-current=\"page\"");
+    try output.writeAll(">All goals</a><a class=\"button\" href=\"");
+    try attribute(output, management.new_url);
+    try output.writeAll("\"");
+    if (management.screen == .new) try output.writeAll(" aria-current=\"page\"");
+    try output.writeAll(">New goal</a></nav>");
+
+    switch (management.screen) {
+        .list => {
+            try output.writeAll("<section class=\"panel\"><h2>Goals</h2><p>");
+            try output.print("{d} of 32 active goals", .{management.active_count});
+            try output.writeAll(". Archived goals remain explicitly reportable.</p>");
+            if (management.active_count > analysis.maximum_active_goals) {
+                try components.feedback(output, .{
+                    .kind = .warning,
+                    .message = "This migrated site is above the active-goal bound. Archive goals until 32 or fewer remain; no definition was truncated.",
+                });
+            }
+            if (management.definitions.len == 0) {
+                try components.emptyState(output, .{
+                    .id = "goals-empty",
+                    .title = "No goals yet",
+                    .message = "Create a Page or Event goal from observed values, or explicitly confirm a value that has not fired yet.",
+                });
+            } else {
+                try output.writeAll(
+                    "<div class=\"table-scroll mobile-records\"><table>" ++
+                        "<caption>Goal definitions</caption><thead><tr>" ++
+                        "<th scope=\"col\">Goal</th><th scope=\"col\">State</th>" ++
+                        "<th scope=\"col\">Selector</th><th scope=\"col\">Updated</th>" ++
+                        "</tr></thead><tbody>",
+                );
+                for (management.definitions) |goal| {
+                    try output.writeAll("<tr><th scope=\"row\" data-label=\"Goal\"><a href=\"");
+                    try attribute(output, goal.detail_url);
+                    try output.writeAll("\">");
+                    try text(output, goal.name);
+                    try output.writeAll("</a></th><td data-label=\"State\">");
+                    try output.writeAll(if (goal.archived) "Archived" else "Active");
+                    try output.writeAll("</td><td data-label=\"Selector\">");
+                    try output.writeAll(goalSelectorLabel(goal));
+                    try output.writeAll(" <code>");
+                    try text(output, goal.match_value);
+                    try output.writeAll("</code></td><td data-label=\"Updated\">");
+                    try text(output, goal.updated_at);
+                    try output.writeAll("</td></tr>");
+                }
+                try output.writeAll("</tbody></table></div><nav aria-label=\"Goal pages\">");
+                if (management.previous_definitions_url) |previous| {
+                    try output.writeAll("<a rel=\"prev\" href=\"");
+                    try attribute(output, previous);
+                    try output.writeAll("\">Previous</a>");
+                }
+                if (management.next_definitions_url) |next| {
+                    try output.writeAll("<a rel=\"next\" href=\"");
+                    try attribute(output, next);
+                    try output.writeAll("\">Next</a>");
+                }
+                try output.writeAll("</nav>");
+            }
+            try output.writeAll("</section>");
+        },
+        .new, .edit => try goalBuilder(output, value, management),
+        .detail => try goalDetail(output, value, management.selected.?),
+        .none => unreachable,
+    }
+}
+
+fn goalBuilder(
+    output: *std.Io.Writer,
+    value: model.Page,
+    management: model.GoalManagement,
+) !void {
+    const selected = management.selected;
+    const has_error_draft = value.form_error_target == .goal;
+    const entity_kind = if (has_error_draft)
+        value.goal_draft.entity_kind
+    else
+        management.entity_kind;
+    const match_mode = if (has_error_draft)
+        value.goal_draft.match_kind
+    else if (selected) |goal|
+        @tagName(goal.match_mode)
+    else
+        "exact";
+    const name = if (has_error_draft)
+        value.goal_draft.name
+    else if (selected) |goal|
+        goal.name
+    else
+        "";
+    const match_value = if (has_error_draft)
+        value.goal_draft.match_value
+    else if (selected) |goal|
+        goal.match_value
+    else
+        "";
+    const confirm_unseen = has_error_draft and value.goal_draft.confirm_unseen;
+
+    try output.writeAll("<section class=\"panel\"><h2>");
+    try output.writeAll(if (management.screen == .edit) "Edit goal" else "New goal");
+    try output.writeAll(
+        "</h2><p>Choose an observed Page or Event without entering selector syntax. " ++
+            "The selected date range and traffic policy determine the discovery list.</p>" ++
+            "<form class=\"filter-builder\" method=\"get\" action=\"",
+    );
+    try attribute(output, if (management.screen == .edit)
+        management.selected.?.edit_url
+    else
+        management.new_url);
+    try output.writeAll("\"><input type=\"hidden\" name=\"from\" value=\"");
+    try attribute(output, value.query.range.start);
+    try output.writeAll("\"><input type=\"hidden\" name=\"to\" value=\"");
+    try attribute(output, value.query.range.end);
+    try output.writeAll("\"><input type=\"hidden\" name=\"compare\" value=\"");
+    try attribute(output, value.query.comparison.name());
+    try output.writeAll("\"><label>Discover<select name=\"entity\">");
+    try output.writeAll(if (entity_kind == .page)
+        "<option value=\"page\" selected>Pages</option><option value=\"event\">Events</option>"
+    else
+        "<option value=\"page\">Pages</option><option value=\"event\" selected>Events</option>");
+    try output.writeAll("</select></label><label>Search<input name=\"search\" maxlength=\"256\" value=\"");
+    try attribute(output, management.search);
+    try output.writeAll("\"></label><button class=\"button-secondary\" type=\"submit\">Search observed values</button></form>");
+
+    if (management.entities.len == 0) {
+        try output.writeAll("<p class=\"muted\">No observed values match this search and date range.</p>");
+    } else {
+        try output.writeAll(
+            "<div class=\"table-scroll mobile-records\"><table><caption>Observed " ++
+                "values available to this goal</caption><thead><tr><th scope=\"col\">Value</th>" ++
+                "<th scope=\"col\">Eligible events</th><th scope=\"col\">Last seen</th>" ++
+                "</tr></thead><tbody>",
+        );
+        for (management.entities) |entity| {
+            try output.writeAll("<tr><th scope=\"row\" data-label=\"Value\"><code>");
+            try text(output, entity.label);
+            try output.print("</code></th><td data-label=\"Eligible events\">{d}</td><td data-label=\"Last seen\">", .{entity.eligible_count});
+            try text(output, entity.last_seen);
+            try output.writeAll("</td></tr>");
+        }
+        try output.writeAll("</tbody></table></div>");
+    }
+    if (management.previous_entities_url != null or
+        management.next_entities_url != null)
+    {
+        try output.writeAll("<nav aria-label=\"Observed value pages\">");
+        if (management.previous_entities_url) |previous| {
+            try output.writeAll("<a rel=\"prev\" href=\"");
+            try attribute(output, previous);
+            try output.writeAll("\">Previous observed values</a>");
+        }
+        if (management.next_entities_url) |next| {
+            try output.writeAll("<a rel=\"next\" href=\"");
+            try attribute(output, next);
+            try output.writeAll("\">Next observed values</a>");
+        }
+        try output.writeAll("</nav>");
+    }
+
+    try output.writeAll("<form method=\"post\" action=\"");
+    try output.writeAll(if (management.screen == .edit)
+        "/admin/goals/edit"
+    else
+        "/admin/goals");
+    try output.writeAll("\" hx-boost=\"true\" hx-sync=\"this:drop\">");
+    try formCommon(output, value);
+    if (selected) |goal| {
+        try output.writeAll("<input type=\"hidden\" name=\"id\" value=\"");
+        try attribute(output, goal.id);
+        try output.print("\"><input type=\"hidden\" name=\"updated_at\" value=\"{d}\">", .{goal.updated_at_utc_micros});
+    }
+    try output.writeAll("<input type=\"hidden\" name=\"search\" value=\"");
+    try attribute(output, management.search);
+    try output.writeAll("\"><label>Source<select name=\"entity\">");
+    try output.writeAll(if (entity_kind == .page)
+        "<option value=\"page\" selected>Page</option><option value=\"event\">Event</option>"
+    else
+        "<option value=\"page\">Page</option><option value=\"event\" selected>Event</option>");
+    try output.writeAll("</select></label><label>Match<select name=\"match\">");
+    try output.writeAll("<option value=\"exact\"");
+    if (std.mem.eql(u8, match_mode, "exact")) try output.writeAll(" selected");
+    try output.writeAll(">Exact value</option>");
+    if (entity_kind == .page) {
+        try output.writeAll("<option value=\"prefix\"");
+        if (std.mem.eql(u8, match_mode, "prefix")) try output.writeAll(" selected");
+        try output.writeAll(">Path starts with</option>");
+    }
+    try output.writeAll("</select></label><label>Value<input list=\"goal-entity-options\" name=\"value\" maxlength=\"1024\" required");
+    try formErrorAttributes(output, value, .goal);
+    try output.writeAll(" value=\"");
+    try attribute(output, match_value);
+    try output.writeAll("\"></label><datalist id=\"goal-entity-options\">");
+    for (management.entities) |entity| {
+        try output.writeAll("<option value=\"");
+        try attribute(output, entity.label);
+        try output.writeAll("\"></option>");
+    }
+    try output.writeAll("</datalist><label>Name<input name=\"name\" maxlength=\"120\" required");
+    try formErrorAttributes(output, value, .goal);
+    try output.writeAll(" value=\"");
+    try attribute(output, name);
+    try output.writeAll("\"></label><label class=\"warning-control\"><input type=\"checkbox\" name=\"confirm_unseen\" value=\"on\"");
+    if (confirm_unseen) try output.writeAll(" checked");
+    try output.writeAll("> Save even if this definition has zero matching events in the selected range</label><button type=\"submit\">");
+    try output.writeAll(if (management.screen == .edit) "Save goal" else "Create goal");
+    try output.writeAll("</button></form></section>");
+}
+
+fn goalDetail(
+    output: *std.Io.Writer,
+    value: model.Page,
+    goal: model.GoalDefinitionView,
+) !void {
+    try output.writeAll("<section class=\"panel\"><div class=\"split-heading\"><div><h2>");
+    try text(output, goal.name);
+    try output.writeAll("</h2><p><strong>");
+    try output.writeAll(if (goal.archived) "Archived" else "Active");
+    try output.writeAll("</strong> · ");
+    try output.writeAll(goalSelectorLabel(goal));
+    try output.writeAll(" <code>");
+    try text(output, goal.match_value);
+    try output.writeAll("</code></p></div><a class=\"button-secondary\" href=\"");
+    try attribute(output, goal.edit_url);
+    try output.writeAll("\">Edit goal</a></div><dl class=\"definition-grid\"><div><dt>Created</dt><dd>");
+    try text(output, goal.created_at);
+    try output.writeAll("</dd></div><div><dt>Updated</dt><dd>");
+    try text(output, goal.updated_at);
+    try output.writeAll("</dd></div></dl><div class=\"management-actions\">");
+    try goalStateForm(output, value, goal);
+    try output.writeAll("<form method=\"post\" action=\"/admin/goals/duplicate\" hx-boost=\"true\" hx-sync=\"this:drop\">");
+    try formCommon(output, value);
+    try goalIdentityFields(output, goal);
+    try output.writeAll("<label>Duplicate name<input name=\"name\" maxlength=\"120\" required");
+    try formErrorAttributes(output, value, .goal_duplicate);
+    try output.writeAll(" value=\"");
+    if (value.form_error_target == .goal_duplicate) {
+        try attribute(output, value.goal_draft.name);
+    } else {
+        try attribute(output, goal.name);
+        try output.writeAll(" copy");
+    }
+    try output.writeAll("\"></label><button class=\"button-secondary\" type=\"submit\">Duplicate</button></form>");
+    try output.writeAll("<form method=\"post\" action=\"/admin/goals/delete\" hx-boost=\"true\" hx-sync=\"this:drop\">");
+    try formCommon(output, value);
+    try goalIdentityFields(output, goal);
+    try output.writeAll("<label>Type the exact goal name to delete<input name=\"name\" maxlength=\"120\" required autocomplete=\"off\" aria-describedby=\"goal-delete-name\"></label><p id=\"goal-delete-name\" class=\"muted\">Enter <strong>");
+    try text(output, goal.name);
+    try output.writeAll("</strong>. This cannot be undone.</p><button class=\"danger\" type=\"submit\">Delete permanently</button></form></div></section>");
+}
+
+fn goalStateForm(
+    output: *std.Io.Writer,
+    value: model.Page,
+    goal: model.GoalDefinitionView,
+) !void {
+    try output.writeAll("<form method=\"post\" action=\"");
+    try output.writeAll(if (goal.archived)
+        "/admin/goals/reactivate"
+    else
+        "/admin/goals/archive");
+    try output.writeAll("\" hx-boost=\"true\" hx-sync=\"this:drop\">");
+    try formCommon(output, value);
+    try goalIdentityFields(output, goal);
+    try output.writeAll("<button class=\"button-secondary\" type=\"submit\">");
+    try output.writeAll(if (goal.archived) "Reactivate" else "Archive");
+    try output.writeAll("</button></form>");
+}
+
+fn goalIdentityFields(
+    output: *std.Io.Writer,
+    goal: model.GoalDefinitionView,
+) !void {
+    try output.writeAll("<input type=\"hidden\" name=\"id\" value=\"");
+    try attribute(output, goal.id);
+    try output.print("\"><input type=\"hidden\" name=\"updated_at\" value=\"{d}\">", .{goal.updated_at_utc_micros});
+}
+
+fn goalSelectorLabel(goal: model.GoalDefinitionView) []const u8 {
+    return switch (goal.entity_kind) {
+        .event => "Event equals",
+        .page => switch (goal.match_mode) {
+            .exact => "Page equals",
+            .prefix => "Page starts with",
+        },
+    };
+}
+
 fn definitions(output: *std.Io.Writer, value: model.Page) !void {
     try output.writeAll("<details class=\"management\"");
     if (value.form_error.len != 0 or value.notice.len != 0) {
         try output.writeAll(" open");
     }
     try output.print(
-        "><summary><span>Goals &amp; funnels</span><span class=\"muted\">{d} goals · {d} funnels</span></summary>" ++
-            "<div class=\"split\"><section class=\"panel\"><h2>Goals</h2><ul class=\"definition-list\">",
-        .{ value.goals.len, value.funnels.len },
+        "><summary><span>Funnel definitions</span><span class=\"muted\">{d} funnels</span></summary>" ++
+            "<section class=\"panel\"><p><a href=\"",
+        .{value.funnels.len},
     );
-    for (value.goals) |goal| {
-        try output.writeAll("<li><strong>");
-        try text(output, goal.name);
-        try output.writeAll("</strong> <span class=\"muted\">");
-        try text(output, @tagName(goal.match_kind));
-        try output.writeAll(" = ");
-        try text(output, goal.match_value);
-        try output.writeAll("</span> ");
-        try deleteForm(output, "/admin/goals/delete", value, goal.name);
-        try output.writeAll("</li>");
-    }
-    if (value.goals.len == 0) try output.writeAll("<li>No goals yet.</li>");
-    try output.writeAll("</ul><h3>Add goal</h3><form method=\"post\" action=\"/admin/goals\" hx-boost=\"true\" hx-sync=\"this:drop\">");
-    try formCommon(output, value);
-    try output.writeAll("<label>Name<input name=\"name\" maxlength=\"120\" required");
-    try formErrorAttributes(output, value, .goal);
-    try output.writeAll(" value=\"");
-    try attribute(output, value.goal_draft.name);
-    try output.writeAll("\"></label><label>Match<select name=\"kind\"");
-    try formErrorAttributes(output, value, .goal);
-    try output.writeAll(">");
-    inline for (.{ "event", "path", "prefix" }) |kind| {
-        try output.writeAll("<option");
-        if (std.mem.eql(u8, value.goal_draft.match_kind, kind)) {
-            try output.writeAll(" selected");
-        }
-        try output.writeAll(">");
-        try text(output, kind);
-        try output.writeAll("</option>");
-    }
-    try output.writeAll("</select></label><label>Value<input name=\"value\" maxlength=\"1024\" required");
-    try formErrorAttributes(output, value, .goal);
-    try output.writeAll(" value=\"");
-    try attribute(output, value.goal_draft.match_value);
-    try output.writeAll("\"></label><button type=\"submit\">Add goal</button></form></section>");
-
-    try output.writeAll("<section class=\"panel\"><h2>Funnels</h2><ul class=\"definition-list\">");
+    var goal_query = value.query;
+    goal_query.kind = .goal;
+    goal_query.subject = "";
+    goal_query.goal_screen = .list;
+    goal_query.goal_id = "";
+    try canonicalUrl(output, .journeys, goal_query, 1);
+    try output.writeAll("\">Manage goals</a></p><h2>Funnels</h2><ul class=\"definition-list\">");
     for (value.funnels) |funnel| {
         try output.writeAll("<li><strong>");
         try text(output, funnel.name);
@@ -2944,7 +3229,7 @@ fn definitions(output: *std.Io.Writer, value: model.Page) !void {
     try formErrorAttributes(output, value, .funnel);
     try output.writeAll(">");
     try text(output, value.funnel_draft.steps);
-    try output.writeAll("</textarea></label><button type=\"submit\">Add funnel</button></form></section></div></details>");
+    try output.writeAll("</textarea></label><button type=\"submit\">Add funnel</button></form></section></details>");
 }
 
 fn selfExclusions(output: *std.Io.Writer, value: model.Page) !void {
@@ -3164,6 +3449,11 @@ fn queryUrl(
     var adjusted = query;
     adjusted.kind = kind;
     adjusted.subject = subject;
+    adjusted.goal_screen = .none;
+    adjusted.goal_id = "";
+    adjusted.goal_page = 1;
+    adjusted.goal_search = "";
+    adjusted.goal_entity_page = 1;
     adjusted.page = page_number;
     if (kind.isList()) {
         adjusted.comparison = .none;
@@ -3392,7 +3682,30 @@ fn canonicalUrlSeparated(
                 try urlComponent(output, adjusted.highlighted_interval);
             }
         },
-        .journeys => if (adjusted.subject.len != 0) {
+        .journeys => if (adjusted.goal_screen != .none) {
+            if (adjusted.goal_screen == .list and adjusted.goal_page != 1) {
+                try output.writeAll(separator);
+                try output.print("goal-page={d}", .{adjusted.goal_page});
+            }
+            if (adjusted.goal_screen == .new or adjusted.goal_screen == .edit) {
+                if (adjusted.goal_entity_set or adjusted.goal_entity_kind == .event) {
+                    try output.writeAll(separator);
+                    try output.writeAll(if (adjusted.goal_entity_kind == .event)
+                        "entity=event"
+                    else
+                        "entity=page");
+                }
+                if (adjusted.goal_search.len != 0) {
+                    try output.writeAll(separator);
+                    try output.writeAll("search=");
+                    try urlComponent(output, adjusted.goal_search);
+                }
+                if (adjusted.goal_entity_page != 1) {
+                    try output.writeAll(separator);
+                    try output.print("entity-page={d}", .{adjusted.goal_entity_page});
+                }
+            }
+        } else if (adjusted.subject.len != 0) {
             try output.writeAll(separator);
             try output.writeAll("subject=");
             try urlComponent(output, adjusted.subject);
@@ -3434,17 +3747,27 @@ fn canonicalPath(
 ) !void {
     try output.writeAll("/admin/sites/");
     try output.writeAll(query.site);
-    try output.writeAll(switch (destination) {
-        .overview => "/overview",
-        .analyze => "/analyze",
-        .journeys => if (query.kind == .funnel)
-            "/journeys/funnels"
-        else
-            "/journeys/goals",
-        .sessions => "/sessions",
-        .live => "/live",
-        .settings => "/settings/general",
-    });
+    switch (destination) {
+        .overview => try output.writeAll("/overview"),
+        .analyze => try output.writeAll("/analyze"),
+        .journeys => if (query.kind == .funnel) {
+            try output.writeAll("/journeys/funnels");
+        } else {
+            try output.writeAll("/journeys/goals");
+            switch (query.goal_screen) {
+                .none, .list => {},
+                .new => try output.writeAll("/new"),
+                .detail, .edit => {
+                    try output.writeByte('/');
+                    try output.writeAll(query.goal_id);
+                    if (query.goal_screen == .edit) try output.writeAll("/edit");
+                },
+            }
+        },
+        .sessions => try output.writeAll("/sessions"),
+        .live => try output.writeAll("/live"),
+        .settings => try output.writeAll("/settings/general"),
+    }
 }
 
 fn text(output: *std.Io.Writer, value: []const u8) !void {
@@ -3729,5 +4052,5 @@ test "production stylesheet mirrors the approved accessible design tokens" {
 
     try std.testing.expect(std.mem.indexOf(u8, stylesheet, "@import") == null);
     try std.testing.expect(std.mem.indexOf(u8, stylesheet, "url(") == null);
-    try std.testing.expectEqualStrings("/admin/app.v11.css", stylesheet_path);
+    try std.testing.expectEqualStrings("/admin/app.v12.css", stylesheet_path);
 }

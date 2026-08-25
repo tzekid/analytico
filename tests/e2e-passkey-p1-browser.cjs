@@ -207,7 +207,7 @@ async function main() {
         "Content-Type": "application/x-www-form-urlencoded",
         Origin: "https://attacker.example"
       },
-      data: `csrf=${encodeURIComponent(csrf)}&site=example&name=Cross&kind=event&value=cross`
+      data: `csrf=${encodeURIComponent(csrf)}&site=example&from=2025-01-01&to=2025-01-02&compare=none&name=Cross&entity=event&match=exact&value=cross`
     });
     assert.equal(crossOrigin.status(), 403);
 
@@ -255,20 +255,18 @@ async function main() {
       "100001"
     );
     await noScriptPage.locator('.primary-navigation a:has-text("Journeys")').click();
-    const definitions = noScriptPage.locator(
-      'details.management:has(form[action="/admin/goals"])',
-    );
-    if (!(await definitions.evaluate((element) => element.open))) {
-      await definitions.locator(':scope > summary').click();
-    }
+    await noScriptPage.getByRole("link", { name: "New goal" }).click();
     const goalForm = noScriptPage.locator('form[action="/admin/goals"]');
     await goalForm.locator('input[name="name"]').fill("Signup");
-    await goalForm.locator('select[name="kind"]').selectOption("event");
+    await goalForm.locator('select[name="entity"]').selectOption("event");
     await goalForm.locator('input[name="value"]').fill("signup");
+    await goalForm.locator('input[name="confirm_unseen"]').check();
     await goalForm.locator('button[type="submit"]').click();
     await noScriptPage.waitForURL(/notice=goal-added/);
-    assert.equal(await noScriptPage.locator("li strong", { hasText: "Signup" }).count(), 1);
+    assert.equal(await noScriptPage.locator("tr", { hasText: "Signup" }).count(), 1);
+    await noScriptPage.getByRole("link", { name: "Funnels" }).click();
     const funnelForm = noScriptPage.locator('form[action="/admin/funnels"]');
+    await funnelForm.locator("xpath=ancestor::details/summary").click();
     await funnelForm.locator('input[name="name"]').fill("Signup journey");
     await funnelForm.locator('textarea[name="steps"]').fill("path=/\nevent=signup");
     await funnelForm.locator('button[type="submit"]').click();

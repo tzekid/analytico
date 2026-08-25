@@ -512,6 +512,33 @@ its empty persistent-candidate build side yielded zero cross-session rows rather
 than scanning the million-row identity relation. Exact final samples are in
 `bench/results/filters-release-safe.json`.
 
+### Analytico 1.0 guided-goal gate
+
+D41 keeps the execution snapshot at no more than 32 active goals and loads at
+most three explicitly selected IDs for one Trend/Breakdown request. Management
+reads return at most 50 definitions plus `has_more`; archive therefore cannot
+turn the first response into an unbounded list. Create, duplicate, and
+reactivate enforce the active cap in their single metadata write rather than
+after a count/read.
+A preserved schema-7 overflow blocks create/duplicate/reactivate and active
+analysis rather than being truncated; archiving is the bounded recovery path.
+
+One builder search returns at most 50 qualifying Page paths or custom-event
+names plus `has_more`, exact count, and last receipt time. It uses the selected
+site/local range/strict traffic policy, bound search and offset, stable
+count-descending then label-ascending order, and the existing two-second
+interrupt deadline. The deadline includes every discovery statement and any
+empty/cardinality work; timeout must leave the connection reusable. The Page
+plan scans qualifying page views only and the Event plan scans qualifying
+custom events only.
+
+The gate exercises real on-disk discovery for empty, searched, and next-page
+states and separately runs the strict million-event query through a fresh CLI
+process. It does not label browser-process reuse as cold SQL evidence. It adds
+no cache, projection, rollup, EAV table, background work, network request,
+dependency, memory-limit change, or client fetch. A measured miss follows the
+existing optimization order before any such mechanism is proposed.
+
 ### M4 production-MVP baseline
 
 The current ReleaseSafe package contains a 26,341,344-byte executable and a
@@ -541,6 +568,8 @@ These apply only when the dashboard exists:
 | Breakdown/property catalog | ≤ 100 rows / latest 2,000 eligible events / ≤ 100 property names / one 30-second entry |
 | Filter suggestions | ≤ 50 values plus has-more; one request deadline |
 | Saved state | ≤ 32 segments and 32 views per site; ≤ 32 KiB canonical JSON each |
+| Goal management | ≤ 50 definitions per page; ≤ 32 active per site |
+| Goal entity discovery | ≤ 50 values plus has-more; one request deadline |
 | Funnel steps | 2–8 |
 | Path plot | 3–5 columns; ≤ 10 nodes per column; ≤ 400 edges |
 | Retention matrix | ≤ 12 cohorts × 12 visible periods |

@@ -679,6 +679,12 @@ pub const ParsedQuery = struct {
     highlighted_interval: []const u8 = "",
     filters: analysis.FilterSet = .{},
     segment_id: ?[]const u8 = null,
+    goal_page: u32 = 1,
+    goal_entity_kind: analysis.GoalEntityKind = .page,
+    goal_search: []const u8 = "",
+    goal_entity_page: u32 = 1,
+    goal_fields_set: bool = false,
+    goal_entity_set: bool = false,
 };
 
 pub fn parseQuery(
@@ -782,6 +788,35 @@ pub fn parseQuery(
         } else if (std.mem.eql(u8, name, "segment")) {
             try domain.validateUuid(value);
             query.segment_id = value;
+        } else if (std.mem.eql(u8, name, "goal-page")) {
+            query.goal_fields_set = true;
+            query.goal_page = std.fmt.parseInt(u32, value, 10) catch
+                return error.InvalidGoalPage;
+            if (query.goal_page == 0 or query.goal_page > 1_000_000) {
+                return error.InvalidGoalPage;
+            }
+        } else if (std.mem.eql(u8, name, "entity")) {
+            query.goal_fields_set = true;
+            query.goal_entity_set = true;
+            query.goal_entity_kind = if (std.mem.eql(u8, value, "page"))
+                .page
+            else if (std.mem.eql(u8, value, "event"))
+                .event
+            else
+                return error.InvalidGoalEntityKind;
+        } else if (std.mem.eql(u8, name, "search")) {
+            query.goal_fields_set = true;
+            try validateGoalSearch(value);
+            query.goal_search = value;
+        } else if (std.mem.eql(u8, name, "entity-page")) {
+            query.goal_fields_set = true;
+            query.goal_entity_page = std.fmt.parseInt(u32, value, 10) catch
+                return error.InvalidGoalDiscoveryPage;
+            if (query.goal_entity_page == 0 or
+                query.goal_entity_page > 1_000_000)
+            {
+                return error.InvalidGoalDiscoveryPage;
+            }
         } else {
             return error.UnknownQueryField;
         }
@@ -789,6 +824,22 @@ pub fn parseQuery(
     query.filters = .{ .clauses = try filters.toOwnedSlice(allocator) };
     try query.filters.validate();
     return query;
+}
+
+fn validateGoalSearch(value: []const u8) !void {
+    if (value.len > analysis.maximum_search_bytes or
+        !std.unicode.utf8ValidateSlice(value))
+    {
+        return error.InvalidGoalSearch;
+    }
+    for (value, 0..) |byte, index| {
+        if (byte < 0x20 or byte == 0x7f) return error.InvalidGoalSearch;
+        if (byte == 0xc2 and index + 1 < value.len and
+            value[index + 1] >= 0x80 and value[index + 1] <= 0x9f)
+        {
+            return error.InvalidGoalSearch;
+        }
+    }
 }
 
 pub fn finishQuery(
@@ -822,6 +873,11 @@ pub fn finishQuery(
         .highlighted_interval = parsed.highlighted_interval,
         .analysis_filters = parsed.filters,
         .analysis_segment_id = parsed.segment_id,
+        .goal_page = parsed.goal_page,
+        .goal_entity_kind = parsed.goal_entity_kind,
+        .goal_search = parsed.goal_search,
+        .goal_entity_page = parsed.goal_entity_page,
+        .goal_entity_set = parsed.goal_entity_set,
     };
     try validateQuery(query);
     return query;
@@ -1379,6 +1435,108 @@ pub fn loadPage(
     const goals = try metadata.listGoals(allocator, selected.slug);
     const funnels = try metadata.listFunnels(allocator, selected.slug);
     const collection_policy = try metadata.sitePolicy(allocator, selected.id);
+    var goal_management: ?model.GoalManagement = null;
+    if (query.goal_screen != .none) {
+        const definitions = if (query.goal_screen == .list)
+            try metadata.listGoalDefinitions(
+                allocator,
+                selected.slug,
+                query.goal_page,
+            )
+        else
+            meta.GoalPage{
+                .goals = &.{},
+                .has_more = false,
+                .active_count = 0,
+            };
+        const selected_definition: ?meta.Goal = switch (query.goal_screen) {
+            .detail, .edit => try metadata.goalById(
+                allocator,
+                selected.slug,
+                query.goal_id,
+            ),
+            .none, .list, .new => null,
+        };
+        const effective_entity_kind: analysis.GoalEntityKind = if (query.goal_screen == .edit and
+            !query.goal_entity_set)
+            if (selected_definition.?.match_kind == .event) .event else .page
+        else
+            query.goal_entity_kind;
+        var entities: []const model.GoalEntityOption = &.{};
+        var entities_have_more = false;
+        if (query.goal_screen == .new or query.goal_screen == .edit) {
+            const resolved_active = if (collection_policy.strict_mode)
+                try resolveAnalysisGoals(allocator, goals)
+            else
+                &.{};
+            const discovered = analysis_store.executeGoalDiscovery(
+                allocator,
+                event_store,
+                .{
+                    .site_id = selected.id,
+                    .range = query.range,
+                    .kind = effective_entity_kind,
+                    .search = query.goal_search,
+                    .page = query.goal_entity_page,
+                    .active_goals = resolved_active,
+                    .strict_traffic_mode = collection_policy.strict_mode,
+                    .timeout_ms = report_timeout_ms,
+                },
+            ) catch |err| {
+                if (err == error.AnalysisTimeout) return error.ReportTimeout;
+                return err;
+            };
+            entities = try goalEntityOptions(allocator, discovered.entities);
+            entities_have_more = discovered.has_more;
+        }
+        goal_management = .{
+            .screen = query.goal_screen,
+            .definitions = try goalDefinitionViews(
+                allocator,
+                query,
+                definitions.goals,
+            ),
+            .active_count = definitions.active_count,
+            .selected = if (selected_definition) |goal|
+                try goalDefinitionView(allocator, query, goal)
+            else
+                null,
+            .entity_kind = effective_entity_kind,
+            .search = query.goal_search,
+            .entities = entities,
+            .list_url = try goalManagementUrl(allocator, query, .list, ""),
+            .new_url = try goalManagementUrl(allocator, query, .new, ""),
+            .previous_definitions_url = if (query.goal_page > 1)
+                try goalDefinitionsPageUrl(allocator, query, query.goal_page - 1)
+            else
+                null,
+            .next_definitions_url = if (definitions.has_more)
+                try goalDefinitionsPageUrl(allocator, query, query.goal_page + 1)
+            else
+                null,
+            .previous_entities_url = if ((query.goal_screen == .new or
+                query.goal_screen == .edit) and query.goal_entity_page > 1)
+                try goalEntitiesPageUrl(
+                    allocator,
+                    query,
+                    effective_entity_kind,
+                    query.goal_entity_page - 1,
+                )
+            else
+                null,
+            .next_entities_url = if ((query.goal_screen == .new or
+                query.goal_screen == .edit) and entities_have_more)
+                try goalEntitiesPageUrl(
+                    allocator,
+                    query,
+                    effective_entity_kind,
+                    query.goal_entity_page + 1,
+                )
+            else
+                null,
+        };
+        if (query.goal_screen == .detail) query.subject = selected_definition.?.name;
+    }
     const segments: []const meta.Segment = if (destination == .overview)
         try metadata.listSegments(allocator, selected.slug)
     else
@@ -1409,7 +1567,9 @@ pub fn loadPage(
         try buildFilterNavigation(allocator, destination, query, segments)
     else
         FilterNavigation{ .chips = &.{}, .segments = &.{} };
-    if (query.kind == .goal and query.subject.len == 0 and goals.len != 0) {
+    if (query.goal_screen == .none and query.kind == .goal and
+        query.subject.len == 0 and goals.len != 0)
+    {
         query.subject = goals[0].name;
     }
     if (query.kind == .funnel and query.subject.len == 0 and funnels.len != 0) {
@@ -1544,6 +1704,7 @@ pub fn loadPage(
         .result = result,
         .overview_kpis = overview_kpis,
         .overview_details = overview_details,
+        .goal_management = goal_management,
         .goals = goals,
         .funnels = funnels,
         .selected_segment_name = resolved_filters.segment_name,
@@ -1602,12 +1763,19 @@ pub fn loadTrendPage(
         query,
         segments,
     );
-    for (query.analysis_series) |metric| if (metric.selector) |selector| {
-        if (selector.kind == .saved_goal and goalById(goals, selector.value) == null) {
-            return error.GoalNotFound;
-        }
-    };
+    const selected_goal_rows = try selectedGoalsForMetrics(
+        allocator,
+        metadata,
+        selected.slug,
+        goals,
+        query.analysis_series,
+    );
+    const display_goals = try mergeGoalRows(allocator, goals, selected_goal_rows);
     const resolved_goals = try resolveAnalysisGoals(allocator, goals);
+    const resolved_selected_goals = try resolveAnalysisGoals(
+        allocator,
+        selected_goal_rows,
+    );
     const execution = analysis.TrendSetExecution{
         .set = .{
             .site_id = selected.id,
@@ -1623,6 +1791,7 @@ pub fn loadTrendPage(
         else
             null,
         .active_goals = resolved_goals,
+        .selected_goals = resolved_selected_goals,
         .strict_traffic_mode = policy.strict_mode,
         .segment_resolved = resolved_filters.segment_resolved,
         .timeout_ms = report_timeout_ms,
@@ -1692,7 +1861,7 @@ pub fn loadTrendPage(
         allocator,
         query.analysis_series,
         executed,
-        goals,
+        display_goals,
         current_buckets,
         comparison_buckets,
         incomplete_bucket,
@@ -1770,12 +1939,19 @@ pub fn loadBreakdownPage(
         query,
         segments,
     );
-    if (breakdown.metric.selector) |selector| {
-        if (selector.kind == .saved_goal and goalById(goals, selector.value) == null) {
-            return error.GoalNotFound;
-        }
-    }
+    const selected_goal_rows = try selectedGoalsForMetrics(
+        allocator,
+        metadata,
+        selected.slug,
+        goals,
+        &.{breakdown.metric},
+    );
+    const display_goals = try mergeGoalRows(allocator, goals, selected_goal_rows);
     const resolved_goals = try resolveAnalysisGoals(allocator, goals);
+    const resolved_selected_goals = try resolveAnalysisGoals(
+        allocator,
+        selected_goal_rows,
+    );
     breakdown.filters = resolved_filters.filters;
     breakdown.site_id = selected.id;
     const executed = analysis_store.executeBreakdownPage(
@@ -1784,6 +1960,7 @@ pub fn loadBreakdownPage(
         .{
             .query = breakdown,
             .active_goals = resolved_goals,
+            .selected_goals = resolved_selected_goals,
             .strict_traffic_mode = policy.strict_mode,
             .segment_resolved = resolved_filters.segment_resolved,
             .timeout_ms = report_timeout_ms,
@@ -1818,7 +1995,7 @@ pub fn loadBreakdownPage(
             .properties_truncated = executed.properties.truncated,
             .no_events_ever = !executed.site_has_events,
         },
-        .goals = goals,
+        .goals = display_goals,
         .funnels = funnels,
         .saved_views = saved_views,
         .selected_segment_name = resolved_filters.segment_name,
@@ -2230,6 +2407,46 @@ fn resolveAnalysisGoals(
     return resolved;
 }
 
+fn selectedGoalsForMetrics(
+    allocator: std.mem.Allocator,
+    metadata: *meta.Store,
+    site_slug: []const u8,
+    active_goals: []const meta.Goal,
+    metrics: []const analysis.Metric,
+) ![]const meta.Goal {
+    var result: std.ArrayList(meta.Goal) = .empty;
+    for (metrics) |metric| {
+        const selector = metric.selector orelse continue;
+        if (selector.kind != .saved_goal) continue;
+        if (goalById(active_goals, selector.value) != null) continue;
+        if (goalById(result.items, selector.value) != null) continue;
+        if (result.items.len >= analysis.maximum_series) {
+            return error.TooManySelectedGoals;
+        }
+        try result.append(
+            allocator,
+            try metadata.goalById(allocator, site_slug, selector.value),
+        );
+    }
+    return result.toOwnedSlice(allocator);
+}
+
+fn mergeGoalRows(
+    allocator: std.mem.Allocator,
+    active: []const meta.Goal,
+    selected: []const meta.Goal,
+) ![]const meta.Goal {
+    var result: std.ArrayList(meta.Goal) = .empty;
+    try result.ensureTotalCapacity(allocator, active.len + selected.len);
+    try result.appendSlice(allocator, active);
+    for (selected) |goal| {
+        if (goalById(result.items, goal.id) == null) {
+            try result.append(allocator, goal);
+        }
+    }
+    return result.toOwnedSlice(allocator);
+}
+
 fn buildOverviewKpis(
     allocator: std.mem.Allocator,
     overview: analysis.OverviewResult,
@@ -2523,6 +2740,146 @@ fn formatUtcMicros(allocator: std.mem.Allocator, micros: i64) ![]const u8 {
     );
 }
 
+fn goalEntityOptions(
+    allocator: std.mem.Allocator,
+    entities: []const analysis.DiscoveredGoalEntity,
+) ![]const model.GoalEntityOption {
+    const result = try allocator.alloc(model.GoalEntityOption, entities.len);
+    for (result, entities) |*target, entity| target.* = .{
+        .label = entity.label,
+        .eligible_count = entity.eligible_count,
+        .last_seen = try formatUtcMicros(
+            allocator,
+            entity.last_received_at_utc_micros,
+        ),
+    };
+    return result;
+}
+
+fn goalDefinitionViews(
+    allocator: std.mem.Allocator,
+    query: model.Query,
+    goals: []const meta.Goal,
+) ![]const model.GoalDefinitionView {
+    const result = try allocator.alloc(model.GoalDefinitionView, goals.len);
+    for (result, goals) |*target, goal| {
+        target.* = try goalDefinitionView(allocator, query, goal);
+    }
+    return result;
+}
+
+fn goalDefinitionView(
+    allocator: std.mem.Allocator,
+    query: model.Query,
+    goal: meta.Goal,
+) !model.GoalDefinitionView {
+    return .{
+        .id = goal.id,
+        .name = goal.name,
+        .entity_kind = if (goal.match_kind == .event) .event else .page,
+        .match_mode = if (goal.match_kind == .prefix) .prefix else .exact,
+        .match_value = goal.match_value,
+        .archived = goal.archived_at_utc_micros != null,
+        .created_at = try formatUtcMicros(allocator, goal.created_at_utc_micros),
+        .updated_at = try formatUtcMicros(allocator, goal.updated_at_utc_micros),
+        .updated_at_utc_micros = goal.updated_at_utc_micros,
+        .detail_url = try goalManagementUrl(allocator, query, .detail, goal.id),
+        .edit_url = try goalManagementUrl(allocator, query, .edit, goal.id),
+    };
+}
+
+fn goalManagementUrl(
+    allocator: std.mem.Allocator,
+    query: model.Query,
+    screen: model.GoalScreen,
+    goal_id: []const u8,
+) ![]const u8 {
+    var output = std.Io.Writer.Allocating.init(allocator);
+    errdefer output.deinit();
+    try output.writer.print(
+        "/admin/sites/{s}/journeys/goals",
+        .{query.site},
+    );
+    switch (screen) {
+        .none, .list => {},
+        .new => try output.writer.writeAll("/new"),
+        .detail, .edit => {
+            try domain.validateUuid(goal_id);
+            try output.writer.print("/{s}", .{goal_id});
+            if (screen == .edit) try output.writer.writeAll("/edit");
+        },
+    }
+    try output.writer.print(
+        "?from={s}&to={s}&compare={s}",
+        .{ query.range.start, query.range.end, query.comparison.name() },
+    );
+    return output.toOwnedSlice();
+}
+
+fn goalDefinitionsPageUrl(
+    allocator: std.mem.Allocator,
+    query: model.Query,
+    page: u32,
+) ![]const u8 {
+    if (page == 0 or page > 1_000_000) return error.InvalidGoalPage;
+    var output = std.Io.Writer.Allocating.init(allocator);
+    errdefer output.deinit();
+    try output.writer.print(
+        "/admin/sites/{s}/journeys/goals?from={s}&to={s}&compare={s}",
+        .{ query.site, query.range.start, query.range.end, query.comparison.name() },
+    );
+    if (page != 1) try output.writer.print("&goal-page={d}", .{page});
+    return output.toOwnedSlice();
+}
+
+fn goalEntitiesPageUrl(
+    allocator: std.mem.Allocator,
+    query: model.Query,
+    entity_kind: analysis.GoalEntityKind,
+    page: u32,
+) ![]const u8 {
+    if (page == 0 or page > 1_000_000 or
+        (query.goal_screen != .new and query.goal_screen != .edit))
+    {
+        return error.InvalidGoalDiscoveryPage;
+    }
+    var output = std.Io.Writer.Allocating.init(allocator);
+    errdefer output.deinit();
+    const base = try goalManagementUrl(
+        allocator,
+        query,
+        query.goal_screen,
+        query.goal_id,
+    );
+    defer allocator.free(base);
+    try output.writer.writeAll(base);
+    try output.writer.writeAll(if (entity_kind == .event)
+        "&entity=event"
+    else
+        "&entity=page");
+    if (query.goal_search.len != 0) {
+        try output.writer.writeAll("&search=");
+        try goalUrlComponent(&output.writer, query.goal_search);
+    }
+    if (page != 1) try output.writer.print("&entity-page={d}", .{page});
+    return output.toOwnedSlice();
+}
+
+fn goalUrlComponent(output: *std.Io.Writer, value: []const u8) !void {
+    const hex = "0123456789ABCDEF";
+    for (value) |byte| {
+        if (std.ascii.isAlphanumeric(byte) or
+            byte == '-' or byte == '_' or byte == '.' or byte == '~')
+        {
+            try output.writeByte(byte);
+        } else {
+            try output.writeByte('%');
+            try output.writeByte(hex[byte >> 4]);
+            try output.writeByte(hex[byte & 0x0f]);
+        }
+    }
+}
+
 const Delta = struct {
     text: []const u8,
     direction: model.KpiDirection = .neutral,
@@ -2759,16 +3116,114 @@ pub fn addGoal(
     allocator: std.mem.Allocator,
     io: std.Io,
     metadata: *meta.Store,
+    event_store: *events.Store,
+    form: Form,
+    now_micros: i64,
+    report_timeout_ms: u32,
+) !void {
+    const site = try form.required("site");
+    try domain.validateSlug(site);
+    const input = try goalInput(form);
+    try requireObservedGoal(
+        allocator,
+        metadata,
+        event_store,
+        site,
+        try formContext(form),
+        input,
+        report_timeout_ms,
+    );
+    const id = try domain.randomUuid(io);
+    try metadata.addGoal(
+        allocator,
+        &id,
+        site,
+        input.name,
+        input.match_kind,
+        input.match_value,
+        now_micros,
+    );
+}
+
+pub fn editGoal(
+    allocator: std.mem.Allocator,
+    metadata: *meta.Store,
+    event_store: *events.Store,
+    form: Form,
+    now_micros: i64,
+    report_timeout_ms: u32,
+) !void {
+    const site = try form.required("site");
+    const input = try goalInput(form);
+    try requireObservedGoal(
+        allocator,
+        metadata,
+        event_store,
+        site,
+        try formContext(form),
+        input,
+        report_timeout_ms,
+    );
+    try metadata.editGoal(
+        allocator,
+        site,
+        try form.required("id"),
+        try goalTimestamp(form),
+        input.name,
+        input.match_kind,
+        input.match_value,
+        now_micros,
+    );
+}
+
+pub fn duplicateGoal(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    metadata: *meta.Store,
     form: Form,
     now_micros: i64,
 ) !void {
     const site = try form.required("site");
-    const name = try form.required("name");
-    const kind = try domain.MatchKind.parse(try form.required("kind"));
-    const value = try form.required("value");
-    try domain.validateSlug(site);
     const id = try domain.randomUuid(io);
-    try metadata.addGoal(allocator, &id, site, name, kind, value, now_micros);
+    try metadata.duplicateGoal(
+        allocator,
+        &id,
+        site,
+        try form.required("id"),
+        try goalTimestamp(form),
+        try form.required("name"),
+        now_micros,
+    );
+}
+
+pub fn archiveGoal(
+    allocator: std.mem.Allocator,
+    metadata: *meta.Store,
+    form: Form,
+    now_micros: i64,
+) !void {
+    try metadata.archiveGoal(
+        allocator,
+        try form.required("site"),
+        try form.required("id"),
+        try goalTimestamp(form),
+        now_micros,
+    );
+}
+
+pub fn reactivateGoal(
+    allocator: std.mem.Allocator,
+    metadata: *meta.Store,
+    form: Form,
+    now_micros: i64,
+) !void {
+    try metadata.reactivateGoal(
+        allocator,
+        try form.required("site"),
+        try form.required("id"),
+        try goalTimestamp(form),
+        now_micros,
+    );
 }
 
 pub fn deleteGoal(
@@ -2776,11 +3231,111 @@ pub fn deleteGoal(
     metadata: *meta.Store,
     form: Form,
 ) !void {
-    try metadata.deleteGoal(
+    try metadata.deleteGoalById(
         allocator,
         try form.required("site"),
+        try form.required("id"),
+        try goalTimestamp(form),
         try form.required("name"),
     );
+}
+
+const GoalInput = struct {
+    name: []const u8,
+    entity_kind: analysis.GoalEntityKind,
+    match_kind: domain.MatchKind,
+    match_value: []const u8,
+    confirm_unseen: bool,
+};
+
+fn goalInput(form: Form) !GoalInput {
+    const entity = try form.required("entity");
+    const match = try form.required("match");
+    const entity_kind: analysis.GoalEntityKind = if (std.mem.eql(u8, entity, "page"))
+        .page
+    else if (std.mem.eql(u8, entity, "event"))
+        .event
+    else
+        return error.InvalidGoalEntityKind;
+    const match_kind: domain.MatchKind = switch (entity_kind) {
+        .event => if (std.mem.eql(u8, match, "exact"))
+            .event
+        else
+            return error.InvalidGoalMatch,
+        .page => if (std.mem.eql(u8, match, "exact"))
+            .path
+        else if (std.mem.eql(u8, match, "prefix"))
+            .prefix
+        else
+            return error.InvalidGoalMatch,
+    };
+    return .{
+        .name = try form.required("name"),
+        .entity_kind = entity_kind,
+        .match_kind = match_kind,
+        .match_value = try form.required("value"),
+        .confirm_unseen = if (form.optional("confirm_unseen")) |value|
+            std.mem.eql(u8, value, "on")
+        else
+            false,
+    };
+}
+
+fn goalTimestamp(form: Form) !i64 {
+    const value = std.fmt.parseInt(
+        i64,
+        try form.required("updated_at"),
+        10,
+    ) catch return error.InvalidGoalTimestamp;
+    if (value < 0) return error.InvalidGoalTimestamp;
+    return value;
+}
+
+fn requireObservedGoal(
+    allocator: std.mem.Allocator,
+    metadata: *meta.Store,
+    event_store: *events.Store,
+    site_slug: []const u8,
+    context: FormContext,
+    input: GoalInput,
+    report_timeout_ms: u32,
+) !void {
+    try domain.validateName(input.name, 120);
+    const selector = analysis.EventSelector{
+        .kind = switch (input.match_kind) {
+            .event => .exact_event,
+            .path => .exact_page,
+            .prefix => .page_prefix,
+        },
+        .value = input.match_value,
+    };
+    try selector.validate();
+    const site = try metadata.siteConfigurationBySlug(allocator, site_slug);
+    const policy = try metadata.sitePolicy(allocator, site.id);
+    const active = if (policy.strict_mode)
+        try resolveAnalysisGoals(
+            allocator,
+            try metadata.listGoals(allocator, site_slug),
+        )
+    else
+        &.{};
+    const observed = analysis_store.goalSelectorObserved(
+        allocator,
+        event_store,
+        .{
+            .site_id = site.id,
+            .range = context.range,
+            .kind = input.entity_kind,
+            .active_goals = active,
+            .strict_traffic_mode = policy.strict_mode,
+            .timeout_ms = report_timeout_ms,
+        },
+        selector,
+    ) catch |err| {
+        if (err == error.AnalysisTimeout) return error.ReportTimeout;
+        return err;
+    };
+    if (!observed and !input.confirm_unseen) return error.GoalNotObserved;
 }
 
 pub fn addFunnel(
@@ -2897,6 +3452,40 @@ pub fn verifyCsrf(form: Form, expected: []const u8) !void {
 pub fn validateQuery(query: model.Query) !void {
     try domain.validateSlug(query.site);
     query.range.validate() catch return error.InvalidReportRange;
+    if (query.goal_screen != .none) {
+        if (query.kind != .goal or query.subject.len != 0 or
+            query.goal_page == 0 or query.goal_page > 1_000_000 or
+            query.goal_entity_page == 0 or query.goal_entity_page > 1_000_000)
+        {
+            return error.InvalidGoalManagementState;
+        }
+        try validateGoalSearch(query.goal_search);
+        switch (query.goal_screen) {
+            .list => if (query.goal_id.len != 0 or query.goal_entity_set or
+                query.goal_search.len != 0 or query.goal_entity_page != 1)
+            {
+                return error.InvalidGoalManagementState;
+            },
+            .new => if (query.goal_id.len != 0 or query.goal_page != 1) {
+                return error.InvalidGoalManagementState;
+            },
+            .detail => {
+                try domain.validateUuid(query.goal_id);
+                if (query.goal_page != 1 or query.goal_entity_set or
+                    query.goal_search.len != 0 or query.goal_entity_page != 1)
+                {
+                    return error.InvalidGoalManagementState;
+                }
+            },
+            .edit => {
+                try domain.validateUuid(query.goal_id);
+                if (query.goal_page != 1) {
+                    return error.InvalidGoalManagementState;
+                }
+            },
+            .none => unreachable,
+        }
+    }
     if (query.analysis_breakdown) |breakdown| {
         if (query.analysis_series.len != 0 or
             query.kind != .overview or query.subject.len != 0 or
@@ -3929,25 +4518,24 @@ fn validateSavedTargetState(
         targetFilters(query),
         query.analysis_segment_id,
     );
-    const goals = try metadata.listGoals(allocator, query.site);
     if (query.analysis_breakdown) |breakdown| {
         if (breakdown.metric.selector) |selector| {
             try validateSavedSelectorProperties(policy, selector);
-            if (selector.kind == .saved_goal and
-                goalById(goals, selector.value) == null)
-            {
-                return error.GoalNotFound;
-            }
+            if (selector.kind == .saved_goal) _ = try metadata.goalById(
+                allocator,
+                query.site,
+                selector.value,
+            );
         }
     }
     for (query.analysis_series) |metric| {
         if (metric.selector) |selector| {
             try validateSavedSelectorProperties(policy, selector);
-            if (selector.kind == .saved_goal and
-                goalById(goals, selector.value) == null)
-            {
-                return error.GoalNotFound;
-            }
+            if (selector.kind == .saved_goal) _ = try metadata.goalById(
+                allocator,
+                query.site,
+                selector.value,
+            );
         }
     }
 }
@@ -4220,6 +4808,10 @@ fn buildOverviewBuckets(
 fn validNotice(value: []const u8) bool {
     inline for (.{
         "goal-added",
+        "goal-updated",
+        "goal-duplicated",
+        "goal-archived",
+        "goal-reactivated",
         "goal-deleted",
         "funnel-added",
         "funnel-deleted",
@@ -4279,6 +4871,49 @@ fn decodeComponent(
         return error.InvalidUrlEncoding;
     }
     return decoded[0..output];
+}
+
+test "goal management query fields remain screen specific" {
+    const base = model.Query{
+        .site = "example",
+        .range = .{ .start = "2025-01-01", .end = "2025-01-02" },
+        .kind = .goal,
+        .goal_screen = .list,
+    };
+    try validateQuery(base);
+
+    var invalid_list = base;
+    invalid_list.goal_entity_set = true;
+    try std.testing.expectError(
+        error.InvalidGoalManagementState,
+        validateQuery(invalid_list),
+    );
+
+    var valid_new = base;
+    valid_new.goal_screen = .new;
+    valid_new.goal_entity_set = true;
+    valid_new.goal_entity_kind = .event;
+    valid_new.goal_search = "signup";
+    try validateQuery(valid_new);
+
+    var invalid_new = valid_new;
+    invalid_new.goal_page = 2;
+    try std.testing.expectError(
+        error.InvalidGoalManagementState,
+        validateQuery(invalid_new),
+    );
+
+    var valid_detail = base;
+    valid_detail.goal_screen = .detail;
+    valid_detail.goal_id = "00000000-0000-4000-8000-000000000033";
+    try validateQuery(valid_detail);
+
+    var invalid_detail = valid_detail;
+    invalid_detail.goal_entity_page = 2;
+    try std.testing.expectError(
+        error.InvalidGoalManagementState,
+        validateQuery(invalid_detail),
+    );
 }
 
 test "calendar query parsing finalizes canonical state and known aliases" {

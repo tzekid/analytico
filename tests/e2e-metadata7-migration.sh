@@ -45,7 +45,6 @@ UNION ALL SELECT 'policy', site_id, strict_mode, daily_event_ceiling,
                  updated_at_utc_micros, '' FROM site_traffic_policy
 UNION ALL SELECT 'settings', site_id, default_currency, '', '', ''
   FROM site_settings
-UNION ALL SELECT 'goal', id, site_id, name, match_kind, match_value FROM goals
 UNION ALL SELECT 'funnel', id, site_id, name, created_at_utc_micros, ''
   FROM funnels
 UNION ALL SELECT 'step', funnel_id, step_index, name, match_kind, match_value
@@ -59,6 +58,9 @@ ORDER BY 1, 2, 3;
 SQL
 }
 metadata_facts "$live" >"$fixture/before-metadata.txt"
+sqlite3 -separator '|' "$live/meta.db" \
+    'SELECT id, site_id, name, match_kind, match_value, created_at_utc_micros FROM goals ORDER BY id;' \
+    >"$fixture/before-goals.txt"
 before_event_sha=$(sha256sum "$live/events.duckdb" | cut -d' ' -f1)
 
 backup="$fixture/pre-metadata7"
@@ -105,22 +107,28 @@ test "$(sqlite3 "$interrupted/meta.db" \
 interrupted_retry="$fixture/interrupted-retry"
 "$current" restore "$interrupted_backup" "$interrupted_retry" --verify >/dev/null
 test "$("$current" migrate "$interrupted_retry" "$interrupted_backup")" = \
-    "migrated metadata=v7 events=v7"
+    "migrated metadata=v8 events=v7"
 test "$("$current" doctor "$interrupted_retry")" = \
-    "ok metadata=v7 events=v7 sites=1 goals=1 funnels=1 stored_events=1 key=ok"
+    "ok metadata=v8 events=v7 sites=1 goals=1 funnels=1 stored_events=1 key=ok"
 test "$(sqlite3 "$interrupted_retry/meta.db" \
     'SELECT count(*) FROM segments;')" = 0
 test "$(sqlite3 "$interrupted_retry/meta.db" \
     'SELECT count(*) FROM saved_views;')" = 0
 test "$("$current" migrate "$interrupted_retry")" = \
-    "migrated metadata=v7 events=v7"
+    "migrated metadata=v8 events=v7"
 
 test "$("$current" migrate "$live" "$backup")" = \
-    "migrated metadata=v7 events=v7"
+    "migrated metadata=v8 events=v7"
 test "$("$current" doctor "$live")" = \
-    "ok metadata=v7 events=v7 sites=1 goals=1 funnels=1 stored_events=1 key=ok"
+    "ok metadata=v8 events=v7 sites=1 goals=1 funnels=1 stored_events=1 key=ok"
 metadata_facts "$live" >"$fixture/after-metadata.txt"
 cmp "$fixture/before-metadata.txt" "$fixture/after-metadata.txt"
+sqlite3 -separator '|' "$live/meta.db" \
+    'SELECT id, site_id, name, match_kind, match_value, created_at_utc_micros FROM goal_definitions ORDER BY id;' \
+    >"$fixture/after-goals.txt"
+cmp "$fixture/before-goals.txt" "$fixture/after-goals.txt"
+test "$(sqlite3 "$live/meta.db" \
+    'SELECT count(*) FROM goal_definitions WHERE updated_at_utc_micros != created_at_utc_micros OR archived_at_utc_micros IS NOT NULL;')" = 0
 test "$(sha256sum "$live/events.duckdb" | cut -d' ' -f1)" = "$before_event_sha"
 test "$("$current" report "$live" migration 2026-08-23 2026-08-23 \
     overview --format json)" = "$before_report"
@@ -129,9 +137,9 @@ test "$(sqlite3 "$live/meta.db" 'SELECT count(*) FROM saved_views;')" = 0
 test "$(sqlite3 "$live/meta.db" \
     "SELECT count(*) FROM meta_migrations WHERE version=7 AND name='segments-and-saved-views';")" = 1
 test "$("$current" migrate "$live" "$backup")" = \
-    "migrated metadata=v7 events=v7"
+    "migrated metadata=v8 events=v7"
 if "$previous" doctor "$live" >/dev/null 2>&1; then
-    echo "metadata-6 predecessor unexpectedly opened metadata 7" >&2
+    echo "metadata-6 predecessor unexpectedly opened current metadata" >&2
     exit 1
 fi
 
@@ -144,8 +152,8 @@ test "$("$previous" report "$rolled_back" migration 2026-08-23 2026-08-23 \
 
 fresh="$fixture/fresh"
 "$current" init "$fresh" >/dev/null
-test "$(sqlite3 "$fresh/meta.db" 'SELECT max(version) FROM meta_migrations;')" = 7
+test "$(sqlite3 "$fresh/meta.db" 'SELECT max(version) FROM meta_migrations;')" = 8
 test "$(sqlite3 "$fresh/meta.db" 'SELECT count(*) FROM segments;')" = 0
 test "$(sqlite3 "$fresh/meta.db" 'SELECT count(*) FROM saved_views;')" = 0
 
-printf 'metadata7_migration_e2e=pass predecessor=a2d71c046a8b8b632429336f58ff0d1eebfea7b3 metadata=6-to-7 events=7 rows=preserved interruption=retried replay=idempotent rollback=matched-pair\n'
+printf 'metadata7_migration_e2e=pass predecessor=a2d71c046a8b8b632429336f58ff0d1eebfea7b3 metadata=6-to-8 events=7 rows=preserved goals=preserved-active interruption=retried replay=idempotent rollback=matched-pair\n'

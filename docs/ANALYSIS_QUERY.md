@@ -23,6 +23,9 @@ sessions, profiles, or Live traffic.
 - FilterSet: `all` mode, at most 12 clauses and 20 OR values per clause.
 - EventSelector: at most three typed property predicates.
 - Execution context: at most 32 resolved active-goal selectors.
+- Explicit saved-goal resolution: at most three selected goal IDs outside the
+  active snapshot; these may be archived definitions. An active selected ID
+  resolves from the active set and is not duplicated across both inputs.
 - Canonical URL query component: at most 16 KiB and 32 parameters.
 - Canonical saved JSON: at most 32 KiB.
 - Interactive execution deadline: positive and at most 2,000 milliseconds.
@@ -119,6 +122,11 @@ An EventSelector is exactly one of:
 
 It may add zero to three event-property predicates. A saved goal ID is never
 placed in DuckDB SQL and an unresolved/deleted goal rejects before execution.
+An archived saved goal is resolvable only when its UUID is explicitly selected
+by the current Trend or Breakdown state. It remains absent from the active-goal
+snapshot used for default conversions, engaged-session evidence, Overview, and
+D34. The controller owns both bounded sets before DuckDB execution; the query
+grammar does not gain an archive flag or a second selector kind.
 Page selector values must already be normalized stored paths without a query or
 fragment; prefix matching is byte-prefix matching after that validation.
 
@@ -620,10 +628,28 @@ canonical Trend-set JSON. Segment changes affect future view loads because a
 view retains its segment ID plus ad-hoc clauses. Page and highlight are not
 saved. Creating a new segment snapshots the complete currently composed
 FilterSet and never creates a segment-to-segment reference. Missing segments,
-removed allowed properties, deleted saved goals,
+removed allowed properties, goals missing outside D41's protected delete path,
 site mismatches, malformed JSON, and noncanonical stored bytes are visible
 typed stale/corrupt states. They block execution and provide an explicit
 remove/reset path; no clause is silently discarded.
+
+D41 metadata schema 8 replaces raw goal rows with stable active/archived
+definitions. An ordinary application delete is refused while a current valid
+saved Trend or Breakdown view contains that exact goal selector; archive
+preserves the UUID and reportability. D40's stale state still covers corrupt,
+restored, or externally missing references. Editing a goal intentionally
+changes future evaluation over raw historical events; the saved view keeps the
+UUID and no historical selector snapshot is introduced.
+
+The guided goal builder's discovered-entity lookup is not an ordinary
+`AnalysisQuery` result and cannot become a second metric grammar. One finite
+bound plan chooses either qualifying page-view paths or qualifying custom-event
+names under the selected site's resolved local range, product traffic policy,
+and shared two-second deadline. It binds search and pagination, returns at most
+50 rows plus `has_more`, exposes exact eligible count and last receipt time,
+and orders count descending then label ascending. It has no cache, projection,
+EAV table, worker, network request, or new dependency. Issue #34 owns property
+predicate discovery and historical preview.
 
 Native apply and suggestion forms are authenticated, exact-origin and CSRF
 checked, and bounded to the route-specific 64 KiB body accepted by D40.
@@ -650,3 +676,8 @@ preset/redirect, canonical search bounds, stable pagination, typed property
 null/missing/conflict behavior, exact cardinality and source components,
 million-row result-plus-catalog latency, and JavaScript-off/enhanced mobile
 browser operation.
+
+Issue #33 additionally proves active/archive selector isolation, explicit
+archived Trend/Breakdown resolution, exact saved-view delete conflicts without
+UUID-text false positives, and bounded Page/Event discovery semantics,
+deadline interruption, and post-interrupt connection reuse.

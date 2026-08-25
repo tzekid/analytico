@@ -162,6 +162,32 @@ pub fn main(init: std.process.Init) !void {
         );
         return;
     }
+    if (args.len == 7 and
+        std.mem.eql(u8, args[1], "m3") and
+        std.mem.eql(u8, args[2], "goal-discovery"))
+    {
+        try m3_probe.goalDiscovery(
+            allocator,
+            output,
+            args[3],
+            args[4],
+            args[5],
+            args[6],
+        );
+        return;
+    }
+    if (args.len == 5 and
+        std.mem.eql(u8, args[1], "m3") and
+        std.mem.eql(u8, args[2], "goal-cap-recovery"))
+    {
+        try m3_probe.goalCapacityRecovery(
+            allocator,
+            output,
+            args[3],
+            args[4],
+        );
+        return;
+    }
     if (args.len == 9 and
         std.mem.eql(u8, args[1], "m3") and
         std.mem.eql(u8, args[2], "overview-v2-series"))
@@ -303,6 +329,8 @@ pub fn main(init: std.process.Init) !void {
         \\  analytico m3 million <directory> <site-id>
         \\  analytico m3 timeout <directory>
         \\  analytico m3 traffic-quality-profile <directory> <site-slug> <start-date> <end-date>
+        \\  analytico m3 goal-discovery <directory> <site-slug> <start-date> <end-date>
+        \\  analytico m3 goal-cap-recovery <directory> <site-slug>
         \\  analytico m3 filters-v2-series <directory> <site-slug> <current-start> <current-end> <comparison-start> <comparison-end>
         \\  analytico m3 filters-v2-profile <directory> <site-slug> <current-start> <current-end> <comparison-start> <comparison-end>
         \\  analytico m3 legacy-create <directory>

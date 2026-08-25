@@ -1164,6 +1164,46 @@ pub const SuggestionResult = struct {
     has_more: bool,
 };
 
+pub const GoalEntityKind = enum {
+    page,
+    event,
+};
+
+pub const GoalDiscoveryRequest = struct {
+    site_id: []const u8,
+    range: LocalDateRange,
+    kind: GoalEntityKind,
+    search: []const u8 = "",
+    page: u32 = 1,
+    active_goals: []const ResolvedGoal = &.{},
+    strict_traffic_mode: bool = false,
+    timeout_ms: u32 = maximum_timeout_ms,
+
+    pub fn validate(self: GoalDiscoveryRequest) !void {
+        try domain.validateUuid(self.site_id);
+        try self.range.validate();
+        try validateSearch(self.search);
+        if (self.page == 0 or self.page > 1_000_000) {
+            return error.InvalidGoalDiscoveryPage;
+        }
+        if (self.timeout_ms == 0 or self.timeout_ms > maximum_timeout_ms) {
+            return error.InvalidAnalysisTimeout;
+        }
+        try validateActiveGoals(self.active_goals, self.strict_traffic_mode);
+    }
+};
+
+pub const DiscoveredGoalEntity = struct {
+    label: []const u8,
+    eligible_count: i64,
+    last_received_at_utc_micros: i64,
+};
+
+pub const GoalDiscoveryResult = struct {
+    entities: []const DiscoveredGoalEntity,
+    has_more: bool,
+};
+
 pub const BreakdownPageResult = struct {
     breakdown: BreakdownResult,
     properties: PropertyCatalog,
@@ -1278,6 +1318,7 @@ pub const Execution = struct {
     query: Query,
     comparison_range: ?LocalDateRange = null,
     active_goals: []const ResolvedGoal = &.{},
+    selected_goals: []const ResolvedGoal = &.{},
     strict_traffic_mode: bool = false,
     segment_resolved: bool = false,
     timeout_ms: u32 = maximum_timeout_ms,
@@ -1300,7 +1341,12 @@ pub const Execution = struct {
             return error.UnresolvedAnalysisSegment;
         }
         try validateActiveGoals(self.active_goals, self.strict_traffic_mode);
-        if (try resolvedSelector(self.query.metric.selector, self.active_goals)) |resolved| {
+        try validateSelectedGoals(self.selected_goals, self.active_goals);
+        if (try resolvedSelectorSets(
+            self.query.metric.selector,
+            self.active_goals,
+            self.selected_goals,
+        )) |resolved| {
             if (resolved.selector.predicates.len +
                 resolved.additional_predicates.len > maximum_selector_predicates)
             {
@@ -1611,6 +1657,7 @@ pub const TrendSetExecution = struct {
     set: TrendSet,
     comparison_range: ?LocalDateRange = null,
     active_goals: []const ResolvedGoal = &.{},
+    selected_goals: []const ResolvedGoal = &.{},
     strict_traffic_mode: bool = false,
     segment_resolved: bool = false,
     timeout_ms: u32 = maximum_timeout_ms,
@@ -1622,6 +1669,7 @@ pub const TrendSetExecution = struct {
                 .query = self.set.query(metric),
                 .comparison_range = self.comparison_range,
                 .active_goals = self.active_goals,
+                .selected_goals = self.selected_goals,
                 .strict_traffic_mode = self.strict_traffic_mode,
                 .segment_resolved = self.segment_resolved,
                 .timeout_ms = self.timeout_ms,
@@ -1712,6 +1760,26 @@ fn validateActiveGoals(
         try goal.validate();
         if (strict_traffic_mode and goal.selector.predicates.len != 0) {
             return error.UnsupportedStrictGoalPredicate;
+        }
+        for (goals[0..index]) |prior| {
+            if (std.mem.eql(u8, goal.id, prior.id)) {
+                return error.DuplicateResolvedGoal;
+            }
+        }
+    }
+}
+
+fn validateSelectedGoals(
+    goals: []const ResolvedGoal,
+    active_goals: []const ResolvedGoal,
+) !void {
+    if (goals.len > maximum_series) return error.TooManySelectedGoals;
+    for (goals, 0..) |goal, index| {
+        try goal.validate();
+        for (active_goals) |active| {
+            if (std.mem.eql(u8, goal.id, active.id)) {
+                return error.DuplicateResolvedGoal;
+            }
         }
         for (goals[0..index]) |prior| {
             if (std.mem.eql(u8, goal.id, prior.id)) {
@@ -1852,6 +1920,19 @@ pub fn resolvedSelector(
         };
     }
     return error.UnresolvedGoalSelector;
+}
+
+pub fn resolvedSelectorSets(
+    selector: ?EventSelector,
+    active_goals: []const ResolvedGoal,
+    selected_goals: []const ResolvedGoal,
+) !?SelectorResolution {
+    const selected = selector orelse return null;
+    if (selected.kind != .saved_goal) return .{ .selector = selected };
+    if (resolvedSelector(selected, active_goals)) |resolution| {
+        return resolution;
+    } else |err| if (err != error.UnresolvedGoalSelector) return err;
+    return resolvedSelector(selected, selected_goals);
 }
 
 const JsonSelector = struct {
@@ -2993,6 +3074,48 @@ test "metric selectors and resolved comparisons fail before execution" {
     try std.testing.expectError(
         error.UnresolvedAnalysisSegment,
         (Execution{ .query = segmented }).validate(),
+    );
+}
+
+test "explicit selected goals resolve separately from the active snapshot" {
+    const archived_id = "00000000-0000-4000-8000-000000000033";
+    const selected = EventSelector{
+        .kind = .saved_goal,
+        .value = archived_id,
+    };
+    const active = [_]ResolvedGoal{.{
+        .id = "00000000-0000-4000-8000-000000000034",
+        .selector = .{ .kind = .exact_event, .value = "active" },
+    }};
+    const explicit = [_]ResolvedGoal{.{
+        .id = archived_id,
+        .selector = .{ .kind = .exact_event, .value = "archived" },
+    }};
+    try std.testing.expectError(
+        error.UnresolvedGoalSelector,
+        resolvedSelector(selected, &active),
+    );
+    const resolved = (try resolvedSelectorSets(
+        selected,
+        &active,
+        &explicit,
+    )).?;
+    try std.testing.expectEqual(SelectorKind.exact_event, resolved.selector.kind);
+    try std.testing.expectEqualStrings("archived", resolved.selector.value);
+
+    try std.testing.expectError(
+        error.DuplicateResolvedGoal,
+        (Execution{
+            .query = .{
+                .site_id = "00000000-0000-4000-8000-000000000035",
+                .range = .{ .start = "2025-01-01", .end = "2025-01-02" },
+                .mode = .trend,
+                .metric = .{ .kind = .visitors },
+                .interval = .day,
+            },
+            .active_goals = &active,
+            .selected_goals = &active,
+        }).validate(),
     );
 }
 

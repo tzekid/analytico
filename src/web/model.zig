@@ -61,6 +61,21 @@ pub const Query = struct {
     analysis_breakdown: ?analysis.Query = null,
     analysis_filters: analysis.FilterSet = .{},
     analysis_segment_id: ?[]const u8 = null,
+    goal_screen: GoalScreen = .none,
+    goal_id: []const u8 = "",
+    goal_page: u32 = 1,
+    goal_entity_kind: analysis.GoalEntityKind = .page,
+    goal_search: []const u8 = "",
+    goal_entity_page: u32 = 1,
+    goal_entity_set: bool = false,
+};
+
+pub const GoalScreen = enum {
+    none,
+    list,
+    new,
+    detail,
+    edit,
 };
 
 pub const ReportTimeBasis = enum {
@@ -230,8 +245,51 @@ pub const SegmentOption = struct {
 
 pub const GoalDraft = struct {
     name: []const u8 = "",
-    match_kind: []const u8 = "event",
+    entity_kind: analysis.GoalEntityKind = .page,
+    match_kind: []const u8 = "exact",
     match_value: []const u8 = "",
+    confirm_unseen: bool = false,
+};
+
+pub const GoalEntityOption = struct {
+    label: []const u8,
+    eligible_count: i64,
+    last_seen: []const u8,
+};
+
+pub const GoalMatchMode = enum {
+    exact,
+    prefix,
+};
+
+pub const GoalDefinitionView = struct {
+    id: []const u8,
+    name: []const u8,
+    entity_kind: analysis.GoalEntityKind,
+    match_mode: GoalMatchMode,
+    match_value: []const u8,
+    archived: bool,
+    created_at: []const u8,
+    updated_at: []const u8,
+    updated_at_utc_micros: i64,
+    detail_url: []const u8,
+    edit_url: []const u8,
+};
+
+pub const GoalManagement = struct {
+    screen: GoalScreen,
+    definitions: []const GoalDefinitionView = &.{},
+    active_count: i64 = 0,
+    selected: ?GoalDefinitionView = null,
+    entity_kind: analysis.GoalEntityKind = .page,
+    search: []const u8 = "",
+    entities: []const GoalEntityOption = &.{},
+    list_url: []const u8,
+    new_url: []const u8,
+    previous_definitions_url: ?[]const u8 = null,
+    next_definitions_url: ?[]const u8 = null,
+    previous_entities_url: ?[]const u8 = null,
+    next_entities_url: ?[]const u8 = null,
 };
 
 pub const FunnelDraft = struct {
@@ -242,6 +300,7 @@ pub const FunnelDraft = struct {
 pub const FormErrorTarget = enum {
     none,
     goal,
+    goal_duplicate,
     funnel,
     network,
     traffic_policy,
@@ -265,6 +324,7 @@ pub const Page = struct {
     analyze_trend: ?AnalyzeTrend = null,
     analyze_breakdown: ?AnalyzeBreakdown = null,
     collection_diagnostics: ?diagnostics.Snapshot = null,
+    goal_management: ?GoalManagement = null,
     goals: []const meta.Goal,
     funnels: []const meta.Funnel,
     saved_views: []const meta.SavedView = &.{},

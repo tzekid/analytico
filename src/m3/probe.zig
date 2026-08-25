@@ -349,6 +349,310 @@ pub fn timeout(
     try output.writeAll("report timeout interrupted and connection reused\n");
 }
 
+pub fn goalDiscovery(
+    allocator: std.mem.Allocator,
+    output: *std.Io.Writer,
+    directory: []const u8,
+    site_slug: []const u8,
+    start_date: []const u8,
+    end_date: []const u8,
+) !void {
+    try domain.validateSlug(site_slug);
+    const range = analysis.LocalDateRange{
+        .start = start_date,
+        .end = end_date,
+    };
+    try range.validate();
+    const metadata_path = try std.fs.path.join(
+        allocator,
+        &.{ directory, "meta.db" },
+    );
+    var metadata = try meta.Store.open(allocator, metadata_path);
+    defer metadata.deinit();
+    try metadata.requireCurrent();
+    const site_id = try metadata.siteIdBySlug(allocator, site_slug);
+    const policy = try metadata.sitePolicy(allocator, site_id);
+    const goals = try metadata.listGoals(allocator, site_slug);
+    const resolved = try allocator.alloc(analysis.ResolvedGoal, goals.len);
+    for (resolved, goals) |*target, goal| target.* = .{
+        .id = goal.id,
+        .selector = .{
+            .kind = switch (goal.match_kind) {
+                .event => .exact_event,
+                .path => .exact_page,
+                .prefix => .page_prefix,
+            },
+            .value = goal.match_value,
+        },
+    };
+    const event_path = try std.fs.path.join(
+        allocator,
+        &.{ directory, "events.duckdb" },
+    );
+    var store = try events.Store.open(allocator, event_path);
+    defer store.deinit();
+    try store.requireCurrent();
+    const request = analysis.GoalDiscoveryRequest{
+        .site_id = site_id,
+        .range = range,
+        .kind = .page,
+        .active_goals = resolved,
+        .strict_traffic_mode = policy.strict_mode,
+        .timeout_ms = analysis.maximum_timeout_ms,
+    };
+    const pages = try analysis_store.executeGoalDiscovery(
+        allocator,
+        &store,
+        request,
+    );
+    if (pages.entities.len == 0 or pages.entities.len > 50) {
+        return error.InvalidGoalDiscoveryProbe;
+    }
+    for (pages.entities[1..], pages.entities[0 .. pages.entities.len - 1]) |
+        current,
+        prior,
+    | {
+        if (current.eligible_count > prior.eligible_count or
+            (current.eligible_count == prior.eligible_count and
+                std.mem.order(u8, current.label, prior.label) == .lt))
+        {
+            return error.InvalidGoalDiscoveryOrder;
+        }
+    }
+    var event_request = request;
+    event_request.kind = .event;
+    const custom_events = try analysis_store.executeGoalDiscovery(
+        allocator,
+        &store,
+        event_request,
+    );
+    if (policy.strict_mode) {
+        if (custom_events.entities.len != 2 or
+            !std.mem.eql(u8, custom_events.entities[0].label, "signup") or
+            custom_events.entities[0].eligible_count != 100_000 or
+            !std.mem.eql(u8, custom_events.entities[1].label, "purchase") or
+            custom_events.entities[1].eligible_count != 99_900)
+        {
+            return error.InvalidGoalDiscoveryKinds;
+        }
+    } else if (custom_events.entities.len != 2 or
+        !std.mem.eql(u8, custom_events.entities[0].label, "purchase") or
+        !std.mem.eql(u8, custom_events.entities[1].label, "signup"))
+    {
+        return error.InvalidGoalDiscoveryKinds;
+    }
+    if (!try analysis_store.goalSelectorObserved(
+        allocator,
+        &store,
+        request,
+        .{ .kind = .page_prefix, .value = "/pri" },
+    ) or try analysis_store.goalSelectorObserved(
+        allocator,
+        &store,
+        request,
+        .{ .kind = .exact_page, .value = "/not-observed" },
+    )) {
+        return error.InvalidGoalDiscoveryPresence;
+    }
+    var timeout_request = request;
+    timeout_request.timeout_ms = 1;
+    if (analysis_store.executeGoalDiscovery(
+        allocator,
+        &store,
+        timeout_request,
+    )) |_| {
+        return error.ExpectedGoalDiscoveryTimeout;
+    } else |err| if (err != error.AnalysisTimeout) return err;
+
+    var reuse_request = request;
+    reuse_request.search = "/pricing";
+    const reused = try analysis_store.executeGoalDiscovery(
+        allocator,
+        &store,
+        reuse_request,
+    );
+    if (reused.entities.len != 1 or
+        !std.mem.eql(u8, reused.entities[0].label, "/pricing"))
+    {
+        return error.InvalidGoalDiscoveryReuse;
+    }
+    try std.json.Stringify.value(.{
+        .strict_mode = policy.strict_mode,
+        .page_entities = pages.entities.len,
+        .custom_event_entities = custom_events.entities.len,
+        .strict_signup_count = custom_events.entities[0].eligible_count,
+        .strict_purchase_count = custom_events.entities[1].eligible_count,
+        .timeout_interrupted = true,
+        .connection_reused = true,
+        .search_value = reused.entities[0].label,
+        .search_count = reused.entities[0].eligible_count,
+    }, .{}, output);
+    try output.writeByte('\n');
+}
+
+pub fn goalCapacityRecovery(
+    allocator: std.mem.Allocator,
+    output: *std.Io.Writer,
+    directory: []const u8,
+    site_slug: []const u8,
+) !void {
+    try domain.validateSlug(site_slug);
+    const metadata_path = try std.fs.path.join(
+        allocator,
+        &.{ directory, "meta.db" },
+    );
+    var metadata = try meta.Store.open(allocator, metadata_path);
+    defer metadata.deinit();
+    try metadata.requireCurrent();
+
+    const initial = try metadata.listGoalDefinitions(allocator, site_slug, 1);
+    if (initial.has_more or initial.active_count != 34 or
+        initial.goals.len != 34)
+    {
+        return error.InvalidGoalCapacityFixture;
+    }
+    var next_timestamp: i64 = 1;
+    for (initial.goals) |goal| {
+        next_timestamp = @max(next_timestamp, goal.updated_at_utc_micros);
+    }
+    next_timestamp = std.math.add(i64, next_timestamp, 1) catch
+        return error.InvalidGoalTimestamp;
+    if (next_timestamp > std.math.maxInt(i64) - 6) {
+        return error.InvalidGoalTimestamp;
+    }
+
+    const probe_id = "50000000-0000-4000-8000-000000000001";
+    try requireTooMany(metadata.addGoal(
+        allocator,
+        probe_id,
+        site_slug,
+        "Capacity probe",
+        .event,
+        "capacity_probe",
+        next_timestamp,
+    ));
+
+    const first = initial.goals[0];
+    const second = initial.goals[1];
+    const third = initial.goals[2];
+    const fourth = initial.goals[3];
+    try metadata.archiveGoal(
+        allocator,
+        site_slug,
+        first.id,
+        first.updated_at_utc_micros,
+        next_timestamp,
+    );
+    try requireTooMany(metadata.reactivateGoal(
+        allocator,
+        site_slug,
+        first.id,
+        next_timestamp,
+        next_timestamp + 1,
+    ));
+    try requireTooMany(metadata.addGoal(
+        allocator,
+        probe_id,
+        site_slug,
+        "Capacity probe",
+        .event,
+        "capacity_probe",
+        next_timestamp + 1,
+    ));
+
+    try metadata.archiveGoal(
+        allocator,
+        site_slug,
+        second.id,
+        second.updated_at_utc_micros,
+        next_timestamp + 1,
+    );
+    try requireTooMany(metadata.reactivateGoal(
+        allocator,
+        site_slug,
+        first.id,
+        next_timestamp,
+        next_timestamp + 2,
+    ));
+    try requireTooMany(metadata.addGoal(
+        allocator,
+        probe_id,
+        site_slug,
+        "Capacity probe",
+        .event,
+        "capacity_probe",
+        next_timestamp + 2,
+    ));
+
+    try metadata.archiveGoal(
+        allocator,
+        site_slug,
+        third.id,
+        third.updated_at_utc_micros,
+        next_timestamp + 2,
+    );
+    try metadata.reactivateGoal(
+        allocator,
+        site_slug,
+        first.id,
+        next_timestamp,
+        next_timestamp + 3,
+    );
+    try metadata.archiveGoal(
+        allocator,
+        site_slug,
+        fourth.id,
+        fourth.updated_at_utc_micros,
+        next_timestamp + 4,
+    );
+    try metadata.addGoal(
+        allocator,
+        probe_id,
+        site_slug,
+        "Capacity probe",
+        .event,
+        "capacity_probe",
+        next_timestamp + 5,
+    );
+    try metadata.deleteGoalById(
+        allocator,
+        site_slug,
+        probe_id,
+        next_timestamp + 5,
+        "Capacity probe",
+    );
+    try metadata.reactivateGoal(
+        allocator,
+        site_slug,
+        second.id,
+        next_timestamp + 1,
+        next_timestamp + 6,
+    );
+
+    const final = try metadata.listGoalDefinitions(allocator, site_slug, 1);
+    if (final.has_more or final.active_count != 32 or final.goals.len != 34) {
+        return error.InvalidGoalCapacityRecovery;
+    }
+    try std.json.Stringify.value(.{
+        .initial_active = initial.active_count,
+        .new_blocked_at_34_33_32 = true,
+        .reactivation_blocked_at_33_32 = true,
+        .new_succeeded_at_31 = true,
+        .reactivation_succeeded_at_31 = true,
+        .final_active = final.active_count,
+        .definitions_preserved = final.goals.len,
+    }, .{}, output);
+    try output.writeByte('\n');
+}
+
+fn requireTooMany(result: anyerror!void) !void {
+    _ = result catch |err| {
+        if (err == error.TooManyActiveGoals) return;
+        return err;
+    };
+    return error.ExpectedTooManyActiveGoals;
+}
+
 pub fn trafficQualityProfile(
     allocator: std.mem.Allocator,
     output: *std.Io.Writer,

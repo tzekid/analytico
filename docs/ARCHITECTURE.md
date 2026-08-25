@@ -2,7 +2,7 @@
 
 > **Status:** Sections 1–10 describe the shipped one-process runtime, its frozen
 > protocol-v1 compatibility path, additive protocol-v2 collector foundation,
-> event schema 7, metadata schema 7, protocol-v2 tracker anonymous identity,
+> event schema 7, metadata schema 8, protocol-v2 tracker anonymous identity,
 > and 30-minute client sessions. The remaining 1.0 evolution is stated
 > separately below; it preserves this runtime shape and lands only with its
 > issue evidence.
@@ -151,7 +151,9 @@ suspected verdicts remain derived and never rewrite the append-oriented rows.
 Metadata schema 5 introduced the per-site strict flag and daily accepted-event
 cap. Metadata schema 6 adds D36's one-to-one explicit default currency and
 unique origin ownership. Metadata schema 7 adds D40's exact site-owned segments
-and saved views without changing collection or event facts.
+and saved views without changing collection or event facts. Metadata schema 8
+adds D41's replacement goal definitions with stable active/archive lifecycle,
+created/updated state, and single-statement mutations.
 
 Decision D29 adds a parallel pure `AnalysisQuery` model and finite metric-v2
 store compiler. The domain model validates and canonicalizes state without I/O;
@@ -185,6 +187,15 @@ Turso querying events or DuckDB reading configuration. The server renderer
 receives owned chip/action URLs and never parses state or performs I/O. The one
 D35 Overview cache entry keys the complete composed set; no ordinary result
 cache, client state store, background process, or new service is introduced.
+
+D41 keeps goal management inside the same boundaries. Turso owns the stable
+definition and archive state. The controller loads either the bounded active
+snapshot or at most three explicitly selected goal IDs before analysis; DuckDB
+never resolves a goal ID. A separate finite discovery statement returns Page
+or custom-event labels, eligible count, and last receipt time under the current
+site/range/policy deadline. It remains local to the goal builder until #35
+provides a second consumer with identical semantics. The renderer receives one
+owned typed list/new/detail/edit model and performs no I/O or allocation.
 
 The serving process configures one query thread, a bounded memory limit, a
 bounded temporary directory, no community extensions, and no external file or

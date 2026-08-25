@@ -1,7 +1,7 @@
 # Data model and metric semantics
 
 > **Status:** Sections 1–9 define the shipped analytics-metadata subset in
-> Turso metadata schema 7, DuckDB event schema 7, and metric semantics v1. Authentication storage
+> Turso metadata schema 8, DuckDB event schema 7, and metric semantics v1. Authentication storage
 > remains governed by its own specification. The daily-pseudonym and UTC-day
 > rules remain the compatibility contract for existing rows and current
 > reports. Section 10 records the remaining 1.0 transition; event schema 7 does
@@ -218,22 +218,35 @@ canonical JSON before insertion, and verifies exact parse/reserialization on
 load. A segment owns one schema-1 FilterSet. A saved view owns one canonical
 Breakdown Query or Trend-set and may reference a segment UUID inside that
 state; the UUID is not a database foreign key because deletion must leave a
-visible stale view rather than cascade or silently rewrite it. All operations
-remain site-scoped D19 autocommits. No owner/team, public token, widget layout,
-or DuckDB table is added.
+visible stale view rather than cascade or silently rewrite it. D41 separately
+refuses an ordinary deletion of a goal referenced by current valid canonical
+saved state; restored corrupt or otherwise missing references retain D40's
+visible stale behavior. All operations remain site-scoped D19 autocommits. No
+owner/team, public token, widget layout, or DuckDB table is added.
 
-### `goals`
+### `goal_definitions`
 
 ```sql
-CREATE TABLE goals (
+CREATE TABLE goal_definitions (
     id TEXT PRIMARY KEY,
     site_id TEXT NOT NULL,
     name TEXT NOT NULL,
     match_kind INTEGER NOT NULL,
     match_value TEXT NOT NULL,
     created_at_utc_micros INTEGER NOT NULL,
+    updated_at_utc_micros INTEGER NOT NULL,
+    archived_at_utc_micros INTEGER,
     FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE CASCADE,
-    UNIQUE (site_id, name)
+    UNIQUE (site_id, name),
+    CHECK (length(id) = 36),
+    CHECK (length(name) BETWEEN 1 AND 120),
+    CHECK (match_kind IN (1, 2, 3)),
+    CHECK (length(match_value) BETWEEN 1 AND 1024),
+    CHECK (updated_at_utc_micros >= created_at_utc_micros),
+    CHECK (
+        archived_at_utc_micros IS NULL OR
+        archived_at_utc_micros >= created_at_utc_micros
+    )
 );
 ```
 
@@ -243,11 +256,37 @@ Closed `match_kind` values:
 2. exact page path;
 3. page-path prefix.
 
-Regexes and property predicates are not in the MVP.
-At most 32 active goals may be created for one site, matching the bounded
-active-goal execution context. A pre-migration overflow is preserved but makes
-D34 heuristic diagnostics unavailable and strict enablement invalid until the
-operator brings the site back within the bound.
+Metadata migration 8 deterministically copies every schema-7 `goals` row into
+this replacement table with the same ID, site, name, selector, and creation
+time. The initial update time equals the creation time and the archived time is
+null. It verifies count and complete row equality, removes the retired table,
+then writes ledger 8 last. Retry repairs a deterministic partial copy under
+D19 durable autocommits. If retry finds the retired source already removed, it
+accepts only the exact validated replacement shape before writing the missing
+ledger; every other mixed state fails closed. No explicit multi-write Turso
+transaction is claimed.
+
+An active goal has no archived time. Archive preserves the row and stable ID,
+removes it from the default active snapshot, and keeps it explicitly
+reportable. Editing changes future evaluation over historical raw events and
+updates the timestamp; no semantic version history is retained. At most 32
+active goals may exist for one site, and create/duplicate/reactivate enforce
+the bound in their single write statement. Page-bounded management reads keep
+archived rows finite. Exact custom-event, exact page, and page-prefix remain
+the only #33 selectors. Regexes and arbitrary expressions are excluded; issue
+#34 owns up to three typed property predicates rather than this base migration.
+
+A pre-migration overflow is copied without loss and shown as an operator state.
+It blocks create/duplicate/reactivate and keeps D34 heuristic diagnostics and
+strict enablement unavailable until archiving reduces the active count to 32
+or fewer. No query silently truncates or selects a subset of those definitions.
+
+Deletion refuses a current valid saved Trend or Breakdown reference to the
+exact goal UUID and offers archive. The UUID is not a database foreign key
+because D40 canonical state remains the source of truth. The guard compares
+the structured Breakdown selector or a finite exact Trend-series form, never a
+whole-document UUID substring. Issue #35 must extend the same guard when it
+adds real funnel goal references.
 
 ### `funnels` and `funnel_steps`
 
@@ -765,8 +804,11 @@ the reversible query layer. D36 and issue #19 advance metadata to schema 6,
 store the explicit optional site currency, and make origin ownership unique;
 event schema 7 and every stored event fact remain unchanged. D40 and issue #30
 advance metadata to schema 7 with exact site-owned segments and saved views.
-The controller resolves their canonical state before DuckDB, so neither store
-queries the other and stale references remain visible rather than disappearing.
+D41 and issue #33 advance metadata to schema 8 with a guided active/archive
+goal lifecycle while preserving selectors and stable IDs. The controller
+resolves canonical state before DuckDB, so neither store queries the other;
+current valid saved-goal references block deletion, while genuinely stale or
+corrupt references remain visible rather than disappearing.
 
 ### Identity and sessions
 

@@ -441,6 +441,26 @@ pair and the backed-up predecessor Caddy configuration, proves the predecessor
 again, and only then switches the release symlink. The metadata-6 binary must
 never be started against the migrated metadata-7 file.
 
+For the metadata-schema-8 deployment, repeat the stopped-writer procedure with
+a manifest recording metadata 7 and event 7. Independently restore that backup
+and prove exact predecessor `54f49ed` opens it and reproduces the selected
+metric-v1 and metric-v2 reports before migration. The replayable migration
+creates `goal_definitions`, deterministically copies and verifies every goal
+ID/site/name/selector/creation time as active, removes the retired `goals`
+table, and writes ledger 8 last. A deliberately partial copy must retry to the
+same complete result. The migration changes no event, identity, tracker,
+Caddy, service-unit, dependency, or process fact.
+
+After migration, verify metadata 8/event 7, `doctor`, report parity, exact
+active/archive lifecycle and site isolation, stable direct goal routes, saved
+Trend/Breakdown delete conflicts, archived explicit reports with default
+active-report isolation, bounded entity discovery, and the JavaScript-disabled
+browser flow. The exact deployed binary/library, one process/listener,
+health/readiness, public passkey boundary, and a canonical goal deep link must
+resolve to the merged release. Rollback stops the writer, restores the matched
+metadata-7/event-7 pair, proves `54f49ed` again, and only then switches the
+release symlink. The metadata-7 binary must never start on metadata 8.
+
 ## 11. Retention and site deletion
 
 Run maintenance with the service stopped:
@@ -503,8 +523,8 @@ zig build e2e-m0 e2e-m1 e2e-m2 e2e-timezone e2e-properties \
   e2e-schema6-migration e2e-schema7-migration e2e-heuristics \
   e2e-exclusion e2e-legacy-migration \
   e2e-m2-browser e2e-identity-browser e2e-tracker-browser e2e-m3 e2e-m4 \
-  e2e-m6 e2e-m7 e2e-filters e2e-passkey-p1 \
-  e2e-metadata7-migration \
+  e2e-m6 e2e-m7 e2e-filters e2e-goals e2e-passkey-p1 \
+  e2e-metadata7-migration e2e-metadata8-migration \
   -Doptimize=ReleaseSafe -Dturso-native-path=<exact-prefix>
 zig build bench-properties \
   -Doptimize=ReleaseSafe -Dturso-native-path=<exact-prefix>
@@ -517,8 +537,9 @@ zig build e2e-release-full \
 `e2e-release-full` checks the outer and inner checksums, private DuckDB linkage,
 Caddy syntax, systemd security, and a fresh real-data report from the extracted
 archive, then runs the complete packaged real-process set including classifier,
-traffic-quality, universal filters, and exact schema-4, schema-5, schema-6,
-plus metadata-6 predecessors. The named `e2e-filters` and
-`e2e-metadata7-migration` gates run independently above and again inside this
+traffic-quality, universal filters, guided goals, and exact schema-4, schema-5,
+schema-6, metadata-6, metadata-7, and metadata-8 predecessors. The named
+`e2e-filters`, `e2e-goals`, `e2e-metadata7-migration`, and
+`e2e-metadata8-migration` gates run independently above and again inside this
 full packaged qualification. Large event/browser fixtures are acceptance
 tooling only and are not shipped.
