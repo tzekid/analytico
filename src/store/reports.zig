@@ -1,4 +1,5 @@
 const std = @import("std");
+const analysis = @import("../analysis.zig");
 const domain = @import("../domain.zig");
 const report = @import("../report.zig");
 const duckdb = @import("duckdb.zig");
@@ -1510,6 +1511,7 @@ fn goalReport(
     traffic_context: TrafficContext,
     timeout_ms: u32,
 ) !report.Goal {
+    try validateMetricV1Goal(goal);
     const sql = switch (goal.match_kind) {
         .event => goal_event_sql,
         .path => goal_path_sql,
@@ -1540,6 +1542,31 @@ fn goalReport(
         .matching_sessions = result.int64(1, 0),
         .eligible_sessions = result.int64(2, 0),
     };
+}
+
+fn validateMetricV1Goal(goal: meta.Goal) !void {
+    if (goal.predicates.len != 0) return error.UnsupportedMetricV1GoalPredicates;
+}
+
+test "metric-v1 rejects a predicate goal before query execution" {
+    const predicates = [_]analysis.PropertyPredicate{.{
+        .property_ref = .{ .name = "plan", .scalar_type = .string },
+        .operator = .is,
+        .values = &.{"pro"},
+    }};
+    try std.testing.expectError(
+        error.UnsupportedMetricV1GoalPredicates,
+        validateMetricV1Goal(.{
+            .id = @constCast("00000000-0000-4000-8000-000000000034"),
+            .name = @constCast("Purchase"),
+            .match_kind = .event,
+            .match_value = @constCast("purchase"),
+            .predicates = &predicates,
+            .created_at_utc_micros = 1,
+            .updated_at_utc_micros = 1,
+            .archived_at_utc_micros = null,
+        }),
+    );
 }
 
 fn funnelReport(

@@ -1,5 +1,6 @@
 const std = @import("std");
 const analysis = @import("../analysis.zig");
+const domain = @import("../domain.zig");
 const property = @import("../property.zig");
 const deadline = @import("deadline.zig");
 const duckdb = @import("duckdb.zig");
@@ -540,6 +541,213 @@ pub fn executeGoalDiscovery(
     };
 }
 
+pub fn executeGoalResult(
+    allocator: std.mem.Allocator,
+    event_store: *events.Store,
+    request: analysis.GoalResultRequest,
+) !analysis.GoalResult {
+    try request.validate();
+    var budget = deadline.Budget.init(request.timeout_ms);
+    return executeGoalResultWithBudget(
+        allocator,
+        event_store,
+        request,
+        &budget,
+    );
+}
+
+pub fn executeGoalPreview(
+    allocator: std.mem.Allocator,
+    event_store: *events.Store,
+    request: analysis.GoalResultRequest,
+) !analysis.GoalPreviewResult {
+    try request.validate();
+    var budget = deadline.Budget.init(request.timeout_ms);
+    const result = try executeGoalResultWithBudget(
+        allocator,
+        event_store,
+        request,
+        &budget,
+    );
+    const properties = try executePropertyCatalog(
+        allocator,
+        &event_store.database,
+        try compileGoalPropertyCatalog(allocator, request),
+        &budget,
+    );
+    return .{ .result = result, .properties = properties };
+}
+
+pub fn profileGoalResult(
+    allocator: std.mem.Allocator,
+    event_store: *events.Store,
+    request: analysis.GoalResultRequest,
+) ![]u8 {
+    try request.validate();
+    var output = std.Io.Writer.Allocating.init(allocator);
+    try output.writer.writeAll("GOAL RESULT STATEMENT\n");
+    try profileOverviewPlan(
+        allocator,
+        event_store,
+        try compileGoalResult(allocator, request),
+        &output.writer,
+    );
+    return output.toOwnedSlice();
+}
+
+fn executeGoalResultWithBudget(
+    allocator: std.mem.Allocator,
+    event_store: *events.Store,
+    request: analysis.GoalResultRequest,
+    budget: *deadline.Budget,
+) !analysis.GoalResult {
+    var result = try executePlan(
+        &event_store.database,
+        try compileGoalResult(allocator, request),
+        budget,
+    );
+    defer result.deinit();
+    if (result.columnCount() != 12 or
+        result.rowCount() == 0 or
+        result.rowCount() > 2 + analysis.maximum_currency_series +
+            analysis.maximum_goal_path_rows)
+    {
+        return error.InvalidGoalResult;
+    }
+    var summary_seen = false;
+    var total_matches: i64 = 0;
+    var converting_visitors: i64 = 0;
+    var converting_sessions: i64 = 0;
+    var eligible_visitors: i64 = 0;
+    var eligible_sessions: i64 = 0;
+    var persistent: i64 = 0;
+    var ephemeral: i64 = 0;
+    var legacy: i64 = 0;
+    var path_cardinality: i64 = 0;
+    var revenue: std.ArrayList(analysis.ExactAmount) = .empty;
+    var paths: std.ArrayList(analysis.GoalPathRow) = .empty;
+    var previous_currency: ?[]const u8 = null;
+    var previous_path: ?analysis.GoalPathRow = null;
+    var revenue_value_count: i64 = 0;
+    var shown_path_matches: i64 = 0;
+    for (0..result.rowCount()) |row| {
+        const section = try result.text(allocator, 0, row);
+        if (std.mem.eql(u8, section, "summary")) {
+            if (summary_seen) return error.InvalidGoalResult;
+            summary_seen = true;
+            total_matches = result.int64(2, row);
+            converting_visitors = result.int64(3, row);
+            converting_sessions = result.int64(4, row);
+            eligible_visitors = result.int64(5, row);
+            eligible_sessions = result.int64(6, row);
+            persistent = result.int64(7, row);
+            ephemeral = result.int64(8, row);
+            legacy = result.int64(9, row);
+            path_cardinality = result.int64(10, row);
+        } else if (std.mem.eql(u8, section, "revenue")) {
+            const value_count = result.int64(2, row);
+            const decimal = try result.text(allocator, 1, row);
+            const currency = try result.text(allocator, 11, row);
+            const number_type = property.numberType(decimal) catch
+                return error.InvalidGoalResult;
+            if (value_count <= 0 or number_type != .decimal) {
+                return error.InvalidGoalResult;
+            }
+            domain.validateCurrency(currency) catch return error.InvalidGoalResult;
+            if (previous_currency) |previous| if (std.mem.order(
+                u8,
+                previous,
+                currency,
+            ) != .lt) return error.InvalidGoalResult;
+            previous_currency = currency;
+            revenue_value_count = std.math.add(
+                i64,
+                revenue_value_count,
+                value_count,
+            ) catch return error.InvalidGoalResult;
+            try revenue.append(allocator, .{
+                .decimal = decimal,
+                .currency = currency,
+                .value_count = value_count,
+            });
+        } else if (std.mem.eql(u8, section, "path")) {
+            const matches = result.int64(2, row);
+            const position = result.int64(3, row);
+            const path = try result.text(allocator, 1, row);
+            if (matches <= 0 or path.len == 0 or
+                position != @as(i64, @intCast(paths.items.len + 1)))
+            {
+                return error.InvalidGoalResult;
+            }
+            if (previous_path) |previous| if (previous.matches < matches or
+                (previous.matches == matches and
+                    std.mem.order(u8, previous.path, path) != .lt))
+            {
+                return error.InvalidGoalResult;
+            };
+            shown_path_matches = std.math.add(
+                i64,
+                shown_path_matches,
+                matches,
+            ) catch return error.InvalidGoalResult;
+            const item = analysis.GoalPathRow{ .path = path, .matches = matches };
+            try paths.append(allocator, item);
+            previous_path = item;
+        } else return error.InvalidGoalResult;
+    }
+    if (revenue.items.len > analysis.maximum_currency_series) {
+        return error.TooManyAnalysisCurrencies;
+    }
+    if (!summary_seen or total_matches < 0 or converting_visitors < 0 or
+        converting_sessions < 0 or eligible_visitors < 0 or
+        eligible_sessions < 0 or persistent < 0 or ephemeral < 0 or
+        legacy < 0 or path_cardinality < 0)
+    {
+        return error.InvalidGoalResult;
+    }
+    const expected_path_rows: usize = @intCast(@min(
+        path_cardinality,
+        @as(i64, analysis.maximum_goal_path_rows),
+    ));
+    if (converting_visitors > eligible_visitors or
+        converting_sessions > eligible_sessions or
+        converting_visitors > total_matches or
+        converting_sessions > total_matches or
+        persistent + ephemeral + legacy != converting_visitors or
+        revenue_value_count > total_matches or
+        shown_path_matches > total_matches or
+        paths.items.len != expected_path_rows or
+        (path_cardinality <= @as(i64, analysis.maximum_goal_path_rows) and
+            shown_path_matches != total_matches) or
+        ((total_matches == 0) != (path_cardinality == 0)))
+    {
+        return error.InvalidGoalResult;
+    }
+    const persistent_scaled = std.math.mul(i64, persistent, 10_000) catch
+        return error.InvalidGoalResult;
+    return .{
+        .total_matches = total_matches,
+        .converting_visitors = converting_visitors,
+        .converting_sessions = converting_sessions,
+        .eligible_visitors = eligible_visitors,
+        .eligible_sessions = eligible_sessions,
+        .converting_coverage = .{
+            .total_people = converting_visitors,
+            .persistent_people = persistent,
+            .ephemeral_people = ephemeral,
+            .legacy_people = legacy,
+            .persistent_basis_points = if (converting_visitors == 0)
+                0
+            else
+                @intCast(@divTrunc(persistent_scaled, converting_visitors)),
+            .persistent_since_local_date = null,
+        },
+        .revenue = try revenue.toOwnedSlice(allocator),
+        .paths = try paths.toOwnedSlice(allocator),
+        .path_cardinality = path_cardinality,
+    };
+}
+
 pub fn compileGoalDiscovery(
     allocator: std.mem.Allocator,
     request: analysis.GoalDiscoveryRequest,
@@ -597,6 +805,99 @@ pub fn compileGoalDiscovery(
     );
     const offset = (@as(i64, request.page) - 1) * 50;
     try builder.bindInteger(offset);
+    return builder.finish();
+}
+
+pub fn compileGoalResult(
+    allocator: std.mem.Allocator,
+    request: analysis.GoalResultRequest,
+) !StatementPlan {
+    try request.validate();
+    const execution = request.execution();
+    try execution.validate();
+    var builder = Builder.init(allocator);
+    if (execution.query.filters.clauses.len == 0) {
+        try writeCompactGoalCommon(&builder, execution, request.range);
+    } else {
+        try writeCommon(&builder, execution, request.range, false, false);
+    }
+    try builder.write(
+        ", matched AS MATERIALIZED (SELECT e.person_key, e.session_id," ++
+            " e.identity_quality, e.path, e.value_amount, e.value_currency" ++
+            " FROM qualified e WHERE ",
+    );
+    try writeSelector(&builder, request.selector, "e");
+    try builder.write(
+        "), eligible AS (SELECT count(DISTINCT person_key)::BIGINT" ++
+            " AS eligible_visitors, count(DISTINCT session_id)::BIGINT" ++
+            " AS eligible_sessions FROM qualified)," ++
+            " matched_summary AS (SELECT count(*)::BIGINT AS total_matches," ++
+            " count(DISTINCT person_key)::BIGINT AS converting_visitors," ++
+            " count(DISTINCT session_id)::BIGINT AS converting_sessions," ++
+            " count(DISTINCT person_key) FILTER (WHERE identity_quality = 1)" ++
+            "::BIGINT AS persistent," ++
+            " count(DISTINCT person_key) FILTER (WHERE identity_quality = 2)" ++
+            "::BIGINT AS ephemeral," ++
+            " count(DISTINCT person_key) FILTER (WHERE identity_quality = 3)" ++
+            "::BIGINT AS legacy," ++
+            " count(DISTINCT COALESCE(NULLIF(path, ''), '(not set)'))::BIGINT" ++
+            " AS path_cardinality FROM matched)," ++
+            " summary AS (SELECT matched_summary.*, eligible.*" ++
+            " FROM matched_summary CROSS JOIN eligible)," ++
+            " revenue_rows AS (SELECT value_currency AS currency," ++
+            " CAST(sum(value_amount) AS VARCHAR) AS amount," ++
+            " count(*)::BIGINT AS value_count FROM matched" ++
+            " WHERE value_amount IS NOT NULL AND value_currency <> ''" ++
+            " GROUP BY value_currency ORDER BY value_currency LIMIT ",
+    );
+    try builder.bindInteger(@as(i64, analysis.maximum_currency_series) + 1);
+    try builder.write(
+        "), path_counts AS (SELECT COALESCE(NULLIF(path, ''), '(not set)')" ++
+            " AS path, count(*)::BIGINT AS matches FROM matched GROUP BY path)," ++
+            " path_rows AS (SELECT path, matches," ++
+            " row_number() OVER (ORDER BY matches DESC, path ASC)::BIGINT" ++
+            " AS position FROM path_counts ORDER BY matches DESC, path ASC LIMIT ",
+    );
+    try builder.bindInteger(analysis.maximum_goal_path_rows);
+    try builder.write(
+        ") SELECT 'summary' AS section, '' AS label," ++
+            " total_matches AS n1, converting_visitors AS n2," ++
+            " converting_sessions AS n3, eligible_visitors AS n4," ++
+            " eligible_sessions AS n5, persistent AS n6, ephemeral AS n7," ++
+            " legacy AS n8, path_cardinality AS n9, '' AS currency" ++
+            " FROM summary UNION ALL SELECT 'revenue', amount, value_count," ++
+            " 0::BIGINT, 0::BIGINT, 0::BIGINT, 0::BIGINT, 0::BIGINT," ++
+            " 0::BIGINT, 0::BIGINT, 0::BIGINT, currency FROM revenue_rows" ++
+            " UNION ALL SELECT 'path', path, matches, position, 0::BIGINT," ++
+            " 0::BIGINT, 0::BIGINT, 0::BIGINT, 0::BIGINT, 0::BIGINT," ++
+            " 0::BIGINT, '' FROM path_rows" ++
+            " ORDER BY section, currency, n2, label",
+    );
+    return builder.finish();
+}
+
+pub fn compileGoalPropertyCatalog(
+    allocator: std.mem.Allocator,
+    request: analysis.GoalResultRequest,
+) !StatementPlan {
+    try request.validate();
+    const execution = request.execution();
+    try execution.validate();
+    var builder = Builder.init(allocator);
+    try writeCommon(&builder, execution, request.range, false, false);
+    var base_selector = request.selector;
+    base_selector.predicates = &.{};
+    try builder.write(
+        ", property_events AS (SELECT e.properties_json AS document" ++
+            " FROM qualified e WHERE ",
+    );
+    try writeSelector(&builder, base_selector, "e");
+    try builder.write(
+        " ORDER BY e.received_at_utc_micros DESC, e.event_id DESC LIMIT ",
+    );
+    try builder.bindInteger(analysis.maximum_property_catalog_events);
+    try builder.write("), ");
+    try writePropertyCatalogExpansion(&builder);
     return builder.finish();
 }
 
@@ -3821,8 +4122,14 @@ fn compilePropertyCatalog(
         " ORDER BY e.received_at_utc_micros DESC, e.event_id DESC LIMIT ",
     );
     try builder.bindInteger(analysis.maximum_property_catalog_events);
+    try builder.write("), ");
+    try writePropertyCatalogExpansion(&builder);
+    return builder.finish();
+}
+
+fn writePropertyCatalogExpansion(builder: *Builder) !void {
     try builder.write(
-        "), expanded AS (SELECT document," ++
+        "expanded AS (SELECT document," ++
             " UNNEST(json_keys(document)) AS property_name" ++
             " FROM property_events), typed AS (SELECT property_name," ++
             " CASE json_type(document, '/' || property_name)" ++
@@ -3845,7 +4152,67 @@ fn compilePropertyCatalog(
             " FROM grouped JOIN selected USING (property_name)" ++
             " ORDER BY grouped.property_name, grouped.type_code",
     );
-    return builder.finish();
+}
+
+fn writeCompactGoalCommon(
+    builder: *Builder,
+    execution: analysis.Execution,
+    range: analysis.LocalDateRange,
+) !void {
+    if (execution.strict_traffic_mode) {
+        var goals: [analysis.maximum_active_goals]traffic.Goal = undefined;
+        for (execution.active_goals, 0..) |goal, index| goals[index] = .{
+            .kind = switch (goal.selector.kind) {
+                .exact_event => .event,
+                .exact_page => .path,
+                .page_prefix => .prefix,
+                .saved_goal => return error.UnresolvedGoalSelector,
+            },
+            .value = goal.selector.value,
+        };
+        try builder.write("WITH ");
+        try builder.appendTraffic(try traffic.classifierFragment(
+            builder.allocator,
+            execution.query.site_id,
+            goals[0..execution.active_goals.len],
+            true,
+        ));
+        try builder.write(", ");
+    } else try builder.write("WITH ");
+    try builder.write(
+        "range_events AS NOT MATERIALIZED (SELECT e.session_id, e.kind," ++
+            " e.event_name, e.path, e.properties_json," ++
+            " e.value_amount, e.value_currency, e.identity_quality," ++
+            " CASE WHEN e.identity_quality IN (1, 2, 3) THEN" ++
+            " struct_pack(identity_kind := CASE" ++
+            " WHEN e.identity_quality = 1" ++
+            " AND COALESCE(l.user_id, e.user_id, '') <> ''" ++
+            " THEN 0::UTINYINT ELSE e.identity_quality END," ++
+            " user_id := CASE WHEN e.identity_quality = 1" ++
+            " AND COALESCE(l.user_id, e.user_id, '') <> ''" ++
+            " THEN COALESCE(l.user_id, e.user_id) ELSE '' END," ++
+            " anonymous_id := CASE WHEN e.identity_quality = 1" ++
+            " AND COALESCE(l.user_id, e.user_id, '') <> ''" ++
+            " THEN CAST(NULL AS UUID) ELSE e.anonymous_id END)" ++
+            " ELSE NULL END AS person_key" ++
+            " FROM events e LEFT JOIN identity_links l" ++
+            " ON l.site_id = e.site_id AND l.anonymous_id = e.anonymous_id" ++
+            " WHERE e.site_id = ",
+    );
+    try builder.bindText(execution.query.site_id);
+    try builder.write(" AND e.site_local_date BETWEEN CAST(");
+    try builder.bindText(range.start);
+    try builder.write(" AS DATE) AND CAST(");
+    try builder.bindText(range.end);
+    try builder.write(
+        " AS DATE) AND e.kind IN (1, 2)" ++
+            " AND e.traffic_class IN (1, 5)",
+    );
+    if (execution.strict_traffic_mode) try builder.write(
+        " AND e.session_id NOT IN (SELECT session_id" ++
+            " FROM d34_current_suspected_sessions)",
+    );
+    try builder.write("), qualified AS NOT MATERIALIZED (SELECT * FROM range_events)");
 }
 
 fn writeCommon(
@@ -3926,8 +4293,15 @@ fn writeCommon(
             " WHEN e.identity_quality = 1 THEN 'a:' || CAST(e.anonymous_id AS VARCHAR)" ++
             " WHEN e.identity_quality = 2 THEN 'e:' || CAST(e.anonymous_id AS VARCHAR)" ++
             " WHEN e.identity_quality = 3 THEN 'l:' || CAST(e.anonymous_id AS VARCHAR)" ++
-            " ELSE NULL END AS person_key" ++
-            " FROM events e LEFT JOIN identity_links l" ++
+            " ELSE NULL END AS person_key",
+    );
+    if (needsFilteredEventColumns(execution.query.filters)) try builder.write(
+        ", e.referrer_host AS referrer, e.country_code AS country," ++
+            " e.device_category AS device, e.browser_family AS browser," ++
+            " e.os_family AS operating_system",
+    );
+    try builder.write(
+        " FROM events e LEFT JOIN identity_links l" ++
             " ON l.site_id = e.site_id AND l.anonymous_id = e.anonymous_id" ++
             " WHERE e.site_id = ",
     );
@@ -5573,6 +5947,98 @@ test "metric v2 executes against a real on-disk schema four store" {
     try std.testing.expectEqualStrings("USD", revenue.trend.total[1].amount.currency);
     try std.testing.expectEqualStrings("7.500000", revenue.trend.total[1].amount.decimal);
 
+    const goal_values = [_][]const u8{"pro"};
+    const goal_predicates = [_]analysis.PropertyPredicate{.{
+        .property_ref = .{ .name = "plan", .scalar_type = .string },
+        .operator = .is,
+        .values = &goal_values,
+    }};
+    const goal_request = analysis.GoalResultRequest{
+        .site_id = site,
+        .range = range,
+        .selector = .{
+            .kind = .exact_event,
+            .value = "purchase",
+            .predicates = &goal_predicates,
+        },
+    };
+    const goal = try executeGoalResult(query_allocator, &event_store, goal_request);
+    try std.testing.expectEqual(@as(i64, 2), goal.total_matches);
+    try std.testing.expectEqual(@as(i64, 1), goal.converting_visitors);
+    try std.testing.expectEqual(@as(i64, 1), goal.converting_sessions);
+    try std.testing.expectEqual(@as(i64, 4), goal.eligible_visitors);
+    try std.testing.expectEqual(@as(i64, 4), goal.eligible_sessions);
+    try std.testing.expectEqual(@as(i64, 1), goal.converting_coverage.persistent_people);
+    try std.testing.expectEqual(@as(usize, 2), goal.revenue.len);
+    try std.testing.expectEqualStrings("EUR", goal.revenue[0].currency);
+    try std.testing.expectEqualStrings("12.500000", goal.revenue[0].decimal);
+    try std.testing.expectEqualStrings("USD", goal.revenue[1].currency);
+    try std.testing.expectEqual(@as(i64, 1), goal.path_cardinality);
+    try std.testing.expectEqual(@as(usize, 1), goal.paths.len);
+    try std.testing.expectEqualStrings("/pricing", goal.paths[0].path);
+    try std.testing.expectEqual(@as(i64, 2), goal.paths[0].matches);
+
+    var prefix_request = goal_request;
+    prefix_request.selector = .{ .kind = .page_prefix, .value = "/" };
+    const prefix_result = try executeGoalResult(
+        query_allocator,
+        &event_store,
+        prefix_request,
+    );
+    try std.testing.expectEqual(@as(i64, 5), prefix_result.total_matches);
+    try std.testing.expectEqual(@as(i64, 5), prefix_result.path_cardinality);
+    try std.testing.expectEqual(@as(usize, 5), prefix_result.paths.len);
+    try std.testing.expectEqualStrings("/", prefix_result.paths[0].path);
+    try std.testing.expectEqualStrings("/ephemeral", prefix_result.paths[1].path);
+    try std.testing.expectEqualStrings("/landing", prefix_result.paths[2].path);
+    try std.testing.expectEqualStrings("/legacy", prefix_result.paths[3].path);
+    try std.testing.expectEqualStrings("/pricing", prefix_result.paths[4].path);
+
+    const preview = try executeGoalPreview(query_allocator, &event_store, goal_request);
+    var plan_type_seen = false;
+    var amount_type_seen = false;
+    for (preview.properties.entries) |entry| {
+        plan_type_seen = plan_type_seen or
+            (std.mem.eql(u8, entry.name, "plan") and entry.scalar_type == .string);
+        amount_type_seen = amount_type_seen or
+            (std.mem.eql(u8, entry.name, "amount") and entry.scalar_type == .decimal);
+    }
+    try std.testing.expect(plan_type_seen);
+    try std.testing.expect(amount_type_seen);
+
+    const page_only_predicates = [_]analysis.PropertyPredicate{.{
+        .property_ref = .{ .name = "page_only", .scalar_type = .string },
+        .operator = .exists,
+    }};
+    var same_session_trap = goal_request;
+    same_session_trap.selector.predicates = &page_only_predicates;
+    try std.testing.expectEqual(
+        @as(i64, 0),
+        (try executeGoalResult(query_allocator, &event_store, same_session_trap)).total_matches,
+    );
+
+    const filter_values = [_][]const u8{"10.000000"};
+    const goal_filters = [_]analysis.Clause{.{
+        .scope = .event,
+        .field = .{
+            .kind = .event_property,
+            .property_ref = .{ .name = "amount", .scalar_type = .decimal },
+        },
+        .operator = .gt,
+        .scalar_type = .decimal,
+        .values = &filter_values,
+    }};
+    var filtered_goal = goal_request;
+    filtered_goal.filters = .{ .clauses = &goal_filters };
+    const filtered_goal_result = try executeGoalResult(
+        query_allocator,
+        &event_store,
+        filtered_goal,
+    );
+    try std.testing.expectEqual(@as(i64, 1), filtered_goal_result.total_matches);
+    try std.testing.expectEqual(@as(usize, 1), filtered_goal_result.revenue.len);
+    try std.testing.expectEqualStrings("EUR", filtered_goal_result.revenue[0].currency);
+
     inline for (@typeInfo(analysis.MetricKind).@"enum".field_values) |raw| {
         const kind: analysis.MetricKind = @fromBackingInt(@intCast(raw));
         _ = try execute(query_allocator, &event_store, .{
@@ -5821,7 +6287,7 @@ pub fn seedSemanticFixture(database: *duckdb.Database) !void {
         \\FROM (VALUES
         \\ ('00000000-0000-4000-8000-000000000101',1767139200000000,'2025-12-31',0,1,'pageview','/old','Old','example.test','00000000-0000-4000-8000-0000000000a1',1,'user-a','00000000-0000-4000-8000-0000000000b0',0,'','DE','en','Chrome','Linux','desktop','','','','{}','{}','5.000000','GBP',0,0),
         \\ ('00000000-0000-4000-8000-000000000102',1767312000000000,'2026-01-02',60,1,'pageview','/landing','Landing','example.test','00000000-0000-4000-8000-0000000000a1',1,'user-a','00000000-0000-4000-8000-0000000000b1',0,'search.example','DE','en','Chrome','Linux','desktop','google','cpc','winter','{"plan":"pro"}','{}','','',0,0),
-        \\ ('00000000-0000-4000-8000-000000000103',1767398400000000,'2026-01-03',60,1,'pageview','/pricing','Pricing','example.test','00000000-0000-4000-8000-0000000000a1',1,'user-a','00000000-0000-4000-8000-0000000000b1',1,'','DE','en','Chrome','Linux','desktop','','','','{"plan":"pro"}','{}','','',0,0),
+        \\ ('00000000-0000-4000-8000-000000000103',1767398400000000,'2026-01-03',60,1,'pageview','/pricing','Pricing','example.test','00000000-0000-4000-8000-0000000000a1',1,'user-a','00000000-0000-4000-8000-0000000000b1',1,'','DE','en','Chrome','Linux','desktop','','','','{"plan":"pro","page_only":"yes"}','{}','','',0,0),
         \\ ('00000000-0000-4000-8000-000000000104',1767398401000000,'2026-01-03',60,2,'purchase','/pricing','Pricing','example.test','00000000-0000-4000-8000-0000000000a1',1,'user-a','00000000-0000-4000-8000-0000000000b1',2,'','DE','en','Chrome','Linux','desktop','','','','{"plan":"pro","amount":14.25}','{}','12.500000','EUR',0,0),
         \\ ('00000000-0000-4000-8000-000000000105',1767398402000000,'2026-01-03',60,2,'purchase','/pricing','Pricing','example.test','00000000-0000-4000-8000-0000000000a1',1,'user-a','00000000-0000-4000-8000-0000000000b1',3,'','DE','en','Chrome','Linux','desktop','','','','{"plan":"pro","amount":7.5}','{}','7.500000','USD',0,0),
         \\ ('00000000-0000-4000-8000-000000000106',1767398403000000,'2026-01-03',60,4,'identify','/pricing','Pricing','example.test','00000000-0000-4000-8000-0000000000a1',1,'user-a','00000000-0000-4000-8000-0000000000b1',4,'','DE','en','Chrome','Linux','desktop','','','','{}','{"plan":"enterprise"}','','',0,0),

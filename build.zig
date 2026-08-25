@@ -502,6 +502,18 @@ pub fn build(b: *std.Build) void {
         "e2e-metadata8-migration",
         "Migrate and roll back the exact deployed metadata-7/event-7 predecessor",
     ).dependOn(&metadata8_migration_e2e.step);
+
+    const metadata9_migration_e2e = b.addSystemCommand(&.{
+        "bash",
+        "scripts/run-metadata8-gate.sh",
+    });
+    metadata9_migration_e2e.addArtifactArg(app);
+    metadata9_migration_e2e.addArg("tests/e2e-metadata9-migration.sh");
+    metadata9_migration_e2e.step.dependOn(b.getInstallStep());
+    b.step(
+        "e2e-metadata9-migration",
+        "Migrate and roll back the exact deployed metadata-8/event-7 predecessor",
+    ).dependOn(&metadata9_migration_e2e.step);
 }
 
 fn addHtmxAssets(

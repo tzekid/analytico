@@ -68,6 +68,7 @@ pub const Query = struct {
     goal_search: []const u8 = "",
     goal_entity_page: u32 = 1,
     goal_entity_set: bool = false,
+    goal_preview_response: bool = false,
 };
 
 pub const GoalScreen = enum {
@@ -248,7 +249,14 @@ pub const GoalDraft = struct {
     entity_kind: analysis.GoalEntityKind = .page,
     match_kind: []const u8 = "exact",
     match_value: []const u8 = "",
+    predicates: []const GoalPredicateDraft = &.{},
     confirm_unseen: bool = false,
+};
+
+pub const GoalPredicateDraft = struct {
+    property_name: []const u8 = "",
+    rule: []const u8 = "string:is",
+    value: []const u8 = "",
 };
 
 pub const GoalEntityOption = struct {
@@ -268,12 +276,14 @@ pub const GoalDefinitionView = struct {
     entity_kind: analysis.GoalEntityKind,
     match_mode: GoalMatchMode,
     match_value: []const u8,
+    predicates: []const analysis.PropertyPredicate,
     archived: bool,
     created_at: []const u8,
     updated_at: []const u8,
     updated_at_utc_micros: i64,
     detail_url: []const u8,
     edit_url: []const u8,
+    analyze_url: []const u8,
 };
 
 pub const GoalManagement = struct {
@@ -284,8 +294,20 @@ pub const GoalManagement = struct {
     entity_kind: analysis.GoalEntityKind = .page,
     search: []const u8 = "",
     entities: []const GoalEntityOption = &.{},
+    properties: analysis.PropertyCatalog = .{
+        .entries = &.{},
+        .property_count = 0,
+        .truncated = false,
+    },
+    result: ?analysis.GoalResult = null,
+    result_is_preview: bool = false,
+    filter_count: usize = 0,
+    segment_name: []const u8 = "",
     list_url: []const u8,
     new_url: []const u8,
+    create_action_url: []const u8,
+    edit_action_url: []const u8,
+    action_suffix: []const u8,
     previous_definitions_url: ?[]const u8 = null,
     next_definitions_url: ?[]const u8 = null,
     previous_entities_url: ?[]const u8 = null,

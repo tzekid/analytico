@@ -34,7 +34,7 @@ port=$((49000 + ($$ % 500)))
 origin="http://localhost:$port"
 data="$fixture/data"
 "$binary" init "$data" >"$fixture/init.txt"
-grep -Fq 'metadata=v8' "$fixture/init.txt"
+grep -Fq 'metadata=v9' "$fixture/init.txt"
 "$binary" site add "$data" example Example https://example.com \
     --timezone UTC >/dev/null
 
@@ -50,12 +50,29 @@ DROP TABLE auth_challenges;
 DROP TABLE auth_credentials;
 DROP TABLE auth_users;
 DROP TABLE auth_config;
+DROP TABLE site_excluded_networks;
+DROP TABLE site_traffic_policy;
+DROP TABLE site_settings;
+DROP TABLE segments;
+DROP TABLE saved_views;
+DROP TABLE goal_definitions_v2;
+DROP INDEX site_origins_unique_origin;
+CREATE TABLE goals (
+  id TEXT PRIMARY KEY,
+  site_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  match_kind INTEGER NOT NULL CHECK (match_kind BETWEEN 1 AND 3),
+  match_value TEXT NOT NULL,
+  created_at_utc_micros INTEGER NOT NULL,
+  FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE CASCADE,
+  UNIQUE (site_id, name)
+);
 DELETE FROM meta_migrations WHERE version >= 2;
 SQL
 legacy_backup="$fixture/legacy-backup"
 "$binary" backup "$legacy" "$legacy_backup" >/dev/null
 "$binary" migrate "$legacy" "$legacy_backup" >"$fixture/upgrade.txt"
-grep -Fq 'metadata=v8 events=v7' "$fixture/upgrade.txt"
+grep -Fq 'metadata=v9 events=v7' "$fixture/upgrade.txt"
 "$binary" site timezone-set "$legacy" preserved UTC >/dev/null
 "$binary" site list "$legacy" | grep -Fq $'preserved\t'
 

@@ -58,6 +58,7 @@ beta_id=$("$binary" site list "$data" |
 test "${#alpha_id}" = 36
 test "${#beta_id}" = 36
 "$binary" m3 seed "$data" "$alpha_id" >/dev/null
+"$binary" m3 goal-predicates-fixture "$data" "$alpha_id" >/dev/null
 for index in $(seq 0 54); do
     path=$(printf '/goal-value-%02d' "$index")
     micros=$((1735776000000000 + index * 1000000))
@@ -73,7 +74,7 @@ archived_goal_id=${archived_goal_output##* }
 reference_goal_output=$("$binary" goal add "$data" alpha "Referenced goal" event signup)
 reference_goal_id=${reference_goal_output##* }
 sqlite3 "$data/meta.db" <<SQL
-UPDATE goal_definitions
+UPDATE goal_definitions_v2
 SET archived_at_utc_micros = created_at_utc_micros + 1,
     updated_at_utc_micros = created_at_utc_micros + 1
 WHERE id = '$archived_goal_id';
@@ -89,22 +90,36 @@ VALUES
    'Referenced breakdown', 1,
    '{"schema":1,"mode":"breakdown","selector":{"kind":"goal","value":"$reference_goal_id"}}',
    91, 91);
+INSERT INTO segments
+  (id, site_id, name, filter_schema_version, canonical_filter_json,
+   created_at_utc_micros, updated_at_utc_micros)
+VALUES
+  ('00000000-0000-4000-8000-000000000392', '$alpha_id',
+   'Germany', 1,
+   '{"schema":1,"match":"all","filters":["event~country~is~string~DE"]}',
+   92, 92),
+  ('00000000-0000-4000-8000-000000000393', '$alpha_id',
+   'Stale goal race', 1,
+   '{"schema":1,"match":"all","filters":["event~country~is~string~DE"]}',
+   93, 93);
 WITH RECURSIVE indexes(value) AS (
   SELECT 0 UNION ALL SELECT value + 1 FROM indexes WHERE value < 31
 )
-INSERT INTO goal_definitions
+INSERT INTO goal_definitions_v2
   (id, site_id, name, match_kind, match_value,
+   canonical_predicates_json,
    created_at_utc_micros, updated_at_utc_micros,
    archived_at_utc_micros)
 SELECT printf('40000000-0000-4000-8000-%012d', value),
        '$beta_id', printf('Beta goal %02d', value), 2,
-       '/beta-secret', 100 + value, 100 + value, NULL
+       '/beta-secret', '{"schema":1,"predicates":[]}',
+       100 + value, 100 + value, NULL
 FROM indexes;
 SQL
 test "$(sqlite3 "$data/meta.db" \
-    "SELECT count(*) FROM goal_definitions WHERE id='$archived_goal_id' AND archived_at_utc_micros IS NOT NULL;")" = 1
+    "SELECT count(*) FROM goal_definitions_v2 WHERE id='$archived_goal_id' AND archived_at_utc_micros IS NOT NULL;")" = 1
 test "$(sqlite3 "$data/meta.db" \
-    "SELECT count(*) FROM goal_definitions WHERE site_id='$beta_id' AND archived_at_utc_micros IS NULL;")" = 32
+    "SELECT count(*) FROM goal_definitions_v2 WHERE site_id='$beta_id' AND archived_at_utc_micros IS NULL;")" = 32
 
 "$binary" auth configure "$data" "$dashboard" >/dev/null
 setup_url=$("$binary" auth bootstrap "$data" --ttl 10m | sed -n '2p')
@@ -195,6 +210,10 @@ jq -e '
     .native_crud and .discovered_page_size == 50 and
     .discovery_order == "count-desc-label-asc" and
     .zero_seen_confirmation and .reference_conflict_status == 409 and
+    .typed_predicate_preview and .predicate_context_preserved and
+    .predicate_event_row_semantics and .exact_goal_result and
+    .predicate_edit_and_duplicate and
+    .stale_context_recovery and
     .archived_trend_and_breakdown and .default_active_isolation and
     .site_isolation and .active_cap_recovery and
     .enhanced_double_submit_requests == 1 and
@@ -202,10 +221,21 @@ jq -e '
     .startup_data_requests == 0
 ' "$fixture/browser.json" >/dev/null
 stop_server
+"$binary" goal list "$data" alpha >"$fixture/goals-after-browser.txt"
 test "$(sqlite3 "$data/meta.db" \
-    "SELECT count(*) FROM goal_definitions WHERE site_id='$alpha_id' AND name='Enhanced double submit';")" = 1
-test "$(sqlite3 "$data/meta.db" \
-    "SELECT count(*) FROM goal_definitions WHERE id='$reference_goal_id';")" = 1
+    "SELECT count(*) FROM goal_definitions_v2 WHERE site_id='$alpha_id' AND name='Stale segment must not save';")" = 0
+test "$(grep -Fc $'Enhanced double submit\t' \
+    "$fixture/goals-after-browser.txt")" = 1
+grep -Fq "$reference_goal_id" "$fixture/goals-after-browser.txt"
+if "$binary" report "$data" alpha 2025-01-01 2025-01-02 \
+    goal "Pro purchases" --format json \
+    >"$fixture/predicate-metric-v1.stdout" \
+    2>"$fixture/predicate-metric-v1.stderr"; then
+    echo "predicate-bearing metric-v1 goal unexpectedly executed" >&2
+    exit 1
+fi
+grep -Fq 'UnsupportedMetricV1GoalPredicates' \
+    "$fixture/predicate-metric-v1.stderr"
 
 "$binary" site traffic-policy "$data" alpha strict 10000000 >/dev/null
 "$binary" m3 million "$data" "$alpha_id" >/dev/null
@@ -215,24 +245,76 @@ timeout_status=$(curl --silent --output "$fixture/timeout.html" \
     "$dashboard/admin/sites/alpha/journeys/goals/new?from=2025-01-01&to=2025-01-12&compare=none&entity=page")
 test "$timeout_status" = 503
 grep -Fq 'Report timed out' "$fixture/timeout.html"
+csrf_page="$fixture/timeout-form.html"
+curl --silent --fail --cookie "$cookie" \
+    "$dashboard/admin/sites/alpha/journeys/goals?from=2025-01-01&to=2025-01-12&compare=none" \
+    >"$csrf_page"
+csrf=$(sed -n 's/.*name="csrf" value="\([^"]*\)".*/\1/p' "$csrf_page")
+test -n "$csrf"
+preview_timeout_status=$(curl --silent --output "$fixture/preview-timeout.html" \
+    --write-out '%{http_code}' --cookie "$cookie" \
+    -H 'Content-Type: application/x-www-form-urlencoded' \
+    -H "Origin: $dashboard" \
+    --data-urlencode "csrf=$csrf" \
+    --data-urlencode 'site=alpha' \
+    --data-urlencode 'from=2025-01-01' \
+    --data-urlencode 'to=2025-01-12' \
+    --data-urlencode 'compare=none' \
+    --data-urlencode 'entity=event' \
+    --data-urlencode 'match=exact' \
+    --data-urlencode 'value=purchase' \
+    --data-urlencode 'name=Timeout must not save' \
+    --data-urlencode 'property_1=plan' \
+    --data-urlencode 'rule_1=string:is' \
+    --data-urlencode 'predicate_value_1=pro' \
+    --data-urlencode 'intent=preview' \
+    "$dashboard/admin/goals")
+test "$preview_timeout_status" = 503
+grep -Fq 'Nothing was saved' "$fixture/preview-timeout.html"
 list_after_timeout_status=$(curl --silent --output "$fixture/list-after-timeout.html" \
     --write-out '%{http_code}' --cookie "$cookie" \
     "$dashboard/admin/sites/alpha/journeys/goals?from=2025-01-01&to=2025-01-12&compare=none")
 test "$list_after_timeout_status" = 200
 stop_server
+"$binary" goal list "$data" alpha >"$fixture/goals-after-timeout.txt"
+if grep -Fq 'Timeout must not save' "$fixture/goals-after-timeout.txt"; then
+    echo "timed-out goal preview unexpectedly wrote metadata" >&2
+    exit 1
+fi
 
 "$binary" m3 goal-discovery "$data" alpha 2025-01-01 2025-01-12 \
     >"$fixture/discovery.json"
 cat "$fixture/discovery.json"
 jq -e '
     .strict_mode and .page_entities == 8 and .custom_event_entities == 2 and
-    .strict_signup_count == 100000 and .strict_purchase_count == 99900 and
+    .strict_signup_count == 100000 and .strict_purchase_count == 100000 and
+    .purchase_goal_base_evidence and
     .timeout_interrupted and .connection_reused and
     .search_value == "/pricing" and .search_count == 100000
 ' "$fixture/discovery.json" >/dev/null
+"$binary" m3 goal-predicates-profile "$data" alpha \
+    2025-01-01 2025-01-12 >"$fixture/goal-predicate-profile.json"
+cat "$fixture/goal-predicate-profile.json"
+jq -e '
+    .strict_mode and
+    (if .performance_enforced then
+        .total_matches == 100000 and .path_cardinality == 1 and
+        (.sample_micros | length) == 10 and .p95_micros < 700000 and
+        .preview_micros < 2000000 and .preview_property_count >= 0 and
+        .preview_timeout_interrupted and .connection_reused
+     else
+        .total_matches == null and (.sample_micros | length) == 0 and
+        .preview_micros == null and .preview_property_count == null
+     end)
+' "$fixture/goal-predicate-profile.json" >/dev/null
+"$binary" m3 goal-predicates-explain "$data" alpha \
+    2025-01-01 2025-01-12 >"$fixture/goal-predicate-explain.txt"
+grep -Fq 'GOAL RESULT STATEMENT' "$fixture/goal-predicate-explain.txt"
+grep -F 'Total Time' "$fixture/goal-predicate-explain.txt"
 
-printf '{"goals_e2e":"pass","metadata":8,"events":7,'
+printf '{"goals_e2e":"pass","metadata":9,"events":7,'
 printf '"auth":"passkey+origin+csrf","native_crud":true,'
-printf '"discovery":"bounded+site-isolated+strict","timeout_reuse":true,'
+printf '"discovery":"bounded+site-isolated+strict","timeout_no_write_reuse":true,'
+printf '"goal_result_profile":"million+p95-under-700ms+explain",'
 printf '"screenshots":"desktop+mobile","browser":%s,"probe":%s}\n' \
     "$(<"$fixture/browser.json")" "$(<"$fixture/discovery.json")"

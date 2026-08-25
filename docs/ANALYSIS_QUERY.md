@@ -681,3 +681,37 @@ Issue #33 additionally proves active/archive selector isolation, explicit
 archived Trend/Breakdown resolution, exact saved-view delete conflicts without
 UUID-text false positives, and bounded Page/Event discovery semantics,
 deadline interruption, and post-interrupt connection reuse.
+
+D42 metadata schema 9 persists each goal's zero-to-three D29 predicates as one
+exact schema-1 canonical JSON document beside the closed base kind/value. Every
+active or explicitly selected goal resolves to one complete `EventSelector`;
+the selected saved-goal UUID still never reaches DuckDB SQL. Predicate order
+and values are canonicalized exactly, and a noncanonical/corrupt stored
+document rejects rather than broadening the selector.
+
+The D42 goal result is a specialized closed consumer, not another
+`AnalysisQuery` grammar or metric. It reuses the selected site's resolved
+site-local range, ad-hoc FilterSet plus segment, product traffic relation,
+strict classifier context, person/session semantics, event-row selector, bound
+values, and one interrupt budget. One statement returns the exact match count,
+distinct converting and eligible people/sessions, converting-person identity
+coverage, at most 16 exact revenue currencies, and at most ten matching paths
+with exact path cardinality. Revenue is never summed across currencies. Path
+rows order count descending then label ascending and are visibly capped.
+
+Builder preview runs that result and then one selector-scoped property sample
+under the same remaining deadline. The sample examines at most the latest
+2,000 eligible events matching the base selector, returns at most 100 property
+names with every observed scalar type/count, and labels conflicts without
+coercion. It has no cache, projection, EAV table, background work, or network
+request. `intent=save` reruns the result before the metadata write; timeout
+cannot save and a zero result requires explicit confirmation.
+
+Predicate-free metric-v1 goal output remains unchanged. A predicate-bearing
+goal is unsupported by that frozen grammar and rejects explicitly rather than
+reporting the broader base selector.
+
+Issue #34 additionally proves canonical predicate JSON collision separation,
+event-row versus same-session semantics, filter/segment composition, typed
+errors, exact result components, zero/timeout no-write and reuse, selector-
+scoped property conflicts, and the goal-detail million-row budget.

@@ -24,6 +24,7 @@ pub const maximum_search_bytes: usize = 256;
 pub const maximum_property_names: u16 = 100;
 pub const maximum_property_catalog_events: u32 = 2_000;
 pub const maximum_suggestions: u8 = 50;
+pub const maximum_goal_path_rows: u8 = 10;
 
 pub const LocalDateRange = struct {
     start: []const u8,
@@ -549,6 +550,60 @@ pub fn parseExactCanonicalFilterJson(
         return error.NonCanonicalAnalysisJson;
     }
     return filters;
+}
+
+const JsonPredicateSet = struct {
+    schema: u8,
+    predicates: []const []const u8 = &.{},
+};
+
+pub fn canonicalPredicateSetJson(
+    allocator: std.mem.Allocator,
+    predicates: []const PropertyPredicate,
+) ![]u8 {
+    if (predicates.len > maximum_selector_predicates) {
+        return error.TooManySelectorPredicates;
+    }
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const encoded = try encodedPredicates(arena.allocator(), predicates);
+    var output = std.Io.Writer.Allocating.init(allocator);
+    errdefer output.deinit();
+    try std.json.Stringify.value(JsonPredicateSet{
+        .schema = query_schema_version,
+        .predicates = encoded,
+    }, .{}, &output.writer);
+    const json = try output.toOwnedSlice();
+    if (json.len > maximum_json_bytes) {
+        allocator.free(json);
+        return error.AnalysisJsonTooLong;
+    }
+    return json;
+}
+
+pub fn parseExactCanonicalPredicateSetJson(
+    allocator: std.mem.Allocator,
+    encoded: []const u8,
+) ![]const PropertyPredicate {
+    if (encoded.len == 0 or encoded.len > maximum_json_bytes) {
+        return error.AnalysisJsonTooLong;
+    }
+    const state = std.json.parseFromSliceLeaky(
+        JsonPredicateSet,
+        allocator,
+        encoded,
+        .{ .ignore_unknown_fields = false },
+    ) catch return error.InvalidAnalysisJson;
+    if (state.schema != query_schema_version) {
+        return error.UnsupportedAnalysisQueryVersion;
+    }
+    const predicates = try parsePredicates(allocator, state.predicates);
+    const normalized = try canonicalPredicateSetJson(allocator, predicates);
+    defer allocator.free(normalized);
+    if (!std.mem.eql(u8, encoded, normalized)) {
+        return error.NonCanonicalAnalysisJson;
+    }
+    return predicates;
 }
 
 pub fn composeFilterSets(
@@ -1189,7 +1244,7 @@ pub const GoalDiscoveryRequest = struct {
         if (self.timeout_ms == 0 or self.timeout_ms > maximum_timeout_ms) {
             return error.InvalidAnalysisTimeout;
         }
-        try validateActiveGoals(self.active_goals, self.strict_traffic_mode);
+        try validateActiveGoals(self.active_goals);
     }
 };
 
@@ -1202,6 +1257,68 @@ pub const DiscoveredGoalEntity = struct {
 pub const GoalDiscoveryResult = struct {
     entities: []const DiscoveredGoalEntity,
     has_more: bool,
+};
+
+pub const GoalResultRequest = struct {
+    site_id: []const u8,
+    range: LocalDateRange,
+    selector: EventSelector,
+    filters: FilterSet = .{},
+    active_goals: []const ResolvedGoal = &.{},
+    strict_traffic_mode: bool = false,
+    timeout_ms: u32 = maximum_timeout_ms,
+
+    pub fn validate(self: GoalResultRequest) !void {
+        try domain.validateUuid(self.site_id);
+        try self.range.validate();
+        try self.selector.validate();
+        if (self.selector.kind == .saved_goal) {
+            return error.UnresolvedGoalSelector;
+        }
+        try self.filters.validate();
+        if (self.timeout_ms == 0 or self.timeout_ms > maximum_timeout_ms) {
+            return error.InvalidAnalysisTimeout;
+        }
+        try validateActiveGoals(self.active_goals);
+    }
+
+    pub fn execution(self: GoalResultRequest) Execution {
+        return .{
+            .query = .{
+                .site_id = self.site_id,
+                .range = self.range,
+                .mode = .breakdown,
+                .metric = .{ .kind = .event_count, .selector = self.selector },
+                .dimension = .{ .kind = .page },
+                .filters = self.filters,
+            },
+            .active_goals = self.active_goals,
+            .strict_traffic_mode = self.strict_traffic_mode,
+            .timeout_ms = self.timeout_ms,
+        };
+    }
+};
+
+pub const GoalPathRow = struct {
+    path: []const u8,
+    matches: i64,
+};
+
+pub const GoalResult = struct {
+    total_matches: i64,
+    converting_visitors: i64,
+    converting_sessions: i64,
+    eligible_visitors: i64,
+    eligible_sessions: i64,
+    converting_coverage: Completeness,
+    revenue: []const ExactAmount,
+    paths: []const GoalPathRow,
+    path_cardinality: i64,
+};
+
+pub const GoalPreviewResult = struct {
+    result: GoalResult,
+    properties: PropertyCatalog,
 };
 
 pub const BreakdownPageResult = struct {
@@ -1340,7 +1457,7 @@ pub const Execution = struct {
         if (self.query.segment_id != null and !self.segment_resolved) {
             return error.UnresolvedAnalysisSegment;
         }
-        try validateActiveGoals(self.active_goals, self.strict_traffic_mode);
+        try validateActiveGoals(self.active_goals);
         try validateSelectedGoals(self.selected_goals, self.active_goals);
         if (try resolvedSelectorSets(
             self.query.metric.selector,
@@ -1744,29 +1861,46 @@ pub const OverviewExecution = struct {
         if (self.daily_event_ceiling < 1 or self.daily_event_ceiling > 10_000_000) {
             return error.InvalidDailyEventCeiling;
         }
-        try validateActiveGoals(self.active_goals, self.strict_traffic_mode);
+        try validateActiveGoals(self.active_goals);
         if (self.trend) |trend| {
             try trend.validate(self.comparison_range != null);
         }
     }
 };
 
-fn validateActiveGoals(
-    goals: []const ResolvedGoal,
-    strict_traffic_mode: bool,
-) !void {
+fn validateActiveGoals(goals: []const ResolvedGoal) !void {
     if (goals.len > maximum_active_goals) return error.TooManyActiveGoals;
     for (goals, 0..) |goal, index| {
         try goal.validate();
-        if (strict_traffic_mode and goal.selector.predicates.len != 0) {
-            return error.UnsupportedStrictGoalPredicate;
-        }
         for (goals[0..index]) |prior| {
             if (std.mem.eql(u8, goal.id, prior.id)) {
                 return error.DuplicateResolvedGoal;
             }
         }
     }
+}
+
+test "strict traffic validates predicate goals for base-selector evidence" {
+    const predicates = [_]PropertyPredicate{.{
+        .property_ref = .{ .name = "plan", .scalar_type = .string },
+        .operator = .is,
+        .values = &.{"pro"},
+    }};
+    const goals = [_]ResolvedGoal{.{
+        .id = "00000000-0000-4000-8000-000000000034",
+        .selector = .{
+            .kind = .exact_event,
+            .value = "purchase",
+            .predicates = &predicates,
+        },
+    }};
+    try (GoalResultRequest{
+        .site_id = "00000000-0000-4000-8000-000000000024",
+        .range = .{ .start = "2026-01-01", .end = "2026-01-02" },
+        .selector = .{ .kind = .exact_event, .value = "purchase" },
+        .active_goals = &goals,
+        .strict_traffic_mode = true,
+    }).validate();
 }
 
 fn validateSelectedGoals(
@@ -2440,6 +2574,57 @@ test "canonical predicate owns only its returned slice" {
         );
         std.testing.allocator.free(encoded);
     }
+}
+
+test "canonical predicate-set JSON is exact ordered and collision-safe" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const low_values = [_][]const u8{ "yearly", "monthly" };
+    const high_values = [_][]const u8{ "year", "lymonthly" };
+    const predicates = [_]PropertyPredicate{
+        .{
+            .property_ref = .{ .name = "plan", .scalar_type = .string },
+            .operator = .is,
+            .values = &.{"pro"},
+        },
+        .{
+            .property_ref = .{ .name = "billing_period", .scalar_type = .string },
+            .operator = .is,
+            .values = &low_values,
+        },
+    };
+    const json = try canonicalPredicateSetJson(std.testing.allocator, &predicates);
+    defer std.testing.allocator.free(json);
+    try std.testing.expectEqualStrings(
+        "{\"schema\":1,\"predicates\":[\"billing_period~is~string~monthly~yearly\",\"plan~is~string~pro\"]}",
+        json,
+    );
+    const parsed = try parseExactCanonicalPredicateSetJson(allocator, json);
+    try std.testing.expectEqual(@as(usize, 2), parsed.len);
+
+    var changed = predicates;
+    changed[1].values = &high_values;
+    const changed_json = try canonicalPredicateSetJson(
+        std.testing.allocator,
+        &changed,
+    );
+    defer std.testing.allocator.free(changed_json);
+    try std.testing.expect(!std.mem.eql(u8, json, changed_json));
+    try std.testing.expectError(
+        error.NonCanonicalAnalysisJson,
+        parseExactCanonicalPredicateSetJson(
+            allocator,
+            "{\"schema\":1,\"predicates\":[\"plan~is~string~pro\",\"billing_period~is~string~yearly~monthly\"]}",
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidAnalysisJson,
+        parseExactCanonicalPredicateSetJson(
+            allocator,
+            "{\"schema\":1,\"predicates\":[],\"extra\":true}",
+        ),
+    );
 }
 
 fn writeSortedValues(

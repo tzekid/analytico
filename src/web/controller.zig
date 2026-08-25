@@ -28,6 +28,13 @@ pub const Form = struct {
         return parseBounded(allocator, body, 64 * 1024, 32);
     }
 
+    pub fn parseGoal(
+        allocator: std.mem.Allocator,
+        body: []const u8,
+    ) !Form {
+        return parseBounded(allocator, body, 8 * 1024, 32);
+    }
+
     fn parseBounded(
         allocator: std.mem.Allocator,
         body: []const u8,
@@ -826,6 +833,41 @@ pub fn parseQuery(
     return query;
 }
 
+pub const GoalActionContext = struct {
+    filters: analysis.FilterSet = .{},
+    segment_id: ?[]const u8 = null,
+};
+
+pub fn parseGoalActionContext(
+    allocator: std.mem.Allocator,
+    target: []const u8,
+) !GoalActionContext {
+    const marker = std.mem.findScalar(u8, target, '?') orelse return .{};
+    const encoded = target[marker + 1 ..];
+    if (encoded.len == 0) return error.InvalidGoalActionContext;
+    const parsed = try parseQuery(allocator, target, .goal);
+    if (parsed.site.len != 0 or parsed.from != null or parsed.to != null or
+        parsed.comparison != null or parsed.notice.len != 0 or
+        parsed.report_set or parsed.kind != .goal or parsed.subject.len != 0 or
+        parsed.campaign_dimension != .all or parsed.sort != .count or
+        parsed.limit != report.default_limit or parsed.page != 1 or
+        parsed.overview_selection_set or parsed.highlighted_interval.len != 0 or
+        parsed.goal_fields_set)
+    {
+        return error.InvalidGoalActionContext;
+    }
+    const canonical = try analysis.canonicalFilterUrlSuffix(
+        allocator,
+        parsed.segment_id,
+        parsed.filters,
+    );
+    defer allocator.free(canonical);
+    if (!std.mem.eql(u8, encoded, canonical)) {
+        return error.NonCanonicalGoalActionContext;
+    }
+    return .{ .filters = parsed.filters, .segment_id = parsed.segment_id };
+}
+
 fn validateGoalSearch(value: []const u8) !void {
     if (value.len > analysis.maximum_search_bytes or
         !std.unicode.utf8ValidateSlice(value))
@@ -1435,6 +1477,25 @@ pub fn loadPage(
     const goals = try metadata.listGoals(allocator, selected.slug);
     const funnels = try metadata.listFunnels(allocator, selected.slug);
     const collection_policy = try metadata.sitePolicy(allocator, selected.id);
+    const has_analysis_context = destination == .overview or query.goal_screen != .none;
+    const segments: []const meta.Segment = if (destination == .overview)
+        try metadata.listSegments(allocator, selected.slug)
+    else
+        &.{};
+    const resolved_filters = if (has_analysis_context)
+        try resolveFilters(
+            allocator,
+            metadata,
+            collection_policy,
+            selected.slug,
+            query.analysis_filters,
+            query.analysis_segment_id,
+        )
+    else
+        ResolvedFilters{
+            .filters = query.analysis_filters,
+            .segment_resolved = false,
+        };
     var goal_management: ?model.GoalManagement = null;
     if (query.goal_screen != .none) {
         const definitions = if (query.goal_screen == .list)
@@ -1462,13 +1523,15 @@ pub fn loadPage(
             if (selected_definition.?.match_kind == .event) .event else .page
         else
             query.goal_entity_kind;
+        const resolved_active = if (collection_policy.strict_mode)
+            try resolveAnalysisGoals(allocator, goals)
+        else
+            &.{};
         var entities: []const model.GoalEntityOption = &.{};
         var entities_have_more = false;
-        if (query.goal_screen == .new or query.goal_screen == .edit) {
-            const resolved_active = if (collection_policy.strict_mode)
-                try resolveAnalysisGoals(allocator, goals)
-            else
-                &.{};
+        if ((query.goal_screen == .new or query.goal_screen == .edit) and
+            !query.goal_preview_response)
+        {
             const discovered = analysis_store.executeGoalDiscovery(
                 allocator,
                 event_store,
@@ -1489,6 +1552,26 @@ pub fn loadPage(
             entities = try goalEntityOptions(allocator, discovered.entities);
             entities_have_more = discovered.has_more;
         }
+        const goal_result = if (selected_definition != null and
+            query.goal_screen == .detail)
+            analysis_store.executeGoalResult(
+                allocator,
+                event_store,
+                .{
+                    .site_id = selected.id,
+                    .range = query.range,
+                    .selector = goalSelector(selected_definition.?),
+                    .filters = resolved_filters.filters,
+                    .active_goals = resolved_active,
+                    .strict_traffic_mode = collection_policy.strict_mode,
+                    .timeout_ms = report_timeout_ms,
+                },
+            ) catch |err| {
+                if (err == error.AnalysisTimeout) return error.ReportTimeout;
+                return err;
+            }
+        else
+            null;
         goal_management = .{
             .screen = query.goal_screen,
             .definitions = try goalDefinitionViews(
@@ -1504,8 +1587,14 @@ pub fn loadPage(
             .entity_kind = effective_entity_kind,
             .search = query.goal_search,
             .entities = entities,
+            .result = goal_result,
+            .filter_count = query.analysis_filters.clauses.len,
+            .segment_name = resolved_filters.segment_name,
             .list_url = try goalManagementUrl(allocator, query, .list, ""),
             .new_url = try goalManagementUrl(allocator, query, .new, ""),
+            .create_action_url = try goalActionUrl(allocator, query, false),
+            .edit_action_url = try goalActionUrl(allocator, query, true),
+            .action_suffix = try goalActionSuffix(allocator, query),
             .previous_definitions_url = if (query.goal_page > 1)
                 try goalDefinitionsPageUrl(allocator, query, query.goal_page - 1)
             else
@@ -1537,29 +1626,11 @@ pub fn loadPage(
         };
         if (query.goal_screen == .detail) query.subject = selected_definition.?.name;
     }
-    const segments: []const meta.Segment = if (destination == .overview)
-        try metadata.listSegments(allocator, selected.slug)
-    else
-        &.{};
-    const resolved_filters = if (destination == .overview)
-        try resolveFilters(
-            allocator,
-            metadata,
-            collection_policy,
-            selected.slug,
-            query.analysis_filters,
-            query.analysis_segment_id,
-        )
-    else
-        ResolvedFilters{
-            .filters = query.analysis_filters,
-            .segment_resolved = false,
-        };
     const state = if (destination == .overview)
         try analysisState(allocator, destination, query)
     else
         AnalysisState{ .kind = "", .json = "" };
-    const grammar = if (destination == .overview)
+    const grammar = if (has_analysis_context)
         try analysisGrammarParameters(allocator, query)
     else
         AnalysisGrammarParameters{ .filters = &.{}, .predicates = &.{} };
@@ -1606,7 +1677,8 @@ pub fn loadPage(
         .page = query.page,
     };
     const result: ?report.Result = if (destination.runsReport() and
-        destination != .overview and has_subject)
+        destination != .overview and has_subject and
+        (query.kind != .goal or query.goal_screen == .none))
         try reports.runWithTimeout(
             allocator,
             event_store,
@@ -2401,10 +2473,23 @@ fn resolveAnalysisGoals(
                     .prefix => .page_prefix,
                 },
                 .value = goal.match_value,
+                .predicates = goal.predicates,
             },
         };
     }
     return resolved;
+}
+
+fn goalSelector(goal: meta.Goal) analysis.EventSelector {
+    return .{
+        .kind = switch (goal.match_kind) {
+            .event => .exact_event,
+            .path => .exact_page,
+            .prefix => .page_prefix,
+        },
+        .value = goal.match_value,
+        .predicates = goal.predicates,
+    };
 }
 
 fn selectedGoalsForMetrics(
@@ -2779,12 +2864,14 @@ fn goalDefinitionView(
         .entity_kind = if (goal.match_kind == .event) .event else .page,
         .match_mode = if (goal.match_kind == .prefix) .prefix else .exact,
         .match_value = goal.match_value,
+        .predicates = goal.predicates,
         .archived = goal.archived_at_utc_micros != null,
         .created_at = try formatUtcMicros(allocator, goal.created_at_utc_micros),
         .updated_at = try formatUtcMicros(allocator, goal.updated_at_utc_micros),
         .updated_at_utc_micros = goal.updated_at_utc_micros,
         .detail_url = try goalManagementUrl(allocator, query, .detail, goal.id),
         .edit_url = try goalManagementUrl(allocator, query, .edit, goal.id),
+        .analyze_url = try goalAnalyzeUrl(allocator, query, goal.id),
     };
 }
 
@@ -2813,7 +2900,91 @@ fn goalManagementUrl(
         "?from={s}&to={s}&compare={s}",
         .{ query.range.start, query.range.end, query.comparison.name() },
     );
+    try appendGoalFilterSuffix(&output.writer, allocator, query);
     return output.toOwnedSlice();
+}
+
+fn goalActionUrl(
+    allocator: std.mem.Allocator,
+    query: model.Query,
+    edit: bool,
+) ![]const u8 {
+    var output = std.Io.Writer.Allocating.init(allocator);
+    errdefer output.deinit();
+    try output.writer.writeAll(if (edit) "/admin/goals/edit" else "/admin/goals");
+    const suffix = try analysis.canonicalFilterUrlSuffix(
+        allocator,
+        query.analysis_segment_id,
+        query.analysis_filters,
+    );
+    defer allocator.free(suffix);
+    if (suffix.len != 0) {
+        try output.writer.writeByte('?');
+        try output.writer.writeAll(suffix);
+    }
+    return output.toOwnedSlice();
+}
+
+fn goalActionSuffix(
+    allocator: std.mem.Allocator,
+    query: model.Query,
+) ![]const u8 {
+    const suffix = try analysis.canonicalFilterUrlSuffix(
+        allocator,
+        query.analysis_segment_id,
+        query.analysis_filters,
+    );
+    defer allocator.free(suffix);
+    if (suffix.len == 0) return "";
+    return std.fmt.allocPrint(allocator, "?{s}", .{suffix});
+}
+
+fn appendGoalFilterSuffix(
+    output: *std.Io.Writer,
+    allocator: std.mem.Allocator,
+    query: model.Query,
+) !void {
+    const suffix = try analysis.canonicalFilterUrlSuffix(
+        allocator,
+        query.analysis_segment_id,
+        query.analysis_filters,
+    );
+    defer allocator.free(suffix);
+    if (suffix.len != 0) {
+        try output.writeByte('&');
+        try output.writeAll(suffix);
+    }
+}
+
+fn goalAnalyzeUrl(
+    allocator: std.mem.Allocator,
+    query: model.Query,
+    goal_id: []const u8,
+) ![]const u8 {
+    try domain.validateUuid(goal_id);
+    const series = [_]analysis.Metric{.{
+        .kind = .conversions,
+        .selector = .{ .kind = .saved_goal, .value = goal_id },
+        .conversion_basis = .visitor,
+    }};
+    const parameters = try analysis.canonicalTrendSetUrl(
+        allocator,
+        .{
+            .site_id = query.analysis_site_id,
+            .range = query.range,
+            .comparison = query.comparison,
+            .series = &series,
+            .filters = query.analysis_filters,
+            .segment_id = query.analysis_segment_id,
+        },
+        "",
+    );
+    defer allocator.free(parameters);
+    return std.fmt.allocPrint(
+        allocator,
+        "/admin/sites/{s}/analyze?{s}",
+        .{ query.site, parameters },
+    );
 }
 
 fn goalDefinitionsPageUrl(
@@ -2829,6 +3000,7 @@ fn goalDefinitionsPageUrl(
         .{ query.site, query.range.start, query.range.end, query.comparison.name() },
     );
     if (page != 1) try output.writer.print("&goal-page={d}", .{page});
+    try appendGoalFilterSuffix(&output.writer, allocator, query);
     return output.toOwnedSlice();
 }
 
@@ -2845,14 +3017,19 @@ fn goalEntitiesPageUrl(
     }
     var output = std.Io.Writer.Allocating.init(allocator);
     errdefer output.deinit();
-    const base = try goalManagementUrl(
-        allocator,
-        query,
-        query.goal_screen,
-        query.goal_id,
+    try output.writer.print(
+        "/admin/sites/{s}/journeys/goals",
+        .{query.site},
     );
-    defer allocator.free(base);
-    try output.writer.writeAll(base);
+    if (query.goal_screen == .new) {
+        try output.writer.writeAll("/new");
+    } else {
+        try output.writer.print("/{s}/edit", .{query.goal_id});
+    }
+    try output.writer.print(
+        "?from={s}&to={s}&compare={s}",
+        .{ query.range.start, query.range.end, query.comparison.name() },
+    );
     try output.writer.writeAll(if (entity_kind == .event)
         "&entity=event"
     else
@@ -2862,6 +3039,7 @@ fn goalEntitiesPageUrl(
         try goalUrlComponent(&output.writer, query.goal_search);
     }
     if (page != 1) try output.writer.print("&entity-page={d}", .{page});
+    try appendGoalFilterSuffix(&output.writer, allocator, query);
     return output.toOwnedSlice();
 }
 
@@ -3112,27 +3290,45 @@ fn coverageText(
     );
 }
 
+pub const GoalPreviewSubmission = struct {
+    draft: model.GoalDraft,
+    result: analysis.GoalResult,
+    properties: analysis.PropertyCatalog,
+};
+
 pub fn addGoal(
     allocator: std.mem.Allocator,
     io: std.Io,
     metadata: *meta.Store,
     event_store: *events.Store,
     form: Form,
+    action_context: GoalActionContext,
     now_micros: i64,
     report_timeout_ms: u32,
-) !void {
+) !?GoalPreviewSubmission {
     const site = try form.required("site");
     try domain.validateSlug(site);
-    const input = try goalInput(form);
-    try requireObservedGoal(
+    const input = try goalInput(allocator, form);
+    const intent = try goalIntent(form);
+    const preview = try evaluateGoal(
         allocator,
         metadata,
         event_store,
         site,
         try formContext(form),
+        action_context,
         input,
+        intent == .preview,
         report_timeout_ms,
     );
+    if (intent == .preview) return .{
+        .draft = try goalDraft(allocator, input),
+        .result = preview.result,
+        .properties = preview.properties,
+    };
+    if (preview.result.total_matches == 0 and !input.confirm_unseen) {
+        return error.GoalNotObserved;
+    }
     const id = try domain.randomUuid(io);
     try metadata.addGoal(
         allocator,
@@ -3141,8 +3337,10 @@ pub fn addGoal(
         input.name,
         input.match_kind,
         input.match_value,
+        input.predicates,
         now_micros,
     );
+    return null;
 }
 
 pub fn editGoal(
@@ -3150,20 +3348,32 @@ pub fn editGoal(
     metadata: *meta.Store,
     event_store: *events.Store,
     form: Form,
+    action_context: GoalActionContext,
     now_micros: i64,
     report_timeout_ms: u32,
-) !void {
+) !?GoalPreviewSubmission {
     const site = try form.required("site");
-    const input = try goalInput(form);
-    try requireObservedGoal(
+    const input = try goalInput(allocator, form);
+    const intent = try goalIntent(form);
+    const preview = try evaluateGoal(
         allocator,
         metadata,
         event_store,
         site,
         try formContext(form),
+        action_context,
         input,
+        intent == .preview,
         report_timeout_ms,
     );
+    if (intent == .preview) return .{
+        .draft = try goalDraft(allocator, input),
+        .result = preview.result,
+        .properties = preview.properties,
+    };
+    if (preview.result.total_matches == 0 and !input.confirm_unseen) {
+        return error.GoalNotObserved;
+    }
     try metadata.editGoal(
         allocator,
         site,
@@ -3172,8 +3382,10 @@ pub fn editGoal(
         input.name,
         input.match_kind,
         input.match_value,
+        input.predicates,
         now_micros,
     );
+    return null;
 }
 
 pub fn duplicateGoal(
@@ -3245,10 +3457,20 @@ const GoalInput = struct {
     entity_kind: analysis.GoalEntityKind,
     match_kind: domain.MatchKind,
     match_value: []const u8,
+    predicates: []const analysis.PropertyPredicate,
     confirm_unseen: bool,
 };
 
-fn goalInput(form: Form) !GoalInput {
+const GoalIntent = enum { preview, save };
+
+fn goalIntent(form: Form) !GoalIntent {
+    const intent = try form.required("intent");
+    if (std.mem.eql(u8, intent, "preview")) return .preview;
+    if (std.mem.eql(u8, intent, "save")) return .save;
+    return error.InvalidGoalIntent;
+}
+
+fn goalInput(allocator: std.mem.Allocator, form: Form) !GoalInput {
     const entity = try form.required("entity");
     const match = try form.required("match");
     const entity_kind: analysis.GoalEntityKind = if (std.mem.eql(u8, entity, "page"))
@@ -3269,16 +3491,60 @@ fn goalInput(form: Form) !GoalInput {
         else
             return error.InvalidGoalMatch,
     };
-    return .{
+    var predicates: std.ArrayList(analysis.PropertyPredicate) = .empty;
+    for (1..analysis.maximum_selector_predicates + 1) |index| {
+        var name_buffer: [32]u8 = undefined;
+        const property_field = try std.fmt.bufPrint(
+            &name_buffer,
+            "property_{d}",
+            .{index},
+        );
+        const property_name = form.optional(property_field) orelse "";
+        const rule_field = try std.fmt.bufPrint(
+            &name_buffer,
+            "rule_{d}",
+            .{index},
+        );
+        const rule = form.optional(rule_field) orelse "string:is";
+        const value_field = try std.fmt.bufPrint(
+            &name_buffer,
+            "predicate_value_{d}",
+            .{index},
+        );
+        const value = form.optional(value_field) orelse "";
+        if (property_name.len == 0) {
+            if (value.len != 0) return error.MissingAnalysisProperty;
+            continue;
+        }
+        const scalar_name, const operator_name = std.mem.cutScalar(u8, rule, ':') orelse
+            return error.InvalidGoalPredicateRule;
+        const scalar_type = try analysis.ScalarType.parse(scalar_name);
+        const operator = try analysis.Operator.parse(operator_name);
+        const values = if (value.len == 0)
+            &.{}
+        else
+            try allocator.dupe([]const u8, &.{value});
+        const predicate = analysis.PropertyPredicate{
+            .property_ref = .{ .name = property_name, .scalar_type = scalar_type },
+            .operator = operator,
+            .values = values,
+        };
+        try predicate.validate();
+        try predicates.append(allocator, predicate);
+    }
+    const result = GoalInput{
         .name = try form.required("name"),
         .entity_kind = entity_kind,
         .match_kind = match_kind,
         .match_value = try form.required("value"),
+        .predicates = try predicates.toOwnedSlice(allocator),
         .confirm_unseen = if (form.optional("confirm_unseen")) |value|
             std.mem.eql(u8, value, "on")
         else
             false,
     };
+    _ = try goalIntent(form);
+    return result;
 }
 
 fn goalTimestamp(form: Form) !i64 {
@@ -3291,15 +3557,17 @@ fn goalTimestamp(form: Form) !i64 {
     return value;
 }
 
-fn requireObservedGoal(
+fn evaluateGoal(
     allocator: std.mem.Allocator,
     metadata: *meta.Store,
     event_store: *events.Store,
     site_slug: []const u8,
     context: FormContext,
+    action_context: GoalActionContext,
     input: GoalInput,
+    include_catalog: bool,
     report_timeout_ms: u32,
-) !void {
+) !analysis.GoalPreviewResult {
     try domain.validateName(input.name, 120);
     const selector = analysis.EventSelector{
         .kind = switch (input.match_kind) {
@@ -3308,6 +3576,7 @@ fn requireObservedGoal(
             .prefix => .page_prefix,
         },
         .value = input.match_value,
+        .predicates = input.predicates,
     };
     try selector.validate();
     const site = try metadata.siteConfigurationBySlug(allocator, site_slug);
@@ -3319,23 +3588,121 @@ fn requireObservedGoal(
         )
     else
         &.{};
-    const observed = analysis_store.goalSelectorObserved(
+    const resolved_filters = try resolveFilters(
         allocator,
-        event_store,
-        .{
-            .site_id = site.id,
-            .range = context.range,
-            .kind = input.entity_kind,
-            .active_goals = active,
-            .strict_traffic_mode = policy.strict_mode,
-            .timeout_ms = report_timeout_ms,
-        },
-        selector,
-    ) catch |err| {
+        metadata,
+        policy,
+        site_slug,
+        action_context.filters,
+        action_context.segment_id,
+    );
+    const request = analysis.GoalResultRequest{
+        .site_id = site.id,
+        .range = context.range,
+        .selector = selector,
+        .filters = resolved_filters.filters,
+        .active_goals = active,
+        .strict_traffic_mode = policy.strict_mode,
+        .timeout_ms = report_timeout_ms,
+    };
+    const result = (if (include_catalog)
+        analysis_store.executeGoalPreview(allocator, event_store, request)
+    else value: {
+        const goal_result = analysis_store.executeGoalResult(
+            allocator,
+            event_store,
+            request,
+        ) catch |err| {
+            if (err == error.AnalysisTimeout) return error.ReportTimeout;
+            return err;
+        };
+        break :value analysis.GoalPreviewResult{
+            .result = goal_result,
+            .properties = .{
+                .entries = &.{},
+                .property_count = 0,
+                .truncated = false,
+            },
+        };
+    }) catch |err| {
         if (err == error.AnalysisTimeout) return error.ReportTimeout;
         return err;
     };
-    if (!observed and !input.confirm_unseen) return error.GoalNotObserved;
+    return result;
+}
+
+fn goalDraft(
+    allocator: std.mem.Allocator,
+    input: GoalInput,
+) !model.GoalDraft {
+    const predicates = try allocator.alloc(
+        model.GoalPredicateDraft,
+        input.predicates.len,
+    );
+    for (predicates, input.predicates) |*target, predicate| {
+        target.* = .{
+            .property_name = predicate.property_ref.name,
+            .rule = try std.fmt.allocPrint(
+                allocator,
+                "{s}:{s}",
+                .{
+                    predicate.property_ref.scalar_type.name(),
+                    predicate.operator.name(),
+                },
+            ),
+            .value = if (predicate.values.len == 0) "" else predicate.values[0],
+        };
+    }
+    return .{
+        .name = input.name,
+        .entity_kind = input.entity_kind,
+        .match_kind = if (input.match_kind == .prefix) "prefix" else "exact",
+        .match_value = input.match_value,
+        .predicates = predicates,
+        .confirm_unseen = input.confirm_unseen,
+    };
+}
+
+pub fn goalDraftFromForm(
+    allocator: std.mem.Allocator,
+    form: Form,
+) !model.GoalDraft {
+    const property_fields = [_][]const u8{
+        "property_1",
+        "property_2",
+        "property_3",
+    };
+    const rule_fields = [_][]const u8{
+        "rule_1",
+        "rule_2",
+        "rule_3",
+    };
+    const value_fields = [_][]const u8{
+        "predicate_value_1",
+        "predicate_value_2",
+        "predicate_value_3",
+    };
+    const predicates = try allocator.alloc(
+        model.GoalPredicateDraft,
+        analysis.maximum_selector_predicates,
+    );
+    for (predicates, 0..) |*predicate, index| predicate.* = .{
+        .property_name = form.optional(property_fields[index]) orelse "",
+        .rule = form.optional(rule_fields[index]) orelse "string:is",
+        .value = form.optional(value_fields[index]) orelse "",
+    };
+    const entity = form.optional("entity") orelse "page";
+    return .{
+        .name = form.optional("name") orelse "",
+        .entity_kind = if (std.mem.eql(u8, entity, "event")) .event else .page,
+        .match_kind = form.optional("match") orelse "exact",
+        .match_value = form.optional("value") orelse "",
+        .predicates = predicates,
+        .confirm_unseen = if (form.optional("confirm_unseen")) |value|
+            std.mem.eql(u8, value, "on")
+        else
+            false,
+    };
 }
 
 pub fn addFunnel(
@@ -4913,6 +5280,34 @@ test "goal management query fields remain screen specific" {
     try std.testing.expectError(
         error.InvalidGoalManagementState,
         validateQuery(invalid_detail),
+    );
+}
+
+test "goal mutation context is canonical closed and duplicate safe" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const segment = "00000000-0000-4000-8000-000000000034";
+    const valid = try parseGoalActionContext(
+        allocator,
+        "/admin/goals?segment=" ++ segment ++
+            "&f=event~device~is~string~desktop",
+    );
+    try std.testing.expectEqualStrings(segment, valid.segment_id.?);
+    try std.testing.expectEqual(@as(usize, 1), valid.filters.clauses.len);
+    try std.testing.expectError(
+        error.NonCanonicalGoalActionContext,
+        parseGoalActionContext(
+            allocator,
+            "/admin/goals?f=event~device~is~string~desktop&segment=" ++ segment,
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidGoalActionContext,
+        parseGoalActionContext(
+            allocator,
+            "/admin/goals?from=2025-01-01",
+        ),
     );
 }
 

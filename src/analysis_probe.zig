@@ -118,6 +118,7 @@ pub fn seedHeuristics(
         "Purchase",
         .event,
         "purchase",
+        &.{},
         1_777_161_600_000_001,
     );
     try analysis_store.seedSemanticFixture(&event_store.database);

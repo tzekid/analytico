@@ -107,28 +107,28 @@ test "$(sqlite3 "$interrupted/meta.db" \
 interrupted_retry="$fixture/interrupted-retry"
 "$current" restore "$interrupted_backup" "$interrupted_retry" --verify >/dev/null
 test "$("$current" migrate "$interrupted_retry" "$interrupted_backup")" = \
-    "migrated metadata=v8 events=v7"
+    "migrated metadata=v9 events=v7"
 test "$("$current" doctor "$interrupted_retry")" = \
-    "ok metadata=v8 events=v7 sites=1 goals=1 funnels=1 stored_events=1 key=ok"
+    "ok metadata=v9 events=v7 sites=1 goals=1 funnels=1 stored_events=1 key=ok"
 test "$(sqlite3 "$interrupted_retry/meta.db" \
     'SELECT count(*) FROM segments;')" = 0
 test "$(sqlite3 "$interrupted_retry/meta.db" \
     'SELECT count(*) FROM saved_views;')" = 0
 test "$("$current" migrate "$interrupted_retry")" = \
-    "migrated metadata=v8 events=v7"
+    "migrated metadata=v9 events=v7"
 
 test "$("$current" migrate "$live" "$backup")" = \
-    "migrated metadata=v8 events=v7"
+    "migrated metadata=v9 events=v7"
 test "$("$current" doctor "$live")" = \
-    "ok metadata=v8 events=v7 sites=1 goals=1 funnels=1 stored_events=1 key=ok"
+    "ok metadata=v9 events=v7 sites=1 goals=1 funnels=1 stored_events=1 key=ok"
 metadata_facts "$live" >"$fixture/after-metadata.txt"
 cmp "$fixture/before-metadata.txt" "$fixture/after-metadata.txt"
 sqlite3 -separator '|' "$live/meta.db" \
-    'SELECT id, site_id, name, match_kind, match_value, created_at_utc_micros FROM goal_definitions ORDER BY id;' \
+    'SELECT id, site_id, name, match_kind, match_value, created_at_utc_micros FROM goal_definitions_v2 ORDER BY id;' \
     >"$fixture/after-goals.txt"
 cmp "$fixture/before-goals.txt" "$fixture/after-goals.txt"
 test "$(sqlite3 "$live/meta.db" \
-    'SELECT count(*) FROM goal_definitions WHERE updated_at_utc_micros != created_at_utc_micros OR archived_at_utc_micros IS NOT NULL;')" = 0
+    'SELECT count(*) FROM goal_definitions_v2 WHERE updated_at_utc_micros != created_at_utc_micros OR archived_at_utc_micros IS NOT NULL;')" = 0
 test "$(sha256sum "$live/events.duckdb" | cut -d' ' -f1)" = "$before_event_sha"
 test "$("$current" report "$live" migration 2026-08-23 2026-08-23 \
     overview --format json)" = "$before_report"
@@ -137,7 +137,7 @@ test "$(sqlite3 "$live/meta.db" 'SELECT count(*) FROM saved_views;')" = 0
 test "$(sqlite3 "$live/meta.db" \
     "SELECT count(*) FROM meta_migrations WHERE version=7 AND name='segments-and-saved-views';")" = 1
 test "$("$current" migrate "$live" "$backup")" = \
-    "migrated metadata=v8 events=v7"
+    "migrated metadata=v9 events=v7"
 if "$previous" doctor "$live" >/dev/null 2>&1; then
     echo "metadata-6 predecessor unexpectedly opened current metadata" >&2
     exit 1
@@ -152,7 +152,7 @@ test "$("$previous" report "$rolled_back" migration 2026-08-23 2026-08-23 \
 
 fresh="$fixture/fresh"
 "$current" init "$fresh" >/dev/null
-test "$(sqlite3 "$fresh/meta.db" 'SELECT max(version) FROM meta_migrations;')" = 8
+test "$(sqlite3 "$fresh/meta.db" 'SELECT max(version) FROM meta_migrations;')" = 9
 test "$(sqlite3 "$fresh/meta.db" 'SELECT count(*) FROM segments;')" = 0
 test "$(sqlite3 "$fresh/meta.db" 'SELECT count(*) FROM saved_views;')" = 0
 

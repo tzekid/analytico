@@ -2910,6 +2910,19 @@ fn goalManagement(output: *std.Io.Writer, value: model.Page) !void {
     try output.writeAll("\"");
     if (management.screen == .new) try output.writeAll(" aria-current=\"page\"");
     try output.writeAll(">New goal</a></nav>");
+    if (management.filter_count != 0 or management.segment_name.len != 0) {
+        try output.writeAll("<p class=\"muted\">Goal results use ");
+        if (management.segment_name.len != 0) {
+            try output.writeAll("segment <strong>");
+            try text(output, management.segment_name);
+            try output.writeAll("</strong>");
+            if (management.filter_count != 0) try output.writeAll(" plus ");
+        }
+        if (management.filter_count != 0) {
+            try output.print("{d} ad-hoc filter(s)", .{management.filter_count});
+        }
+        try output.writeAll(" from the current analysis context.</p>");
+    }
 
     switch (management.screen) {
         .list => {
@@ -2967,7 +2980,7 @@ fn goalManagement(output: *std.Io.Writer, value: model.Page) !void {
             try output.writeAll("</section>");
         },
         .new, .edit => try goalBuilder(output, value, management),
-        .detail => try goalDetail(output, value, management.selected.?),
+        .detail => try goalDetail(output, value, management),
         .none => unreachable,
     }
 }
@@ -2978,36 +2991,37 @@ fn goalBuilder(
     management: model.GoalManagement,
 ) !void {
     const selected = management.selected;
-    const has_error_draft = value.form_error_target == .goal;
-    const entity_kind = if (has_error_draft)
+    const has_draft = value.form_error_target == .goal or
+        management.result_is_preview;
+    const entity_kind = if (has_draft)
         value.goal_draft.entity_kind
     else
         management.entity_kind;
-    const match_mode = if (has_error_draft)
+    const match_mode = if (has_draft)
         value.goal_draft.match_kind
     else if (selected) |goal|
         @tagName(goal.match_mode)
     else
         "exact";
-    const name = if (has_error_draft)
+    const name = if (has_draft)
         value.goal_draft.name
     else if (selected) |goal|
         goal.name
     else
         "";
-    const match_value = if (has_error_draft)
+    const match_value = if (has_draft)
         value.goal_draft.match_value
     else if (selected) |goal|
         goal.match_value
     else
         "";
-    const confirm_unseen = has_error_draft and value.goal_draft.confirm_unseen;
+    const confirm_unseen = has_draft and value.goal_draft.confirm_unseen;
 
     try output.writeAll("<section class=\"panel\"><h2>");
     try output.writeAll(if (management.screen == .edit) "Edit goal" else "New goal");
     try output.writeAll(
-        "</h2><p>Choose an observed Page or Event without entering selector syntax. " ++
-            "The selected date range and traffic policy determine the discovery list.</p>" ++
+        "</h2><p>Choose an observed Page or Event, then optionally require up to three typed event properties. " ++
+            "The selected date range, analysis context, and traffic policy determine the preview.</p>" ++
             "<form class=\"filter-builder\" method=\"get\" action=\"",
     );
     try attribute(output, if (management.screen == .edit)
@@ -3020,7 +3034,9 @@ fn goalBuilder(
     try attribute(output, value.query.range.end);
     try output.writeAll("\"><input type=\"hidden\" name=\"compare\" value=\"");
     try attribute(output, value.query.comparison.name());
-    try output.writeAll("\"><label>Discover<select name=\"entity\">");
+    try output.writeAll("\">");
+    try analysisContextHiddenFields(output, value);
+    try output.writeAll("<label>Discover<select name=\"entity\">");
     try output.writeAll(if (entity_kind == .page)
         "<option value=\"page\" selected>Pages</option><option value=\"event\">Events</option>"
     else
@@ -3065,10 +3081,10 @@ fn goalBuilder(
     }
 
     try output.writeAll("<form method=\"post\" action=\"");
-    try output.writeAll(if (management.screen == .edit)
-        "/admin/goals/edit"
+    try attribute(output, if (management.screen == .edit)
+        management.edit_action_url
     else
-        "/admin/goals");
+        management.create_action_url);
     try output.writeAll("\" hx-boost=\"true\" hx-sync=\"this:drop\">");
     try formCommon(output, value);
     if (selected) |goal| {
@@ -3106,18 +3122,149 @@ fn goalBuilder(
     try formErrorAttributes(output, value, .goal);
     try output.writeAll(" value=\"");
     try attribute(output, name);
-    try output.writeAll("\"></label><label class=\"warning-control\"><input type=\"checkbox\" name=\"confirm_unseen\" value=\"on\"");
+    try output.writeAll("\"></label>");
+    try goalPredicateBuilder(output, value, management, has_draft);
+    try output.writeAll("<label class=\"warning-control\"><input type=\"checkbox\" name=\"confirm_unseen\" value=\"on\"");
     if (confirm_unseen) try output.writeAll(" checked");
-    try output.writeAll("> Save even if this definition has zero matching events in the selected range</label><button type=\"submit\">");
+    try output.writeAll("> Save even if this definition has zero matching events in the selected range</label>" ++
+        "<div class=\"management-actions\"><button class=\"button-secondary\" type=\"submit\" name=\"intent\" value=\"preview\">Preview result</button><button type=\"submit\" name=\"intent\" value=\"save\">");
     try output.writeAll(if (management.screen == .edit) "Save goal" else "Create goal");
-    try output.writeAll("</button></form></section>");
+    try output.writeAll("</button></div></form>");
+    if (management.result_is_preview) {
+        try components.feedback(output, .{
+            .kind = .notice,
+            .message = "Preview completed. This definition has not been saved.",
+        });
+        try goalResult(output, management.result.?);
+        try goalPropertyCatalog(output, management.properties);
+    }
+    try output.writeAll("</section>");
+}
+
+fn goalPredicateBuilder(
+    output: *std.Io.Writer,
+    value: model.Page,
+    management: model.GoalManagement,
+    has_draft: bool,
+) !void {
+    try output.writeAll(
+        "<fieldset><legend>Event properties — all rows must match</legend>" ++
+            "<p class=\"muted\">Add up to three typed predicates. Empty property rows are ignored.</p>",
+    );
+    for (0..analysis.maximum_selector_predicates) |index| {
+        const draft: ?model.GoalPredicateDraft = if (has_draft and
+            index < value.goal_draft.predicates.len)
+            value.goal_draft.predicates[index]
+        else
+            null;
+        const predicate: ?analysis.PropertyPredicate = if (!has_draft and
+            management.selected != null and
+            index < management.selected.?.predicates.len)
+            management.selected.?.predicates[index]
+        else
+            null;
+        const property_name = if (draft) |row|
+            row.property_name
+        else if (predicate) |row|
+            row.property_ref.name
+        else
+            "";
+        const predicate_value = if (draft) |row|
+            row.value
+        else if (predicate) |row|
+            if (row.values.len == 0) "" else row.values[0]
+        else
+            "";
+        try output.print("<div class=\"filter-builder\"><label>Property {d}<input list=\"goal-property-options\" name=\"property_{d}\" maxlength=\"120\" value=\"", .{ index + 1, index + 1 });
+        try attribute(output, property_name);
+        try output.print("\"></label><label>Type and rule<select name=\"rule_{d}\">", .{index + 1});
+        try goalRuleOptions(output, if (draft) |row| row.rule else "", predicate);
+        try output.print("</select></label><label>Value<input name=\"predicate_value_{d}\" maxlength=\"1024\" value=\"", .{index + 1});
+        try attribute(output, predicate_value);
+        try output.writeAll("\"></label></div>");
+    }
+    try output.writeAll("<datalist id=\"goal-property-options\">");
+    for (management.properties.entries) |property| {
+        try output.writeAll("<option value=\"");
+        try attribute(output, property.name);
+        try output.writeAll("\">");
+        try text(output, property.scalar_type.name());
+        try output.writeAll("</option>");
+    }
+    try output.writeAll("</datalist></fieldset>");
+}
+
+const GoalRuleOption = struct {
+    value: []const u8,
+    label: []const u8,
+    scalar_type: analysis.ScalarType,
+    operator: analysis.Operator,
+};
+
+fn goalRuleOptions(
+    output: *std.Io.Writer,
+    draft_rule: []const u8,
+    selected: ?analysis.PropertyPredicate,
+) !void {
+    const options = [_]GoalRuleOption{
+        .{ .value = "string:is", .label = "Text · is", .scalar_type = .string, .operator = .is },
+        .{ .value = "string:is_not", .label = "Text · is not", .scalar_type = .string, .operator = .is_not },
+        .{ .value = "string:contains", .label = "Text · contains", .scalar_type = .string, .operator = .contains },
+        .{ .value = "string:not_contains", .label = "Text · does not contain", .scalar_type = .string, .operator = .not_contains },
+        .{ .value = "string:starts_with", .label = "Text · starts with", .scalar_type = .string, .operator = .starts_with },
+        .{ .value = "string:exists", .label = "Text · exists", .scalar_type = .string, .operator = .exists },
+        .{ .value = "string:absent", .label = "Text · absent", .scalar_type = .string, .operator = .absent },
+        .{ .value = "integer:is", .label = "Integer · is", .scalar_type = .integer, .operator = .is },
+        .{ .value = "integer:is_not", .label = "Integer · is not", .scalar_type = .integer, .operator = .is_not },
+        .{ .value = "integer:gt", .label = "Integer · greater than", .scalar_type = .integer, .operator = .gt },
+        .{ .value = "integer:gte", .label = "Integer · at least", .scalar_type = .integer, .operator = .gte },
+        .{ .value = "integer:lt", .label = "Integer · less than", .scalar_type = .integer, .operator = .lt },
+        .{ .value = "integer:lte", .label = "Integer · at most", .scalar_type = .integer, .operator = .lte },
+        .{ .value = "integer:exists", .label = "Integer · exists", .scalar_type = .integer, .operator = .exists },
+        .{ .value = "integer:absent", .label = "Integer · absent", .scalar_type = .integer, .operator = .absent },
+        .{ .value = "decimal:is", .label = "Decimal · is", .scalar_type = .decimal, .operator = .is },
+        .{ .value = "decimal:is_not", .label = "Decimal · is not", .scalar_type = .decimal, .operator = .is_not },
+        .{ .value = "decimal:gt", .label = "Decimal · greater than", .scalar_type = .decimal, .operator = .gt },
+        .{ .value = "decimal:gte", .label = "Decimal · at least", .scalar_type = .decimal, .operator = .gte },
+        .{ .value = "decimal:lt", .label = "Decimal · less than", .scalar_type = .decimal, .operator = .lt },
+        .{ .value = "decimal:lte", .label = "Decimal · at most", .scalar_type = .decimal, .operator = .lte },
+        .{ .value = "decimal:exists", .label = "Decimal · exists", .scalar_type = .decimal, .operator = .exists },
+        .{ .value = "decimal:absent", .label = "Decimal · absent", .scalar_type = .decimal, .operator = .absent },
+        .{ .value = "boolean:is_true", .label = "Boolean · is true", .scalar_type = .boolean, .operator = .is_true },
+        .{ .value = "boolean:is_false", .label = "Boolean · is false", .scalar_type = .boolean, .operator = .is_false },
+        .{ .value = "boolean:exists", .label = "Boolean · exists", .scalar_type = .boolean, .operator = .exists },
+        .{ .value = "boolean:absent", .label = "Boolean · absent", .scalar_type = .boolean, .operator = .absent },
+        .{ .value = "null:is", .label = "Null · is null", .scalar_type = .null, .operator = .is },
+        .{ .value = "null:is_not", .label = "Null · is not null", .scalar_type = .null, .operator = .is_not },
+        .{ .value = "null:exists", .label = "Null · exists", .scalar_type = .null, .operator = .exists },
+        .{ .value = "null:absent", .label = "Null · absent", .scalar_type = .null, .operator = .absent },
+        .{ .value = "missing:is", .label = "Missing · is missing", .scalar_type = .missing, .operator = .is },
+        .{ .value = "missing:is_not", .label = "Missing · is present", .scalar_type = .missing, .operator = .is_not },
+    };
+    for (options) |option| {
+        try output.writeAll("<option value=\"");
+        try attribute(output, option.value);
+        try output.writeAll("\"");
+        const is_selected = if (selected) |predicate|
+            predicate.property_ref.scalar_type == option.scalar_type and
+                predicate.operator == option.operator
+        else if (draft_rule.len != 0)
+            std.mem.eql(u8, draft_rule, option.value)
+        else
+            std.mem.eql(u8, option.value, "string:is");
+        if (is_selected) try output.writeAll(" selected");
+        try output.writeAll(">");
+        try text(output, option.label);
+        try output.writeAll("</option>");
+    }
 }
 
 fn goalDetail(
     output: *std.Io.Writer,
     value: model.Page,
-    goal: model.GoalDefinitionView,
+    management: model.GoalManagement,
 ) !void {
+    const goal = management.selected.?;
     try output.writeAll("<section class=\"panel\"><div class=\"split-heading\"><div><h2>");
     try text(output, goal.name);
     try output.writeAll("</h2><p><strong>");
@@ -3126,15 +3273,23 @@ fn goalDetail(
     try output.writeAll(goalSelectorLabel(goal));
     try output.writeAll(" <code>");
     try text(output, goal.match_value);
-    try output.writeAll("</code></p></div><a class=\"button-secondary\" href=\"");
+    try output.writeAll("</code></p>");
+    try goalPredicateSummary(output, goal.predicates);
+    try output.writeAll("</div><a class=\"button-secondary\" href=\"");
     try attribute(output, goal.edit_url);
     try output.writeAll("\">Edit goal</a></div><dl class=\"definition-grid\"><div><dt>Created</dt><dd>");
     try text(output, goal.created_at);
     try output.writeAll("</dd></div><div><dt>Updated</dt><dd>");
     try text(output, goal.updated_at);
-    try output.writeAll("</dd></div></dl><div class=\"management-actions\">");
-    try goalStateForm(output, value, goal);
-    try output.writeAll("<form method=\"post\" action=\"/admin/goals/duplicate\" hx-boost=\"true\" hx-sync=\"this:drop\">");
+    try output.writeAll("</dd></div></dl><p><a href=\"");
+    try attribute(output, goal.analyze_url);
+    try output.writeAll("\">Open this goal in Analyze</a></p>");
+    try goalResult(output, management.result.?);
+    try output.writeAll("<div class=\"management-actions\">");
+    try goalStateForm(output, value, management, goal);
+    try output.writeAll("<form method=\"post\" action=\"/admin/goals/duplicate");
+    try attribute(output, management.action_suffix);
+    try output.writeAll("\" hx-boost=\"true\" hx-sync=\"this:drop\">");
     try formCommon(output, value);
     try goalIdentityFields(output, goal);
     try output.writeAll("<label>Duplicate name<input name=\"name\" maxlength=\"120\" required");
@@ -3147,7 +3302,9 @@ fn goalDetail(
         try output.writeAll(" copy");
     }
     try output.writeAll("\"></label><button class=\"button-secondary\" type=\"submit\">Duplicate</button></form>");
-    try output.writeAll("<form method=\"post\" action=\"/admin/goals/delete\" hx-boost=\"true\" hx-sync=\"this:drop\">");
+    try output.writeAll("<form method=\"post\" action=\"/admin/goals/delete");
+    try attribute(output, management.action_suffix);
+    try output.writeAll("\" hx-boost=\"true\" hx-sync=\"this:drop\">");
     try formCommon(output, value);
     try goalIdentityFields(output, goal);
     try output.writeAll("<label>Type the exact goal name to delete<input name=\"name\" maxlength=\"120\" required autocomplete=\"off\" aria-describedby=\"goal-delete-name\"></label><p id=\"goal-delete-name\" class=\"muted\">Enter <strong>");
@@ -3158,6 +3315,7 @@ fn goalDetail(
 fn goalStateForm(
     output: *std.Io.Writer,
     value: model.Page,
+    management: model.GoalManagement,
     goal: model.GoalDefinitionView,
 ) !void {
     try output.writeAll("<form method=\"post\" action=\"");
@@ -3165,12 +3323,149 @@ fn goalStateForm(
         "/admin/goals/reactivate"
     else
         "/admin/goals/archive");
+    try attribute(output, management.action_suffix);
     try output.writeAll("\" hx-boost=\"true\" hx-sync=\"this:drop\">");
     try formCommon(output, value);
     try goalIdentityFields(output, goal);
     try output.writeAll("<button class=\"button-secondary\" type=\"submit\">");
     try output.writeAll(if (goal.archived) "Reactivate" else "Archive");
     try output.writeAll("</button></form>");
+}
+
+fn goalPredicateSummary(
+    output: *std.Io.Writer,
+    predicates: []const analysis.PropertyPredicate,
+) !void {
+    if (predicates.len == 0) {
+        try output.writeAll("<p class=\"muted\">No property predicates.</p>");
+        return;
+    }
+    try output.writeAll("<ul class=\"definition-list\">");
+    for (predicates) |predicate| {
+        try output.writeAll("<li><code>");
+        try text(output, predicate.property_ref.name);
+        try output.writeAll("</code> · ");
+        try text(output, predicate.property_ref.scalar_type.name());
+        try output.writeAll(" · ");
+        try text(output, predicate.operator.name());
+        if (predicate.values.len != 0) {
+            try output.writeAll(" · <code>");
+            try text(output, predicate.values[0]);
+            try output.writeAll("</code>");
+        }
+        try output.writeAll("</li>");
+    }
+    try output.writeAll("</ul>");
+}
+
+fn goalResult(output: *std.Io.Writer, result: analysis.GoalResult) !void {
+    if (result.total_matches < 0 or result.converting_visitors < 0 or
+        result.converting_sessions < 0 or result.eligible_visitors < 0 or
+        result.eligible_sessions < 0 or result.path_cardinality < 0)
+    {
+        return error.InvalidGoalResult;
+    }
+    var visitor_percent: [32]u8 = undefined;
+    var session_percent: [32]u8 = undefined;
+    var coverage_percent: [32]u8 = undefined;
+    const visitor_rate = try percentText(
+        &visitor_percent,
+        result.converting_visitors,
+        result.eligible_visitors,
+    );
+    const session_rate = try percentText(
+        &session_percent,
+        result.converting_sessions,
+        result.eligible_sessions,
+    );
+    const coverage_rate = try percentText(
+        &coverage_percent,
+        result.converting_coverage.persistent_basis_points,
+        10_000,
+    );
+    var matches_buffer: [32]u8 = undefined;
+    var visitors_buffer: [96]u8 = undefined;
+    var sessions_buffer: [96]u8 = undefined;
+    const matches_text = try std.fmt.bufPrint(
+        &matches_buffer,
+        "{d}",
+        .{result.total_matches},
+    );
+    const visitors_text = try std.fmt.bufPrint(
+        &visitors_buffer,
+        "{d}/{d} · {s}",
+        .{
+            result.converting_visitors,
+            result.eligible_visitors,
+            if (result.eligible_visitors == 0) "unavailable" else visitor_rate,
+        },
+    );
+    const sessions_text = try std.fmt.bufPrint(
+        &sessions_buffer,
+        "{d}/{d} · {s}",
+        .{
+            result.converting_sessions,
+            result.eligible_sessions,
+            if (result.eligible_sessions == 0) "unavailable" else session_rate,
+        },
+    );
+    try output.writeAll("<section class=\"panel\"><h3>Goal result</h3><p class=\"muted\">Counts use event-row selector semantics in the selected site-local range and current filter context.</p><ul class=\"kpi-grid\">");
+    try components.kpi(output, .{ .label = "Matching events", .value = matches_text });
+    try components.kpi(output, .{ .label = "Converting visitors", .value = visitors_text });
+    try components.kpi(output, .{ .label = "Converting sessions", .value = sessions_text });
+    try components.kpi(output, .{
+        .label = "Persistent identity coverage",
+        .value = if (result.converting_visitors == 0)
+            "unavailable"
+        else
+            coverage_rate,
+    });
+    try output.writeAll(
+        "</ul><p class=\"coverage-note\">Legacy coverage counts daily" ++
+            " identities only; those rows are never linked into persistent" ++
+            " people across dates.</p>",
+    );
+    if (result.revenue.len != 0) {
+        try output.writeAll("<div class=\"table-scroll mobile-records\"><table><caption>Exact revenue on matching events</caption><thead><tr><th scope=\"col\">Currency</th><th scope=\"col\">Exact sum</th><th scope=\"col\">Values</th></tr></thead><tbody>");
+        for (result.revenue) |amount| {
+            try output.writeAll("<tr><th scope=\"row\" data-label=\"Currency\">");
+            try text(output, amount.currency);
+            try output.writeAll("</th><td data-label=\"Exact sum\">");
+            try text(output, amount.decimal);
+            try output.print("</td><td data-label=\"Values\">{d}</td></tr>", .{amount.value_count});
+        }
+        try output.writeAll("</tbody></table></div>");
+    }
+    try output.writeAll("<div class=\"table-scroll mobile-records\"><table><caption>Top paths for matching events</caption><thead><tr><th scope=\"col\">Path</th><th scope=\"col\">Matches</th></tr></thead><tbody>");
+    for (result.paths) |row| {
+        try output.writeAll("<tr><th scope=\"row\" data-label=\"Path\"><code>");
+        try text(output, row.path);
+        try output.print("</code></th><td data-label=\"Matches\">{d}</td></tr>", .{row.matches});
+    }
+    if (result.paths.len == 0) {
+        try output.writeAll("<tr><td colspan=\"2\">No matching paths.</td></tr>");
+    }
+    try output.print("</tbody></table></div><p class=\"muted\">{d} distinct matching path(s); at most {d} are shown.</p></section>", .{ result.path_cardinality, analysis.maximum_goal_path_rows });
+}
+
+fn goalPropertyCatalog(
+    output: *std.Io.Writer,
+    catalog: analysis.PropertyCatalog,
+) !void {
+    if (catalog.property_count < 0) return error.InvalidPropertyCatalog;
+    try output.writeAll("<details><summary>Observed properties for this selector</summary><div class=\"table-scroll mobile-records\"><table><caption>Latest 2,000 matching base-selector events</caption><thead><tr><th scope=\"col\">Property</th><th scope=\"col\">Type</th><th scope=\"col\">Events</th></tr></thead><tbody>");
+    for (catalog.entries) |property| {
+        if (property.event_count < 0) return error.InvalidPropertyCatalog;
+        try output.writeAll("<tr><th scope=\"row\" data-label=\"Property\"><code>");
+        try text(output, property.name);
+        try output.writeAll("</code></th><td data-label=\"Type\">");
+        try text(output, property.scalar_type.name());
+        try output.print("</td><td data-label=\"Events\">{d}</td></tr>", .{property.event_count});
+    }
+    if (catalog.entries.len == 0) {
+        try output.writeAll("<tr><td colspan=\"3\">No typed properties were observed for this selector.</td></tr>");
+    }
+    try output.print("</tbody></table></div><p class=\"muted\">{d} distinct property name(s){s}.</p></details>", .{ catalog.property_count, if (catalog.truncated) "; bounded list truncated" else "" });
 }
 
 fn goalIdentityFields(
@@ -3727,6 +4022,20 @@ fn canonicalUrlSeparated(
             }
         },
         .sessions, .settings => {},
+    }
+    if (destination == .journeys and adjusted.goal_screen != .none) {
+        const suffix = try analysis.canonicalFilterUrlSuffix(
+            std.heap.page_allocator,
+            adjusted.analysis_segment_id,
+            adjusted.analysis_filters,
+        );
+        defer std.heap.page_allocator.free(suffix);
+        var parts = std.mem.splitScalar(u8, suffix, '&');
+        while (parts.next()) |part| {
+            if (part.len == 0) continue;
+            try output.writeAll(separator);
+            try output.writeAll(part);
+        }
     }
 }
 

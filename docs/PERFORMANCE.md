@@ -539,6 +539,42 @@ no cache, projection, rollup, EAV table, background work, network request,
 dependency, memory-limit change, or client fetch. A measured miss follows the
 existing optimization order before any such mechanism is proposed.
 
+D42 adds no deadline or memory increase. Goal detail executes one closed result
+statement and must remain below 700 ms p95 on the standard one-million-event
+fixture in ReleaseSafe. It returns one summary, at most 16 currency rows, and
+at most ten matching paths. Preview adds one selector-scoped catalog over only
+the latest 2,000 matching eligible events and shares the same two-second budget
+with the result. Timeout must interrupt the real DuckDB statement, perform no
+metadata write, and leave the connection reusable.
+
+The performance gate records fresh-process and repeated measurements
+separately and retains rejected evidence. It profiles the exact production
+statement with a predicate-bearing goal and current filter context before any
+optimization. No result cache, property cache, projection, rollup, EAV table,
+background process, broader memory limit, or relaxed timeout is accepted
+without a new measured decision.
+
+The first ReleaseSafe million-event candidate failed the production two-second
+deadline; its retained `EXPLAIN ANALYZE` evidence measured 2.41 seconds. The
+plan showed DuckDB materializing the generic 55-column qualified event rowset
+for one million rows. D42 therefore takes the package's next documented
+optimization step only for an unfiltered goal result: project the selector,
+identity, revenue, and path columns, derive both eligible counts in one
+aggregate, and materialize only the narrow matched rows. Filtered goal results
+retain the existing D29 compiler path and semantics.
+
+The exact final post-review ReleaseSafe production binary measured a
+0.161-second fresh `EXPLAIN ANALYZE`. Four independent ten-sample fixture and
+browser processes measured p95 values of 231,307, 189,418, 161,019, and
+169,414 microseconds; every sample was below the 700,000-microsecond target.
+Each run returned 100,000 exact predicate matches and one path. The same
+processes ran the complete result-plus-catalog preview in 574,605, 602,663,
+559,075, and 533,909 microseconds under the unchanged two-second deadline.
+Earlier passing review measurements preceded the final stale-context journey
+and are not presented as final-candidate evidence. These are repeated
+warm-database statement measurements, not a cold database-open claim; the
+separate explain process preserves the fresh-process evidence.
+
 ### M4 production-MVP baseline
 
 The current ReleaseSafe package contains a 26,341,344-byte executable and a

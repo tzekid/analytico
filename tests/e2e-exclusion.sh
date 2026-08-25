@@ -301,7 +301,7 @@ if grep -aF '203.0.113.9' "$data/meta.db" "$data/events.duckdb" \
     exit 1
 fi
 test "$("$binary" doctor "$data")" = \
-    "ok metadata=v8 events=v7 sites=4 goals=0 funnels=0 stored_events=12 key=ok"
+    "ok metadata=v9 events=v7 sites=4 goals=0 funnels=0 stored_events=12 key=ok"
 grep -Fq '"accepted":12' "$fixture/server.stderr"
 grep -Fq '"excluded":6' "$fixture/server.stderr"
 

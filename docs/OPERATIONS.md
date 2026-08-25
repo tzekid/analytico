@@ -461,6 +461,25 @@ resolve to the merged release. Rollback stops the writer, restores the matched
 metadata-7/event-7 pair, proves `54f49ed` again, and only then switches the
 release symlink. The metadata-7 binary must never start on metadata 8.
 
+For the metadata-schema-9 deployment, repeat the stopped-writer procedure with
+a manifest recording metadata 8 and event 7. Independently restore that backup
+and prove exact predecessor `f1609073444e204f6767a9621f87f2f24c2e0f3d`
+opens it and reproduces `doctor`, selected
+metric-v1/metric-v2 reports, and a canonical goal detail before migration. The
+replayable migration creates `goal_definitions_v2`, copies and verifies every
+schema-8 lifecycle/base-selector field with the exact empty canonical predicate
+document, removes `goal_definitions`, and writes ledger 9 last. A genuinely
+partial copy and an after-drop missing-ledger state must retry to the same
+complete result; corrupt or noncanonical replacement state fails closed.
+
+After migration, verify metadata 9/event 7, complete predicate-aware
+create/preview/edit/duplicate/archive/report behavior, the 34-active overflow
+state, saved-view references, report/event preservation, and the
+JavaScript-disabled browser route. Rollback stops the writer, restores the
+matched metadata-8/event-7 pair, proves
+`f1609073444e204f6767a9621f87f2f24c2e0f3d` again, and only then switches
+the release symlink. The metadata-8 binary must never start on metadata 9.
+
 ## 11. Retention and site deletion
 
 Run maintenance with the service stopped:
@@ -525,6 +544,7 @@ zig build e2e-m0 e2e-m1 e2e-m2 e2e-timezone e2e-properties \
   e2e-m2-browser e2e-identity-browser e2e-tracker-browser e2e-m3 e2e-m4 \
   e2e-m6 e2e-m7 e2e-filters e2e-goals e2e-passkey-p1 \
   e2e-metadata7-migration e2e-metadata8-migration \
+  e2e-metadata9-migration \
   -Doptimize=ReleaseSafe -Dturso-native-path=<exact-prefix>
 zig build bench-properties \
   -Doptimize=ReleaseSafe -Dturso-native-path=<exact-prefix>
@@ -538,8 +558,8 @@ zig build e2e-release-full \
 Caddy syntax, systemd security, and a fresh real-data report from the extracted
 archive, then runs the complete packaged real-process set including classifier,
 traffic-quality, universal filters, guided goals, and exact schema-4, schema-5,
-schema-6, metadata-6, metadata-7, and metadata-8 predecessors. The named
-`e2e-filters`, `e2e-goals`, `e2e-metadata7-migration`, and
-`e2e-metadata8-migration` gates run independently above and again inside this
-full packaged qualification. Large event/browser fixtures are acceptance
-tooling only and are not shipped.
+schema-6, metadata-6, metadata-7, metadata-8, and metadata-9 predecessors. The
+named `e2e-filters`, `e2e-goals`, `e2e-metadata7-migration`,
+`e2e-metadata8-migration`, and `e2e-metadata9-migration` gates run independently
+above and again inside this full packaged qualification. Large event/browser
+fixtures are acceptance tooling only and are not shipped.
