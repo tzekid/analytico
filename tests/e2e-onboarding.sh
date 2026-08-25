@@ -54,7 +54,7 @@ dashboard="http://localhost:$proxy_port"
 data="$fixture/data"
 
 "$binary" init "$data" >"$fixture/init.txt"
-grep -Fq 'metadata=v7 events=v7' "$fixture/init.txt"
+grep -Fq 'metadata=v8 events=v7' "$fixture/init.txt"
 "$binary" auth configure "$data" "$dashboard" >/dev/null
 setup_url=$("$binary" auth bootstrap "$data" --ttl 10m | sed -n '2p')
 case "$setup_url" in
@@ -110,7 +110,7 @@ jq -e '
     .engine == "chromium" and
     .passkey_bootstrap == "real-virtual-authenticator" and
     .site_creation_javascript == "disabled" and
-    .metadata_schema == 7 and .event_schema == 7 and
+    .metadata_schema == 8 and .event_schema == 7 and
     .exact_retry == "existing-outcome" and
     .unavailable_store_honest and
     .startup_data_requests == 0 and .mobile_width == 360 and
@@ -144,7 +144,7 @@ printf '%s\n' "$site_list" |
         '$1 == "browser-site" && $2 == id && $4 == "Browser Site" { found = 1 } END { exit !found }'
 doctor=$("$binary" doctor "$data")
 test "$doctor" = \
-    "ok metadata=v7 events=v7 sites=1 goals=0 funnels=0 stored_events=1 key=ok"
+    "ok metadata=v8 events=v7 sites=1 goals=0 funnels=0 stored_events=1 key=ok"
 
 test "$(sqlite3 "$data/meta.db" \
     "SELECT default_currency FROM site_settings WHERE site_id='$site_id';")" = EUR
@@ -154,5 +154,5 @@ sqlite3 "$data/meta.db" \
     "SELECT name FROM sqlite_master WHERE type='index' AND name='site_origins_unique_origin';" |
     grep -Fxq site_origins_unique_origin
 
-printf 'onboarding_e2e=pass metadata=7 events=7 sites=1 events_stored=1 cold_onboarding_rss_growth_kib=%s browser=%s\n' \
+printf 'onboarding_e2e=pass metadata=8 events=7 sites=1 events_stored=1 cold_onboarding_rss_growth_kib=%s browser=%s\n' \
     "$cold_onboarding_rss_growth_kib" "$(<"$fixture/browser.json")"

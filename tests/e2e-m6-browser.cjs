@@ -5,9 +5,10 @@ const { chromium } = require("playwright");
 
 const origin = process.argv[2];
 const sessionToken = process.argv[3];
-if (!origin || !sessionToken) {
+const unsafeGoalId = process.argv[4];
+if (!origin || !sessionToken || !unsafeGoalId) {
   throw new Error(
-    "usage: node e2e-m6-browser.cjs <dashboard-origin> <session-token>",
+    "usage: node e2e-m6-browser.cjs <dashboard-origin> <session-token> <unsafe-goal-id>",
   );
 }
 
@@ -1035,7 +1036,7 @@ async function main() {
     assert.equal(response.status(), 200);
     assert.match(page.url(), /page=2/);
 
-    await page.goto(route("example", "journeys/goals"), {
+    await page.goto(route("example", `journeys/goals/${unsafeGoalId}`), {
       waitUntil: "load",
     });
     const unsafeText = "<script>alert(1)</script> \"&";
@@ -1046,12 +1047,16 @@ async function main() {
     );
     assert.ok((await page.locator("body").innerText()).includes(unsafeText));
 
-    await page.locator(
-      'details.management:has(form[action="/admin/goals"]) > summary',
-    ).click();
+    response = await Promise.all([
+      page.waitForNavigation({ waitUntil: "load" }),
+      page.getByRole("link", { name: "New goal" }).click(),
+    ]).then(([navigation]) => navigation);
+    assert.equal(response.status(), 200);
+    assert.match(page.url(), /\/journeys\/goals\/new/);
     const goalForm = page.locator('form[action="/admin/goals"]');
     await goalForm.locator('input[name="name"]').fill("kept goal");
-    await goalForm.locator('select[name="kind"]').selectOption("event");
+    await goalForm.locator('select[name="entity"]').selectOption("event");
+    await goalForm.locator('select[name="match"]').selectOption("exact");
     await goalForm.locator('input[name="value"]').fill("bad value");
     response = await Promise.all([
       page.waitForResponse(
@@ -1084,12 +1089,7 @@ async function main() {
         .getAttribute("aria-invalid"),
       "true",
     );
-    assert.equal(
-      await page
-        .locator('form[action="/admin/funnels"] input[name="name"]')
-        .getAttribute("aria-invalid"),
-      null,
-    );
+    assert.equal(await page.locator('form[action="/admin/funnels"]').count(), 0);
     assert.equal(
       await page
         .locator('form[action="/admin/goals"] input[name="name"]')
@@ -1109,6 +1109,9 @@ async function main() {
     await page
       .locator('form[action="/admin/goals"] input[name="value"]')
       .fill("purchase");
+    await page
+      .locator('form[action="/admin/goals"] input[name="confirm_unseen"]')
+      .check();
     response = await Promise.all([
       page.waitForNavigation({ waitUntil: "load" }),
       page
@@ -1124,10 +1127,17 @@ async function main() {
     assert.match(page.url(), /to=2025-01-02/);
     assert.match(page.url(), /compare=previous/);
 
-    const purchaseItem = page.locator("li", { hasText: "Purchase" });
+    const purchaseItem = page.locator("tr", { hasText: "Purchase" });
     response = await Promise.all([
       page.waitForNavigation({ waitUntil: "load" }),
-      purchaseItem.locator("button", { hasText: "Delete" }).click(),
+      purchaseItem.getByRole("link", { name: "Purchase" }).click(),
+    ]).then(([navigation]) => navigation);
+    assert.equal(response.status(), 200);
+    const purchaseDelete = page.locator('form[action="/admin/goals/delete"]');
+    await purchaseDelete.locator('input[name="name"]').fill("Purchase");
+    response = await Promise.all([
+      page.waitForNavigation({ waitUntil: "load" }),
+      purchaseDelete.getByRole("button", { name: "Delete permanently" }).click(),
     ]).then(([navigation]) => navigation);
     assert.equal(response.status(), 200);
     assert.equal(
@@ -1135,7 +1145,13 @@ async function main() {
       "Goal deleted.",
     );
 
+    response = await Promise.all([
+      page.waitForNavigation({ waitUntil: "load" }),
+      page.getByRole("link", { name: "Funnels" }).click(),
+    ]).then(([navigation]) => navigation);
+    assert.equal(response.status(), 200);
     const funnelForm = page.locator('form[action="/admin/funnels"]');
+    await funnelForm.locator("xpath=ancestor::details/summary").click();
     await funnelForm.locator('input[name="name"]').fill("Checkout");
     await funnelForm
       .locator('textarea[name="steps"]')

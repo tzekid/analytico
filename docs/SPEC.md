@@ -71,6 +71,12 @@
   forms and 303 canonical GETs remain the baseline; no client state or startup
   data request is added. Metric-v1 CLI output remains frozen; the browser does
   not retain it as a second analysis system.
+- D41 and issue #33 advance metadata to schema 8 and replace the raw goal form
+  with native list/new/detail/edit destinations. Page/Event discovery is
+  bounded by the selected range and analysis deadline; active/archive state,
+  stable IDs, reference-safe delete, and explicit zero-seen confirmation are
+  server-owned. Property predicates and historical preview remain issue #34;
+  funnel goal references remain issue #35.
 
 ## 1. Product statement
 
@@ -179,6 +185,18 @@ strict policy excludes only current suspects through the shared versioned
 product relation; trusted interaction, engagement, scroll, later activity,
 goal conversion, or persistent return vetoes that verdict. Traffic-quality
 diagnostics remain visible independently of strict mode.
+
+Goal administration is a guided browser flow rather than a raw selector form.
+It supports create, edit, duplicate, archive, reactivate, and confirmed delete
+for exact custom events, exact pages, and page prefixes. Search returns bounded
+observed Page/Event choices with count and last-seen context; a value not seen
+in the selected range requires explicit confirmation. Archive removes a goal
+from default active metrics while preserving its stable ID and explicit
+historical reportability. Current saved Trend or Breakdown references refuse
+delete and offer archive. Forms work without JavaScript, preserve submitted
+values and exact errors, and never expose an expression language. Property
+predicates, match preview, goal-result expansion, and funnel references remain
+owned by their later issues.
 
 ### F5. CLI
 

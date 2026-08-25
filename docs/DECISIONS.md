@@ -49,6 +49,7 @@ semantic, or application state model is consequential and must be added here.
 | D38 | Installation verification state | Session-bound signed URL watermark plus durable event lookup and restart-scoped rejection guidance | Accepted for 1.0 issue #20 |
 | D39 | Server-rendered Analyze Breakdown | Extend the single D29 query with bounded aggregate-label search and a shared-deadline typed property catalog | Accepted for 1.0 issue #29 |
 | D40 | Universal filters, segments, and saved views | Resolve one canonical FilterSet context; persist exact site-owned state in metadata schema 7 | Accepted for 1.0 issue #30 |
+| D41 | Guided goal lifecycle and metadata schema 8 | Replace raw goal administration with bounded discovery, archive-first lifecycle, and reference-safe deletion | Accepted for 1.0 issue #33 |
 
 ## D01. MVP interface
 
@@ -2639,3 +2640,162 @@ Debug and ReleaseSafe gates.
 `ANALYSIS_QUERY.md`, `DESIGN_SYSTEM.md`, `PERFORMANCE.md`, `OPERATIONS.md`,
 `RELEASE_CONTRACT_1.0.md`, and issue #30. Issues #31, #38, #39, #41, #47, and
 #48 consume or verify this boundary later without broadening its grammar.
+
+## D41. Replace raw goal administration with a guided, reference-safe lifecycle
+
+**Status:** Accepted for Analytico 1.0 issue #33
+
+**Date:** 2026-08-24
+
+**Issue:** #33
+
+**Extends:** D19's durable Turso autocommits, D29's closed event-selector
+grammar, D34's bounded active-goal snapshot, and D40's exact saved state. It
+supersedes D40 only where an ordinary goal deletion would knowingly invalidate
+a current valid saved view.
+
+### Context
+
+Metadata schema 7 stores a goal as an immutable name and raw selector tuple.
+The CLI and authenticated browser can add, list, or delete that row, but cannot
+edit, duplicate, archive, reactivate, browse an entity, or preserve a stable
+detail destination. `listGoals` also feeds both default conversion metrics and
+D34's human-evidence veto, so simply retaining an archived row in that snapshot
+would change analytics semantics. Conversely, deleting a goal selected by a
+valid saved Trend or Breakdown view would knowingly create the stale state that
+#33's reference-safe deletion requirement forbids.
+
+The package target also includes property predicates and historical preview,
+but #34 explicitly owns those additions. Funnel goal-ID references do not
+exist yet; #35 owns creating them and extending the deletion guard. Issue #33
+must deliver a complete base Page/Event lifecycle without prebuilding either
+downstream feature.
+
+### Lifecycle storage and migration candidates
+
+| Candidate | Runtime behavior | Migration, maintenance, and rollback |
+| --- | --- | --- |
+| Add lifecycle columns directly to `goals` | Compact single-row mutations | Interrupted replay cannot safely repeat the required `ALTER TABLE ADD COLUMN` sequence on the pinned Turso evidence |
+| Add a one-to-one lifecycle child | Replayable additive migration | Create and repair become multi-write mutations with a crash-visible mixed state |
+| Replace `goals` with `goal_definitions` | Every post-migration mutation remains one statement | Deterministic copy and verification are replayable; rollback restores the matched predecessor pair |
+
+Select the replacement table. Metadata schema 8 creates
+`goal_definitions`, copies every schema-7 row as active with identical IDs,
+sites, names, selectors, and creation times, sets its initial update time to the
+creation time, verifies count and complete row equality, removes the retired
+table, and writes migration ledger 8 last. Retry may repair deterministic
+partial copies. If interruption lands after the verified retired-table removal
+but before the ledger write, retry accepts only the exact validated replacement
+shape and completes the ledger; any other source/replacement combination fails
+closed. These are D19 durable autocommits, not an explicit multi-write Turso
+transaction. The exact schema-7 predecessor is commit `54f49ed`; that binary
+must refuse migrated metadata, and rollback restores the matched
+metadata-7/event-7 backup before it starts.
+
+### Mutations, capacity, and references
+
+Create, edit, duplicate, archive, reactivate, and delete are site-scoped
+single-statement mutations. IDs remain immutable. Name, selector, state, and
+update time are compared or guarded in the write predicate so a stale form
+never reports a different stored outcome as success. The application permits
+at most 32 active goals per site; create, duplicate, and reactivate enforce
+that cap inside the write rather than with a preceding race-prone count.
+Duplicate copies the source selector in that same timestamp-guarded insert and
+accepts only a new unique display name; it is not a second edit builder.
+Archiving frees one active slot and preserves historical reportability.
+Archived definitions never enter default Overview conversion totals or D34
+classifier evidence.
+
+Schema 7 already treats an externally created pre-migration overflow as data to
+preserve rather than silently discard. Schema 8 copies every such row, shows
+the over-cap state, blocks create/duplicate/reactivate, and keeps D34 strict
+enablement unavailable until archive brings the active count to 32 or fewer.
+It never truncates the active snapshot or chooses goals on the owner's behalf.
+
+A current saved Trend or Breakdown view can contain one exact saved-goal UUID
+inside D40's bounded, canonical schema-1 JSON. Deletion therefore performs one
+conditional statement that refuses the exact site-owned UUID reference with an
+HTTP 409 outcome and offers archive. It does not cascade or rewrite the saved
+view. The check uses the fixed canonical selector representation and must prove
+that the same UUID in unrelated property/filter text is not a reference. For
+Breakdown it compares the structured selector kind and value. For Trend it
+examines only the `series` array and compares the finite accepted canonical
+series forms. A raw whole-document UUID substring is not a reference check.
+Archive remains available and preserves the UUID. Corrupt restored state,
+retention outside this application path, or future removed entities may still
+produce D40's explicit stale state; D41 does not hide or normalize those cases.
+A normalized reference table would duplicate canonical state and add mutation
+and backfill machinery for one bounded existing consumer, so it is not added.
+When #35 creates funnel goal-ID references, it must extend the same atomic
+deletion predicate rather than weaken this rule.
+
+### Reporting and discovered entities
+
+The active-goal snapshot remains capped at 32 and continues to govern default
+conversion metrics and D34. A separate request-owned explicit resolution set
+contains at most the three goal IDs selected by the existing Trend/Breakdown
+envelope and absent from the active set; an active selected ID resolves from
+the active snapshot rather than being duplicated across both inputs. The
+explicit set may resolve archived definitions for a direct or saved report but
+never makes them active again. Editing a definition intentionally changes
+future evaluation over raw historical events; no definition version history
+or snapshot is introduced.
+
+The guided builder queries DuckDB for Page or custom-event entities under the
+selected site's resolved local range, traffic policy, and one existing
+two-second request deadline. It returns at most 50 rows plus `has_more`, with
+exact label, eligible count, and last receipt time, ordered by count descending
+then label ascending. Page discovery reads qualifying page-view paths; Event
+discovery reads qualifying custom-event names. Search and pagination remain
+bound values. No Turso query reaches DuckDB, no raw URL query or user agent is
+retained, and no cache, projection, background work, network request, or new
+dependency is added.
+
+A manual exact value absent from the current result is allowed only after an
+explicit zero-seen confirmation. Exact-page, page-prefix, and exact-event are
+the only #33 selectors. Predicate rows, type-conflict handling, historical
+preview, and expanded goal result metrics remain #34 work.
+
+### Browser, security, and rollback
+
+The authenticated route family exposes stable list, new, detail, and edit GET
+destinations beneath `/admin/sites/{site}/journeys/goals`. Native bounded forms
+perform POST/303/GET create, edit, duplicate, archive, reactivate, and delete.
+They preserve valid submitted state and field errors, verify the selected site,
+session, exact origin, and CSRF token, and require exact destructive
+confirmation. The server produces one owned typed view model; deterministic
+renderers allocate nothing and perform no database, filesystem, session,
+network, or clock work. JavaScript may enhance the same routes but owns no
+state, and the first response contains the useful management or builder state.
+
+The metadata migration changes neither DuckDB event schema 7 nor tracker,
+Caddy, service topology, dependencies, or backup format. Deployment stops the
+sole writer, creates and independently restores the metadata-7/event-7 pair,
+proves `54f49ed` opens the restored predecessor and reproduces selected
+reports, then migrates and verifies schema 8. Executable-only rollback is
+forbidden; the matched pair must be restored before starting the predecessor.
+
+### Consequences and acceptance evidence
+
+Runtime adds bounded goal CRUD reads plus at most one deadline-controlled
+discovery statement on builder search. Durable state gains one numbered
+replacement migration but no second lifecycle table, reference index, audit
+process, draft store, or version history. Memory and work remain bounded by 32
+active goals, page-sized archived reads, three explicit resolved goals, 50
+discovered entities plus next-page state, existing form/URL limits, and the
+two-second analysis deadline.
+
+Issue #33 must prove exact schema-7-to-8 copy, interrupted retry, repeated
+migration, backup/restore, predecessor read and refusal, matched rollback, and
+event/report preservation. It must also prove site-isolated lifecycle CRUD,
+stable IDs across rename, exact active-cap and preserved-overflow behavior,
+saved Trend and Breakdown
+delete conflicts without false UUID collisions, archived explicit reports with
+active Overview/D34 isolation, discovery semantics/bounds/deadline/reuse,
+authentication/origin/CSRF/idempotent submission, JavaScript-disabled and
+enhanced desktop/mobile flows, and separate Debug and ReleaseSafe gates.
+
+**Affected contracts:** `SPEC.md`, `ARCHITECTURE.md`, `DATA_MODEL.md`,
+`ANALYSIS_QUERY.md`, `DESIGN_SYSTEM.md`, `PERFORMANCE.md`, `OPERATIONS.md`,
+`RELEASE_CONTRACT_1.0.md`, and issue #33. Issues #34 and #35 extend this
+boundary without broadening #33.

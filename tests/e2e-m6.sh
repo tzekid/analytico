@@ -71,8 +71,10 @@ currency_site_id=$("$binary" site list "$data" |
 property_site_id=$("$binary" site list "$data" |
     awk -F '\t' '$1 == "properties" { print $2 }')
 "$binary" goal add "$data" example Signup event signup >/dev/null
-"$binary" goal add "$data" example \
-    '<script>alert(1)</script> "&' event escaped >/dev/null
+unsafe_goal_output=$("$binary" goal add "$data" example \
+    '<script>alert(1)</script> "&' event escaped)
+unsafe_goal_id=${unsafe_goal_output##* }
+test "${#unsafe_goal_id}" = 36
 "$binary" funnel add "$data" example Journey \
     path=/ path=/pricing event=signup >/dev/null
 "$binary" m3 seed "$data" "$site_id" >/dev/null
@@ -297,7 +299,8 @@ test "$rss_growth_kib" -le 8192
 TMPDIR=/tmp NODE_PATH="$module_root" \
     PLAYWRIGHT_BROWSERS_PATH="$browser_root" \
     ANALYTICO_CHROMIUM_PATH="$chromium_path" \
-    node tests/e2e-m6-browser.cjs "$dashboard" "$session_cookie" \
+    node tests/e2e-m6-browser.cjs \
+    "$dashboard" "$session_cookie" "$unsafe_goal_id" \
     >"$fixture/browser.json"
 
 csrf=$(grep -Eo 'name="csrf" value="[A-Za-z0-9_-]{43}"' \
@@ -310,8 +313,12 @@ status=$(curl --silent --output "$fixture/cross-origin.html" \
     -H 'Origin: https://attacker.example' \
     --data-urlencode "csrf=$csrf" \
     --data-urlencode 'site=example' \
+    --data-urlencode 'from=2025-01-01' \
+    --data-urlencode 'to=2025-01-02' \
+    --data-urlencode 'compare=none' \
     --data-urlencode 'name=Cross origin' \
-    --data-urlencode 'kind=event' \
+    --data-urlencode 'entity=event' \
+    --data-urlencode 'match=exact' \
     --data-urlencode 'value=cross-origin')
 test "$status" = 403
 grep -Fq 'modifying form did not come from this dashboard origin' \

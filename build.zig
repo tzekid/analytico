@@ -423,6 +423,17 @@ pub fn build(b: *std.Build) void {
         "Run filters, suggestions, segments, and saved views through real Chromium",
     ).dependOn(&filters_e2e.step);
 
+    const goals_e2e = b.addSystemCommand(&.{
+        "bash",
+        "tests/e2e-goals.sh",
+    });
+    goals_e2e.addArtifactArg(app);
+    goals_e2e.step.dependOn(b.getInstallStep());
+    b.step(
+        "e2e-goals",
+        "Run guided goal lifecycle and discovery through real stores and Chromium",
+    ).dependOn(&goals_e2e.step);
+
     const passkey_p1_e2e = b.addSystemCommand(&.{
         "bash",
         "tests/e2e-passkey-p1.sh",
@@ -479,6 +490,18 @@ pub fn build(b: *std.Build) void {
         "e2e-metadata7-migration",
         "Migrate and roll back the exact deployed metadata-6/event-7 predecessor",
     ).dependOn(&metadata7_migration_e2e.step);
+
+    const metadata8_migration_e2e = b.addSystemCommand(&.{
+        "bash",
+        "scripts/run-metadata7-gate.sh",
+    });
+    metadata8_migration_e2e.addArtifactArg(app);
+    metadata8_migration_e2e.addArg("tests/e2e-metadata8-migration.sh");
+    metadata8_migration_e2e.step.dependOn(b.getInstallStep());
+    b.step(
+        "e2e-metadata8-migration",
+        "Migrate and roll back the exact deployed metadata-7/event-7 predecessor",
+    ).dependOn(&metadata8_migration_e2e.step);
 }
 
 fn addHtmxAssets(

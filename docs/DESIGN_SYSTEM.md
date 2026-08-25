@@ -150,13 +150,40 @@ built owned strings. The renderer escapes and writes them without allocation,
 query parsing, session access, or I/O. Native POST/303/GET and browser history
 are the baseline; HTMX may boost the same controls but adds no client state.
 
+Issue #33 replaces the collapsed raw goal tuple with stable native Goals list,
+new, detail, and edit destinations. The first response contains a finite
+active/archived list, state text, updated time, selector summary, and ordinary
+links for every action. Create/edit forms first choose Page or Event, then show
+a bounded search with observed label, eligible count, and last-seen context.
+Duplicate copies the exact current selector after a stale-state guard and asks
+only for a new unique name. Page prefix is an explicit match choice; no raw
+numeric kind or expression syntax is shown.
+
+A manual exact value absent from the current result displays a non-color-only
+zero-seen warning and requires a separate confirmation control. Archive and
+reactivate are visibly reversible. Delete names the exact goal, requires
+confirmation, and renders a 409 reference conflict with an archive action
+rather than pretending success. Archived goals remain directly reportable but
+are labeled outside the default active set. Empty, no-match, timeout, duplicate
+name, invalid selector, stale form, and active-cap states preserve the useful
+builder context and focus the error summary.
+
+At phone width the list becomes labeled records, actions retain their names,
+controls meet the established touch target, and no primary action clips or
+requires horizontal scrolling. Keyboard and JavaScript-disabled users complete
+the same GET and POST/303/GET flow. Optional enhancement may submit those exact
+forms but cannot add a client router, hidden draft, or selector state model.
+Issue #34 owns property-predicate rows, type conflicts, and historical preview;
+issue #35 owns funnel step composition. The base builder does not render fake
+or disabled versions of those future controls.
+
 Server validation renders one focused error summary and associates only the
 affected form fields with that summary while preserving submitted values.
 Notices use restrained status semantics, errors use alerts, and loading is
 limited to the region whose existing native navigation or form is in flight.
 None of these enhancement states may replace the JavaScript-free baseline.
 
-The component stylesheet is self-hosted at a versioned `/admin/app.v11.css` path.
+The component stylesheet is self-hosted at a versioned `/admin/app.v12.css` path.
 Changing its bytes requires another path revision because existing responses
 may be cached privately for 24 hours.
 

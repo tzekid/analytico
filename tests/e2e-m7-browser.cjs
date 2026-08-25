@@ -243,13 +243,10 @@ async function normal() {
     );
     assert.match(page.url(), /dimension=event-name/);
 
-    await page.goto(route("example", "journeys/goals"), {
+    await page.goto(route("example", "journeys/goals/new"), {
       waitUntil: "load",
     });
     await page.waitForFunction(() => window.htmx !== undefined);
-    await page.locator(
-      'details.management:has(form[action="/admin/goals"]) > summary',
-    ).click();
     const goalForm = page.locator('form[action="/admin/goals"]');
     const postCountBeforeValidation = enhanced.filter(
       (entry) => entry.method === "POST",
@@ -293,7 +290,8 @@ async function normal() {
 
     const doubleForm = page.locator('form[action="/admin/goals"]');
     await doubleForm.locator('input[name="name"]').fill("Double");
-    await doubleForm.locator('input[name="value"]').fill("double");
+    await doubleForm.locator('input[name="value"]').fill("/double");
+    await doubleForm.locator('input[name="confirm_unseen"]').check();
     const doubleBefore = enhanced.filter(
       (entry) => entry.url === `${origin}/admin/goals`,
     ).length;

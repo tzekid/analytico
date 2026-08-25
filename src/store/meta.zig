@@ -2,7 +2,7 @@ const std = @import("std");
 const turso = @import("turso");
 const domain = @import("../domain.zig");
 
-pub const schema_version: i64 = 7;
+pub const schema_version: i64 = 8;
 pub const maximum_excluded_networks: usize = 16;
 pub const maximum_active_goals: usize = 32;
 pub const maximum_saved_entities: usize = 32;
@@ -65,6 +65,15 @@ pub const Goal = struct {
     name: []u8,
     match_kind: domain.MatchKind,
     match_value: []u8,
+    created_at_utc_micros: i64,
+    updated_at_utc_micros: i64,
+    archived_at_utc_micros: ?i64,
+};
+
+pub const GoalPage = struct {
+    goals: []Goal,
+    has_more: bool,
+    active_count: i64,
 };
 
 pub const FunnelStep = struct {
@@ -419,6 +428,194 @@ pub const Store = struct {
             std.log.err("metadata migration v7 failed: {s}", .{diagnostics.text()});
             return err;
         };
+        if (current < 8) self.migrateGoalDefinitions() catch |err| {
+            std.log.err("metadata migration v8 failed: {s}", .{@errorName(err)});
+            return err;
+        };
+    }
+
+    fn migrateGoalDefinitions(self: *Store) !void {
+        const source_exists = try self.tableExists("goals");
+        const replacement_exists = try self.tableExists("goal_definitions");
+        if (!source_exists and !replacement_exists) {
+            return error.MissingGoalMigrationSource;
+        }
+        if (!replacement_exists) {
+            _ = try self.connection.exec(
+                \\CREATE TABLE goal_definitions (
+                \\  id TEXT PRIMARY KEY,
+                \\  site_id TEXT NOT NULL,
+                \\  name TEXT NOT NULL,
+                \\  match_kind INTEGER NOT NULL,
+                \\  match_value TEXT NOT NULL,
+                \\  created_at_utc_micros INTEGER NOT NULL,
+                \\  updated_at_utc_micros INTEGER NOT NULL,
+                \\  archived_at_utc_micros INTEGER,
+                \\  FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE CASCADE,
+                \\  UNIQUE (site_id, name),
+                \\  CHECK (length(id) = 36),
+                \\  CHECK (length(name) BETWEEN 1 AND 120),
+                \\  CHECK (match_kind IN (1, 2, 3)),
+                \\  CHECK (length(match_value) BETWEEN 1 AND 1024),
+                \\  CHECK (updated_at_utc_micros >= created_at_utc_micros),
+                \\  CHECK (archived_at_utc_micros IS NULL OR
+                \\    archived_at_utc_micros >= created_at_utc_micros)
+                \\)
+            , &.{}, .{});
+        }
+        if (source_exists) {
+            _ = try self.connection.exec(
+                \\INSERT INTO goal_definitions
+                \\  (id, site_id, name, match_kind, match_value,
+                \\   created_at_utc_micros, updated_at_utc_micros,
+                \\   archived_at_utc_micros)
+                \\SELECT id, site_id, name, match_kind, match_value,
+                \\       created_at_utc_micros, created_at_utc_micros, NULL
+                \\FROM goals
+                \\ON CONFLICT(id) DO NOTHING
+            , &.{}, .{});
+            if (try self.goalMigrationDifferenceCount() != 0) {
+                return error.GoalMigrationMismatch;
+            }
+            _ = try self.connection.exec("DROP TABLE goals", &.{}, .{});
+        } else try self.validateGoalReplacement();
+        _ = try self.connection.exec(
+            \\INSERT INTO meta_migrations
+            \\  (version, name, applied_at_utc_micros)
+            \\VALUES (8, 'guided-goal-lifecycle', 0)
+            \\ON CONFLICT(version) DO NOTHING
+        , &.{}, .{});
+    }
+
+    fn tableExists(self: *Store, name: []const u8) !bool {
+        var rows = try self.connection.queryParams(
+            "SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+            .{name},
+            .{},
+        );
+        defer rows.deinit();
+        const row = (try rows.next()) orelse return error.MissingCountRow;
+        const count = try row.get(i64, 0);
+        try rows.finish(null);
+        return count == 1;
+    }
+
+    fn goalMigrationDifferenceCount(self: *Store) !i64 {
+        var rows = try self.connection.query(
+            \\SELECT
+            \\  (SELECT count(*) FROM (
+            \\    SELECT id, site_id, name, match_kind, match_value,
+            \\           created_at_utc_micros, created_at_utc_micros, NULL
+            \\    FROM goals
+            \\    EXCEPT
+            \\    SELECT id, site_id, name, match_kind, match_value,
+            \\           created_at_utc_micros, updated_at_utc_micros,
+            \\           archived_at_utc_micros FROM goal_definitions
+            \\  )) +
+            \\  (SELECT count(*) FROM (
+            \\    SELECT id, site_id, name, match_kind, match_value,
+            \\           created_at_utc_micros, updated_at_utc_micros,
+            \\           archived_at_utc_micros FROM goal_definitions
+            \\    EXCEPT
+            \\    SELECT id, site_id, name, match_kind, match_value,
+            \\           created_at_utc_micros, created_at_utc_micros, NULL
+            \\    FROM goals
+            \\  ))
+        , &.{}, .{});
+        defer rows.deinit();
+        const row = (try rows.next()) orelse return error.MissingCountRow;
+        const count = try row.get(i64, 0);
+        try rows.finish(null);
+        return count;
+    }
+
+    fn validateGoalReplacement(self: *Store) !void {
+        var rows = try self.connection.query(
+            "PRAGMA table_info(goal_definitions)",
+            &.{},
+            .{},
+        );
+        defer rows.deinit();
+        const names = [_][]const u8{
+            "id",
+            "site_id",
+            "name",
+            "match_kind",
+            "match_value",
+            "created_at_utc_micros",
+            "updated_at_utc_micros",
+            "archived_at_utc_micros",
+        };
+        const types = [_][]const u8{
+            "TEXT",
+            "TEXT",
+            "TEXT",
+            "INTEGER",
+            "TEXT",
+            "INTEGER",
+            "INTEGER",
+            "INTEGER",
+        };
+        var column: usize = 0;
+        while (try rows.next()) |row| : (column += 1) {
+            if (column >= names.len or
+                try row.get(i64, 0) != @as(i64, @intCast(column)) or
+                !std.mem.eql(u8, try row.get([]const u8, 1), names[column]) or
+                !std.mem.eql(u8, try row.get([]const u8, 2), types[column]) or
+                try row.get(i64, 3) != @intFromBool(column != 0 and column != 7) or
+                try row.get(i64, 5) != @intFromBool(column == 0))
+            {
+                return error.InvalidGoalReplacement;
+            }
+        }
+        try rows.finish(null);
+        if (column != names.len) return error.InvalidGoalReplacement;
+
+        const expected_schema =
+            "CREATE TABLE goal_definitions (id TEXT PRIMARY KEY, " ++
+            "site_id TEXT NOT NULL, name TEXT NOT NULL, " ++
+            "match_kind INTEGER NOT NULL, match_value TEXT NOT NULL, " ++
+            "created_at_utc_micros INTEGER NOT NULL, " ++
+            "updated_at_utc_micros INTEGER NOT NULL, " ++
+            "archived_at_utc_micros INTEGER, FOREIGN KEY (site_id) " ++
+            "REFERENCES sites (id) ON DELETE CASCADE, UNIQUE (site_id, name), " ++
+            "CHECK (length (id) = 36), CHECK (length (name) BETWEEN 1 AND 120), " ++
+            "CHECK (match_kind IN (1, 2, 3)), " ++
+            "CHECK (length (match_value) BETWEEN 1 AND 1024), " ++
+            "CHECK (updated_at_utc_micros >= created_at_utc_micros), " ++
+            "CHECK (archived_at_utc_micros IS NULL OR " ++
+            "archived_at_utc_micros >= created_at_utc_micros))";
+        var schema_rows = try self.connection.query(
+            "SELECT sql FROM sqlite_schema " ++
+                "WHERE type = 'table' AND name = 'goal_definitions'",
+            &.{},
+            .{},
+        );
+        defer schema_rows.deinit();
+        const schema_row = (try schema_rows.next()) orelse
+            return error.InvalidGoalReplacement;
+        if (!std.mem.eql(
+            u8,
+            try schema_row.get([]const u8, 0),
+            expected_schema,
+        )) return error.InvalidGoalReplacement;
+        if (try schema_rows.next() != null) return error.InvalidGoalReplacement;
+        try schema_rows.finish(null);
+
+        var invalid = try self.connection.query(
+            \\SELECT count(*) FROM goal_definitions
+            \\WHERE length(id) != 36 OR length(name) NOT BETWEEN 1 AND 120
+            \\   OR match_kind NOT IN (1, 2, 3)
+            \\   OR length(match_value) NOT BETWEEN 1 AND 1024
+            \\   OR updated_at_utc_micros < created_at_utc_micros
+            \\   OR (archived_at_utc_micros IS NOT NULL AND
+            \\       archived_at_utc_micros < created_at_utc_micros)
+        , &.{}, .{});
+        defer invalid.deinit();
+        const invalid_row = (try invalid.next()) orelse return error.MissingCountRow;
+        const invalid_count = try invalid_row.get(i64, 0);
+        try invalid.finish(null);
+        if (invalid_count != 0) return error.InvalidGoalReplacement;
     }
 
     pub fn migrateProbe(self: *Store) !void {
@@ -1110,26 +1307,75 @@ pub const Store = struct {
         try domain.validateName(name, 120);
         try validateMatch(kind, value);
         const site_id = try self.siteIdBySlug(allocator, site_slug);
-        var count_rows = try self.connection.queryParams(
-            "SELECT count(*) FROM goals WHERE site_id = ?1",
-            .{site_id},
-            .{},
-        );
-        defer count_rows.deinit();
-        const count_row = (try count_rows.next()) orelse return error.MissingCountRow;
-        const count = try count_row.get(i64, 0);
-        try count_rows.finish(null);
-        if (count < 0 or count >= maximum_active_goals) {
-            return error.TooManyActiveGoals;
-        }
-        _ = try self.connection.execParams(
-            \\INSERT INTO goals
-            \\  (id, site_id, name, match_kind, match_value, created_at_utc_micros)
-            \\VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        const changed = self.connection.execParams(
+            \\INSERT INTO goal_definitions
+            \\  (id, site_id, name, match_kind, match_value,
+            \\   created_at_utc_micros, updated_at_utc_micros,
+            \\   archived_at_utc_micros)
+            \\SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?6, NULL
+            \\WHERE (SELECT count(*) FROM goal_definitions
+            \\       WHERE site_id = ?2 AND archived_at_utc_micros IS NULL) < 32
         ,
             .{ id, site_id, name, @backingInt(kind), value, created_at },
             .{},
-        );
+        ) catch |err| {
+            if (isConstraintError(err)) return error.GoalNameConflict;
+            return err;
+        };
+        if (changed == 1) return;
+        if (try self.goalNameExistsBySiteId(site_id, name)) {
+            return error.GoalNameConflict;
+        }
+        if (try self.activeGoalCountBySiteId(site_id) >= maximum_active_goals) {
+            return error.TooManyActiveGoals;
+        }
+        return error.GoalNameConflict;
+    }
+
+    pub fn duplicateGoal(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        id: []const u8,
+        site_slug: []const u8,
+        source_id: []const u8,
+        expected_updated_at: i64,
+        name: []const u8,
+        created_at: i64,
+    ) !void {
+        try domain.validateUuid(id);
+        try domain.validateUuid(source_id);
+        try domain.validateName(name, 120);
+        if (expected_updated_at < 0) return error.InvalidGoalTimestamp;
+        const site_id = try self.siteIdBySlug(allocator, site_slug);
+        const changed = self.connection.execParams(
+            \\INSERT INTO goal_definitions
+            \\  (id, site_id, name, match_kind, match_value,
+            \\   created_at_utc_micros, updated_at_utc_micros,
+            \\   archived_at_utc_micros)
+            \\SELECT ?1, site_id, ?5, match_kind, match_value, ?6, ?6, NULL
+            \\FROM goal_definitions
+            \\WHERE site_id = ?2 AND id = ?3 AND updated_at_utc_micros = ?4
+            \\  AND (SELECT count(*) FROM goal_definitions
+            \\       WHERE site_id = ?2 AND archived_at_utc_micros IS NULL) < 32
+        ,
+            .{ id, site_id, source_id, expected_updated_at, name, created_at },
+            .{},
+        ) catch |err| {
+            if (isConstraintError(err)) return error.GoalNameConflict;
+            return err;
+        };
+        if (changed == 1) return;
+        if (try self.goalNameExistsBySiteId(site_id, name)) {
+            return error.GoalNameConflict;
+        }
+        const source = try self.goalById(allocator, site_slug, source_id);
+        if (source.updated_at_utc_micros != expected_updated_at) {
+            return error.StaleGoal;
+        }
+        if (try self.activeGoalCountBySiteId(site_id) >= maximum_active_goals) {
+            return error.TooManyActiveGoals;
+        }
+        return error.StaleGoal;
     }
 
     pub fn listGoals(
@@ -1138,9 +1384,16 @@ pub const Store = struct {
         site_slug: []const u8,
     ) ![]Goal {
         var rows = try self.connection.queryParams(
-            \\SELECT goals.id, goals.name, goals.match_kind, goals.match_value
-            \\FROM goals JOIN sites ON sites.id = goals.site_id
-            \\WHERE sites.slug = ?1 ORDER BY goals.name
+            \\SELECT goal_definitions.id, goal_definitions.name,
+            \\       goal_definitions.match_kind, goal_definitions.match_value,
+            \\       goal_definitions.created_at_utc_micros,
+            \\       goal_definitions.updated_at_utc_micros,
+            \\       goal_definitions.archived_at_utc_micros
+            \\FROM goal_definitions
+            \\JOIN sites ON sites.id = goal_definitions.site_id
+            \\WHERE sites.slug = ?1
+            \\  AND goal_definitions.archived_at_utc_micros IS NULL
+            \\ORDER BY goal_definitions.name, goal_definitions.id
         ,
             .{site_slug},
             .{},
@@ -1148,15 +1401,50 @@ pub const Store = struct {
         defer rows.deinit();
         var result: std.ArrayList(Goal) = .empty;
         while (try rows.next()) |row| {
-            try result.append(allocator, .{
-                .id = try allocator.dupe(u8, try row.get([]const u8, 0)),
-                .name = try allocator.dupe(u8, try row.get([]const u8, 1)),
-                .match_kind = @fromBackingInt(@intCast(try row.get(i64, 2))),
-                .match_value = try allocator.dupe(u8, try row.get([]const u8, 3)),
-            });
+            try result.append(allocator, try readGoal(allocator, row));
         }
         try rows.finish(null);
         return result.toOwnedSlice(allocator);
+    }
+
+    pub fn listGoalDefinitions(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        site_slug: []const u8,
+        page: u32,
+    ) !GoalPage {
+        if (page == 0 or page > 1_000_000) return error.InvalidGoalPage;
+        const site_id = try self.siteIdBySlug(allocator, site_slug);
+        const active_count = try self.activeGoalCountBySiteId(site_id);
+        const offset: u64 = (@as(u64, page) - 1) * 50;
+        var rows = try self.connection.queryParams(
+            \\SELECT id, name, match_kind, match_value,
+            \\       created_at_utc_micros, updated_at_utc_micros,
+            \\       archived_at_utc_micros
+            \\FROM goal_definitions
+            \\WHERE site_id = ?1
+            \\ORDER BY archived_at_utc_micros IS NOT NULL, name, id
+            \\LIMIT 51 OFFSET ?2
+        ,
+            .{ site_id, offset },
+            .{},
+        );
+        defer rows.deinit();
+        var result: std.ArrayList(Goal) = .empty;
+        var has_more = false;
+        while (try rows.next()) |row| {
+            if (result.items.len == 50) {
+                has_more = true;
+                break;
+            }
+            try result.append(allocator, try readGoal(allocator, row));
+        }
+        try rows.finish(null);
+        return .{
+            .goals = try result.toOwnedSlice(allocator),
+            .has_more = has_more,
+            .active_count = active_count,
+        };
     }
 
     pub fn goalByName(
@@ -1168,23 +1456,148 @@ pub const Store = struct {
         try domain.validateSlug(site_slug);
         try domain.validateName(name, 120);
         var rows = try self.connection.queryParams(
-            \\SELECT goals.id, goals.name, goals.match_kind, goals.match_value
-            \\FROM goals JOIN sites ON sites.id = goals.site_id
-            \\WHERE sites.slug = ?1 AND goals.name = ?2
+            \\SELECT goal_definitions.id, goal_definitions.name,
+            \\       goal_definitions.match_kind, goal_definitions.match_value,
+            \\       goal_definitions.created_at_utc_micros,
+            \\       goal_definitions.updated_at_utc_micros,
+            \\       goal_definitions.archived_at_utc_micros
+            \\FROM goal_definitions
+            \\JOIN sites ON sites.id = goal_definitions.site_id
+            \\WHERE sites.slug = ?1 AND goal_definitions.name = ?2
         ,
             .{ site_slug, name },
             .{},
         );
         defer rows.deinit();
         const row = (try rows.next()) orelse return error.GoalNotFound;
-        const result = Goal{
-            .id = try allocator.dupe(u8, try row.get([]const u8, 0)),
-            .name = try allocator.dupe(u8, try row.get([]const u8, 1)),
-            .match_kind = @fromBackingInt(@intCast(try row.get(i64, 2))),
-            .match_value = try allocator.dupe(u8, try row.get([]const u8, 3)),
-        };
+        const result = try readGoal(allocator, row);
         try rows.finish(null);
         return result;
+    }
+
+    pub fn goalById(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        site_slug: []const u8,
+        id: []const u8,
+    ) !Goal {
+        try domain.validateUuid(id);
+        var rows = try self.connection.queryParams(
+            \\SELECT goal_definitions.id, goal_definitions.name,
+            \\       goal_definitions.match_kind, goal_definitions.match_value,
+            \\       goal_definitions.created_at_utc_micros,
+            \\       goal_definitions.updated_at_utc_micros,
+            \\       goal_definitions.archived_at_utc_micros
+            \\FROM goal_definitions
+            \\JOIN sites ON sites.id = goal_definitions.site_id
+            \\WHERE sites.slug = ?1 AND goal_definitions.id = ?2
+        ,
+            .{ site_slug, id },
+            .{},
+        );
+        defer rows.deinit();
+        const row = (try rows.next()) orelse return error.GoalNotFound;
+        const result = try readGoal(allocator, row);
+        try rows.finish(null);
+        return result;
+    }
+
+    pub fn editGoal(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        site_slug: []const u8,
+        id: []const u8,
+        expected_updated_at: i64,
+        name: []const u8,
+        kind: domain.MatchKind,
+        value: []const u8,
+        updated_at: i64,
+    ) !void {
+        try domain.validateUuid(id);
+        try domain.validateName(name, 120);
+        try validateMatch(kind, value);
+        if (expected_updated_at < 0 or updated_at <= expected_updated_at) {
+            return error.InvalidGoalTimestamp;
+        }
+        const site_id = try self.siteIdBySlug(allocator, site_slug);
+        const changed = self.connection.execParams(
+            \\UPDATE goal_definitions
+            \\SET name = ?4, match_kind = ?5, match_value = ?6,
+            \\    updated_at_utc_micros = ?7
+            \\WHERE site_id = ?1 AND id = ?2
+            \\  AND updated_at_utc_micros = ?3
+        ,
+            .{ site_id, id, expected_updated_at, name, @backingInt(kind), value, updated_at },
+            .{},
+        ) catch |err| {
+            if (isConstraintError(err)) return error.GoalNameConflict;
+            return err;
+        };
+        if (changed != 1) return error.StaleGoal;
+    }
+
+    pub fn archiveGoal(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        site_slug: []const u8,
+        id: []const u8,
+        expected_updated_at: i64,
+        updated_at: i64,
+    ) !void {
+        try domain.validateUuid(id);
+        if (expected_updated_at < 0 or updated_at <= expected_updated_at) {
+            return error.InvalidGoalTimestamp;
+        }
+        const site_id = try self.siteIdBySlug(allocator, site_slug);
+        const changed = try self.connection.execParams(
+            \\UPDATE goal_definitions
+            \\SET archived_at_utc_micros = ?4, updated_at_utc_micros = ?4
+            \\WHERE site_id = ?1 AND id = ?2
+            \\  AND updated_at_utc_micros = ?3
+            \\  AND archived_at_utc_micros IS NULL
+        ,
+            .{ site_id, id, expected_updated_at, updated_at },
+            .{},
+        );
+        if (changed != 1) return error.StaleGoal;
+    }
+
+    pub fn reactivateGoal(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        site_slug: []const u8,
+        id: []const u8,
+        expected_updated_at: i64,
+        updated_at: i64,
+    ) !void {
+        try domain.validateUuid(id);
+        if (expected_updated_at < 0 or updated_at <= expected_updated_at) {
+            return error.InvalidGoalTimestamp;
+        }
+        const site_id = try self.siteIdBySlug(allocator, site_slug);
+        const changed = try self.connection.execParams(
+            \\UPDATE goal_definitions
+            \\SET archived_at_utc_micros = NULL, updated_at_utc_micros = ?4
+            \\WHERE site_id = ?1 AND id = ?2
+            \\  AND updated_at_utc_micros = ?3
+            \\  AND archived_at_utc_micros IS NOT NULL
+            \\  AND (SELECT count(*) FROM goal_definitions
+            \\       WHERE site_id = ?1 AND archived_at_utc_micros IS NULL) < 32
+        ,
+            .{ site_id, id, expected_updated_at, updated_at },
+            .{},
+        );
+        if (changed == 1) return;
+        const current = try self.goalById(allocator, site_slug, id);
+        if (current.updated_at_utc_micros != expected_updated_at or
+            current.archived_at_utc_micros == null)
+        {
+            return error.StaleGoal;
+        }
+        if (try self.activeGoalCountBySiteId(site_id) >= maximum_active_goals) {
+            return error.TooManyActiveGoals;
+        }
+        return error.StaleGoal;
     }
 
     pub fn deleteGoal(
@@ -1193,13 +1606,98 @@ pub const Store = struct {
         site_slug: []const u8,
         name: []const u8,
     ) !void {
+        const goal = try self.goalByName(allocator, site_slug, name);
+        try self.deleteGoalById(
+            allocator,
+            site_slug,
+            goal.id,
+            goal.updated_at_utc_micros,
+            name,
+        );
+    }
+
+    pub fn deleteGoalById(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        site_slug: []const u8,
+        id: []const u8,
+        expected_updated_at: i64,
+        confirmed_name: []const u8,
+    ) !void {
+        try domain.validateUuid(id);
+        try domain.validateName(confirmed_name, 120);
+        if (expected_updated_at < 0) return error.InvalidGoalTimestamp;
         const site_id = try self.siteIdBySlug(allocator, site_slug);
         const changed = try self.connection.execParams(
-            "DELETE FROM goals WHERE site_id = ?1 AND name = ?2",
+            \\DELETE FROM goal_definitions
+            \\WHERE site_id = ?1 AND id = ?2 AND name = ?3
+            \\  AND updated_at_utc_micros = ?4
+            \\  AND NOT EXISTS (
+            \\    SELECT 1 FROM saved_views
+            \\    WHERE saved_views.site_id = ?1 AND (
+            \\      (json_extract(canonical_query_json, '$.mode') = 'breakdown'
+            \\       AND json_extract(canonical_query_json, '$.selector.kind') = 'goal'
+            \\       AND json_extract(canonical_query_json, '$.selector.value') = ?2)
+            \\      OR
+            \\      (json_extract(canonical_query_json, '$.mode') = 'trend'
+            \\       AND EXISTS (
+            \\         SELECT 1 FROM json_each(canonical_query_json, '$.series') AS series
+            \\         WHERE series.value = 'conversions~visitor~goal~' || ?2
+            \\            OR series.value = 'conversion-rate~visitor~goal~' || ?2
+            \\            OR series.value = 'revenue~goal~' || ?2
+            \\            OR series.value = 'average-value~goal~' || ?2
+            \\       ))
+            \\    )
+            \\  )
+        ,
+            .{ site_id, id, confirmed_name, expected_updated_at },
+            .{},
+        );
+        if (changed == 1) return;
+        const current = self.goalById(allocator, site_slug, id) catch
+            return error.GoalNotFound;
+        if (!std.mem.eql(u8, current.name, confirmed_name)) {
+            return error.GoalConfirmationMismatch;
+        }
+        if (current.updated_at_utc_micros != expected_updated_at) {
+            return error.StaleGoal;
+        }
+        return error.GoalReferenced;
+    }
+
+    fn goalNameExistsBySiteId(
+        self: *Store,
+        site_id: []const u8,
+        name: []const u8,
+    ) !bool {
+        var rows = try self.connection.queryParams(
+            \\SELECT count(*) FROM goal_definitions
+            \\WHERE site_id = ?1 AND name = ?2
+        ,
             .{ site_id, name },
             .{},
         );
-        if (changed != 1) return error.GoalNotFound;
+        defer rows.deinit();
+        const row = (try rows.next()) orelse return error.MissingCountRow;
+        const count = try row.get(i64, 0);
+        try rows.finish(null);
+        return count == 1;
+    }
+
+    fn activeGoalCountBySiteId(self: *Store, site_id: []const u8) !i64 {
+        var rows = try self.connection.queryParams(
+            \\SELECT count(*) FROM goal_definitions
+            \\WHERE site_id = ?1 AND archived_at_utc_micros IS NULL
+        ,
+            .{site_id},
+            .{},
+        );
+        defer rows.deinit();
+        const row = (try rows.next()) orelse return error.MissingCountRow;
+        const count = try row.get(i64, 0);
+        try rows.finish(null);
+        if (count < 0) return error.InvalidGoalCount;
+        return count;
     }
 
     pub fn addFunnel(
@@ -1787,7 +2285,9 @@ pub const Store = struct {
         const site_id = try self.siteIdBySlug(allocator, site_slug);
         if (strict_mode) {
             var rows = try self.connection.queryParams(
-                "SELECT count(*) FROM goals WHERE site_id = ?1",
+                \\SELECT count(*) FROM goal_definitions
+                \\WHERE site_id = ?1 AND archived_at_utc_micros IS NULL
+            ,
                 .{site_id},
                 .{},
             );
@@ -1848,7 +2348,7 @@ pub const Store = struct {
     pub fn counts(self: *Store) !Counts {
         return .{
             .sites = try self.scalar("SELECT COUNT(*) FROM sites"),
-            .goals = try self.scalar("SELECT COUNT(*) FROM goals"),
+            .goals = try self.scalar("SELECT COUNT(*) FROM goal_definitions"),
             .funnels = try self.scalar("SELECT COUNT(*) FROM funnels"),
         };
     }
@@ -1924,6 +2424,22 @@ fn savedEntityFromRow(
     @compileError("unsupported saved entity type");
 }
 
+fn readGoal(allocator: std.mem.Allocator, row: anytype) !Goal {
+    return .{
+        .id = try allocator.dupe(u8, try row.get([]const u8, 0)),
+        .name = try allocator.dupe(u8, try row.get([]const u8, 1)),
+        .match_kind = @fromBackingInt(@intCast(try row.get(i64, 2))),
+        .match_value = try allocator.dupe(u8, try row.get([]const u8, 3)),
+        .created_at_utc_micros = try row.get(i64, 4),
+        .updated_at_utc_micros = try row.get(i64, 5),
+        .archived_at_utc_micros = try row.get(?i64, 6),
+    };
+}
+
+fn isConstraintError(err: anyerror) bool {
+    return std.mem.indexOf(u8, @errorName(err), "Constraint") != null;
+}
+
 fn containsString(values: []const []const u8, expected: []const u8) bool {
     for (values) |value| {
         if (std.mem.eql(u8, value, expected)) return true;
@@ -1936,6 +2452,359 @@ fn validateMatch(kind: domain.MatchKind, value: []const u8) !void {
         .event => try domain.validateIdentifier(value),
         .path, .prefix => _ = try domain.normalizePath(value),
     }
+}
+
+test "goal lifecycle is bounded reference safe and site scoped" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const backing = std.testing.allocator;
+    const path = try std.fmt.allocPrint(
+        backing,
+        ".zig-cache/tmp/{s}/meta.db",
+        .{temporary.sub_path},
+    );
+    defer backing.free(path);
+    var store = try Store.open(backing, path);
+    defer store.deinit();
+    try store.migrate();
+    var arena = std.heap.ArenaAllocator.init(backing);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    _ = try store.createSite(allocator, .{
+        .id = "00000000-0000-4000-8000-000000000331",
+        .slug = "alpha",
+        .name = "Alpha",
+        .origin = "https://alpha.example",
+        .timezone_name = "UTC",
+        .default_currency = "",
+        .created_at_utc_micros = 1,
+    });
+    _ = try store.createSite(allocator, .{
+        .id = "00000000-0000-4000-8000-000000000332",
+        .slug = "beta",
+        .name = "Beta",
+        .origin = "https://beta.example",
+        .timezone_name = "UTC",
+        .default_currency = "",
+        .created_at_utc_micros = 1,
+    });
+
+    const goal_id = "00000000-0000-4000-8000-000000000333";
+    try store.addGoal(allocator, goal_id, "alpha", "Signup", .event, "signup", 10);
+    const created = try store.goalById(allocator, "alpha", goal_id);
+    try std.testing.expectEqual(@as(i64, 10), created.created_at_utc_micros);
+    try std.testing.expectEqual(@as(i64, 10), created.updated_at_utc_micros);
+    try std.testing.expectEqual(@as(?i64, null), created.archived_at_utc_micros);
+    try std.testing.expectError(
+        error.GoalNotFound,
+        store.goalById(allocator, "beta", goal_id),
+    );
+    try store.editGoal(
+        allocator,
+        "alpha",
+        goal_id,
+        10,
+        "Completed signup",
+        .event,
+        "signup_complete",
+        20,
+    );
+    try std.testing.expectError(
+        error.StaleGoal,
+        store.editGoal(
+            allocator,
+            "alpha",
+            goal_id,
+            10,
+            "Stale",
+            .event,
+            "stale",
+            21,
+        ),
+    );
+    try store.archiveGoal(allocator, "alpha", goal_id, 20, 30);
+    try std.testing.expectEqual(@as(usize, 0), (try store.listGoals(
+        allocator,
+        "alpha",
+    )).len);
+    const archived = try store.goalById(allocator, "alpha", goal_id);
+    try std.testing.expectEqual(@as(?i64, 30), archived.archived_at_utc_micros);
+    try store.reactivateGoal(allocator, "alpha", goal_id, 30, 40);
+
+    const duplicate_id = "00000000-0000-4000-8000-000000000346";
+    try std.testing.expectError(
+        error.StaleGoal,
+        store.duplicateGoal(
+            allocator,
+            duplicate_id,
+            "alpha",
+            goal_id,
+            39,
+            "Stale duplicate",
+            41,
+        ),
+    );
+    try store.duplicateGoal(
+        allocator,
+        duplicate_id,
+        "alpha",
+        goal_id,
+        40,
+        "Current duplicate",
+        41,
+    );
+    const duplicate = try store.goalById(allocator, "alpha", duplicate_id);
+    try std.testing.expectEqual(domain.MatchKind.event, duplicate.match_kind);
+    try std.testing.expectEqualStrings("signup_complete", duplicate.match_value);
+
+    const collision_id = "00000000-0000-4000-8000-000000000334";
+    try store.addGoal(allocator, collision_id, "alpha", "Collision", .path, "/ok", 41);
+    try std.testing.expectError(
+        error.GoalConfirmationMismatch,
+        store.deleteGoalById(allocator, "alpha", collision_id, 41, "Wrong name"),
+    );
+    const collision_json = try std.fmt.allocPrint(
+        allocator,
+        "{{\"schema\":1,\"mode\":\"trend\",\"series\":[\"visitors\"],\"filters\":[\"event~path~contains~string~{s}\"]}}",
+        .{collision_id},
+    );
+    try store.addSavedView(
+        allocator,
+        "00000000-0000-4000-8000-000000000335",
+        "alpha",
+        "UUID text collision",
+        collision_json,
+        42,
+    );
+    const invalid_series_json = try std.fmt.allocPrint(
+        allocator,
+        "{{\"schema\":1,\"mode\":\"trend\",\"series\":[\"conversions~session~goal~{s}\"]}}",
+        .{collision_id},
+    );
+    try store.addSavedView(
+        allocator,
+        "00000000-0000-4000-8000-000000000345",
+        "alpha",
+        "Invalid goal series token",
+        invalid_series_json,
+        42,
+    );
+    try store.deleteGoalById(allocator, "alpha", collision_id, 41, "Collision");
+
+    try std.testing.expectError(
+        error.StaleGoal,
+        store.deleteGoalById(allocator, "alpha", goal_id, 39, "Completed signup"),
+    );
+
+    const breakdown_json = try std.fmt.allocPrint(
+        allocator,
+        "{{\"schema\":1,\"mode\":\"breakdown\",\"selector\":{{\"kind\":\"goal\",\"value\":\"{s}\"}}}}",
+        .{goal_id},
+    );
+    try store.addSavedView(
+        allocator,
+        "00000000-0000-4000-8000-000000000336",
+        "alpha",
+        "Goal Breakdown",
+        breakdown_json,
+        43,
+    );
+    try std.testing.expectError(
+        error.GoalReferenced,
+        store.deleteGoalById(allocator, "alpha", goal_id, 40, "Completed signup"),
+    );
+    try store.deleteSavedView(
+        allocator,
+        "alpha",
+        "00000000-0000-4000-8000-000000000336",
+        "Goal Breakdown",
+    );
+
+    const trend_json = try std.fmt.allocPrint(
+        allocator,
+        "{{\"schema\":1,\"mode\":\"trend\",\"series\":[\"conversion-rate~visitor~goal~{s}\"]}}",
+        .{goal_id},
+    );
+    try store.addSavedView(
+        allocator,
+        "00000000-0000-4000-8000-000000000337",
+        "alpha",
+        "Goal Trend",
+        trend_json,
+        44,
+    );
+    try std.testing.expectError(
+        error.GoalReferenced,
+        store.deleteGoalById(allocator, "alpha", goal_id, 40, "Completed signup"),
+    );
+    try store.archiveGoal(allocator, "alpha", goal_id, 40, 50);
+    try std.testing.expectError(
+        error.GoalReferenced,
+        store.deleteGoalById(allocator, "alpha", goal_id, 50, "Completed signup"),
+    );
+    try store.deleteSavedView(
+        allocator,
+        "alpha",
+        "00000000-0000-4000-8000-000000000337",
+        "Goal Trend",
+    );
+    try store.deleteGoalById(allocator, "alpha", goal_id, 50, "Completed signup");
+}
+
+test "goal capacity preserves conflict and stale mutation precedence" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const backing_allocator = std.testing.allocator;
+    const path = try std.fmt.allocPrint(
+        backing_allocator,
+        ".zig-cache/tmp/{s}/meta.db",
+        .{temporary.sub_path},
+    );
+    defer backing_allocator.free(path);
+    var store = try Store.open(backing_allocator, path);
+    defer store.deinit();
+    try store.migrate();
+
+    var arena = std.heap.ArenaAllocator.init(backing_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    _ = try store.createSite(allocator, .{
+        .id = "00000000-0000-4000-8000-000000000338",
+        .slug = "capacity",
+        .name = "Capacity",
+        .origin = "https://capacity.example",
+        .timezone_name = "UTC",
+        .default_currency = "",
+        .created_at_utc_micros = 1,
+    });
+    const archived_id = "00000000-0000-4000-8000-000000000339";
+    try store.addGoal(
+        allocator,
+        archived_id,
+        "capacity",
+        "Archived",
+        .event,
+        "archived",
+        10,
+    );
+    try store.archiveGoal(allocator, "capacity", archived_id, 10, 11);
+
+    for (0..maximum_active_goals) |index| {
+        const id = try std.fmt.allocPrint(
+            allocator,
+            "10000000-0000-4000-8000-{d:0>12}",
+            .{index},
+        );
+        const name = try std.fmt.allocPrint(allocator, "Goal {d}", .{index});
+        const event = try std.fmt.allocPrint(allocator, "event_{d}", .{index});
+        try store.addGoal(
+            allocator,
+            id,
+            "capacity",
+            name,
+            .event,
+            event,
+            20 + @as(i64, @intCast(index)),
+        );
+    }
+    try std.testing.expectError(
+        error.GoalNameConflict,
+        store.addGoal(
+            allocator,
+            "20000000-0000-4000-8000-000000000001",
+            "capacity",
+            "Goal 0",
+            .event,
+            "duplicate",
+            100,
+        ),
+    );
+    try std.testing.expectError(
+        error.GoalNameConflict,
+        store.duplicateGoal(
+            allocator,
+            "20000000-0000-4000-8000-000000000002",
+            "capacity",
+            "10000000-0000-4000-8000-000000000000",
+            20,
+            "Goal 0",
+            100,
+        ),
+    );
+    try std.testing.expectError(
+        error.TooManyActiveGoals,
+        store.duplicateGoal(
+            allocator,
+            "20000000-0000-4000-8000-000000000003",
+            "capacity",
+            "10000000-0000-4000-8000-000000000000",
+            20,
+            "Unique duplicate",
+            100,
+        ),
+    );
+    try std.testing.expectError(
+        error.StaleGoal,
+        store.reactivateGoal(allocator, "capacity", archived_id, 10, 101),
+    );
+    try std.testing.expectError(
+        error.TooManyActiveGoals,
+        store.reactivateGoal(allocator, "capacity", archived_id, 11, 101),
+    );
+    for (0..maximum_active_goals) |index| {
+        const id = try std.fmt.allocPrint(
+            allocator,
+            "10000000-0000-4000-8000-{d:0>12}",
+            .{index},
+        );
+        try store.archiveGoal(
+            allocator,
+            "capacity",
+            id,
+            20 + @as(i64, @intCast(index)),
+            200 + @as(i64, @intCast(index)),
+        );
+    }
+    for (32..50) |index| {
+        const id = try std.fmt.allocPrint(
+            allocator,
+            "10000000-0000-4000-8000-{d:0>12}",
+            .{index},
+        );
+        const name = try std.fmt.allocPrint(allocator, "Goal {d}", .{index});
+        const event = try std.fmt.allocPrint(allocator, "event_{d}", .{index});
+        const created = 300 + @as(i64, @intCast(index));
+        try store.addGoal(
+            allocator,
+            id,
+            "capacity",
+            name,
+            .event,
+            event,
+            created,
+        );
+        try store.archiveGoal(
+            allocator,
+            "capacity",
+            id,
+            created,
+            400 + @as(i64, @intCast(index)),
+        );
+    }
+    const first_page = try store.listGoalDefinitions(
+        allocator,
+        "capacity",
+        1,
+    );
+    try std.testing.expectEqual(@as(usize, 50), first_page.goals.len);
+    try std.testing.expect(first_page.has_more);
+    const second_page = try store.listGoalDefinitions(
+        allocator,
+        "capacity",
+        2,
+    );
+    try std.testing.expectEqual(@as(usize, 1), second_page.goals.len);
+    try std.testing.expect(!second_page.has_more);
 }
 
 test "site creation classifies exact retries before repairing missing children" {

@@ -100,7 +100,7 @@ kill -TERM "$collector_pid"
 wait "$collector_pid"
 collector_pid=
 test "$("$binary" doctor "$data")" = \
-    "ok metadata=v7 events=v7 sites=1 goals=1 funnels=1 stored_events=3 key=ok"
+    "ok metadata=v8 events=v7 sites=1 goals=1 funnels=1 stored_events=3 key=ok"
 
 today=$(date -u +%F)
 report_json() {
@@ -147,7 +147,7 @@ restored="$fixture/restored"
 "$binary" backup "$data" "$backup" >/dev/null
 "$binary" restore "$backup" "$restored" --verify >/dev/null
 test "$("$binary" doctor "$restored")" = \
-    "ok metadata=v7 events=v7 sites=1 goals=1 funnels=1 stored_events=3 key=ok"
+    "ok metadata=v8 events=v7 sites=1 goals=1 funnels=1 stored_events=3 key=ok"
 test "$("$binary" report "$restored" cutover "$today" "$today" \
     overview --format json)" = "$(report_json overview)"
 

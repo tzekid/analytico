@@ -249,7 +249,7 @@ test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
 
 stop_server
 test "$($binary doctor "$data")" = \
-    "ok metadata=v7 events=v7 sites=1 goals=0 funnels=0 stored_events=1000001 key=ok"
+    "ok metadata=v8 events=v7 sites=1 goals=0 funnels=0 stored_events=1000001 key=ok"
 
 printf 'installation_e2e=pass events=1000001 restart_persistence=true fragment_p95_seconds=%s scale_success_seconds=%s rss_growth_kib=%s desktop_png_bytes=%s mobile_png_bytes=%s browser=%s\n' \
     "$p95" "$scale_success_seconds" "$rss_growth_kib" "$(wc -c <"$desktop_screenshot")" \

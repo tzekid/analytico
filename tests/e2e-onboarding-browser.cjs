@@ -81,7 +81,8 @@ async function main() {
     assert.equal(response.status(), 200);
     assert.equal(await page.locator("script").count(), 0);
     assert.equal(await page.locator(".primary-navigation").count(), 0);
-    assert.equal(await page.getByText("Ready · schema 7").count(), 2);
+    assert.equal(await page.getByText("Ready · schema 8").count(), 1);
+    assert.equal(await page.getByText("Ready · schema 7").count(), 1);
     assert.deepEqual([...new Set(firstRequests)].sort(), ["document", "stylesheet"]);
     assert.equal(firstRequests.filter((kind) => kind === "fetch").length, 0);
     assert.equal(firstRequests.filter((kind) => kind === "xhr").length, 0);
@@ -97,7 +98,8 @@ async function main() {
     }
     response = await page.reload({ waitUntil: "load" });
     assert.equal(response.status(), 200);
-    assert.equal(await page.getByText("Ready · schema 7").count(), 2);
+    assert.equal(await page.getByText("Ready · schema 8").count(), 1);
+    assert.equal(await page.getByText("Ready · schema 7").count(), 1);
     assert.ok(
       await page.evaluate(
         () => document.documentElement.scrollWidth <= window.innerWidth,
@@ -323,7 +325,7 @@ async function main() {
         engine: "chromium",
         passkey_bootstrap: "real-virtual-authenticator",
         site_creation_javascript: "disabled",
-      metadata_schema: 7,
+      metadata_schema: 8,
         event_schema: 7,
         site_id: siteId,
         exact_retry: "existing-outcome",

@@ -499,6 +499,186 @@ pub fn executeSuggestions(
     };
 }
 
+pub fn executeGoalDiscovery(
+    allocator: std.mem.Allocator,
+    event_store: *events.Store,
+    request: analysis.GoalDiscoveryRequest,
+) !analysis.GoalDiscoveryResult {
+    try request.validate();
+    var budget = deadline.Budget.init(request.timeout_ms);
+    var result = try executePlan(
+        &event_store.database,
+        try compileGoalDiscovery(allocator, request),
+        &budget,
+    );
+    defer result.deinit();
+    if (result.columnCount() != 3 or result.rowCount() > 51) {
+        return error.InvalidGoalDiscoveryResult;
+    }
+    const visible = @min(result.rowCount(), 50);
+    const entities = try allocator.alloc(analysis.DiscoveredGoalEntity, visible);
+    for (entities, 0..) |*entity, index| {
+        const label = try result.text(allocator, 0, index);
+        try (analysis.EventSelector{
+            .kind = if (request.kind == .page) .exact_page else .exact_event,
+            .value = label,
+        }).validate();
+        const eligible_count = result.int64(1, index);
+        const last_received = result.int64(2, index);
+        if (eligible_count <= 0 or last_received < 0) {
+            return error.InvalidGoalDiscoveryResult;
+        }
+        entity.* = .{
+            .label = label,
+            .eligible_count = eligible_count,
+            .last_received_at_utc_micros = last_received,
+        };
+    }
+    return .{
+        .entities = entities,
+        .has_more = result.rowCount() > 50,
+    };
+}
+
+pub fn compileGoalDiscovery(
+    allocator: std.mem.Allocator,
+    request: analysis.GoalDiscoveryRequest,
+) !StatementPlan {
+    try request.validate();
+    const query = analysis.Query{
+        .site_id = request.site_id,
+        .range = request.range,
+        .mode = .breakdown,
+        .metric = .{ .kind = if (request.kind == .page)
+            .page_views
+        else
+            .custom_events },
+        .dimension = .{ .kind = if (request.kind == .page)
+            .page
+        else
+            .event_name },
+        .sort = .value_desc,
+        .limit = 50,
+    };
+    const execution = analysis.Execution{
+        .query = query,
+        .active_goals = request.active_goals,
+        .strict_traffic_mode = request.strict_traffic_mode,
+        .timeout_ms = request.timeout_ms,
+    };
+    try execution.validate();
+    try validateCombination(query);
+    var builder = Builder.init(allocator);
+    try writeCommon(&builder, execution, request.range, false, false);
+    const expression = if (request.kind == .page) "e.path" else "e.event_name";
+    try builder.write(", discovered AS (SELECT ");
+    try builder.write(expression);
+    try builder.write(
+        " AS label, count(*)::BIGINT AS eligible_count," ++
+            " max(e.received_at_utc_micros)::BIGINT AS last_received" ++
+            " FROM qualified e WHERE e.kind = ",
+    );
+    try builder.bindInteger(if (request.kind == .page) 1 else 2);
+    try builder.write(" AND ");
+    try builder.write(expression);
+    try builder.write(" <> ''");
+    if (request.search.len != 0) {
+        try builder.write(" AND contains(lower(");
+        try builder.write(expression);
+        try builder.write("), lower(");
+        try builder.bindText(request.search);
+        try builder.write("))");
+    }
+    try builder.write(" GROUP BY ");
+    try builder.write(expression);
+    try builder.write(
+        ") SELECT label, eligible_count, last_received FROM discovered" ++
+            " ORDER BY eligible_count DESC, label ASC LIMIT 51 OFFSET ",
+    );
+    const offset = (@as(i64, request.page) - 1) * 50;
+    try builder.bindInteger(offset);
+    return builder.finish();
+}
+
+pub fn goalSelectorObserved(
+    allocator: std.mem.Allocator,
+    event_store: *events.Store,
+    request: analysis.GoalDiscoveryRequest,
+    selector: analysis.EventSelector,
+) !bool {
+    try request.validate();
+    try selector.validate();
+    if ((request.kind == .event) != (selector.kind == .exact_event) or
+        selector.kind == .saved_goal)
+    {
+        return error.InvalidGoalDiscoverySelector;
+    }
+    var budget = deadline.Budget.init(request.timeout_ms);
+    var result = try executePlan(
+        &event_store.database,
+        try compileGoalSelectorPresence(allocator, request, selector),
+        &budget,
+    );
+    defer result.deinit();
+    if (result.columnCount() != 1 or result.rowCount() != 1) {
+        return error.InvalidGoalDiscoveryResult;
+    }
+    const count = result.int64(0, 0);
+    if (count < 0) return error.InvalidGoalDiscoveryResult;
+    return count != 0;
+}
+
+fn compileGoalSelectorPresence(
+    allocator: std.mem.Allocator,
+    request: analysis.GoalDiscoveryRequest,
+    selector: analysis.EventSelector,
+) !StatementPlan {
+    const query = analysis.Query{
+        .site_id = request.site_id,
+        .range = request.range,
+        .mode = .breakdown,
+        .metric = .{ .kind = if (request.kind == .page)
+            .page_views
+        else
+            .custom_events },
+        .dimension = .{ .kind = if (request.kind == .page)
+            .page
+        else
+            .event_name },
+        .sort = .value_desc,
+        .limit = 1,
+    };
+    const execution = analysis.Execution{
+        .query = query,
+        .active_goals = request.active_goals,
+        .strict_traffic_mode = request.strict_traffic_mode,
+        .timeout_ms = request.timeout_ms,
+    };
+    try execution.validate();
+    try validateCombination(query);
+    var builder = Builder.init(allocator);
+    try writeCommon(&builder, execution, request.range, false, false);
+    try builder.write(" SELECT count(*)::BIGINT FROM qualified e WHERE e.kind = ");
+    try builder.bindInteger(if (request.kind == .page) 1 else 2);
+    switch (selector.kind) {
+        .exact_event => {
+            try builder.write(" AND e.event_name = ");
+            try builder.bindText(selector.value);
+        },
+        .exact_page => {
+            try builder.write(" AND e.path = ");
+            try builder.bindText(selector.value);
+        },
+        .page_prefix => {
+            try builder.write(" AND starts_with(e.path, ");
+            try builder.bindText(selector.value);
+            try builder.write(")");
+        },
+        .saved_goal => unreachable,
+    }
+    return builder.finish();
+}
+
 pub fn compileSuggestions(
     allocator: std.mem.Allocator,
     request: analysis.SuggestionRequest,
@@ -933,6 +1113,7 @@ fn trendSetItemExecution(
         .query = execution.set.query(metric),
         .comparison_range = execution.comparison_range,
         .active_goals = execution.active_goals,
+        .selected_goals = execution.selected_goals,
         .strict_traffic_mode = execution.strict_traffic_mode,
         .segment_resolved = execution.segment_resolved,
         .timeout_ms = execution.timeout_ms,
@@ -4132,9 +4313,10 @@ fn writeMeasure(
                     try builder.write(".session_id END))::BIGINT");
                 },
                 .conversion_rate => {
-                    const selector = (try analysis.resolvedSelector(
+                    const selector = (try analysis.resolvedSelectorSets(
                         metric.selector,
                         execution.active_goals,
+                        execution.selected_goals,
                     )).?;
                     try builder.write("count(DISTINCT CASE WHEN ");
                     try writeSelectorResolution(builder, selector, event_alias);
@@ -4276,16 +4458,21 @@ fn writeMetricWhere(
         .page_views => try builder.write(" AND e.kind = 1"),
         .custom_events => try builder.write(" AND e.kind = 2"),
         .conversions, .event_count, .event_visitors => {
-            const selector = (try analysis.resolvedSelector(
+            const selector = (try analysis.resolvedSelectorSets(
                 metric.selector,
                 execution.active_goals,
+                execution.selected_goals,
             )).?;
             try builder.write(" AND ");
             try writeSelectorResolution(builder, selector, event_alias);
         },
         .revenue, .average_value => {
             try builder.write(" AND e.value_amount IS NOT NULL AND e.value_currency <> ''");
-            if (try analysis.resolvedSelector(metric.selector, execution.active_goals)) |selector| {
+            if (try analysis.resolvedSelectorSets(
+                metric.selector,
+                execution.active_goals,
+                execution.selected_goals,
+            )) |selector| {
                 try builder.write(" AND ");
                 try writeSelectorResolution(builder, selector, event_alias);
             }

@@ -280,6 +280,10 @@ fn installSiteForPath(path: []const u8) ?[]const u8 {
 
 const Action = enum {
     add_goal,
+    edit_goal,
+    duplicate_goal,
+    archive_goal,
+    reactivate_goal,
     delete_goal,
     add_funnel,
     delete_funnel,
@@ -331,6 +335,8 @@ const Route = struct {
     site: []const u8,
     destination: model.Destination,
     default_kind: report.Kind,
+    goal_screen: model.GoalScreen = .none,
+    goal_id: []const u8 = "",
 };
 
 fn routeFor(path: []const u8) ?Route {
@@ -353,7 +359,32 @@ fn routeFor(path: []const u8) ?Route {
         .site = site,
         .destination = .journeys,
         .default_kind = .goal,
+        .goal_screen = .list,
     };
+    if (std.mem.eql(u8, suffix, "journeys/goals/new")) return .{
+        .site = site,
+        .destination = .journeys,
+        .default_kind = .goal,
+        .goal_screen = .new,
+    };
+    const goal_prefix = "journeys/goals/";
+    if (std.mem.startsWith(u8, suffix, goal_prefix)) {
+        const goal_suffix = suffix[goal_prefix.len..];
+        var id = goal_suffix;
+        var screen: model.GoalScreen = .detail;
+        if (std.mem.endsWith(u8, goal_suffix, "/edit")) {
+            id = goal_suffix[0 .. goal_suffix.len - "/edit".len];
+            screen = .edit;
+        }
+        domain.validateUuid(id) catch return null;
+        return .{
+            .site = site,
+            .destination = .journeys,
+            .default_kind = .goal,
+            .goal_screen = screen,
+            .goal_id = id,
+        };
+    }
     if (std.mem.eql(u8, suffix, "journeys/funnels")) return .{
         .site = site,
         .destination = .journeys,
@@ -379,6 +410,10 @@ fn routeFor(path: []const u8) ?Route {
 
 fn actionFor(path: []const u8) ?Action {
     if (std.mem.eql(u8, path, "/admin/goals")) return .add_goal;
+    if (std.mem.eql(u8, path, "/admin/goals/edit")) return .edit_goal;
+    if (std.mem.eql(u8, path, "/admin/goals/duplicate")) return .duplicate_goal;
+    if (std.mem.eql(u8, path, "/admin/goals/archive")) return .archive_goal;
+    if (std.mem.eql(u8, path, "/admin/goals/reactivate")) return .reactivate_goal;
     if (std.mem.eql(u8, path, "/admin/goals/delete")) return .delete_goal;
     if (std.mem.eql(u8, path, "/admin/funnels")) return .add_funnel;
     if (std.mem.eql(u8, path, "/admin/funnels/delete")) return .delete_funnel;
@@ -845,6 +880,14 @@ fn getLegacyPage(
         });
         return;
     };
+    if (parsed.goal_fields_set) {
+        try writeError(output, .{
+            .status = 400,
+            .title = "Invalid report request",
+            .message = "Goal builder fields are valid only on a site-scoped Goals route.",
+        });
+        return;
+    }
     const sites = try dependencies.metadata.listSites(dependencies.allocator);
     if (sites.len == 0) {
         try writeFirstRun(output, dependencies.collection_available);
@@ -974,16 +1017,44 @@ fn getPage(
         try invalidQueryPage(dependencies.allocator, output, route.destination, default_query);
         return;
     };
-    if (parsed.site.len != 0 or !kindAllowed(route, parsed.kind)) {
+    if (parsed.site.len != 0 or !kindAllowed(route, parsed.kind) or
+        (parsed.goal_fields_set and route.goal_screen == .none))
+    {
         try invalidQueryPage(dependencies.allocator, output, route.destination, default_query);
         return;
     }
-    const query = controller.finishQuery(
+    var query = controller.finishQuery(
         parsed,
         selected.slug,
         &default_range,
         .previous,
     ) catch {
+        try invalidQueryPage(dependencies.allocator, output, route.destination, default_query);
+        return;
+    };
+    query.goal_screen = route.goal_screen;
+    query.goal_id = route.goal_id;
+    if (route.goal_screen == .list and query.subject.len != 0) {
+        const legacy_goal = dependencies.metadata.goalByName(
+            dependencies.allocator,
+            selected.slug,
+            query.subject,
+        ) catch |err| {
+            if (err == error.GoalNotFound) {
+                try writeError(output, .{
+                    .status = 404,
+                    .title = "Goal not found",
+                    .message = "The selected goal no longer exists.",
+                });
+                return;
+            }
+            return err;
+        };
+        query.goal_screen = .detail;
+        query.goal_id = legacy_goal.id;
+        query.subject = "";
+    }
+    controller.validateQuery(query) catch {
         try invalidQueryPage(dependencies.allocator, output, route.destination, default_query);
         return;
     };
@@ -2011,6 +2082,35 @@ fn postAction(
             dependencies.allocator,
             dependencies.io,
             dependencies.metadata,
+            dependencies.events,
+            form,
+            now,
+            dependencies.report_timeout_ms,
+        ),
+        .edit_goal => controller.editGoal(
+            dependencies.allocator,
+            dependencies.metadata,
+            dependencies.events,
+            form,
+            now,
+            dependencies.report_timeout_ms,
+        ),
+        .duplicate_goal => controller.duplicateGoal(
+            dependencies.allocator,
+            dependencies.io,
+            dependencies.metadata,
+            form,
+            now,
+        ),
+        .archive_goal => controller.archiveGoal(
+            dependencies.allocator,
+            dependencies.metadata,
+            form,
+            now,
+        ),
+        .reactivate_goal => controller.reactivateGoal(
+            dependencies.allocator,
+            dependencies.metadata,
             form,
             now,
         ),
@@ -2050,8 +2150,16 @@ fn postAction(
         ),
     };
     operation catch |err| {
+        if (err == error.ReportTimeout) {
+            try writeError(output, .{
+                .status = 503,
+                .title = "Goal validation timed out",
+                .message = "The goal was not saved because observed-entity validation exceeded the report deadline. Narrow the date range and retry.",
+            });
+            return;
+        }
         if (!isFormError(err)) return err;
-        try formErrorPage(dependencies, output, form, action);
+        try formErrorPage(dependencies, output, form, action, err);
         return;
     };
     if (action == .add_excluded_network or
@@ -2071,12 +2179,26 @@ fn postAction(
     }
     const site = try form.required("site");
     const destination: model.Destination = switch (action) {
-        .add_goal, .delete_goal, .add_funnel, .delete_funnel => .journeys,
+        .add_goal,
+        .edit_goal,
+        .duplicate_goal,
+        .archive_goal,
+        .reactivate_goal,
+        .delete_goal,
+        .add_funnel,
+        .delete_funnel,
+        => .journeys,
         .add_excluded_network, .delete_excluded_network, .update_traffic_policy => .settings,
     };
     const kind: report.Kind = switch (action) {
         .add_funnel, .delete_funnel => .funnel,
-        .add_goal, .delete_goal => .goal,
+        .add_goal,
+        .edit_goal,
+        .duplicate_goal,
+        .archive_goal,
+        .reactivate_goal,
+        .delete_goal,
+        => .goal,
         .add_excluded_network, .delete_excluded_network, .update_traffic_policy => .overview,
     };
     try redirectToCanonical(dependencies.allocator, output, destination, .{
@@ -2086,6 +2208,10 @@ fn postAction(
         .kind = kind,
     }, switch (action) {
         .add_goal => "goal-added",
+        .edit_goal => "goal-updated",
+        .duplicate_goal => "goal-duplicated",
+        .archive_goal => "goal-archived",
+        .reactivate_goal => "goal-reactivated",
         .delete_goal => "goal-deleted",
         .add_funnel => "funnel-added",
         .delete_funnel => "funnel-deleted",
@@ -2100,6 +2226,7 @@ fn formErrorPage(
     output: *std.Io.Writer,
     form: controller.Form,
     action: Action,
+    failure: anyerror,
 ) !void {
     const form_context = controller.formContext(form) catch {
         try writeError(output, .{
@@ -2110,16 +2237,47 @@ fn formErrorPage(
         return;
     };
     const site = form.required("site") catch "";
-    const query = model.Query{
+    var query = model.Query{
         .site = site,
         .range = form_context.range,
         .comparison = form_context.comparison,
         .kind = switch (action) {
-            .add_goal, .delete_goal => .goal,
+            .add_goal,
+            .edit_goal,
+            .duplicate_goal,
+            .archive_goal,
+            .reactivate_goal,
+            .delete_goal,
+            => .goal,
             .add_funnel, .delete_funnel => .funnel,
             .add_excluded_network, .delete_excluded_network, .update_traffic_policy => .overview,
         },
     };
+    switch (action) {
+        .add_goal => query.goal_screen = .new,
+        .edit_goal => {
+            query.goal_screen = .edit;
+            query.goal_id = form.required("id") catch "";
+        },
+        .duplicate_goal,
+        .archive_goal,
+        .reactivate_goal,
+        .delete_goal,
+        => {
+            query.goal_screen = .detail;
+            query.goal_id = form.required("id") catch "";
+        },
+        else => {},
+    }
+    if (query.goal_screen == .new or query.goal_screen == .edit) {
+        query.goal_entity_set = true;
+        query.goal_entity_kind = if (std.mem.eql(
+            u8,
+            form.required("entity") catch "page",
+            "event",
+        )) .event else .page;
+        query.goal_search = form.optional("search") orelse "";
+    }
     const resolved_calendar = resolvePageCalendar(dependencies, query) catch {
         try writeError(output, .{
             .status = 503,
@@ -2133,7 +2291,15 @@ fn formErrorPage(
         dependencies.metadata,
         dependencies.events,
         switch (action) {
-            .add_goal, .delete_goal, .add_funnel, .delete_funnel => .journeys,
+            .add_goal,
+            .edit_goal,
+            .duplicate_goal,
+            .archive_goal,
+            .reactivate_goal,
+            .delete_goal,
+            .add_funnel,
+            .delete_funnel,
+            => .journeys,
             .add_excluded_network, .delete_excluded_network, .update_traffic_policy => .settings,
         },
         query,
@@ -2150,7 +2316,19 @@ fn formErrorPage(
         });
         return;
     };
-    page.form_error = if (action == .update_traffic_policy)
+    page.form_error = if (failure == error.GoalReferenced)
+        "This goal is used by a saved view. It was not deleted; archive it instead or remove the saved reference first."
+    else if (failure == error.GoalConfirmationMismatch)
+        "The goal was not deleted because the confirmation did not exactly match its current name."
+    else if (failure == error.GoalNotObserved)
+        "No matching Page or Event was seen in this date range. Confirm the zero-seen definition explicitly to save it."
+    else if (failure == error.GoalNameConflict)
+        "The goal was not saved because this site already has a goal with that name."
+    else if (failure == error.StaleGoal)
+        "The goal changed after this form loaded. Reload its current detail before retrying."
+    else if (failure == error.TooManyActiveGoals)
+        "This site already has 32 active goals. Archive one before creating or reactivating another."
+    else if (action == .update_traffic_policy)
         "The traffic policy was not saved. Use a ceiling from 1 to 10,000,000; strict mode also requires at most 32 goals."
     else if (action == .add_excluded_network or
         action == .delete_excluded_network)
@@ -2158,18 +2336,31 @@ fn formErrorPage(
     else
         "The definition was not saved. Check its name, match kind, value, and step count.";
     page.form_error_target = switch (action) {
-        .add_goal => .goal,
+        .add_goal, .edit_goal => .goal,
         .add_funnel => .funnel,
         .add_excluded_network => .network,
         .update_traffic_policy => .traffic_policy,
-        .delete_goal, .delete_funnel, .delete_excluded_network => .none,
+        .duplicate_goal => .goal_duplicate,
+        .archive_goal,
+        .reactivate_goal,
+        .delete_goal,
+        .delete_funnel,
+        .delete_excluded_network,
+        => .none,
     };
-    if (action == .add_goal) {
+    if (action == .add_goal or action == .edit_goal) {
         page.goal_draft = .{
             .name = form.required("name") catch "",
-            .match_kind = form.required("kind") catch "event",
+            .entity_kind = query.goal_entity_kind,
+            .match_kind = form.required("match") catch "exact",
             .match_value = form.required("value") catch "",
+            .confirm_unseen = if (form.optional("confirm_unseen")) |value|
+                std.mem.eql(u8, value, "on")
+            else
+                false,
         };
+    } else if (action == .duplicate_goal) {
+        page.goal_draft.name = form.required("name") catch "";
     } else if (action == .add_funnel) {
         page.funnel_draft = .{
             .name = form.required("name") catch "",
@@ -2186,7 +2377,7 @@ fn formErrorPage(
             .daily_event_ceiling = form.required("daily_event_ceiling") catch "",
         };
     }
-    try writePage(output, 422, page);
+    try writePage(output, if (failure == error.GoalReferenced) 409 else 422, page);
 }
 
 fn writePage(output: *std.Io.Writer, status: u16, page: model.Page) !void {
@@ -2287,6 +2478,10 @@ fn noticeMessage(code: []const u8) []const u8 {
     if (std.mem.eql(u8, code, "goal-added")) {
         return "Goal added.";
     }
+    if (std.mem.eql(u8, code, "goal-updated")) return "Goal updated.";
+    if (std.mem.eql(u8, code, "goal-duplicated")) return "Goal duplicated.";
+    if (std.mem.eql(u8, code, "goal-archived")) return "Goal archived.";
+    if (std.mem.eql(u8, code, "goal-reactivated")) return "Goal reactivated.";
     if (std.mem.eql(u8, code, "goal-deleted")) {
         return "Goal deleted.";
     }
@@ -2438,17 +2633,27 @@ fn canonicalUrl(
 ) !void {
     try output.writeAll("/admin/sites/");
     try output.writeAll(query.site);
-    try output.writeAll(switch (destination) {
-        .overview => "/overview",
-        .analyze => "/analyze",
-        .journeys => if (query.kind == .funnel)
-            "/journeys/funnels"
-        else
-            "/journeys/goals",
-        .sessions => "/sessions",
-        .live => "/live",
-        .settings => "/settings/general",
-    });
+    switch (destination) {
+        .overview => try output.writeAll("/overview"),
+        .analyze => try output.writeAll("/analyze"),
+        .journeys => if (query.kind == .funnel) {
+            try output.writeAll("/journeys/funnels");
+        } else {
+            try output.writeAll("/journeys/goals");
+            switch (query.goal_screen) {
+                .none, .list => {},
+                .new => try output.writeAll("/new"),
+                .detail, .edit => {
+                    try output.writeByte('/');
+                    try output.writeAll(query.goal_id);
+                    if (query.goal_screen == .edit) try output.writeAll("/edit");
+                },
+            }
+        },
+        .sessions => try output.writeAll("/sessions"),
+        .live => try output.writeAll("/live"),
+        .settings => try output.writeAll("/settings/general"),
+    }
     if (destination == .overview) {
         try output.writeAll("?v=1&from=");
         try urlComponent(output, query.range.start);
@@ -2539,7 +2744,26 @@ fn canonicalUrl(
                 try urlComponent(output, query.highlighted_interval);
             }
         },
-        .journeys => if (query.subject.len != 0) {
+        .journeys => if (query.goal_screen != .none) {
+            if (query.goal_screen == .list and query.goal_page != 1) {
+                try output.print("&goal-page={d}", .{query.goal_page});
+            }
+            if (query.goal_screen == .new or query.goal_screen == .edit) {
+                if (query.goal_entity_set or query.goal_entity_kind == .event) {
+                    try output.writeAll(if (query.goal_entity_kind == .event)
+                        "&entity=event"
+                    else
+                        "&entity=page");
+                }
+                if (query.goal_search.len != 0) {
+                    try output.writeAll("&search=");
+                    try urlComponent(output, query.goal_search);
+                }
+                if (query.goal_entity_page != 1) {
+                    try output.print("&entity-page={d}", .{query.goal_entity_page});
+                }
+            }
+        } else if (query.subject.len != 0) {
             try output.writeAll("&subject=");
             try urlComponent(output, query.subject);
         },
@@ -2646,6 +2870,14 @@ fn isFormError(err: anyerror) bool {
         error.InvalidName,
         error.InvalidIdentifier,
         error.InvalidMatchKind,
+        error.InvalidGoalEntityKind,
+        error.InvalidGoalMatch,
+        error.InvalidGoalTimestamp,
+        error.GoalNotObserved,
+        error.GoalNameConflict,
+        error.GoalConfirmationMismatch,
+        error.GoalReferenced,
+        error.StaleGoal,
         error.InvalidPath,
         error.InvalidFunnelLength,
         error.InvalidFunnelStep,
