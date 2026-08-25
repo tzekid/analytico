@@ -3351,6 +3351,13 @@ limits. The independent bulk threshold retains its default. Rollback is the
 predecessor artifact and restores the prior allocator setting without touching
 data.
 
+The RSS gate samples only after a database-free `/healthz` completion barrier.
+Response bytes can reach the client before the handler runs its deferred result
+and arena cleanup; because this server accepts one request at a time, the next
+health response proves that cleanup completed. The barrier changes neither the
+heavy request count nor any memory setting, and it performs no DuckDB work.
+Arbitrary sleeps and in-flight post-flush RSS samples are not accepted evidence.
+
 ### Range, summary, identity, and value semantics
 
 A session participates when it has at least one product-eligible Page or
@@ -3562,6 +3569,16 @@ complete profile time were 148,859/40,178/587,443 microseconds normal and
 its identical canonical detail-link suffix once per response rather than once
 per visible record. D45's exact 8 MiB allocator threshold and every existing
 memory, thread, and deadline bound remain unchanged.
+
+A later full-release run proved the original immediate post-flush RSS sample
+could race that deferred cleanup. The same failure reproduced on the untouched
+merged predecessor, while two otherwise identical runs synchronized by the
+next sequential health response passed both list and detail/profile bounds.
+The corrected gate therefore measures post-request steady state; it does not
+change D45's selected mechanism, 600-request warmup, three 200-request cohorts,
+8,192 KiB assertion, or any D46 runtime behavior. The tracked Debug correction
+measured list/detail-profile at -6,865/-2,105 KiB. Two independent ReleaseSafe
+processes measured -281/4,414 KiB and 4,850/-2,849 KiB.
 
 The existing `e2e-sessions` gate expands to cover the real authenticated list,
 detail, and profile routes. Its on-disk and Chromium journey must prove

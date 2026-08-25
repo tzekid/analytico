@@ -940,6 +940,14 @@ and then a 10,756 KiB failure. The pinned 128/512 MiB native allocator defaults
 remained unstable; explicit 16 MiB flush thresholds still averaged 8,472 KiB
 and failed.
 
+Every RSS read follows one database-free `/healthz` round-trip. The server
+accepts requests sequentially, so that response proves the preceding heavy
+request has returned through its deferred result and request-arena cleanup.
+This is a completion barrier, not a sleep, DuckDB query, allocator flush,
+extra warmup, omitted cohort, or relaxed limit. Sampling immediately after the
+heavy response bytes reached `curl` was rejected because response flush occurs
+before the handler's deferred cleanup.
+
 The exact `8MiB` threshold passed two independent ReleaseSafe processes while
 the bulk-deallocation threshold retained its default. Their warmups were
 96,776 and 84,428 KiB; cohort changes were -6,988, +4,424, and -21,872 KiB,
@@ -1031,6 +1039,21 @@ microseconds and 131,491/40,066/568,004 microseconds. Strict-mode values were
 All four runs interrupted 1-millisecond list, detail, and profile requests,
 then reused the same connection. The detail budget kept more than 200
 milliseconds of headroom without a cache, projection, index, or wider limit.
+
+A later packaged qualification exposed that the original RSS sample could
+race the deferred cleanup after response flush. Four exact 8 MiB candidate
+processes missed a list or detail/profile boundary at 8,606, 18,874, 17,104,
+and 10,453 KiB per 200 requests; the untouched merged predecessor independently
+missed at 15,448 KiB. The large signed cohorts reproduced without the issue-#43
+Live path and therefore did not authorize a memory-mechanism change. Two
+diagnostic runs added only the sequential completion barrier: `/readyz`
+measured list/detail-profile at 2,121/693 KiB, and database-free `/healthz`
+measured -2,586/-4,834 KiB. The corrected gate uses `/healthz`, retains every
+request, cohort, signed observation, 8,192 KiB assertion, the exact 8 MiB
+allocator setting, and the default bulk-deallocation setting. The tracked
+Debug gate then measured -6,865/-2,105 KiB. Two independent tracked ReleaseSafe
+processes measured -281/4,414 KiB and 4,850/-2,849 KiB for list/detail-profile,
+with all four results inside the unchanged boundary.
 
 ## 8. Regression policy
 

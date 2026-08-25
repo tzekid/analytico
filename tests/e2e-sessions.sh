@@ -98,6 +98,13 @@ stop_server() {
     server_pid=
 }
 
+synchronize_rss_sample() {
+    # Response bytes can reach curl before handle() runs its deferred request
+    # cleanup. The server is sequential, so this database-free request proves
+    # the preceding heavy request and arena reset have completed.
+    curl --silent --fail "$upstream/healthz" >/dev/null
+}
+
 start_server
 {
     printf '{\n\tadmin off\n}\n'
@@ -136,10 +143,12 @@ curl --silent --fail --cookie "$cookie" "$sessions_page" \
 test "$(grep -o 'class="session-record"' "$fixture/sessions.html" | wc -l)" = 25
 sessions_gzip_bytes=$(gzip --stdout "$fixture/sessions.html" | wc -c)
 test "$sessions_gzip_bytes" -le 32768
+synchronize_rss_sample
 rss_initial=$(awk '$1 == "VmRSS:" { print $2 }' "/proc/$server_pid/status")
 for _ in {1..600}; do
     curl --silent --fail --cookie "$cookie" "$sessions_page" >/dev/null
 done
+synchronize_rss_sample
 rss_before=$(awk '$1 == "VmRSS:" { print $2 }' "/proc/$server_pid/status")
 rss_warmup_growth_kib=$((rss_before - rss_initial))
 rss_previous=$rss_before
@@ -148,6 +157,7 @@ for cohort in 1 2 3; do
     for _ in {1..200}; do
         curl --silent --fail --cookie "$cookie" "$sessions_page" >/dev/null
     done
+    synchronize_rss_sample
     rss_current=$(awk '$1 == "VmRSS:" { print $2 }' "/proc/$server_pid/status")
     rss_cohort_growth_kib+=("$((rss_current - rss_previous))")
     rss_previous=$rss_current
@@ -273,11 +283,13 @@ heavy_detail_gzip_bytes=$(gzip --stdout "$fixture/heavy-detail.html" | wc -c)
 test "$heavy_detail_gzip_bytes" -le 32768
 rich_detail="$dashboard/admin/sites/quality/sessions/$profile_session_a?v=1&from=$today&to=$today&compare=none"
 rich_profile="$dashboard/admin/sites/quality/users/$profile_user_path?v=1&from=$today&to=$today&compare=none"
+synchronize_rss_sample
 detail_profile_rss_cold=$(awk '$1 == "VmRSS:" { print $2 }' "/proc/$server_pid/status")
 for _ in {1..300}; do
     curl --silent --fail --cookie "$cookie" "$rich_detail" >/dev/null
     curl --silent --fail --cookie "$cookie" "$rich_profile" >/dev/null
 done
+synchronize_rss_sample
 detail_profile_rss_previous=$(awk '$1 == "VmRSS:" { print $2 }' "/proc/$server_pid/status")
 detail_profile_rss_warmup_kib=$((detail_profile_rss_previous - detail_profile_rss_cold))
 detail_profile_rss_growth_kib=()
@@ -286,6 +298,7 @@ for cohort in 1 2 3; do
         curl --silent --fail --cookie "$cookie" "$rich_detail" >/dev/null
         curl --silent --fail --cookie "$cookie" "$rich_profile" >/dev/null
     done
+    synchronize_rss_sample
     detail_profile_rss_current=$(awk '$1 == "VmRSS:" { print $2 }' "/proc/$server_pid/status")
     detail_profile_rss_growth_kib+=("$((detail_profile_rss_current - detail_profile_rss_previous))")
     detail_profile_rss_previous=$detail_profile_rss_current

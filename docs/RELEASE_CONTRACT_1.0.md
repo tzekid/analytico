@@ -230,8 +230,10 @@ are not passes.
   JavaScript-disabled desktop and 390-pixel browser paths use native
   context/filter/segment/Goal/page controls with no startup data request. Three
   warmed 200-request RSS cohorts retain the 8 MiB-per-200 sustained-growth
-  limit. Default and strict complete two-statement p95 remain below 400 ms on
-  one million events and 100,000 sessions with ten active Goals.
+  limit. Each RSS read follows a database-free sequential health round-trip so
+  the preceding heavy request's deferred cleanup is complete. Default and
+  strict complete two-statement p95 remain below 400 ms on one million events
+  and 100,000 sessions with ten active Goals.
 - Session detail/profile acceptance extends that same real executable and
   browser gate with the package's direct routes, one full summary, deterministic
   50-entry paged timeline, per-visit engagement aggregation, active-Goal names,
