@@ -286,7 +286,9 @@ const Action = enum {
     reactivate_goal,
     delete_goal,
     add_funnel,
-    delete_funnel,
+    edit_funnel,
+    archive_funnel,
+    reactivate_funnel,
     add_excluded_network,
     delete_excluded_network,
     update_traffic_policy,
@@ -337,6 +339,8 @@ const Route = struct {
     default_kind: report.Kind,
     goal_screen: model.GoalScreen = .none,
     goal_id: []const u8 = "",
+    funnel_screen: model.FunnelScreen = .none,
+    funnel_id: []const u8 = "",
 };
 
 fn routeFor(path: []const u8) ?Route {
@@ -389,7 +393,32 @@ fn routeFor(path: []const u8) ?Route {
         .site = site,
         .destination = .journeys,
         .default_kind = .funnel,
+        .funnel_screen = .list,
     };
+    if (std.mem.eql(u8, suffix, "journeys/funnels/new")) return .{
+        .site = site,
+        .destination = .journeys,
+        .default_kind = .funnel,
+        .funnel_screen = .new,
+    };
+    const funnel_prefix = "journeys/funnels/";
+    if (std.mem.startsWith(u8, suffix, funnel_prefix)) {
+        const funnel_suffix = suffix[funnel_prefix.len..];
+        var id = funnel_suffix;
+        var screen: model.FunnelScreen = .detail;
+        if (std.mem.endsWith(u8, funnel_suffix, "/edit")) {
+            id = funnel_suffix[0 .. funnel_suffix.len - "/edit".len];
+            screen = .edit;
+        }
+        domain.validateUuid(id) catch return null;
+        return .{
+            .site = site,
+            .destination = .journeys,
+            .default_kind = .funnel,
+            .funnel_screen = screen,
+            .funnel_id = id,
+        };
+    }
     if (std.mem.eql(u8, suffix, "sessions")) return .{
         .site = site,
         .destination = .sessions,
@@ -416,7 +445,11 @@ fn actionFor(path: []const u8) ?Action {
     if (std.mem.eql(u8, path, "/admin/goals/reactivate")) return .reactivate_goal;
     if (std.mem.eql(u8, path, "/admin/goals/delete")) return .delete_goal;
     if (std.mem.eql(u8, path, "/admin/funnels")) return .add_funnel;
-    if (std.mem.eql(u8, path, "/admin/funnels/delete")) return .delete_funnel;
+    if (std.mem.eql(u8, path, "/admin/funnels/edit")) return .edit_funnel;
+    if (std.mem.eql(u8, path, "/admin/funnels/archive")) return .archive_funnel;
+    if (std.mem.eql(u8, path, "/admin/funnels/reactivate")) {
+        return .reactivate_funnel;
+    }
     if (std.mem.eql(u8, path, "/admin/exclusions/networks")) {
         return .add_excluded_network;
     }
@@ -1018,7 +1051,8 @@ fn getPage(
         return;
     };
     if (parsed.site.len != 0 or !kindAllowed(route, parsed.kind) or
-        (parsed.goal_fields_set and route.goal_screen == .none))
+        (parsed.goal_fields_set and route.goal_screen == .none) or
+        (parsed.funnel_fields_set and route.funnel_screen == .none))
     {
         try invalidQueryPage(dependencies.allocator, output, route.destination, default_query);
         return;
@@ -1034,6 +1068,8 @@ fn getPage(
     };
     query.goal_screen = route.goal_screen;
     query.goal_id = route.goal_id;
+    query.funnel_screen = route.funnel_screen;
+    query.funnel_id = route.funnel_id;
     if (route.goal_screen == .list and query.subject.len != 0) {
         const legacy_goal = dependencies.metadata.goalByName(
             dependencies.allocator,
@@ -1052,6 +1088,26 @@ fn getPage(
         };
         query.goal_screen = .detail;
         query.goal_id = legacy_goal.id;
+        query.subject = "";
+    }
+    if (route.funnel_screen == .list and query.subject.len != 0) {
+        const legacy_funnel = dependencies.metadata.funnelByName(
+            dependencies.allocator,
+            selected.slug,
+            query.subject,
+        ) catch |err| {
+            if (err == error.FunnelNotFound) {
+                try writeError(output, .{
+                    .status = 404,
+                    .title = "Funnel not found",
+                    .message = "The selected funnel no longer exists.",
+                });
+                return;
+            }
+            return err;
+        };
+        query.funnel_screen = .detail;
+        query.funnel_id = legacy_funnel.id;
         query.subject = "";
     }
     controller.validateQuery(query) catch {
@@ -2043,6 +2099,7 @@ fn postAction(
         return;
     }
     const goal_form = action == .add_goal or action == .edit_goal;
+    const funnel_form = action == .add_funnel or action == .edit_funnel;
     const goal_context_action = switch (action) {
         .add_goal,
         .edit_goal,
@@ -2053,8 +2110,21 @@ fn postAction(
         => true,
         else => false,
     };
+    const funnel_context_action = switch (action) {
+        .add_funnel,
+        .edit_funnel,
+        .archive_funnel,
+        .reactivate_funnel,
+        => true,
+        else => false,
+    };
     const form = (if (goal_form)
         controller.Form.parseGoal(
+            dependencies.allocator,
+            request.body,
+        )
+    else if (funnel_form)
+        controller.Form.parseFunnel(
             dependencies.allocator,
             request.body,
         )
@@ -2079,6 +2149,18 @@ fn postAction(
                 .status = 400,
                 .title = "Invalid form",
                 .message = "The goal context was malformed or non-canonical.",
+            });
+            return;
+        }
+    else if (funnel_context_action)
+        controller.parseFunnelActionContext(
+            dependencies.allocator,
+            request.target,
+        ) catch {
+            try writeError(output, .{
+                .status = 400,
+                .title = "Invalid form",
+                .message = "The funnel context was malformed or non-canonical.",
             });
             return;
         }
@@ -2156,6 +2238,54 @@ fn postAction(
             );
             return;
         }
+    } else if (funnel_form) {
+        const submission = (if (action == .add_funnel)
+            controller.addFunnel(
+                dependencies.allocator,
+                dependencies.io,
+                dependencies.metadata,
+                dependencies.events,
+                form,
+                goal_action_context,
+                now,
+                dependencies.report_timeout_ms,
+            )
+        else
+            controller.editFunnel(
+                dependencies.allocator,
+                dependencies.metadata,
+                dependencies.events,
+                form,
+                goal_action_context,
+                now,
+                dependencies.report_timeout_ms,
+            )) catch |err| {
+            if (err != error.ReportTimeout and !isFormError(err) and
+                !isStaleSegmentError(err) and err != error.StaleFilterProperty)
+            {
+                return err;
+            }
+            try formErrorPage(
+                dependencies,
+                output,
+                form,
+                action,
+                goal_action_context,
+                err,
+            );
+            return;
+        };
+        if (submission) |draft| {
+            try funnelSubmissionPage(
+                dependencies,
+                output,
+                form,
+                action,
+                goal_action_context,
+                draft,
+            );
+            return;
+        }
     } else {
         const operation = switch (action) {
             .add_goal, .edit_goal => unreachable,
@@ -2183,17 +2313,18 @@ fn postAction(
                 dependencies.metadata,
                 form,
             ),
-            .add_funnel => controller.addFunnel(
+            .add_funnel, .edit_funnel => unreachable,
+            .archive_funnel => controller.archiveFunnel(
                 dependencies.allocator,
-                dependencies.io,
                 dependencies.metadata,
                 form,
                 now,
             ),
-            .delete_funnel => controller.deleteFunnel(
+            .reactivate_funnel => controller.reactivateFunnel(
                 dependencies.allocator,
                 dependencies.metadata,
                 form,
+                now,
             ),
             .add_excluded_network => controller.addExcludedNetwork(
                 dependencies.allocator,
@@ -2250,12 +2381,18 @@ fn postAction(
         .reactivate_goal,
         .delete_goal,
         .add_funnel,
-        .delete_funnel,
+        .edit_funnel,
+        .archive_funnel,
+        .reactivate_funnel,
         => .journeys,
         .add_excluded_network, .delete_excluded_network, .update_traffic_policy => .settings,
     };
     const kind: report.Kind = switch (action) {
-        .add_funnel, .delete_funnel => .funnel,
+        .add_funnel,
+        .edit_funnel,
+        .archive_funnel,
+        .reactivate_funnel,
+        => .funnel,
         .add_goal,
         .edit_goal,
         .duplicate_goal,
@@ -2271,6 +2408,7 @@ fn postAction(
         .comparison = form_context.comparison,
         .kind = kind,
         .goal_screen = if (kind == .goal) .list else .none,
+        .funnel_screen = if (kind == .funnel) .list else .none,
         .analysis_filters = goal_action_context.filters,
         .analysis_segment_id = goal_action_context.segment_id,
     }, switch (action) {
@@ -2281,7 +2419,9 @@ fn postAction(
         .reactivate_goal => "goal-reactivated",
         .delete_goal => "goal-deleted",
         .add_funnel => "funnel-added",
-        .delete_funnel => "funnel-deleted",
+        .edit_funnel => "funnel-updated",
+        .archive_funnel => "funnel-archived",
+        .reactivate_funnel => "funnel-reactivated",
         .add_excluded_network => "network-exclusion-added",
         .delete_excluded_network => "network-exclusion-deleted",
         .update_traffic_policy => "traffic-policy-updated",
@@ -2318,7 +2458,7 @@ fn goalPreviewPage(
         "",
         dependencies.report_timeout_ms,
     ) catch |err| {
-        if (err == error.ReportTimeout) {
+        if (isRecoverableSubmissionPageError(err)) {
             try formErrorPage(
                 dependencies,
                 output,
@@ -2372,6 +2512,79 @@ fn goalSubmissionQuery(
     return query;
 }
 
+fn funnelSubmissionPage(
+    dependencies: Dependencies,
+    output: *std.Io.Writer,
+    form: controller.Form,
+    action: Action,
+    action_context: controller.GoalActionContext,
+    submission: controller.FunnelSubmission,
+) !void {
+    var query = try funnelSubmissionQuery(form, action, action_context);
+    query.funnel_preview_response = submission.previewed;
+    const resolved_calendar = resolvePageCalendar(dependencies, query) catch {
+        try writeError(output, .{
+            .status = 503,
+            .title = "Site calendar unavailable",
+            .message = "The funnel draft cannot be rendered because this site's validated timezone is unavailable.",
+        });
+        return;
+    };
+    var page = controller.loadPage(
+        dependencies.allocator,
+        dependencies.metadata,
+        dependencies.events,
+        .journeys,
+        query,
+        resolved_calendar,
+        null,
+        dependencies.csrf_token,
+        "",
+        dependencies.report_timeout_ms,
+    ) catch |err| {
+        if (isRecoverableSubmissionPageError(err)) {
+            try formErrorPage(
+                dependencies,
+                output,
+                form,
+                action,
+                action_context,
+                err,
+            );
+            return;
+        }
+        return err;
+    };
+    page.funnel_draft = submission.draft;
+    if (page.funnel_management) |*management| {
+        management.draft_steps = submission.steps;
+    } else return error.MissingFunnelManagement;
+    try writePage(output, 200, page);
+}
+
+fn funnelSubmissionQuery(
+    form: controller.Form,
+    action: Action,
+    action_context: controller.GoalActionContext,
+) !model.Query {
+    const form_context = try controller.formContext(form);
+    var query = model.Query{
+        .site = try form.required("site"),
+        .range = form_context.range,
+        .comparison = form_context.comparison,
+        .kind = .funnel,
+        .analysis_filters = action_context.filters,
+        .analysis_segment_id = action_context.segment_id,
+        .funnel_screen = if (action == .edit_funnel) .edit else .new,
+    };
+    if (action == .edit_funnel) {
+        query.funnel_id = try form.required("id");
+    } else if (action != .add_funnel) {
+        return error.InvalidFunnelAction;
+    }
+    return query;
+}
+
 fn formErrorPage(
     dependencies: Dependencies,
     output: *std.Io.Writer,
@@ -2398,6 +2611,15 @@ fn formErrorPage(
             });
             return;
         }
+    else if (action == .add_funnel or action == .edit_funnel)
+        funnelSubmissionQuery(form, action, action_context) catch {
+            try writeError(output, .{
+                .status = 400,
+                .title = "Invalid form",
+                .message = "The submitted funnel context was missing or invalid.",
+            });
+            return;
+        }
     else
         model.Query{
             .site = site,
@@ -2411,7 +2633,11 @@ fn formErrorPage(
                 .reactivate_goal,
                 .delete_goal,
                 => .goal,
-                .add_funnel, .delete_funnel => .funnel,
+                .add_funnel,
+                .edit_funnel,
+                .archive_funnel,
+                .reactivate_funnel,
+                => .funnel,
                 .add_excluded_network, .delete_excluded_network, .update_traffic_policy => .overview,
             },
             .analysis_filters = action_context.filters,
@@ -2431,6 +2657,15 @@ fn formErrorPage(
             query.goal_screen = .detail;
             query.goal_id = form.required("id") catch "";
         },
+        .add_funnel => query.funnel_screen = .new,
+        .edit_funnel => {
+            query.funnel_screen = .edit;
+            query.funnel_id = form.required("id") catch "";
+        },
+        .archive_funnel, .reactivate_funnel => {
+            query.funnel_screen = .detail;
+            query.funnel_id = form.required("id") catch "";
+        },
         else => {},
     }
     if (isStaleSegmentError(failure)) {
@@ -2447,6 +2682,9 @@ fn formErrorPage(
             "event",
         )) .event else .page;
         query.goal_search = form.optional("search") orelse "";
+    }
+    if (query.funnel_screen == .new or query.funnel_screen == .edit) {
+        query.funnel_preview_response = true;
     }
     const resolved_calendar = resolvePageCalendar(dependencies, query) catch {
         try writeError(output, .{
@@ -2468,7 +2706,9 @@ fn formErrorPage(
             .reactivate_goal,
             .delete_goal,
             .add_funnel,
-            .delete_funnel,
+            .edit_funnel,
+            .archive_funnel,
+            .reactivate_funnel,
             => .journeys,
             .add_excluded_network, .delete_excluded_network, .update_traffic_policy => .settings,
         },
@@ -2486,8 +2726,10 @@ fn formErrorPage(
         });
         return;
     };
+    const is_funnel = action == .add_funnel or action == .edit_funnel or
+        action == .archive_funnel or action == .reactivate_funnel;
     page.form_error = if (failure == error.GoalReferenced)
-        "This goal is used by a saved view. It was not deleted; archive it instead or remove the saved reference first."
+        "This goal is used by a saved view or funnel. It was not deleted; archive it instead or remove the exact reference first."
     else if (failure == error.GoalConfirmationMismatch)
         "The goal was not deleted because the confirmation did not exactly match its current name."
     else if (failure == error.GoalNotObserved)
@@ -2495,13 +2737,27 @@ fn formErrorPage(
     else if (failure == error.ReportTimeout)
         "The preview exceeded the shared report deadline. Nothing was saved; narrow the date range or filters and retry."
     else if (isStaleSegmentError(failure))
-        "The selected segment became stale before this goal was submitted. Nothing was saved; the stale segment was removed from this draft."
+        if (is_funnel)
+            "The selected segment became stale before this funnel was submitted. Nothing was saved; the stale segment was removed from this draft."
+        else
+            "The selected segment became stale before this goal was submitted. Nothing was saved; the stale segment was removed from this draft."
     else if (failure == error.StaleFilterProperty)
-        "An ad-hoc property filter became stale before this goal was submitted. Nothing was saved; stale ad-hoc filters were removed from this draft."
+        if (is_funnel)
+            "An ad-hoc property filter became stale before this funnel was submitted. Nothing was saved; stale ad-hoc filters were removed from this draft."
+        else
+            "An ad-hoc property filter became stale before this goal was submitted. Nothing was saved; stale ad-hoc filters were removed from this draft."
     else if (failure == error.GoalNameConflict)
         "The goal was not saved because this site already has a goal with that name."
     else if (failure == error.StaleGoal)
         "The goal changed after this form loaded. Reload its current detail before retrying."
+    else if (failure == error.StaleFunnelGoal)
+        "A referenced goal is archived or unavailable. Nothing was saved; replace the step or reactivate the goal."
+    else if (failure == error.StaleFunnel)
+        "The funnel changed after this form loaded. Reload its current detail before retrying."
+    else if (failure == error.FunnelNameConflict)
+        "The funnel was not saved because this site already has a funnel with that name."
+    else if (failure == error.FunnelDefinitionTooLong)
+        "The funnel definition exceeds the 8 KiB stored limit. Shorten step values or predicates; the draft was preserved."
     else if (failure == error.TooManyActiveGoals)
         "This site already has 32 active goals. Archive one before creating or reactivating another."
     else if (action == .update_traffic_policy)
@@ -2513,14 +2769,15 @@ fn formErrorPage(
         "The definition was not saved. Check its name, match kind, value, and step count.";
     page.form_error_target = switch (action) {
         .add_goal, .edit_goal => .goal,
-        .add_funnel => .funnel,
+        .add_funnel, .edit_funnel => .funnel,
         .add_excluded_network => .network,
         .update_traffic_policy => .traffic_policy,
         .duplicate_goal => .goal_duplicate,
         .archive_goal,
         .reactivate_goal,
         .delete_goal,
-        .delete_funnel,
+        .archive_funnel,
+        .reactivate_funnel,
         .delete_excluded_network,
         => .none,
     };
@@ -2531,11 +2788,22 @@ fn formErrorPage(
         );
     } else if (action == .duplicate_goal) {
         page.goal_draft.name = form.required("name") catch "";
-    } else if (action == .add_funnel) {
-        page.funnel_draft = .{
-            .name = form.required("name") catch "",
-            .steps = form.required("steps") catch "",
-        };
+    } else if (action == .add_funnel or action == .edit_funnel) {
+        page.funnel_draft = controller.funnelDraftFromForm(
+            dependencies.allocator,
+            form,
+        ) catch .{};
+        if (page.funnel_management) |*management| {
+            const active_goals = try dependencies.metadata.listGoals(
+                dependencies.allocator,
+                site,
+            );
+            management.draft_steps = try controller.funnelDraftViews(
+                dependencies.allocator,
+                page.funnel_draft.steps,
+                active_goals,
+            );
+        }
     } else if (action == .add_excluded_network) {
         page.network_draft = form.required("network") catch "";
     } else if (action == .update_traffic_policy) {
@@ -2667,8 +2935,10 @@ fn noticeMessage(code: []const u8) []const u8 {
     if (std.mem.eql(u8, code, "funnel-added")) {
         return "Funnel added.";
     }
-    if (std.mem.eql(u8, code, "funnel-deleted")) {
-        return "Funnel deleted.";
+    if (std.mem.eql(u8, code, "funnel-updated")) return "Funnel updated.";
+    if (std.mem.eql(u8, code, "funnel-archived")) return "Funnel archived.";
+    if (std.mem.eql(u8, code, "funnel-reactivated")) {
+        return "Funnel reactivated.";
     }
     if (std.mem.eql(u8, code, "network-exclusion-added")) {
         return "Network exclusion added and collection policy refreshed.";
@@ -2817,6 +3087,17 @@ fn canonicalUrl(
         .analyze => try output.writeAll("/analyze"),
         .journeys => if (query.kind == .funnel) {
             try output.writeAll("/journeys/funnels");
+            switch (query.funnel_screen) {
+                .none, .list => {},
+                .new => try output.writeAll("/new"),
+                .detail, .edit => {
+                    try output.writeByte('/');
+                    try output.writeAll(query.funnel_id);
+                    if (query.funnel_screen == .edit) {
+                        try output.writeAll("/edit");
+                    }
+                },
+            }
         } else {
             try output.writeAll("/journeys/goals");
             switch (query.goal_screen) {
@@ -2942,6 +3223,10 @@ fn canonicalUrl(
                     try output.print("&entity-page={d}", .{query.goal_entity_page});
                 }
             }
+        } else if (query.funnel_screen != .none) {
+            if (query.funnel_screen == .list and query.funnel_page != 1) {
+                try output.print("&funnel-page={d}", .{query.funnel_page});
+            }
         } else if (query.subject.len != 0) {
             try output.writeAll("&subject=");
             try urlComponent(output, query.subject);
@@ -2960,7 +3245,9 @@ fn canonicalUrl(
         },
         .sessions, .settings => {},
     }
-    if (destination == .journeys and query.goal_screen != .none) {
+    if (destination == .journeys and
+        (query.goal_screen != .none or query.funnel_screen != .none))
+    {
         const suffix = try analysis.canonicalFilterUrlSuffix(
             std.heap.page_allocator,
             query.analysis_segment_id,
@@ -3014,6 +3301,11 @@ fn isStaleSegmentError(err: anyerror) bool {
     };
 }
 
+fn isRecoverableSubmissionPageError(err: anyerror) bool {
+    return err == error.ReportTimeout or err == error.StaleFilterProperty or
+        isStaleSegmentError(err);
+}
+
 fn staleFilterPage(
     allocator: std.mem.Allocator,
     output: *std.Io.Writer,
@@ -3060,6 +3352,7 @@ fn isFormError(err: anyerror) bool {
         error.InvalidSlug,
         error.InvalidName,
         error.InvalidIdentifier,
+        error.InvalidUuid,
         error.InvalidMatchKind,
         error.InvalidGoalEntityKind,
         error.InvalidGoalMatch,
@@ -3087,6 +3380,18 @@ fn isFormError(err: anyerror) bool {
         error.InvalidPath,
         error.InvalidFunnelLength,
         error.InvalidFunnelStep,
+        error.InvalidFunnelAction,
+        error.InvalidFunnelIntent,
+        error.InvalidFunnelOrder,
+        error.InvalidFunnelScope,
+        error.InvalidFunnelWindow,
+        error.InvalidFunnelPredicateRule,
+        error.InvalidFunnelTimestamp,
+        error.UnsupportedFunnelPredicateValues,
+        error.FunnelDefinitionTooLong,
+        error.StaleFunnelGoal,
+        error.StaleFunnel,
+        error.FunnelNameConflict,
         error.GoalNotFound,
         error.FunnelNotFound,
         error.InvalidNetworkPrefix,
@@ -3174,6 +3479,16 @@ test "canonical dashboard URL preserves Overview trend handoff state" {
         "/admin/sites/example/overview?v=1&from=2025-01-01&to=2025-01-02&compare=previous&metric=revenue-EUR",
         output.written(),
     );
+}
+
+test "goal and funnel post-submit page loads retain stale recovery" {
+    try std.testing.expect(isRecoverableSubmissionPageError(error.ReportTimeout));
+    try std.testing.expect(isRecoverableSubmissionPageError(error.SegmentNotFound));
+    try std.testing.expect(isRecoverableSubmissionPageError(error.StaleSegmentState));
+    try std.testing.expect(isRecoverableSubmissionPageError(error.StaleSegmentProperty));
+    try std.testing.expect(isRecoverableSubmissionPageError(error.TooManyAnalysisClauses));
+    try std.testing.expect(isRecoverableSubmissionPageError(error.StaleFilterProperty));
+    try std.testing.expect(!isRecoverableSubmissionPageError(error.InvalidName));
 }
 
 test "post-commit refresh failure leaves one exact retryable site" {

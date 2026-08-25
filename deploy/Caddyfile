@@ -13,7 +13,7 @@ analytics.example {
 	request_body {
 		max_size 192KiB
 	}
-	@analytico_saved_state path /admin/filters/apply /admin/filters/suggest /admin/filters/remove /admin/segments /admin/segments/update /admin/segments/rename /admin/segments/duplicate /admin/segments/delete /admin/saved-views /admin/saved-views/duplicate /admin/saved-views/rename /admin/saved-views/delete
+	@analytico_saved_state path /admin/filters/apply /admin/filters/suggest /admin/filters/remove /admin/segments /admin/segments/update /admin/segments/rename /admin/segments/duplicate /admin/segments/delete /admin/saved-views /admin/saved-views/duplicate /admin/saved-views/rename /admin/saved-views/delete /admin/funnels /admin/funnels/edit
 	request_body @analytico_saved_state {
 		max_size 65536
 	}

@@ -643,7 +643,7 @@ exec 9<&-
 server_pid=
 
 test "$("$binary" doctor "$fixture_dir")" = \
-    "ok metadata=v9 events=v7 sites=2 goals=0 funnels=0 stored_events=45 key=ok"
+    "ok metadata=v10 events=v7 sites=2 goals=0 funnels=0 stored_events=45 key=ok"
 pageview_row=$("$binary" event inspect "$fixture_dir" pageview)
 test "$pageview_row" = $'pageview\t/pricing\tsearch.example\tDE\tFirefox\tLinux\tdesktop\tnewsletter\t{}\t1\t2\t\t0\tfalse\t0\tfalse\tfalse\t0\t0\t1\tfalse'
 custom_row=$("$binary" event inspect "$fixture_dir" signup)
@@ -766,7 +766,7 @@ kill -TERM "$server_pid"
 wait "$server_pid"
 server_pid=
 test "$("$binary" doctor "$fault_dir")" = \
-    "ok metadata=v9 events=v7 sites=1 goals=0 funnels=0 stored_events=0 key=ok"
+    "ok metadata=v10 events=v7 sites=1 goals=0 funnels=0 stored_events=0 key=ok"
 test "$("$binary" m2 identity-links "$fault_dir")" = 0
 if grep -aE 'fault_user|private-plan' \
     "$fault_dir/server.stdout" "$fault_dir/server.stderr" >/dev/null

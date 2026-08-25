@@ -711,6 +711,29 @@ Predicate-free metric-v1 goal output remains unchanged. A predicate-bearing
 goal is unsupported by that frozen grammar and rejects explicitly rather than
 reporting the broader base selector.
 
+D43 adds one specialized funnel-builder preview without extending the
+ordinary metric×dimension grammar. The controller parses an exact canonical
+funnel draft, resolves each Goal UUID to its complete current D42 selector,
+and supplies two through eight ordinary `EventSelector` values plus the
+already composed FilterSet, site-local range, traffic policy, and active-goal
+strict-classifier snapshot. Archived or missing Goal references reject before
+DuckDB.
+
+One finite statement scans the eligible filtered relation once and returns
+exactly one `(step_index, matching_events)` row for every ordered selector.
+Counts are independent: an event may contribute to more than one availability
+row because this result deliberately does not evaluate progression. Row order
+and cardinality must exactly match the request, counts are nonnegative, every
+value is bound, and the existing two-second interrupt/deadline applies. The UI
+labels the result as selector availability and never calls it entrants,
+completion, conversion, drop-off, or timing.
+
+Sequential/consecutive order, one-event/one-step use, Sessions/Visitors and
+window semantics, comparison, progression, timing, and result visualization
+remain #36's separate closed funnel result. D43 adds no query cache,
+projection, rollup, background process, network request, or SQL supplied by a
+request.
+
 Issue #34 additionally proves canonical predicate JSON collision separation,
 event-row versus same-session semantics, filter/segment composition, typed
 errors, exact result components, zero/timeout no-write and reuse, selector-

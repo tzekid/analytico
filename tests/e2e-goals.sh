@@ -312,7 +312,7 @@ jq -e '
 grep -Fq 'GOAL RESULT STATEMENT' "$fixture/goal-predicate-explain.txt"
 grep -F 'Total Time' "$fixture/goal-predicate-explain.txt"
 
-printf '{"goals_e2e":"pass","metadata":9,"events":7,'
+printf '{"goals_e2e":"pass","metadata":10,"events":7,'
 printf '"auth":"passkey+origin+csrf","native_crud":true,'
 printf '"discovery":"bounded+site-isolated+strict","timeout_no_write_reuse":true,'
 printf '"goal_result_profile":"million+p95-under-700ms+explain",'

@@ -265,13 +265,15 @@ async function main() {
     await noScriptPage.waitForURL(/notice=goal-added/);
     assert.equal(await noScriptPage.locator("tr", { hasText: "Signup" }).count(), 1);
     await noScriptPage.getByRole("link", { name: "Funnels" }).click();
-    const funnelForm = noScriptPage.locator('form[action="/admin/funnels"]');
-    await funnelForm.locator("xpath=ancestor::details/summary").click();
+    await noScriptPage.getByRole("link", { name: "New funnel" }).click();
+    const funnelForm = noScriptPage.locator("form.funnel-builder");
     await funnelForm.locator('input[name="name"]').fill("Signup journey");
-    await funnelForm.locator('textarea[name="steps"]').fill("path=/\nevent=signup");
-    await funnelForm.locator('button[type="submit"]').click();
+    await funnelForm.getByRole("button", { name: "Save funnel" }).click();
     await noScriptPage.waitForURL(/notice=funnel-added/);
-    assert.equal(await noScriptPage.locator("li strong", { hasText: "Signup journey" }).count(), 1);
+    assert.equal(
+      await noScriptPage.getByRole("link", { name: "Signup journey" }).count(),
+      1,
+    );
     await noScriptPage.locator('.sidebar-account form[action="/admin/logout"] button').click();
     await noScriptPage.waitForURL(`${origin}/admin/login`);
     await noScript.close();

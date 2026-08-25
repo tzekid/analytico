@@ -392,6 +392,16 @@ nav[aria-label="Pagination"] { display: flex; gap: .75rem; margin-top: 1rem; }
 .definition-grid dt { color: var(--color-inkMuted); font-size: var(--font-xs); font-weight: 750; text-transform: uppercase; }
 .definition-grid dd { margin: var(--space-1) 0 0; }
 .warning-control { border-left: 4px solid var(--color-warning); padding: var(--space-2); background: var(--color-warningWash); }
+.funnel-settings { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-3); margin-block: var(--space-3); }
+.funnel-steps { display: grid; gap: var(--space-4); margin: var(--space-4) 0; padding: 0; counter-reset: none; }
+.funnel-steps > li { list-style: none; min-width: 0; }
+.funnel-step { min-width: 0; border: 1px solid var(--color-borderStrong); border-radius: var(--radius-md); padding: var(--space-3); background: var(--color-surfaceSubtle); }
+.funnel-step > legend { padding-inline: var(--space-1); font-weight: 750; }
+.funnel-step-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); }
+.funnel-step-heading > strong { overflow-wrap: anywhere; }
+.funnel-step .predicate-builder { margin-top: var(--space-3); }
+.selector-availability { border-left: 4px solid var(--color-brandStrong); padding: var(--space-2) var(--space-3); background: var(--color-brandWash); }
+.status-text { font-weight: 750; }
 
 .auth-page header, .auth-page main, .auth-page footer { width: min(100% - 2rem, 42rem); }
 .auth-page main { padding-top: clamp(2rem, 8vh, 6rem); }
@@ -457,6 +467,8 @@ nav[aria-label="Pagination"] { display: flex; gap: .75rem; margin-top: 1rem; }
   .overview-metric-form { width: 100%; min-width: 0; }
   .analysis-series-builder { grid-template-columns: 1fr; }
   .filter-builder .form-grid, .segment-row, .saved-row { grid-template-columns: 1fr; }
+  .funnel-settings { grid-template-columns: 1fr; }
+  .funnel-step-heading { align-items: stretch; flex-direction: column; }
   .answer-grid, .health-grid { grid-template-columns: 1fr; }
   .chart-data > summary { min-height: var(--layout-touchTarget); }
   .mobile-records { overflow: visible; border: 0; background: transparent; }

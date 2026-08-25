@@ -425,6 +425,7 @@ pub fn doctor(
     defer metadata.deinit();
     try metadata.requireCurrent();
     try metadata.integrityCheck();
+    try metadata.validateFunnelDefinitions();
     const site_ids = try metadata.siteIds(allocator);
     const now_seconds = @divFloor(try nowMicros(), 1_000_000);
     for (site_ids) |site_id| {

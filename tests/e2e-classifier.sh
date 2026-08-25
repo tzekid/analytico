@@ -250,7 +250,7 @@ if grep -aF -e 'NotGooglebotLike' -e 'MyUptimeRobotTool' -e 'Googlebot/2.1' \
     exit 1
 fi
 test "$("$binary" doctor "$data")" = \
-    "ok metadata=v9 events=v7 sites=1 goals=0 funnels=0 stored_events=14 key=ok"
+    "ok metadata=v10 events=v7 sites=1 goals=0 funnels=0 stored_events=14 key=ok"
 
 printf '%s\n' "$quality"
 echo "classifier v2 real-loopback, bounded-signal, and serve-counter checks passed"

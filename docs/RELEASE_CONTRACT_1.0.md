@@ -61,7 +61,7 @@ are not passes.
 
 ### Data semantics
 
-- Protocol version 2, event schema version 7, metadata schema version 9, and
+- Protocol version 2, event schema version 7, metadata schema version 10, and
   metric version 2 are
   documented and exercised together while schema-3 rows upgrade without lost
   facts and the documented protocol-v1 and metric-v1 compatibility paths
@@ -101,6 +101,12 @@ are not passes.
   exposes observed type conflicts without coercion, and reports exact total,
   visitor, session, identity-coverage, and per-currency revenue results. Preview
   timeout performs no metadata write and leaves the analysis connection usable.
+- The D43 funnel builder persists one exact bounded definition with two through
+  eight ordered Page, Event, or Goal steps, guarded lifecycle state, and exact
+  Goal references. Preview reports independent selector availability under the
+  current context; it does not claim #36 progression, timing, or conversion.
+  Its two full-draft routes reuse the exact 65,536-byte saved-state proxy and
+  application bound; all other funnel actions retain the ordinary 8 KiB limit.
 - D34 query classification is reversible, default-off parity is exact, every
   documented human-evidence veto wins, strict mode uses one shared product
   predicate, and traffic-quality v5 exposes bounded contradiction/cap/anomaly
@@ -166,6 +172,12 @@ are not passes.
   lifecycle/selectors, 34-active overflow preservation, backup plus independent
   restore, old-binary read of the restored pair, refusal of migrated metadata,
   event/report preservation, and matched-pair rollback before a binary switch.
+- Metadata schema 10 additionally proves exact `d583161` metadata-9/event-7
+  predecessor behavior, complete canonical parent/step copy, genuine partial,
+  child-dropped, and after-drop replay, invalid/noncanonical refusal, repeated
+  migration, stable lifecycle and order, backup plus independent restore,
+  predecessor read and migrated-store refusal, Goal reference guards,
+  event/report preservation, and matched-pair rollback before a binary switch.
 - Core real-browser journeys pass with JavaScript enabled; the complete native
   baseline passes with JavaScript disabled. Mobile, keyboard, focus, contrast,
   reduced-motion, chart/table, zoom, and screen-reader checks meet the written
@@ -189,10 +201,19 @@ are not passes.
   discovery, conflict and typed-operator errors, zero/timeout no-write,
   preview/save/edit/duplicate, exact filtered detail results and currencies,
   same-session false-positive traps, and a native Analyze handoff.
+- Guided-funnel acceptance runs the real authenticated list/new/detail/edit
+  lifecycle with two and eight steps, native reorder, Page/Event/Goal selectors,
+  predicates, settings, zero/stale/timeout states, site isolation, Goal delete
+  conflicts, JavaScript-disabled operation, enhanced equivalence, keyboard use,
+  phone layout, and no startup data request. Selector availability is visibly
+  distinct from #36's ordered result. Exact 65,536/65,537-byte Caddy requests
+  prove complete matcher coverage, application reachability, and deterministic
+  413 rather than 502.
 - The named `e2e-filters`, `e2e-goals`, `e2e-metadata7-migration`,
-  `e2e-metadata8-migration`, and `e2e-metadata9-migration` gates pass
-  independently. All five are mandatory parts of `e2e-release-full`; the full
-  packaged gate is not a substitute for reproducing any focused boundary.
+  `e2e-metadata8-migration`, `e2e-metadata9-migration`, `e2e-funnels`, and
+  `e2e-metadata10-migration` gates pass independently. All seven are mandatory
+  parts of `e2e-release-full`; the full packaged gate is not a substitute for
+  reproducing any focused boundary.
 - Server-rendered chart families validate bounded typed inputs and stable IDs,
   handle empty/single/constant/missing data honestly, expose no inline handlers,
   and pair every visual value with an exact captioned table/details alternative.

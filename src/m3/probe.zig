@@ -724,6 +724,133 @@ pub fn goalPredicatesProfile(
     try output.writeByte('\n');
 }
 
+pub fn funnelAvailabilityProfile(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    output: *std.Io.Writer,
+    directory: []const u8,
+    site_slug: []const u8,
+    start_date: []const u8,
+    end_date: []const u8,
+    explain: bool,
+) !void {
+    try domain.validateSlug(site_slug);
+    const range = analysis.LocalDateRange{
+        .start = start_date,
+        .end = end_date,
+    };
+    try range.validate();
+    const metadata_path = try std.fs.path.join(
+        allocator,
+        &.{ directory, "meta.db" },
+    );
+    var metadata = try meta.Store.open(allocator, metadata_path);
+    defer metadata.deinit();
+    try metadata.requireCurrent();
+    const site_id = try metadata.siteIdBySlug(allocator, site_slug);
+    const policy = try metadata.sitePolicy(allocator, site_id);
+    const goals = try metadata.listGoals(allocator, site_slug);
+    const resolved = try allocator.alloc(analysis.ResolvedGoal, goals.len);
+    for (resolved, goals) |*target, goal| target.* = .{
+        .id = goal.id,
+        .selector = .{
+            .kind = switch (goal.match_kind) {
+                .event => .exact_event,
+                .path => .exact_page,
+                .prefix => .page_prefix,
+            },
+            .value = goal.match_value,
+            .predicates = goal.predicates,
+        },
+    };
+    const event_path = try std.fs.path.join(
+        allocator,
+        &.{ directory, "events.duckdb" },
+    );
+    var store = try events.Store.open(allocator, event_path);
+    defer store.deinit();
+    try store.requireCurrent();
+    const missing_plan = [_]analysis.PropertyPredicate{.{
+        .property_ref = .{ .name = "plan", .scalar_type = .missing },
+        .operator = .is,
+    }};
+    const selectors = [_]analysis.EventSelector{
+        .{ .kind = .exact_event, .value = "signup" },
+        .{ .kind = .exact_event, .value = "purchase" },
+        .{ .kind = .exact_page, .value = "/pricing" },
+        .{ .kind = .page_prefix, .value = "/" },
+        .{ .kind = .exact_event, .value = "purchase", .predicates = &missing_plan },
+        .{ .kind = .exact_page, .value = "/" },
+        .{ .kind = .exact_event, .value = "download" },
+        .{ .kind = .exact_event, .value = "never" },
+    };
+    const request = analysis.FunnelAvailabilityRequest{
+        .site_id = site_id,
+        .range = range,
+        .selectors = &selectors,
+        .active_goals = resolved,
+        .strict_traffic_mode = policy.strict_mode,
+        .timeout_ms = analysis.maximum_timeout_ms,
+    };
+    if (explain) {
+        try output.writeAll(try analysis_store.profileFunnelAvailability(
+            allocator,
+            &store,
+            request,
+        ));
+        return;
+    }
+    if (builtin.mode == .debug) {
+        try std.json.Stringify.value(.{
+            .strict_mode = policy.strict_mode,
+            .selector_count = selectors.len,
+            .performance_enforced = false,
+            .sample_micros = &[_]i64{},
+            .p95_micros = @as(?i64, null),
+            .timeout_interrupted = false,
+            .connection_reused = false,
+        }, .{}, output);
+        try output.writeByte('\n');
+        return;
+    }
+    var timeout_request = request;
+    timeout_request.timeout_ms = 1;
+    if (analysis_store.executeFunnelAvailability(
+        allocator,
+        &store,
+        timeout_request,
+    )) |_| {
+        return error.ExpectedFunnelAvailabilityTimeout;
+    } else |err| if (err != error.AnalysisTimeout) return err;
+    _ = try analysis_store.executeFunnelAvailability(allocator, &store, request);
+    var samples: [10]i64 = undefined;
+    var last: []const analysis.FunnelAvailabilityRow = &.{};
+    for (&samples) |*elapsed| {
+        const started = std.Io.Clock.awake.now(io).nanoseconds;
+        last = try analysis_store.executeFunnelAvailability(
+            allocator,
+            &store,
+            request,
+        );
+        elapsed.* = @intCast(@divTrunc(
+            std.Io.Clock.awake.now(io).nanoseconds - started,
+            std.time.ns_per_us,
+        ));
+    }
+    if (last.len != selectors.len) return error.InvalidFunnelAvailability;
+    std.mem.sort(i64, &samples, {}, std.sort.asc(i64));
+    try std.json.Stringify.value(.{
+        .strict_mode = policy.strict_mode,
+        .selector_count = selectors.len,
+        .performance_enforced = true,
+        .sample_micros = samples,
+        .p95_micros = samples[9],
+        .timeout_interrupted = true,
+        .connection_reused = true,
+    }, .{}, output);
+    try output.writeByte('\n');
+}
+
 pub fn goalCapacityRecovery(
     allocator: std.mem.Allocator,
     output: *std.Io.Writer,

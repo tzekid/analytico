@@ -480,6 +480,29 @@ matched metadata-8/event-7 pair, proves
 `f1609073444e204f6767a9621f87f2f24c2e0f3d` again, and only then switches
 the release symlink. The metadata-8 binary must never start on metadata 9.
 
+For the metadata-schema-10 deployment, repeat the stopped-writer procedure
+with a manifest recording metadata 9 and event 7. Independently restore that
+backup and prove exact predecessor
+`d58316145ff2e7fecb834bedc2e5ea7034349952` opens it and reproduces `doctor`,
+selected metric-v1/metric-v2 reports, and a canonical goal detail before
+migration. The replayable migration creates `funnel_definitions`, copies and
+verifies every valid schema-9 parent/step definition as one canonical document,
+drops `funnel_steps`, drops `funnels`, and writes ledger 10 last. Genuine
+partial-copy, child-dropped/parent-retained, and fully after-drop missing-ledger
+states must retry to the same result; invalid source or noncanonical replacement
+state fails closed.
+
+After migration, verify metadata 10/event 7, `doctor`, report parity, exact
+guided funnel lifecycle and site isolation, Goal reference conflicts, bounded
+selector-availability preview, stale-context no-write recovery, and the
+JavaScript-disabled browser route. The candidate Caddy file adds only the two
+full-draft funnel mutation routes to the existing saved-state matcher. Verify
+the adapted JSON has an exact 65,536-byte ceiling, 65,536 reaches the
+application, and 65,537 returns 413 without upstream dispatch. Rollback stops
+the writer, restores the matched metadata-9/event-7 pair and predecessor Caddy
+file, proves `d583161` again, and only then switches the release symlink. The
+metadata-9 binary must never start on metadata 10.
+
 ## 11. Retention and site deletion
 
 Run maintenance with the service stopped:
@@ -544,7 +567,7 @@ zig build e2e-m0 e2e-m1 e2e-m2 e2e-timezone e2e-properties \
   e2e-m2-browser e2e-identity-browser e2e-tracker-browser e2e-m3 e2e-m4 \
   e2e-m6 e2e-m7 e2e-filters e2e-goals e2e-passkey-p1 \
   e2e-metadata7-migration e2e-metadata8-migration \
-  e2e-metadata9-migration \
+  e2e-metadata9-migration e2e-funnels e2e-metadata10-migration \
   -Doptimize=ReleaseSafe -Dturso-native-path=<exact-prefix>
 zig build bench-properties \
   -Doptimize=ReleaseSafe -Dturso-native-path=<exact-prefix>
@@ -558,8 +581,10 @@ zig build e2e-release-full \
 Caddy syntax, systemd security, and a fresh real-data report from the extracted
 archive, then runs the complete packaged real-process set including classifier,
 traffic-quality, universal filters, guided goals, and exact schema-4, schema-5,
-schema-6, metadata-6, metadata-7, metadata-8, and metadata-9 predecessors. The
-named `e2e-filters`, `e2e-goals`, `e2e-metadata7-migration`,
-`e2e-metadata8-migration`, and `e2e-metadata9-migration` gates run independently
-above and again inside this full packaged qualification. Large event/browser
-fixtures are acceptance tooling only and are not shipped.
+schema-6, metadata-6, metadata-7, metadata-8, metadata-9, and metadata-10
+predecessors. The named `e2e-filters`, `e2e-goals`,
+`e2e-metadata7-migration`,
+`e2e-metadata8-migration`, `e2e-metadata9-migration`, `e2e-funnels`, and
+`e2e-metadata10-migration` gates run independently above and again inside this
+full packaged qualification. Large event/browser fixtures are acceptance
+tooling only and are not shipped.

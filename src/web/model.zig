@@ -1,6 +1,7 @@
 const analysis = @import("../analysis.zig");
 const calendar = @import("../calendar.zig");
 const diagnostics = @import("../diagnostics.zig");
+const funnel = @import("../funnel.zig");
 const meta = @import("../store/meta.zig");
 const report = @import("../report.zig");
 
@@ -61,6 +62,7 @@ pub const Query = struct {
     analysis_breakdown: ?analysis.Query = null,
     analysis_filters: analysis.FilterSet = .{},
     analysis_segment_id: ?[]const u8 = null,
+    canonical_filter_suffix: []const u8 = "",
     goal_screen: GoalScreen = .none,
     goal_id: []const u8 = "",
     goal_page: u32 = 1,
@@ -69,9 +71,21 @@ pub const Query = struct {
     goal_entity_page: u32 = 1,
     goal_entity_set: bool = false,
     goal_preview_response: bool = false,
+    funnel_screen: FunnelScreen = .none,
+    funnel_id: []const u8 = "",
+    funnel_page: u32 = 1,
+    funnel_preview_response: bool = false,
 };
 
 pub const GoalScreen = enum {
+    none,
+    list,
+    new,
+    detail,
+    edit,
+};
+
+pub const FunnelScreen = enum {
     none,
     list,
     new,
@@ -314,9 +328,59 @@ pub const GoalManagement = struct {
     next_entities_url: ?[]const u8 = null,
 };
 
+pub const FunnelStepDraft = struct {
+    kind: analysis.SelectorKind = .exact_page,
+    value: []const u8 = "/",
+    goal_id: []const u8 = "",
+    predicates: []const GoalPredicateDraft = &.{},
+};
+
 pub const FunnelDraft = struct {
     name: []const u8 = "",
-    steps: []const u8 = "path=/pricing\nevent=signup",
+    order: funnel.Order = .sequential,
+    scope: funnel.Scope = .sessions,
+    window: funnel.Window = .same_session,
+    steps: []const FunnelStepDraft = &.{},
+};
+
+pub const FunnelStepView = struct {
+    index: usize,
+    draft: FunnelStepDraft,
+    label: []const u8,
+    stale: bool = false,
+    matching_events: ?i64 = null,
+};
+
+pub const FunnelDefinitionView = struct {
+    id: []const u8,
+    name: []const u8,
+    order: funnel.Order,
+    scope: funnel.Scope,
+    window: funnel.Window,
+    steps: []const FunnelStepView,
+    archived: bool,
+    created_at: []const u8,
+    updated_at: []const u8,
+    updated_at_utc_micros: i64,
+    detail_url: []const u8,
+    edit_url: []const u8,
+};
+
+pub const FunnelManagement = struct {
+    screen: FunnelScreen,
+    definitions: []const FunnelDefinitionView = &.{},
+    selected: ?FunnelDefinitionView = null,
+    draft_steps: []const FunnelStepView = &.{},
+    goals: []const GoalDefinitionView = &.{},
+    filter_count: usize = 0,
+    segment_name: []const u8 = "",
+    list_url: []const u8,
+    new_url: []const u8,
+    create_action_url: []const u8,
+    edit_action_url: []const u8,
+    action_suffix: []const u8,
+    previous_definitions_url: ?[]const u8 = null,
+    next_definitions_url: ?[]const u8 = null,
 };
 
 pub const FormErrorTarget = enum {
@@ -347,6 +411,7 @@ pub const Page = struct {
     analyze_breakdown: ?AnalyzeBreakdown = null,
     collection_diagnostics: ?diagnostics.Snapshot = null,
     goal_management: ?GoalManagement = null,
+    funnel_management: ?FunnelManagement = null,
     goals: []const meta.Goal,
     funnels: []const meta.Funnel,
     saved_views: []const meta.SavedView = &.{},
