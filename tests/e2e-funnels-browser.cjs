@@ -10,6 +10,72 @@ async function nativeClick(page, button) {
   ]).then(([response]) => response);
 }
 
+async function assertExactFunnelGeometry(section) {
+  const percent = (numerator, denominator) => {
+    const basisPoints = denominator === 0
+      ? 0
+      : Math.min(10000, Math.floor((numerator * 10000) / denominator));
+    return `${Math.floor(basisPoints / 100)}.${String(basisPoints % 100).padStart(2, "0")}%`;
+  };
+  const currentCounts = (await section
+    .locator('td[data-label="Current count"]')
+    .allTextContents()).map(Number);
+  const currentDropoffs = (await section
+    .locator('td[data-label="Current drop-off before step"]')
+    .allTextContents()).map(Number);
+  const currentDropoffRates = await section
+    .locator('td[data-label="Current drop-off rate before step"]')
+    .allTextContents();
+  const currentWidths = await section.locator("svg .funnel-bar").evaluateAll(
+    (bars) => bars.map((bar) => Number(bar.getAttribute("width"))),
+  );
+  const currentLabels = await section.locator("svg .chart-value").allTextContents();
+  assert.ok(currentCounts.length >= 2);
+  assert.equal(currentWidths.length, currentCounts.length);
+  assert.equal(currentLabels.length, currentCounts.length);
+  for (let index = 0; index < currentCounts.length; index += 1) {
+    const prior = index === 0 ? currentCounts[0] : currentCounts[index - 1];
+    const expectedWidth = currentCounts[0] === 0
+      ? 0
+      : Math.floor((currentCounts[index] * 620) / currentCounts[0]);
+    assert.equal(currentWidths[index], expectedWidth);
+    assert.equal(currentDropoffs[index], prior - currentCounts[index]);
+    assert.equal(
+      currentDropoffRates[index],
+      percent(prior - currentCounts[index], prior),
+    );
+    assert.match(currentLabels[index], new RegExp(`^${currentCounts[index]} · `));
+  }
+
+  const comparisonCells = section.locator('td[data-label="Comparison count"]');
+  const comparisonCount = await comparisonCells.count();
+  if (comparisonCount === 0) return;
+  const comparisonCounts = (await comparisonCells.allTextContents()).map(Number);
+  const comparisonDropoffs = (await section
+    .locator('td[data-label="Comparison drop-off before step"]')
+    .allTextContents()).map(Number);
+  const comparisonDropoffRates = await section
+    .locator('td[data-label="Comparison drop-off rate before step"]')
+    .allTextContents();
+  const comparisonWidths = await section
+    .locator("svg .funnel-comparison-bar")
+    .evaluateAll((bars) => bars.map((bar) => Number(bar.getAttribute("width"))));
+  assert.equal(comparisonCounts.length, currentCounts.length);
+  assert.equal(comparisonWidths.length, comparisonCounts.length);
+  for (let index = 0; index < comparisonCounts.length; index += 1) {
+    const prior = index === 0 ? comparisonCounts[0] : comparisonCounts[index - 1];
+    const expectedWidth = comparisonCounts[0] === 0
+      ? 0
+      : Math.floor((comparisonCounts[index] * 620) / comparisonCounts[0]);
+    assert.equal(comparisonWidths[index], expectedWidth);
+    assert.equal(comparisonDropoffs[index], prior - comparisonCounts[index]);
+    assert.equal(
+      comparisonDropoffRates[index],
+      percent(prior - comparisonCounts[index], prior),
+    );
+  }
+}
+
 async function main() {
   const [origin, session, goalId, segmentId, staleSegmentId, desktopShot, mobileShot] =
     process.argv.slice(2);
@@ -78,7 +144,7 @@ async function main() {
   }
   response = await nativeClick(
     page,
-    form.getByRole("button", { name: "Preview selector availability", exact: true }),
+    form.getByRole("button", { name: "Preview funnel", exact: true }),
   );
   assert.equal(response.status(), 422);
   assert.doesNotMatch(await page.locator("body").innerText(), /Internal Server Error/i);
@@ -152,7 +218,7 @@ async function main() {
   await form.locator('input[name="step_value_4"]').fill("never");
   response = await nativeClick(
     page,
-    form.getByRole("button", { name: "Preview selector availability", exact: true }),
+    form.getByRole("button", { name: "Preview funnel", exact: true }),
   );
   assert.equal(response.status(), 200);
   responseBytes.push((await response.body()).length);
@@ -164,6 +230,18 @@ async function main() {
   assert.match(availability[2], /0 matching event.*Zero matches/);
   assert.match(availability[3], /0 matching event.*Zero matches/);
   assert.ok(availability.every((value) => /not funnel progression/i.test(value)));
+  let orderedResult = page.locator("section.funnel-ordered-result");
+  assert.equal(
+    await orderedResult.getByRole("heading", { name: "Ordered funnel result", exact: true }).count(),
+    1,
+  );
+  assert.match(await orderedResult.innerText(), /Persistent visitors.*consecutive/is);
+  assert.match(await orderedResult.innerText(), /none completed every step/i);
+  const previewExact = orderedResult.locator("details.chart-data");
+  await previewExact.locator("summary").click();
+  assert.match(await previewExact.innerText(), /CURRENT PERSISTENT VISITORS/i);
+  assert.match(await previewExact.innerText(), /CURRENT MEDIAN FROM PRIOR/i);
+  await assertExactFunnelGeometry(orderedResult);
 
   response = await nativeClick(
     page,
@@ -196,7 +274,29 @@ async function main() {
   const detailText = await page.locator("main").innerText();
   assert.match(detailText, /consecutive.*visitors.*1 day/is);
   assert.match(detailText, /plan.*string:is.*pro/is);
+  orderedResult = page.locator("section.funnel-ordered-result");
+  assert.equal(await orderedResult.count(), 1);
+  assert.match(await orderedResult.innerText(), /Ordered funnel result/);
   const editHref = await page.getByRole("link", { name: "Edit funnel" }).getAttribute("href");
+  const comparisonUrl = new URL(createdHref, origin);
+  comparisonUrl.searchParams.set("compare", "previous");
+  response = await page.goto(comparisonUrl.href, { waitUntil: "load" });
+  assert.equal(response.status(), 200);
+  orderedResult = page.locator("section.funnel-ordered-result");
+  assert.match(
+    await orderedResult.innerText(),
+    /Comparison summary · \d{4}-\d{2}-\d{2} through \d{4}-\d{2}-\d{2}/,
+  );
+  assert.match(
+    await orderedResult.innerText(),
+    /Comparison persistent visitor step-one identities/i,
+  );
+  const comparisonExact = orderedResult.locator("details.chart-data");
+  await comparisonExact.locator("summary").click();
+  assert.match(await comparisonExact.innerText(), /COMPARISON PERSISTENT VISITORS/i);
+  await assertExactFunnelGeometry(orderedResult);
+  response = await page.goto(`${origin}${createdHref}`, { waitUntil: "load" });
+  assert.equal(response.status(), 200);
   const staleEditPage = await native.newPage();
   response = await staleEditPage.goto(`${origin}${editHref}`, { waitUntil: "load" });
   assert.equal(response.status(), 200);
@@ -256,7 +356,7 @@ async function main() {
   form = page.locator("form.funnel-builder");
   response = await nativeClick(
     page,
-    form.getByRole("button", { name: "Preview selector availability", exact: true }),
+    form.getByRole("button", { name: "Preview funnel", exact: true }),
   );
   assert.equal(response.status(), 422);
   assert.match(await page.locator('[role="alert"]').innerText(), /archived or unavailable/);
@@ -397,6 +497,18 @@ async function main() {
     enhancedRequests.some((request) => request.htmx && request.method === "POST"),
     true,
   );
+  response = await mobile.goto(`${origin}${renamedHref}`, { waitUntil: "load" });
+  assert.equal(response.status(), 200);
+  assert.equal(await mobile.locator("section.funnel-ordered-result").count(), 1);
+  await mobile.locator("section.funnel-ordered-result details.chart-data summary").click();
+  assert.match(
+    await mobile.locator("section.funnel-ordered-result details.chart-data").innerText(),
+    /CURRENT PERSISTENT VISITORS/i,
+  );
+  assert.equal(
+    await mobile.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+    true,
+  );
   await mobile.screenshot({ path: mobileShot, fullPage: true });
   await enhanced.close();
   await browser.close();
@@ -407,6 +519,7 @@ async function main() {
     oversized_definition_recovery: true,
     settings_and_reorder: true,
     predicate_goal_and_zero_preview: true,
+    ordered_result: true,
     stable_id_after_edit: createdId,
     goal_reference_conflict: true,
     stale_goal_recovery: true,

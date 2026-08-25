@@ -1,6 +1,7 @@
 const std = @import("std");
 const analysis = @import("../analysis.zig");
 const domain = @import("../domain.zig");
+const funnel = @import("../funnel.zig");
 const property = @import("../property.zig");
 const deadline = @import("deadline.zig");
 const duckdb = @import("duckdb.zig");
@@ -602,10 +603,24 @@ pub fn executeFunnelAvailability(
 ) ![]const analysis.FunnelAvailabilityRow {
     try request.validate();
     var budget = deadline.Budget.init(request.timeout_ms);
+    return executeFunnelAvailabilityWithBudget(
+        allocator,
+        event_store,
+        request,
+        &budget,
+    );
+}
+
+fn executeFunnelAvailabilityWithBudget(
+    allocator: std.mem.Allocator,
+    event_store: *events.Store,
+    request: analysis.FunnelAvailabilityRequest,
+    budget: *deadline.Budget,
+) ![]const analysis.FunnelAvailabilityRow {
     var result = try executePlan(
         &event_store.database,
         try compileFunnelAvailability(allocator, request),
-        &budget,
+        budget,
     );
     defer result.deinit();
     if (result.columnCount() != 2 or result.rowCount() != request.selectors.len) {
@@ -630,6 +645,74 @@ pub fn executeFunnelAvailability(
     return rows;
 }
 
+pub fn executeFunnelResult(
+    allocator: std.mem.Allocator,
+    event_store: *events.Store,
+    request: funnel.ResultRequest,
+) !funnel.Result {
+    try request.validate();
+    var budget = deadline.Budget.init(request.timeout_ms);
+    return executeFunnelResultWithBudget(allocator, event_store, request, &budget);
+}
+
+pub fn executeFunnelPreview(
+    allocator: std.mem.Allocator,
+    event_store: *events.Store,
+    request: funnel.ResultRequest,
+) !funnel.PreviewResult {
+    try request.validate();
+    var budget = deadline.Budget.init(request.timeout_ms);
+    const availability = try executeFunnelAvailabilityWithBudget(
+        allocator,
+        event_store,
+        .{
+            .site_id = request.site_id,
+            .range = request.range,
+            .selectors = request.selectors,
+            .filters = request.filters,
+            .active_goals = request.active_goals,
+            .strict_traffic_mode = request.strict_traffic_mode,
+            .timeout_ms = request.timeout_ms,
+        },
+        &budget,
+    );
+    return .{
+        .availability = availability,
+        .result = try executeFunnelResultWithBudget(
+            allocator,
+            event_store,
+            request,
+            &budget,
+        ),
+    };
+}
+
+pub fn profileFunnelResult(
+    allocator: std.mem.Allocator,
+    event_store: *events.Store,
+    request: funnel.ResultRequest,
+) ![]u8 {
+    try request.validate();
+    var output = std.Io.Writer.Allocating.init(allocator);
+    try output.writer.writeAll("FUNNEL ORDERED RESULT STATEMENT\n");
+    try profileOverviewPlan(
+        allocator,
+        event_store,
+        try compileFunnelResult(allocator, request, request.range),
+        &output.writer,
+    );
+    if (request.comparison_range) |range| {
+        try output.writer.writeAll("FUNNEL ORDERED COMPARISON STATEMENT\n");
+        try profileOverviewPlan(
+            allocator,
+            event_store,
+            try compileFunnelResult(allocator, request, range),
+            &output.writer,
+        );
+    }
+    return output.toOwnedSlice();
+}
+
 pub fn profileFunnelAvailability(
     allocator: std.mem.Allocator,
     event_store: *events.Store,
@@ -645,6 +728,107 @@ pub fn profileFunnelAvailability(
         &output.writer,
     );
     return output.toOwnedSlice();
+}
+
+fn executeFunnelResultWithBudget(
+    allocator: std.mem.Allocator,
+    event_store: *events.Store,
+    request: funnel.ResultRequest,
+    budget: *deadline.Budget,
+) !funnel.Result {
+    const current = try executeFunnelRun(
+        allocator,
+        event_store,
+        request,
+        request.range,
+        budget,
+    );
+    const comparison = if (request.comparison_range) |range|
+        try executeFunnelRun(allocator, event_store, request, range, budget)
+    else
+        null;
+    return .{ .current = current, .comparison = comparison };
+}
+
+fn executeFunnelRun(
+    allocator: std.mem.Allocator,
+    event_store: *events.Store,
+    request: funnel.ResultRequest,
+    range: analysis.LocalDateRange,
+    budget: *deadline.Budget,
+) !funnel.Run {
+    var result = try executePlan(
+        &event_store.database,
+        try compileFunnelResult(allocator, request, range),
+        budget,
+    );
+    defer result.deinit();
+    if (result.columnCount() != 7 or
+        result.rowCount() != request.selectors.len)
+    {
+        return error.InvalidFunnelResult;
+    }
+    const steps = try allocator.alloc(funnel.ResultStep, request.selectors.len);
+    errdefer allocator.free(steps);
+    var median_total: ?i64 = null;
+    var persistent: i64 = -1;
+    var ephemeral: i64 = -1;
+    var legacy: i64 = -1;
+    for (steps, 0..) |*step, index| {
+        const step_index = result.int64(0, index);
+        const participants = result.int64(1, index);
+        const row_persistent = result.int64(4, index);
+        const row_ephemeral = result.int64(5, index);
+        const row_legacy = result.int64(6, index);
+        if (step_index != @as(i64, @intCast(index)) or participants < 0 or
+            (index == 0 and !result.isNull(2, index)) or
+            (index != 0 and participants != 0 and result.isNull(2, index)) or
+            row_persistent < -1 or row_ephemeral < -1 or row_legacy < -1)
+        {
+            return error.InvalidFunnelResult;
+        }
+        if (index == 0) {
+            persistent = row_persistent;
+            ephemeral = row_ephemeral;
+            legacy = row_legacy;
+        } else if (persistent != row_persistent or ephemeral != row_ephemeral or
+            legacy != row_legacy)
+        {
+            return error.InvalidFunnelResult;
+        }
+        step.* = .{
+            .step_index = @intCast(step_index),
+            .participants = participants,
+            .median_from_prior_micros = if (result.isNull(2, index))
+                null
+            else
+                result.int64(2, index),
+        };
+        if (index + 1 == steps.len) {
+            median_total = if (result.isNull(3, index))
+                null
+            else
+                result.int64(3, index);
+        } else if (!result.isNull(3, index)) {
+            return error.InvalidFunnelResult;
+        }
+    }
+    const run = funnel.Run{
+        .entrants = steps[0].participants,
+        .completions = steps[steps.len - 1].participants,
+        .median_total_micros = median_total,
+        .steps = steps,
+        .identity_coverage = if (request.scope == .visitors)
+            .{
+                .persistent_step_one = persistent,
+                .ephemeral_step_one = ephemeral,
+                .legacy_step_one = legacy,
+            }
+        else
+            null,
+    };
+    try run.validate(request.selectors.len, request.scope);
+    return run;
 }
 
 fn executeGoalResultWithBudget(
@@ -975,6 +1159,244 @@ pub fn compileFunnelAvailability(
             " AS step_index, unnest(counts)::BIGINT AS matching_events" ++
             " FROM availability_counts ORDER BY step_index",
     );
+    return builder.finish();
+}
+
+pub fn compileFunnelResult(
+    allocator: std.mem.Allocator,
+    request: funnel.ResultRequest,
+    range: analysis.LocalDateRange,
+) !StatementPlan {
+    try request.validate();
+    try range.validate();
+    const execution = request.execution(range);
+    try execution.validate();
+    const greedy_same_session = request.order == .sequential and
+        request.window == .same_session;
+    const greedy_sessions = greedy_same_session and request.scope == .sessions;
+    var builder = Builder.init(allocator);
+    try writeCommon(&builder, execution, range, false, false);
+    try builder.write(", funnel_source AS ");
+    if (request.scope == .visitors) try builder.write("MATERIALIZED ");
+    try builder.write(
+        "(SELECT e.session_id, e.person_key, e.identity_quality, e.kind," ++
+            " e.event_name, e.path, e.properties_json," ++
+            " e.occurred_at_utc_micros, e.sequence," ++
+            " e.received_at_utc_micros, e.event_id FROM qualified e)," ++
+            " coverage AS (SELECT ",
+    );
+    if (request.scope == .visitors) {
+        inline for (.{ @as(u8, 1), @as(u8, 2), @as(u8, 3) }, 0..) |quality, index| {
+            if (index != 0) try builder.write(", ");
+            try builder.write("count(DISTINCT person_key) FILTER (WHERE identity_quality = ");
+            try builder.bindInteger(quality);
+            try builder.write(" AND ");
+            try writeSelector(&builder, request.selectors[0], "e");
+            try builder.write(")::BIGINT AS ");
+            try builder.write(switch (index) {
+                0 => "persistent_step_one",
+                1 => "ephemeral_step_one",
+                2 => "legacy_step_one",
+                else => unreachable,
+            });
+        }
+        try builder.write(" FROM funnel_source e" ++
+            "), funnel_events AS (SELECT e.*, ");
+        if (request.window == .same_session) {
+            try builder.write("e.session_id");
+        } else {
+            try builder.write("e.person_key");
+        }
+        try builder.write(" AS chain_key, e.person_key AS count_key" ++
+            " FROM funnel_source e WHERE e.identity_quality = 1" ++
+            " AND e.person_key IS NOT NULL)");
+    } else {
+        try builder.write(
+            "-1::BIGINT AS persistent_step_one," ++
+                " -1::BIGINT AS ephemeral_step_one," ++
+                " -1::BIGINT AS legacy_step_one" ++
+                "), funnel_events AS (SELECT e.*, e.session_id AS chain_key," ++
+                " e.session_id AS count_key FROM funnel_source e)",
+        );
+    }
+    try builder.write(
+        ", numbered AS MATERIALIZED (SELECT e.chain_key, e.count_key," ++
+            " e.occurred_at_utc_micros, e.sequence," ++
+            " e.received_at_utc_micros, e.event_id," ++
+            " row_number() OVER (PARTITION BY chain_key ORDER BY" ++
+            " occurred_at_utc_micros, sequence, received_at_utc_micros," ++
+            " event_id) AS position",
+    );
+    for (request.selectors, 0..) |selector, index| {
+        try builder.write(", (");
+        try writeSelector(&builder, selector, "e");
+        try builder.write(") AS matches_");
+        try builder.output.writer.print("{d}", .{index});
+    }
+    try builder.write(" FROM funnel_events e)");
+    for (request.selectors, 0..) |_, index| {
+        try builder.write(", candidate_");
+        try builder.output.writer.print("{d}", .{index});
+        try builder.write(
+            " AS (SELECT e.chain_key, e.count_key," ++
+                " e.occurred_at_utc_micros, e.sequence," ++
+                " e.received_at_utc_micros, e.event_id, e.position",
+        );
+        try builder.write(" FROM numbered e WHERE e.matches_");
+        try builder.output.writer.print("{d}", .{index});
+        try builder.write(")");
+    }
+
+    for (request.selectors, 0..) |_, index| {
+        try builder.write(", step_");
+        try builder.output.writer.print("{d}", .{index});
+        try builder.write(" AS (SELECT ");
+        if (index == 0) {
+            if (greedy_same_session) {
+                try builder.write(
+                    "e.chain_key, e.count_key," ++
+                        " arg_min(e.occurred_at_utc_micros, e.position)" ++
+                        " AS start_at," ++
+                        " arg_min(e.sequence, e.position) AS start_sequence," ++
+                        " arg_min(e.received_at_utc_micros, e.position)" ++
+                        " AS start_received," ++
+                        " arg_min(e.event_id, e.position) AS start_event_id," ++
+                        " arg_min(e.occurred_at_utc_micros, e.position)" ++
+                        " AS matched_at," ++
+                        " arg_min(e.sequence, e.position) AS matched_sequence," ++
+                        " arg_min(e.received_at_utc_micros, e.position)" ++
+                        " AS matched_received," ++
+                        " arg_min(e.event_id, e.position) AS matched_event_id," ++
+                        " arg_min(e.occurred_at_utc_micros, e.position)" ++
+                        " AS prior_at, min(e.position) AS matched_position" ++
+                        " FROM candidate_0 e GROUP BY e.chain_key, e.count_key",
+                );
+            } else {
+                try builder.write(
+                    "e.chain_key, e.count_key," ++
+                        " e.occurred_at_utc_micros AS start_at," ++
+                        " e.sequence AS start_sequence," ++
+                        " e.received_at_utc_micros AS start_received," ++
+                        " e.event_id AS start_event_id," ++
+                        " e.occurred_at_utc_micros AS matched_at," ++
+                        " e.sequence AS matched_sequence," ++
+                        " e.received_at_utc_micros AS matched_received," ++
+                        " e.event_id AS matched_event_id," ++
+                        " e.occurred_at_utc_micros AS prior_at," ++
+                        " e.position AS matched_position" ++
+                        " FROM candidate_0 e",
+                );
+            }
+        } else {
+            try builder.write("p.chain_key, p.count_key, p.start_at," ++
+                " p.start_sequence, p.start_received, p.start_event_id,");
+            if (greedy_same_session) {
+                try builder.write(
+                    " arg_min(n.occurred_at_utc_micros, n.position)" ++
+                        " AS matched_at," ++
+                        " arg_min(n.sequence, n.position) AS matched_sequence," ++
+                        " arg_min(n.received_at_utc_micros, n.position)" ++
+                        " AS matched_received," ++
+                        " arg_min(n.event_id, n.position) AS matched_event_id," ++
+                        " p.matched_at AS prior_at," ++
+                        " min(n.position) AS matched_position FROM step_",
+                );
+            } else {
+                try builder.write(
+                    " n.occurred_at_utc_micros AS matched_at," ++
+                        " n.sequence AS matched_sequence," ++
+                        " n.received_at_utc_micros AS matched_received," ++
+                        " n.event_id AS matched_event_id," ++
+                        " p.matched_at AS prior_at," ++
+                        " n.position AS matched_position FROM step_",
+                );
+            }
+            try builder.output.writer.print("{d}", .{index - 1});
+            try builder.write(" p ");
+            if (!greedy_same_session and request.order == .sequential) {
+                try builder.write("ASOF ");
+            }
+            try builder.write("JOIN candidate_");
+            try builder.output.writer.print("{d}", .{index});
+            try builder.write(" n ON n.chain_key = p.chain_key AND n.position ");
+            try builder.write(if (request.order == .consecutive) "= " else "> ");
+            try builder.write("p.matched_position");
+            if (request.order == .consecutive) try builder.write(" + 1");
+            if (request.window != .same_session) {
+                const window_micros = std.math.mul(
+                    i64,
+                    request.window.seconds(),
+                    std.time.us_per_s,
+                ) catch return error.InvalidFunnelWindow;
+                try builder.write(" WHERE n.occurred_at_utc_micros" ++
+                    " - p.start_at BETWEEN 0 AND ");
+                try builder.bindInteger(window_micros);
+            }
+            if (greedy_same_session) {
+                try builder.write(
+                    " GROUP BY p.chain_key, p.count_key, p.start_at," ++
+                        " p.start_sequence, p.start_received," ++
+                        " p.start_event_id, p.matched_at," ++
+                        " p.matched_position",
+                );
+            }
+        }
+        try builder.write(")");
+        try builder.write(", selected_");
+        try builder.output.writer.print("{d}", .{index});
+        if (greedy_sessions) {
+            try builder.write(
+                " AS (SELECT count_key, matched_at, prior_at, start_at" ++
+                    " FROM step_",
+            );
+            try builder.output.writer.print("{d}", .{index});
+            try builder.write(")");
+        } else {
+            try builder.write(" AS (SELECT *, row_number() OVER" ++
+                " (PARTITION BY count_key ORDER BY matched_at," ++
+                " matched_sequence, matched_received, matched_event_id," ++
+                " start_at, start_sequence, start_received," ++
+                " start_event_id) AS selected FROM step_");
+            try builder.output.writer.print("{d}", .{index});
+            try builder.write(")");
+        }
+    }
+
+    try builder.write(" SELECT * FROM (");
+    for (request.selectors, 0..) |_, index| {
+        if (index != 0) try builder.write(" UNION ALL ");
+        try builder.write("SELECT ");
+        try builder.bindInteger(@intCast(index));
+        try builder.write("::BIGINT AS step_index, count(*)::BIGINT" ++
+            " AS participants, ");
+        if (index == 0) {
+            try builder.write("NULL::BIGINT");
+        } else {
+            try builder.write(
+                "CAST(round(median(matched_at - prior_at)) AS BIGINT)",
+            );
+        }
+        try builder.write(" AS median_from_prior_micros, ");
+        if (index + 1 == request.selectors.len) {
+            try builder.write(
+                "CAST(round(median(matched_at - start_at)) AS BIGINT)",
+            );
+        } else {
+            try builder.write("NULL::BIGINT");
+        }
+        try builder.write(
+            " AS median_total_micros," ++
+                " (SELECT persistent_step_one FROM coverage)" ++
+                " AS persistent_step_one," ++
+                " (SELECT ephemeral_step_one FROM coverage)" ++
+                " AS ephemeral_step_one," ++
+                " (SELECT legacy_step_one FROM coverage) AS legacy_step_one" ++
+                " FROM selected_",
+        );
+        try builder.output.writer.print("{d}", .{index});
+        if (!greedy_sessions) try builder.write(" WHERE selected = 1");
+    }
+    try builder.write(") ordered_result ORDER BY step_index");
     return builder.finish();
 }
 
@@ -5636,6 +6058,117 @@ test "funnel availability compiles all selectors over one qualified relation" {
     try std.testing.expect(planContainsText(plan, adversarial));
 }
 
+test "ordered funnel compiler binds selectors and emits bounded position links" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const adversarial = "x'); SELECT * FROM events; --";
+    const values = [_][]const u8{adversarial};
+    const predicates = [_]analysis.PropertyPredicate{.{
+        .property_ref = .{ .name = "plan", .scalar_type = .string },
+        .operator = .is,
+        .values = &values,
+    }};
+    const selectors = [_]analysis.EventSelector{
+        .{ .kind = .exact_page, .value = "/" },
+        .{ .kind = .exact_event, .value = "signup", .predicates = &predicates },
+        .{ .kind = .exact_event, .value = "purchase", .predicates = &predicates },
+    };
+    const request = funnel.ResultRequest{
+        .site_id = "00000000-0000-4000-8000-000000000024",
+        .range = .{ .start = "2026-01-01", .end = "2026-01-02" },
+        .order = .sequential,
+        .scope = .sessions,
+        .window = .one_day,
+        .selectors = &selectors,
+    };
+    const plan = try compileFunnelResult(
+        arena.allocator(),
+        request,
+        request.range,
+    );
+    try std.testing.expect(plan.sql.len <= maximum_sql_bytes);
+    try std.testing.expect(plan.bindings.len <= maximum_bindings);
+    try std.testing.expect(std.mem.indexOf(u8, plan.sql, adversarial) == null);
+    try std.testing.expect(planContainsText(plan, adversarial));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(
+        u8,
+        plan.sql,
+        "row_number() OVER (PARTITION BY chain_key",
+    ));
+    try std.testing.expectEqual(selectors.len - 1, std.mem.count(
+        u8,
+        plan.sql,
+        "n.position > p.matched_position",
+    ));
+    try std.testing.expectEqual(selectors.len, std.mem.count(
+        u8,
+        plan.sql,
+        " FROM numbered e WHERE ",
+    ));
+    try std.testing.expectEqual(selectors.len - 1, std.mem.count(
+        u8,
+        plan.sql,
+        " p ASOF JOIN candidate_",
+    ));
+    try std.testing.expect(std.mem.indexOf(u8, plan.sql, "step_2 AS") != null);
+
+    var consecutive = request;
+    consecutive.order = .consecutive;
+    const consecutive_plan = try compileFunnelResult(
+        arena.allocator(),
+        consecutive,
+        consecutive.range,
+    );
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        consecutive_plan.sql,
+        "n.position > p.matched_position",
+    ) == null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        consecutive_plan.sql,
+        "n.position = p.matched_position + 1",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        consecutive_plan.sql,
+        " ASOF JOIN ",
+    ) == null);
+
+    var greedy = request;
+    greedy.window = .same_session;
+    const greedy_plan = try compileFunnelResult(
+        arena.allocator(),
+        greedy,
+        greedy.range,
+    );
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        greedy_plan.sql,
+        " ASOF JOIN ",
+    ) == null);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(
+        u8,
+        greedy_plan.sql,
+        "row_number() OVER (PARTITION BY chain_key",
+    ));
+    try std.testing.expectEqual(selectors.len - 1, std.mem.count(
+        u8,
+        greedy_plan.sql,
+        "min(n.position) AS matched_position",
+    ));
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        greedy_plan.sql,
+        "FROM candidate_0 e GROUP BY e.chain_key, e.count_key",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        greedy_plan.sql,
+        "row_number() OVER (PARTITION BY count_key",
+    ) == null);
+}
+
 test "Breakdown search and catalog context remain bound SQL inputs" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -5862,6 +6395,72 @@ test "simple empty-filter Trend plans omit unused session facts" {
         filtered.primary_rows.sql,
         "session_facts",
     ) != null);
+}
+
+test "ordered funnel executes typed session and visitor results on disk" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const allocator = std.testing.allocator;
+    const path = try std.fmt.allocPrint(
+        allocator,
+        ".zig-cache/tmp/{s}/events.duckdb",
+        .{temporary.sub_path},
+    );
+    defer allocator.free(path);
+    var event_store = try events.Store.open(allocator, path);
+    defer event_store.deinit();
+    try event_store.migrate();
+    try seedSemanticFixture(&event_store.database);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const query_allocator = arena.allocator();
+    const selectors = [_]analysis.EventSelector{
+        .{ .kind = .exact_page, .value = "/pricing" },
+        .{ .kind = .exact_event, .value = "purchase" },
+    };
+    const session_result = try executeFunnelResult(
+        query_allocator,
+        &event_store,
+        .{
+            .site_id = "00000000-0000-4000-8000-000000000024",
+            .range = .{ .start = "2026-01-03", .end = "2026-01-03" },
+            .order = .sequential,
+            .scope = .sessions,
+            .window = .same_session,
+            .selectors = &selectors,
+        },
+    );
+    try std.testing.expectEqual(@as(i64, 1), session_result.current.entrants);
+    try std.testing.expectEqual(@as(i64, 1), session_result.current.completions);
+    try std.testing.expectEqual(
+        @as(?i64, 1_000_000),
+        session_result.current.steps[1].median_from_prior_micros,
+    );
+    try std.testing.expectEqual(@as(?funnel.IdentityCoverage, null), session_result.current.identity_coverage);
+
+    const repeated_pages = [_]analysis.EventSelector{
+        .{ .kind = .page_prefix, .value = "/" },
+        .{ .kind = .page_prefix, .value = "/" },
+    };
+    const visitor_result = try executeFunnelResult(
+        query_allocator,
+        &event_store,
+        .{
+            .site_id = "00000000-0000-4000-8000-000000000024",
+            .range = .{ .start = "2026-01-03", .end = "2026-01-03" },
+            .order = .sequential,
+            .scope = .visitors,
+            .window = .same_session,
+            .selectors = &repeated_pages,
+        },
+    );
+    try std.testing.expectEqual(@as(i64, 2), visitor_result.current.entrants);
+    try std.testing.expectEqual(@as(i64, 0), visitor_result.current.completions);
+    try std.testing.expectEqualDeep(funnel.IdentityCoverage{
+        .persistent_step_one = 2,
+        .ephemeral_step_one = 1,
+        .legacy_step_one = 1,
+    }, visitor_result.current.identity_coverage.?);
 }
 
 test "metric v2 executes against a real on-disk schema four store" {

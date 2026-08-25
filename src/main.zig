@@ -174,6 +174,37 @@ pub fn main(init: std.process.Init) !void {
         );
         return;
     }
+    if (args.len == 5 and
+        std.mem.eql(u8, args[1], "m3") and
+        std.mem.eql(u8, args[2], "funnel-result-semantics"))
+    {
+        try m3_probe.funnelResultSemantics(
+            allocator,
+            output,
+            args[3],
+            args[4],
+        );
+        return;
+    }
+    if (args.len == 9 and
+        std.mem.eql(u8, args[1], "m3") and
+        (std.mem.eql(u8, args[2], "funnel-result-profile") or
+            std.mem.eql(u8, args[2], "funnel-result-explain")))
+    {
+        try m3_probe.funnelResultProfile(
+            allocator,
+            init.io,
+            output,
+            args[3],
+            args[4],
+            args[5],
+            args[6],
+            args[7],
+            args[8],
+            std.mem.eql(u8, args[2], "funnel-result-explain"),
+        );
+        return;
+    }
     if (args.len == 7 and
         std.mem.eql(u8, args[1], "m3") and
         std.mem.eql(u8, args[2], "goal-discovery"))
@@ -380,6 +411,9 @@ pub fn main(init: std.process.Init) !void {
         \\  analytico m3 goal-predicates-explain <directory> <site-slug> <start-date> <end-date>
         \\  analytico m3 funnel-availability-profile <directory> <site-slug> <start-date> <end-date>
         \\  analytico m3 funnel-availability-explain <directory> <site-slug> <start-date> <end-date>
+        \\  analytico m3 funnel-result-semantics <directory> <site-id>
+        \\  analytico m3 funnel-result-profile <directory> <site-slug> <current-start> <current-end> <comparison-start> <comparison-end>
+        \\  analytico m3 funnel-result-explain <directory> <site-slug> <current-start> <current-end> <comparison-start> <comparison-end>
         \\  analytico m3 goal-cap-recovery <directory> <site-slug>
         \\  analytico m3 filters-v2-series <directory> <site-slug> <current-start> <current-end> <comparison-start> <comparison-end>
         \\  analytico m3 filters-v2-profile <directory> <site-slug> <current-start> <current-end> <comparison-start> <comparison-end>

@@ -211,10 +211,15 @@ I/O or allocation.
 D43 applies the same boundary to funnel management. Turso owns stable
 definitions and lifecycle state; one row contains the complete ordered draft.
 The controller owns stable list/new/detail/edit routes, resolves shared filter
-context and Goal references, and executes at most one specialized
-step-availability statement under the existing deadline. The renderer receives
-owned step labels, settings, counts, errors, and action URLs. It does not parse
-canonical JSON, resolve a goal, or compute funnel progression.
+context and Goal references, and executes the specialized D43 availability and
+D44 ordered-result plans under one request deadline. D44 numbers the filtered
+meaningful DuckDB relation and follows at most eight reviewed next-position
+links from every step-one occurrence. Session and persistent-person keys stay
+inside DuckDB; only bounded counts, medians, and identity-coverage totals cross
+the store boundary. Current and comparison runs are independent inputs to one
+owned result. The renderer receives owned step labels, settings, counts,
+errors, and action URLs. It does not parse canonical JSON, resolve a goal,
+compute progression, or receive participant IDs.
 The full-draft `/admin/funnels` and `/admin/funnels/edit` POST routes reuse
 D40's exact 65,536-byte request/Caddy boundary because URL form encoding can
 expand the bounded canonical document; all other funnel actions retain the
@@ -379,9 +384,9 @@ bound as data; DuckDB never queries Turso.
 
 The D43 builder preview compiles up to eight resolved selectors into one
 single-scan statement and returns one independent matching-event count per
-step. It is not an ordered funnel report. D43 leaves sequential/consecutive,
-session/visitor window, drop-off, timing, comparison, and result visualization
-to #36.
+step. It is not an ordered funnel report. D44 coordinates that availability
+with a separate fixed position-link plan for sequential/consecutive,
+session/visitor window, drop-off, timing, comparison, and result visualization.
 
 The shipped metric-v1 reports continue to convert UTC dates directly. The D27
 range resolver converts inclusive local dates into half-open UTC instants with

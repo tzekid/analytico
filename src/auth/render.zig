@@ -170,7 +170,7 @@ fn head(
     );
     try text(output, title);
     try output.writeAll(
-        " · Analytico</title><link rel=\"stylesheet\" href=\"/admin/app.v13.css\">" ++
+        " · Analytico</title><link rel=\"stylesheet\" href=\"/admin/app.v14.css\">" ++
             "<script defer src=\"",
     );
     try attribute(output, passkeys_path);

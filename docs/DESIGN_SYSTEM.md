@@ -198,13 +198,28 @@ clipping, every move/action keeps a visible name and 44-pixel target, and the
 same forms work with JavaScript disabled. Optional enhancement may replace only
 the submitted builder region; it owns no hidden draft or alternate step order.
 
+D44 places a separate ordered result after a successful preview and on saved
+detail. Horizontal proportional bars use the raw current entrant count as
+their scale and may add a neutral comparison outline; they never use a
+decorative funnel shape. Visible summary text names Sessions or persistent
+Visitors and reports entrants, completions, conversion, and total median.
+Every step shows its raw count, entrant rate, prior-step rate, drop-off
+count/rate, and median from the prior step. The exact table includes every
+current and requested comparison value even when the SVG omits a label for
+space. Visitor coverage names excluded ephemeral and legacy-daily step-one
+identities. No entrants and no progression are different visible states, and
+consecutive mode explains that meaningful detours disqualify. Values,
+unavailable medians,
+and comparison are distinguishable without color. At phone width the figure
+and labeled table records stack without page-level horizontal overflow.
+
 Server validation renders one focused error summary and associates only the
 affected form fields with that summary while preserving submitted values.
 Notices use restrained status semantics, errors use alerts, and loading is
 limited to the region whose existing native navigation or form is in flight.
 None of these enhancement states may replace the JavaScript-free baseline.
 
-The component stylesheet is self-hosted at a versioned `/admin/app.v13.css` path.
+The component stylesheet is self-hosted at a versioned `/admin/app.v14.css` path.
 Changing its bytes requires another path revision because existing responses
 may be cached privately for 24 hours.
 

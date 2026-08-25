@@ -302,6 +302,7 @@ nav[aria-label="Pagination"] { display: flex; gap: .75rem; margin-top: 1rem; }
 .chart-compare-point { fill: var(--color-chartCompare); stroke: var(--color-surface); stroke-width: 2; }
 .chart-bar, .funnel-bar { fill: var(--color-brandStrong); }
 .funnel-track { fill: var(--color-surfaceStrong); }
+.funnel-comparison-bar { fill: none; stroke: var(--color-textMuted); stroke-width: 2; stroke-dasharray: 6 4; }
 .path-edge { stroke: var(--color-chartCompare); opacity: .55; }
 .path-node { fill: var(--color-surfaceSubtle); stroke: var(--color-borderStrong); }
 .path-column-label { fill: var(--color-ink); font-weight: 750; }
@@ -537,6 +538,7 @@ nav[aria-label="Pagination"] { display: flex; gap: .75rem; margin-top: 1rem; }
 
 @media (forced-colors: active) {
   .chart-line, .chart-bar, .funnel-bar, .chart-point { stroke: Highlight; fill: Highlight; }
+  .funnel-comparison-bar { fill: none; stroke: CanvasText; }
   .chart-compare, .path-edge, .chart-grid { stroke: CanvasText; }
   .chart-compare-point { fill: CanvasText; stroke: Canvas; }
   .path-node, .funnel-track { fill: Canvas; stroke: CanvasText; }

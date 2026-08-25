@@ -58,6 +58,16 @@ beta_id=$("$binary" site list "$data" |
 test "${#beta_id}" = 36
 "$binary" m3 seed "$data" "$alpha_id" >/dev/null
 "$binary" m3 goal-predicates-fixture "$data" "$alpha_id" >/dev/null
+"$binary" m3 funnel-result-semantics "$data" "$alpha_id" \
+    >"$fixture/funnel-semantics.json"
+cat "$fixture/funnel-semantics.json"
+jq -e '
+  .sequential and .consecutive and .restart_and_internal_events and
+  .repeated_one_event_trap and .same_timestamp_sequence and .window_retry and
+  .visitor_identity_links and .all_windows and
+  .legacy_ephemeral_coverage and .event_filter and
+  .property_goal_selector and .comparison and .zero
+' "$fixture/funnel-semantics.json" >/dev/null
 "$binary" event add "$data" beta pageview /beta-secret \
     1735776000000000 2025-01-02 203.0.113.10 Safari macOS desktop >/dev/null
 goal_output=$("$binary" goal add "$data" alpha "Active Signup" event signup)
@@ -232,6 +242,7 @@ jq -e '
   .native_builder and .step_bounds == "2-8" and
   .oversized_definition_recovery and
   .settings_and_reorder and .predicate_goal_and_zero_preview and
+  .ordered_result and
   .goal_reference_conflict and .stale_goal_recovery and
   .archive_reactivate and .stale_context_recovery and .site_isolation and
   .enhanced_equivalent and .mobile_width == 390 and
@@ -279,8 +290,71 @@ if "$binary" funnel show "$data" alpha "Checkout journey renamed" \
 fi
 grep -Fq 'UnsupportedLegacyFunnel' "$fixture/richer.stderr"
 
-"$binary" site traffic-policy "$data" alpha strict 10000000 >/dev/null
+for index in {1..9}; do
+    "$binary" goal add "$data" alpha "Benchmark Goal $index" \
+        event "benchmark_goal_$index" >/dev/null
+done
 "$binary" m3 million "$data" "$alpha_id" >/dev/null
+"$binary" m3 funnel-result-profile "$data" alpha \
+    2025-01-07 2025-01-12 2025-01-01 2025-01-06 \
+    >"$fixture/funnel-result-normal.json"
+cat "$fixture/funnel-result-normal.json"
+jq -e '
+  (.strict_mode | not) and .active_goal_count == 10 and
+  .selector_count == 8 and
+  (if .performance_enforced then
+     .comparison_populated and .preview_availability_rows == 8 and
+     (.sample_micros | length) == 10 and
+     (.current_sample_micros | length) == 10 and
+     (.comparison_sample_micros | length) == 10 and
+     .current_entrants > 0 and .current_completions > 0 and
+     .comparison_entrants > 0 and .comparison_completions > 0 and
+     .current_p95_micros < 1200000 and
+     .comparison_p95_micros < 1200000 and .p95_micros < 2000000 and
+     .timeout_interrupted and .connection_reused
+   else
+     (.comparison_populated | not) and .preview_availability_rows == 0 and
+     (.sample_micros | length) == 0 and
+     (.current_sample_micros | length) == 0 and
+     (.comparison_sample_micros | length) == 0 and
+     .current_p95_micros == null and .comparison_p95_micros == null and
+     .p95_micros == null and (.timeout_interrupted | not) and
+     (.connection_reused | not)
+   end)
+' "$fixture/funnel-result-normal.json" >/dev/null
+"$binary" site traffic-policy "$data" alpha strict 10000000 >/dev/null
+"$binary" m3 funnel-result-profile "$data" alpha \
+    2025-01-07 2025-01-12 2025-01-01 2025-01-06 \
+    >"$fixture/funnel-result-strict.json"
+cat "$fixture/funnel-result-strict.json"
+jq -e '
+  .strict_mode and .active_goal_count == 10 and .selector_count == 8 and
+  (if .performance_enforced then
+     .comparison_populated and .preview_availability_rows == 8 and
+     (.sample_micros | length) == 10 and
+     (.current_sample_micros | length) == 10 and
+     (.comparison_sample_micros | length) == 10 and
+     .current_entrants > 0 and .current_completions > 0 and
+     .comparison_entrants > 0 and .comparison_completions > 0 and
+     .current_p95_micros < 1200000 and
+     .comparison_p95_micros < 1200000 and .p95_micros < 2000000 and
+     .timeout_interrupted and .connection_reused
+   else
+     (.comparison_populated | not) and .preview_availability_rows == 0 and
+     (.sample_micros | length) == 0 and
+     (.current_sample_micros | length) == 0 and
+     (.comparison_sample_micros | length) == 0 and
+     .current_p95_micros == null and .comparison_p95_micros == null and
+     .p95_micros == null and (.timeout_interrupted | not) and
+     (.connection_reused | not)
+   end)
+' "$fixture/funnel-result-strict.json" >/dev/null
+"$binary" m3 funnel-result-explain "$data" alpha \
+    2025-01-07 2025-01-12 2025-01-01 2025-01-06 \
+    >"$fixture/funnel-result-explain.txt"
+grep -Fq 'FUNNEL ORDERED RESULT STATEMENT' "$fixture/funnel-result-explain.txt"
+grep -Fq 'FUNNEL ORDERED COMPARISON STATEMENT' "$fixture/funnel-result-explain.txt"
+grep -Fq 'Total Time' "$fixture/funnel-result-explain.txt"
 "$binary" m3 funnel-availability-profile "$data" alpha \
     2025-01-01 2025-01-12 >"$fixture/profile.json"
 cat "$fixture/profile.json"

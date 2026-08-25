@@ -503,6 +503,18 @@ the writer, restores the matched metadata-9/event-7 pair and predecessor Caddy
 file, proves `d583161` again, and only then switches the release symlink. The
 metadata-9 binary must never start on metadata 10.
 
+D44 ordered funnel evaluation changes only the application artifact. It adds
+no metadata/event migration, Caddy route, tracker, service unit, dependency,
+backup format, or runtime data file. Use the ordinary stopped-writer release
+procedure and still create and independently restore the matched
+metadata-10/event-7 pre-deployment backup. Verify the exact predecessor on the
+restored pair, then prove the candidate's focused funnel gate, frozen
+metric-v1 parity, exact binary/private library, one process/listener,
+health/readiness, authenticated native funnel preview/detail/comparison, and
+JavaScript-disabled 390-pixel result. Rollback stops the writer and restores
+the predecessor release symlink; because the schema pair is unchanged, a data
+restore is required only if ordinary verification finds unrelated corruption.
+
 ## 11. Retention and site deletion
 
 Run maintenance with the service stopped:

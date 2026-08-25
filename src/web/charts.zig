@@ -54,15 +54,19 @@ pub const BarFigure = struct {
 
 pub const FunnelStep = struct {
     name: []const u8,
-    sessions: u64,
-    median_to_next: ?[]const u8 = null,
+    count: u64,
+    median_from_prior_micros: ?u64 = null,
+    comparison_count: ?u64 = null,
+    comparison_median_from_prior_micros: ?u64 = null,
 };
 
 pub const FunnelFigure = struct {
     id: []const u8,
     title: []const u8,
     summary: []const u8,
+    count_label: []const u8 = "Sessions",
     entrants: u64,
+    comparison_entrants: ?u64 = null,
     steps: []const FunnelStep,
 };
 
@@ -357,13 +361,22 @@ pub fn renderBars(output: *std.Io.Writer, value: BarFigure) !void {
 
 pub fn renderFunnel(output: *std.Io.Writer, value: FunnelFigure) !void {
     try validateFigure(value.id, value.title, value.summary);
+    try validateRequiredLabel(value.count_label);
     if (value.steps.len > maximum_funnel_steps) return error.TooManyFunnelSteps;
     var prior = value.entrants;
+    var comparison_prior = value.comparison_entrants orelse 0;
     for (value.steps) |step| {
         try validateRequiredLabel(step.name);
-        if (step.median_to_next) |label| try validateLabel(label);
-        if (step.sessions > prior) return error.InvalidFunnelCounts;
-        prior = step.sessions;
+        if (step.count > prior or
+            (value.comparison_entrants == null) != (step.comparison_count == null) or
+            step.comparison_count orelse 0 > comparison_prior or
+            (step.comparison_median_from_prior_micros != null and
+                step.comparison_count == null))
+        {
+            return error.InvalidFunnelCounts;
+        }
+        prior = step.count;
+        if (step.comparison_count) |count| comparison_prior = count;
     }
 
     const svg_height: u32 = @max(70, @as(u32, @intCast(value.steps.len)) * 44 + 24);
@@ -374,39 +387,131 @@ pub fn renderFunnel(output: *std.Io.Writer, value: FunnelFigure) !void {
         try svgStart(output, "funnel-chart", value.id, 900, svg_height);
         for (value.steps, 0..) |step, index| {
             const y: u32 = 14 + @as(u32, @intCast(index)) * 44;
-            const width = scaled(step.sessions, value.entrants, 620);
+            const width = scaled(step.count, value.entrants, 620);
             try output.print("<rect class=\"funnel-track\" x=\"250\" y=\"{d}\" width=\"620\" height=\"26\" rx=\"5\"/><rect class=\"funnel-bar\" x=\"250\" y=\"{d}\" width=\"{d}\" height=\"26\" rx=\"5\"/><text class=\"chart-label\" x=\"8\" y=\"{d}\">{d} · ", .{
                 y, y, width, y + 18, index + 1,
             });
             try components.text(output, step.name);
-            try output.print("</text><text class=\"chart-value\" x=\"{d}\" y=\"{d}\">{d} · ", .{ 260 + width, y + 18, step.sessions });
-            try percent(output, step.sessions, value.entrants);
+            try output.print("</text><text class=\"chart-value\" x=\"{d}\" y=\"{d}\">{d} · ", .{ 260 + width, y + 18, step.count });
+            try percent(output, step.count, value.entrants);
             try output.writeAll("</text>");
+            if (step.comparison_count) |count| {
+                const comparison_width = scaled(
+                    count,
+                    value.comparison_entrants.?,
+                    620,
+                );
+                try output.print(
+                    "<rect class=\"funnel-comparison-bar\" x=\"250\"" ++
+                        " y=\"{d}\" width=\"{d}\" height=\"26\" rx=\"5\"/>",
+                    .{ y, comparison_width },
+                );
+            }
         }
         try output.writeAll("</svg>");
     }
     try exactStart(output, value.id, value.title);
-    try output.writeAll("<thead><tr><th scope=\"col\">Step</th><th scope=\"col\">Sessions</th><th scope=\"col\">Step rate</th><th scope=\"col\">Overall rate</th><th scope=\"col\">Drop-off</th><th scope=\"col\">Median to next</th></tr></thead><tbody>");
+    try output.writeAll("<thead><tr><th scope=\"col\">Step</th><th scope=\"col\">Current ");
+    try components.text(output, value.count_label);
+    try output.writeAll("</th><th scope=\"col\">Current prior-step rate</th>" ++
+        "<th scope=\"col\">Current overall rate</th>" ++
+        "<th scope=\"col\">Current drop-off before step</th>" ++
+        "<th scope=\"col\">Current drop-off rate before step</th>" ++
+        "<th scope=\"col\">Current median from prior</th>");
+    if (value.comparison_entrants != null) {
+        try output.writeAll("<th scope=\"col\">Comparison ");
+        try components.text(output, value.count_label);
+        try output.writeAll("</th><th scope=\"col\">Comparison prior-step rate</th>" ++
+            "<th scope=\"col\">Comparison overall rate</th>" ++
+            "<th scope=\"col\">Comparison drop-off before step</th>" ++
+            "<th scope=\"col\">Comparison drop-off rate before step</th>" ++
+            "<th scope=\"col\">Comparison median from prior</th>");
+    }
+    try output.writeAll("</tr></thead><tbody>");
     prior = value.entrants;
+    comparison_prior = value.comparison_entrants orelse 0;
     for (value.steps, 0..) |step, index| {
         try output.print("<tr><th scope=\"row\" data-label=\"Step\">{d} · ", .{index + 1});
         try components.text(output, step.name);
-        try output.print("</th><td data-label=\"Sessions\">{d}</td><td data-label=\"Step rate\">", .{step.sessions});
-        try percent(output, step.sessions, prior);
-        try output.writeAll("</td><td data-label=\"Overall rate\">");
-        try percent(output, step.sessions, value.entrants);
-        try output.print("</td><td data-label=\"Drop-off\">{d}</td><td data-label=\"Median to next\">", .{prior - step.sessions});
-        if (step.median_to_next) |label| {
-            try components.text(output, label);
+        try output.print("</th><td data-label=\"Current count\">{d}</td>" ++
+            "<td data-label=\"Current prior-step rate\">", .{step.count});
+        try percent(output, step.count, prior);
+        try output.writeAll("</td><td data-label=\"Current overall rate\">");
+        try percent(output, step.count, value.entrants);
+        try output.print("</td><td data-label=\"Current drop-off before step\">{d}</td>" ++
+            "<td data-label=\"Current drop-off rate before step\">", .{
+            prior - step.count,
+        });
+        try percent(output, prior - step.count, prior);
+        try output.writeAll("</td><td data-label=\"Current median from prior\">");
+        if (step.median_from_prior_micros) |micros| {
+            try exactDurationMicros(output, micros);
+        } else if (index == 0) {
+            try output.writeAll("Not applicable");
         } else {
             try output.writeAll("Unavailable");
         }
-        try output.writeAll("</td></tr>");
-        prior = step.sessions;
+        try output.writeAll("</td>");
+        if (step.comparison_count) |count| {
+            try output.print("<td data-label=\"Comparison count\">{d}</td>" ++
+                "<td data-label=\"Comparison prior-step rate\">", .{count});
+            try percent(output, count, comparison_prior);
+            try output.writeAll("</td><td data-label=\"Comparison overall rate\">");
+            try percent(output, count, value.comparison_entrants.?);
+            try output.print("</td><td data-label=\"Comparison drop-off before step\">{d}</td>" ++
+                "<td data-label=\"Comparison drop-off rate before step\">", .{
+                comparison_prior - count,
+            });
+            try percent(output, comparison_prior - count, comparison_prior);
+            try output.writeAll("</td><td data-label=\"Comparison median from prior\">");
+            if (step.comparison_median_from_prior_micros) |micros| {
+                try exactDurationMicros(output, micros);
+            } else if (index == 0) {
+                try output.writeAll("Not applicable");
+            } else {
+                try output.writeAll("Unavailable");
+            }
+            try output.writeAll("</td>");
+            comparison_prior = count;
+        }
+        try output.writeAll("</tr>");
+        prior = step.count;
     }
-    if (value.steps.len == 0) try emptyTableRow(output, 6);
+    if (value.steps.len == 0) try emptyTableRow(
+        output,
+        if (value.comparison_entrants == null) 7 else 13,
+    );
     try exactEnd(output);
     try output.writeAll("</figure>");
+}
+
+fn exactDurationMicros(output: *std.Io.Writer, micros: u64) !void {
+    try output.print(
+        "<span class=\"chart-raw-value\">{d} microseconds</span>" ++
+            " <span class=\"chart-formatted-value\">(",
+        .{micros},
+    );
+    try formattedDurationMicros(output, micros);
+    try output.writeAll(")</span>");
+}
+
+pub fn formattedDurationMicros(output: *std.Io.Writer, micros: u64) !void {
+    if (micros < std.time.us_per_ms) {
+        try output.print("{d} µs", .{micros});
+    } else if (micros < std.time.us_per_s) {
+        try output.print("{d}.{d:0>3} ms", .{
+            micros / std.time.us_per_ms,
+            micros % std.time.us_per_ms,
+        });
+    } else if (micros < 60 * std.time.us_per_s) {
+        try output.print("{d}.{d:0>3} s", .{
+            micros / std.time.us_per_s,
+            (micros % std.time.us_per_s) / std.time.us_per_ms,
+        });
+    } else {
+        const total_seconds = micros / std.time.us_per_s;
+        try output.print("{d}m {d}s", .{ total_seconds / 60, total_seconds % 60 });
+    }
 }
 
 pub fn renderPath(output: *std.Io.Writer, value: PathFigure) !void {
@@ -1216,20 +1321,25 @@ test "bar and funnel figures preserve exact all-zero data" {
         .summary = "All steps are zero.",
         .entrants = 0,
         .steps = &.{
-            .{ .name = "Visit", .sessions = 0 },
-            .{ .name = "Signup", .sessions = 0 },
+            .{ .name = "Visit", .count = 0 },
+            .{ .name = "Signup", .count = 0 },
         },
     });
     const funnel_rendered = try funnel.toOwnedSlice();
     defer std.testing.allocator.free(funnel_rendered);
     try std.testing.expect(std.mem.indexOf(u8, funnel_rendered, "0.00%") != null);
-    try std.testing.expect(std.mem.indexOf(u8, funnel_rendered, "Median to next") != null);
+    try std.testing.expect(std.mem.indexOf(u8, funnel_rendered, "Current median from prior") != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        funnel_rendered,
+        "Current drop-off rate before step",
+    ) != null);
     try std.testing.expectError(error.InvalidFunnelCounts, renderFunnel(&funnel.writer, .{
         .id = "invalid-funnel",
         .title = "Invalid",
         .summary = "Invalid counts.",
         .entrants = 1,
-        .steps = &.{.{ .name = "Too many", .sessions = 2 }},
+        .steps = &.{.{ .name = "Too many", .count = 2 }},
     }));
 }
 

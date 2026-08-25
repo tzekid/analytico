@@ -341,7 +341,11 @@ each. Goal steps store only a
 stable goal UUID and resolve its complete current D42 selector.
 
 Every load parses and reserializes the document and requires byte-identical
-content. Direct predicate strings are bytewise sorted and deduplicated. The
+content. The decoded definition owns every step, selector, goal ID, property,
+and predicate value for its allocator lifetime; it never borrows Turso row
+storage. This is required because D44 may compile current and comparison
+statements after the metadata cursor is closed. Direct predicate strings are
+bytewise sorted and deduplicated. The
 closed window seconds are `0`, `3600`, `86400`, `604800`, and `2592000`; zero
 means same session. An active funnel has no archived timestamp.
 
@@ -358,6 +362,17 @@ site-owned active or archived funnel. A matching string in a direct value or
 predicate is not a reference. Archive preserves the row and reference; a
 referenced archived or missing goal makes preview and execution stale until
 the goal is reactivated or the step is replaced.
+
+D44 changes no stored schema. Ordered funnel evaluation reads the same
+append-oriented events through D34's product relation. Its plausible order is
+`occurred_at_utc_micros`, `sequence`, `received_at_utc_micros`, then
+`event_id`; this is a metric-v2 result and does not alter metric-v1's frozen
+receipt ordering. Session scope uses stored `session_id`. Visitor scope uses
+only the canonical persistent person derived from `identity_quality=1`,
+`anonymous_id`, `user_id`, and `identity_links`; ephemeral and `legacy_daily`
+step-one identities remain separate bounded coverage counts. All participating
+events have `kind IN (1, 2)`, an eligible traffic class, and a
+`site_local_date` inside the selected result range.
 
 ## 3. DuckDB events
 
