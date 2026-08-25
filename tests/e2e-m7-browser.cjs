@@ -252,7 +252,7 @@ async function normal() {
       (entry) => entry.method === "POST",
     ).length;
     await goalForm.locator('input[name="name"]').fill("");
-    await goalForm.locator('button[type="submit"]').click();
+    await goalForm.locator('button[name="intent"][value="save"]').click();
     assert.equal(
       enhanced.filter((entry) => entry.method === "POST").length,
       postCountBeforeValidation,
@@ -269,7 +269,7 @@ async function normal() {
           candidate.url() === `${origin}/admin/goals` &&
           candidate.request().headers()["hx-request"] === "true",
       ),
-      goalForm.locator('button[type="submit"]').click(),
+      goalForm.locator('button[name="intent"][value="save"]').click(),
     ]).then(([post]) => post);
     assert.equal(response.status(), 422);
     await page.waitForFunction(() =>
@@ -295,7 +295,7 @@ async function normal() {
     const doubleBefore = enhanced.filter(
       (entry) => entry.url === `${origin}/admin/goals`,
     ).length;
-    await doubleForm.locator('button[type="submit"]').dblclick();
+    await doubleForm.locator('button[name="intent"][value="save"]').dblclick();
     await page.waitForFunction(() =>
       document.querySelector('.notice[role="status"]')?.textContent === "Goal added.",
     );

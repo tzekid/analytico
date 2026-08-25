@@ -103,7 +103,7 @@ test "$("$current" m3 legacy-evidence "$restored_legacy")" = \
     "$before_evidence"
 
 test "$("$current" migrate "$live" "$pre_upgrade")" = \
-    "migrated metadata=v8 events=v7"
+    "migrated metadata=v9 events=v7"
 after_evidence=$("$current" m3 legacy-evidence "$live")
 test "$(jq -r .event_migration_version <<<"$after_evidence")" = 7
 test "$(jq -r .rows <<<"$after_evidence")" = 3
@@ -111,7 +111,7 @@ test "$(jq -r .preserved_fingerprint <<<"$after_evidence")" = \
     "$(jq -r .preserved_fingerprint <<<"$before_evidence")"
 test "$("$current" m2 identity-links "$live")" = 0
 test "$("$current" migrate "$live" "$pre_upgrade")" = \
-    "migrated metadata=v8 events=v7"
+    "migrated metadata=v9 events=v7"
 
 # No site can serve until its explicit migration timezone choice is complete.
 expect_failure "$current" doctor "$live"
@@ -119,7 +119,7 @@ expect_failure "$current" doctor "$live"
     --offline-rebucket >/dev/null
 "$current" site timezone-set "$live" utc UTC >/dev/null
 test "$("$current" doctor "$live")" = \
-    "ok metadata=v8 events=v7 sites=2 goals=0 funnels=0 stored_events=3 key=ok"
+    "ok metadata=v9 events=v7 sites=2 goals=0 funnels=0 stored_events=3 key=ok"
 test "$("$current" report "$live" berlin 2026-03-28 2026-03-28 \
     overview --format json)" = "$before_day_one"
 test "$("$current" report "$live" berlin 2026-03-29 2026-03-29 \
@@ -191,7 +191,7 @@ post_upgrade="$fixture/post-upgrade"
 restored_current="$fixture/restored-current"
 "$current" restore "$post_upgrade" "$restored_current" --verify >/dev/null
 test "$("$current" doctor "$restored_current")" = \
-    "ok metadata=v8 events=v7 sites=2 goals=0 funnels=0 stored_events=5 key=ok"
+    "ok metadata=v9 events=v7 sites=2 goals=0 funnels=0 stored_events=5 key=ok"
 
 # The candidate-created schema-2 backup remains consumable by the exact old binary.
 rolled_back="$fixture/rolled-back"

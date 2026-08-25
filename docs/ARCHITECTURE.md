@@ -2,7 +2,7 @@
 
 > **Status:** Sections 1–10 describe the shipped one-process runtime, its frozen
 > protocol-v1 compatibility path, additive protocol-v2 collector foundation,
-> event schema 7, metadata schema 8, protocol-v2 tracker anonymous identity,
+> event schema 7, metadata schema 9, protocol-v2 tracker anonymous identity,
 > and 30-minute client sessions. The remaining 1.0 evolution is stated
 > separately below; it preserves this runtime shape and lands only with its
 > issue evidence.
@@ -153,7 +153,10 @@ cap. Metadata schema 6 adds D36's one-to-one explicit default currency and
 unique origin ownership. Metadata schema 7 adds D40's exact site-owned segments
 and saved views without changing collection or event facts. Metadata schema 8
 adds D41's replacement goal definitions with stable active/archive lifecycle,
-created/updated state, and single-statement mutations.
+created/updated state, and single-statement mutations. Metadata schema 9
+replaces that table once with D42's canonical predicate-set document. The
+controller resolves the complete selector before DuckDB; Turso still never
+queries event rows and DuckDB never reads metadata.
 
 Decision D29 adds a parallel pure `AnalysisQuery` model and finite metric-v2
 store compiler. The domain model validates and canonicalizes state without I/O;

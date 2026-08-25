@@ -542,6 +542,7 @@ fn goalCommand(
             args[5],
             kind,
             args[7],
+            &.{},
             try nowMicros(),
         );
         try output.print("goal added {s} {s}\n", .{ args[5], id });

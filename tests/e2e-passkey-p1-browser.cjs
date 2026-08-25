@@ -261,7 +261,7 @@ async function main() {
     await goalForm.locator('select[name="entity"]').selectOption("event");
     await goalForm.locator('input[name="value"]').fill("signup");
     await goalForm.locator('input[name="confirm_unseen"]').check();
-    await goalForm.locator('button[type="submit"]').click();
+    await goalForm.locator('button[name="intent"][value="save"]').click();
     await noScriptPage.waitForURL(/notice=goal-added/);
     assert.equal(await noScriptPage.locator("tr", { hasText: "Signup" }).count(), 1);
     await noScriptPage.getByRole("link", { name: "Funnels" }).click();

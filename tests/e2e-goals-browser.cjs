@@ -95,6 +95,232 @@ async function main() {
   assert.match(await discovered.first().innerText(), /signup/i);
   assert.doesNotMatch(await page.locator("main").innerText(), /beta-secret/);
 
+  const segmentId = "00000000-0000-4000-8000-000000000392";
+  const predicateContext = `${contextQuery}&entity=event&search=purchase&segment=${segmentId}&f=event%7Edevice%7Eis%7Estring%7Edesktop`;
+  response = await page.goto(goalRoute("/new", predicateContext), {
+    waitUntil: "load",
+  });
+  assert.equal(response.status(), 200);
+  assert.match(await page.locator("main").innerText(), /segment Germany plus 1 ad-hoc filter/);
+  let predicateForm = page.locator('form[action^="/admin/goals?"]');
+  await predicateForm.locator('select[name="entity"]').selectOption("event");
+  await predicateForm.locator('input[name="value"]').fill("purchase");
+  await predicateForm.locator('input[name="name"]').fill("Pro purchases");
+  await predicateForm.locator('input[name="property_1"]').fill("plan");
+  await predicateForm.locator('select[name="rule_1"]').selectOption("integer:gt");
+  await predicateForm.locator('input[name="predicate_value_1"]').fill("pro");
+  response = await nativeSubmit(page, predicateForm, "Preview result");
+  assert.equal(response.status(), 422);
+  assert.match(await page.locator('[role="alert"]').innerText(), /definition was not saved/i);
+  predicateForm = page.locator('form[action^="/admin/goals?"]');
+  assert.equal(
+    await predicateForm.locator('input[name="predicate_value_1"]').inputValue(),
+    "pro",
+  );
+  await predicateForm.locator('select[name="rule_1"]').selectOption("string:is");
+  response = await nativeSubmit(page, predicateForm, "Preview result");
+  assert.equal(response.status(), 200);
+  assert.match(await page.locator("main").innerText(), /has not been saved/);
+  assert.equal(
+    await page.locator('li.kpi:has-text("Matching events") strong').innerText(),
+    "2",
+  );
+  assert.match(
+    await page.locator("main").innerText(),
+    /Legacy coverage counts daily identities only/,
+  );
+  assert.match(
+    await page.locator('li.kpi:has-text("Converting visitors") strong').innerText(),
+    /^1\/2 · 50\.00%$/,
+  );
+  assert.match(await page.locator("main").innerText(), /12\.500000/);
+  assert.match(await page.locator("main").innerText(), /7\.500000/);
+  const propertiesDisclosure = page.locator("details", {
+    has: page.getByText("Observed properties for this selector", { exact: true }),
+  });
+  await propertiesDisclosure.locator("summary").click();
+  assert.match(await propertiesDisclosure.innerText(), /plan[\s\S]*string/i);
+  assert.match(await propertiesDisclosure.innerText(), /amount[\s\S]*decimal/i);
+  const amountTypes = propertiesDisclosure.locator("tbody tr", {
+    has: page.getByText("amount", { exact: true }),
+  });
+  assert.equal(await amountTypes.count(), 2);
+  assert.match(await amountTypes.nth(0).innerText(), /decimal|string/);
+  assert.match(await amountTypes.nth(1).innerText(), /decimal|string/);
+  assert.notEqual(
+    await amountTypes.nth(0).innerText(),
+    await amountTypes.nth(1).innerText(),
+  );
+  predicateForm = page.locator('form[action^="/admin/goals?"]');
+  response = await nativeSubmit(page, predicateForm, "Create goal");
+  assert.equal(response.status(), 200);
+  const predicateHref = await page
+    .getByRole("link", { name: "Pro purchases", exact: true })
+    .getAttribute("href");
+  assert.equal(new URL(`${origin}${predicateHref}`).searchParams.get("segment"), segmentId);
+  assert.equal(new URL(`${origin}${predicateHref}`).searchParams.getAll("f").length, 1);
+  response = await page.goto(`${origin}${predicateHref}`, { waitUntil: "load" });
+  assert.equal(response.status(), 200);
+  assert.match(await page.locator("main").innerText(), /plan · string · is · pro/);
+  assert.equal(
+    await page.locator('li.kpi:has-text("Matching events") strong').innerText(),
+    "2",
+  );
+  const predicateAnalyzeHref = await page
+    .getByRole("link", { name: "Open this goal in Analyze", exact: true })
+    .getAttribute("href");
+  const predicateAnalyzeUrl = new URL(`${origin}${predicateAnalyzeHref}`);
+  assert.equal(predicateAnalyzeUrl.searchParams.get("segment"), segmentId);
+  assert.equal(predicateAnalyzeUrl.searchParams.getAll("f").length, 1);
+  let predicateEditHref = await page
+    .getByRole("link", { name: "Edit goal", exact: true })
+    .getAttribute("href");
+  response = await page.goto(predicateAnalyzeUrl.toString(), { waitUntil: "load" });
+  assert.equal(response.status(), 200);
+  assert.equal(
+    await page
+      .getByRole("heading", {
+        name: "Conversions · goal Pro purchases",
+        exact: true,
+      })
+      .count(),
+    1,
+  );
+  response = await page.goto(`${origin}${predicateEditHref}`, { waitUntil: "load" });
+  assert.equal(response.status(), 200);
+  predicateForm = page.locator('form[action^="/admin/goals/edit?"]');
+  assert.equal(await predicateForm.locator('input[name="property_1"]').inputValue(), "plan");
+  assert.equal(await predicateForm.locator('input[name="predicate_value_1"]').inputValue(), "pro");
+  await predicateForm.locator('input[name="predicate_value_1"]').fill("free");
+  response = await nativeSubmit(page, predicateForm, "Preview result");
+  assert.equal(response.status(), 200);
+  assert.equal(
+    await page.locator('li.kpi:has-text("Matching events") strong').innerText(),
+    "0",
+  );
+  assert.equal(
+    await page
+      .locator('li.kpi:has-text("Persistent identity coverage") strong')
+      .innerText(),
+    "unavailable",
+  );
+  predicateForm = page.locator('form[action^="/admin/goals/edit?"]');
+  await predicateForm.locator('input[name="predicate_value_1"]').fill("pro");
+  response = await nativeSubmit(page, predicateForm, "Save goal");
+  assert.equal(response.status(), 200);
+  await page.getByRole("link", { name: "Pro purchases", exact: true }).click();
+  let predicateDuplicate = page.locator('form[action^="/admin/goals/duplicate?"]');
+  await predicateDuplicate.locator('input[name="name"]').fill("Pro purchases copy");
+  response = await nativeSubmit(page, predicateDuplicate, "Duplicate");
+  assert.equal(response.status(), 200);
+  await page.getByRole("link", { name: "Pro purchases copy", exact: true }).click();
+  assert.match(await page.locator("main").innerText(), /plan · string · is · pro/);
+
+  response = await page.goto(goalRoute("/new", `${contextQuery}&entity=event&search=signup`), {
+    waitUntil: "load",
+  });
+  assert.equal(response.status(), 200);
+  let trapForm = page.locator('form[action="/admin/goals"]');
+  await trapForm.locator('select[name="entity"]').selectOption("event");
+  await trapForm.locator('input[name="value"]').fill("signup");
+  await trapForm.locator('input[name="name"]').fill("Same-session trap");
+  await trapForm.locator('input[name="property_1"]').fill("page_only");
+  await trapForm.locator('select[name="rule_1"]').selectOption("string:is");
+  await trapForm.locator('input[name="predicate_value_1"]').fill("yes");
+  response = await nativeSubmit(page, trapForm, "Preview result");
+  assert.equal(response.status(), 200);
+  assert.equal(
+    await page.locator('li.kpi:has-text("Matching events") strong').innerText(),
+    "0",
+  );
+
+  const staleSegmentId = "00000000-0000-4000-8000-000000000393";
+  const retainedFilter = "event~device~is~string~desktop";
+  const retainedFilterParameter = encodeURIComponent(retainedFilter);
+  response = await page.goto(
+    goalRoute(
+      "/new",
+      `${contextQuery}&entity=event&search=signup&segment=${staleSegmentId}&f=${retainedFilterParameter}`,
+    ),
+    { waitUntil: "load" },
+  );
+  assert.equal(response.status(), 200);
+  let staleContextForm = page.locator('form[action^="/admin/goals?"]');
+  await staleContextForm.locator('select[name="entity"]').selectOption("event");
+  await staleContextForm.locator('input[name="value"]').fill("signup");
+  await staleContextForm.locator('input[name="name"]').fill("Stale segment must not save");
+  await staleContextForm.locator('input[name="property_1"]').fill("plan");
+  await staleContextForm.locator('select[name="rule_1"]').selectOption("string:is");
+  await staleContextForm.locator('input[name="predicate_value_1"]').fill("pro");
+
+  const segmentDeletePage = await native.newPage();
+  response = await segmentDeletePage.goto(
+    `${origin}/admin/sites/alpha/overview?${contextQuery}&segment=${staleSegmentId}`,
+    { waitUntil: "load" },
+  );
+  assert.equal(response.status(), 200);
+  const segmentManagement = segmentDeletePage.locator("details.management", {
+    hasText: "Segments",
+  });
+  await segmentManagement.locator("summary").click();
+  const staleSegmentRow = segmentManagement.locator(".segment-row", {
+    hasText: "Stale goal race",
+  });
+  const segmentDeleteForm = staleSegmentRow.locator(
+    'form[action="/admin/segments/delete"]',
+  );
+  await segmentDeleteForm.locator('input[name="name"]').fill("Stale goal race");
+  response = await nativeSubmit(segmentDeletePage, segmentDeleteForm, "Delete segment");
+  assert.equal(response.status(), 200);
+  await segmentDeletePage.close();
+
+  response = await nativeSubmit(page, staleContextForm, "Create goal");
+  assert.equal(response.status(), 422);
+  assert.match(await page.locator('[role="alert"]').innerText(), /segment became stale/i);
+  assert.doesNotMatch(await page.locator("body").innerText(), /Internal Server Error/i);
+  staleContextForm = page.locator('form[action^="/admin/goals?"]');
+  assert.equal(
+    await staleContextForm.locator('input[name="name"]').inputValue(),
+    "Stale segment must not save",
+  );
+  assert.equal(
+    await staleContextForm.locator('select[name="entity"]').inputValue(),
+    "event",
+  );
+  assert.equal(
+    await staleContextForm.locator('input[name="value"]').inputValue(),
+    "signup",
+  );
+  assert.equal(
+    await staleContextForm.locator('input[name="property_1"]').inputValue(),
+    "plan",
+  );
+  assert.equal(
+    await staleContextForm.locator('select[name="rule_1"]').inputValue(),
+    "string:is",
+  );
+  assert.equal(
+    await staleContextForm.locator('input[name="predicate_value_1"]').inputValue(),
+    "pro",
+  );
+  const recoveredAction = new URL(await staleContextForm.getAttribute("action"), origin);
+  assert.equal(recoveredAction.searchParams.get("segment"), null);
+  assert.deepEqual(recoveredAction.searchParams.getAll("f"), [retainedFilter]);
+  for (const label of ["All goals", "New goal"]) {
+    const href = await page
+      .getByRole("link", { name: label, exact: true })
+      .getAttribute("href");
+    const recovered = new URL(href, origin);
+    assert.equal(recovered.searchParams.get("segment"), null);
+    assert.deepEqual(recovered.searchParams.getAll("f"), [retainedFilter]);
+  }
+  assert.match(await page.locator("main").innerText(), /1 ad-hoc filter/);
+  assert.doesNotMatch(await page.locator("main").innerText(), /Stale goal race/);
+
+  response = await page.goto(goalRoute("/new", `${contextQuery}&entity=event&search=sign`), {
+    waitUntil: "load",
+  });
+  assert.equal(response.status(), 200);
   let createForm = page.locator('form[action="/admin/goals"]');
   await createForm.locator('select[name="entity"]').selectOption("event");
   await createForm.locator('select[name="match"]').selectOption("exact");
@@ -376,6 +602,12 @@ async function main() {
     discovered_page_size: 50,
     discovery_order: "count-desc-label-asc",
     zero_seen_confirmation: true,
+    typed_predicate_preview: true,
+    predicate_context_preserved: true,
+    predicate_event_row_semantics: true,
+    exact_goal_result: true,
+    predicate_edit_and_duplicate: true,
+    stale_context_recovery: true,
     stable_id_after_rename: createdId,
     reference_conflict_status: 409,
     archived_trend_and_breakdown: true,

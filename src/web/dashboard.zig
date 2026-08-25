@@ -2042,10 +2042,27 @@ fn postAction(
         });
         return;
     }
-    const form = controller.Form.parse(
-        dependencies.allocator,
-        request.body,
-    ) catch {
+    const goal_form = action == .add_goal or action == .edit_goal;
+    const goal_context_action = switch (action) {
+        .add_goal,
+        .edit_goal,
+        .duplicate_goal,
+        .archive_goal,
+        .reactivate_goal,
+        .delete_goal,
+        => true,
+        else => false,
+    };
+    const form = (if (goal_form)
+        controller.Form.parseGoal(
+            dependencies.allocator,
+            request.body,
+        )
+    else
+        controller.Form.parse(
+            dependencies.allocator,
+            request.body,
+        )) catch {
         try writeError(output, .{
             .status = 400,
             .title = "Invalid form",
@@ -2053,6 +2070,20 @@ fn postAction(
         });
         return;
     };
+    const goal_action_context = if (goal_context_action)
+        controller.parseGoalActionContext(
+            dependencies.allocator,
+            request.target,
+        ) catch {
+            try writeError(output, .{
+                .status = 400,
+                .title = "Invalid form",
+                .message = "The goal context was malformed or non-canonical.",
+            });
+            return;
+        }
+    else
+        controller.GoalActionContext{};
     controller.verifyCsrf(form, dependencies.csrf_token) catch {
         try writeError(output, .{
             .status = 403,
@@ -2077,91 +2108,124 @@ fn postAction(
         });
         return;
     };
-    const operation = switch (action) {
-        .add_goal => controller.addGoal(
-            dependencies.allocator,
-            dependencies.io,
-            dependencies.metadata,
-            dependencies.events,
-            form,
-            now,
-            dependencies.report_timeout_ms,
-        ),
-        .edit_goal => controller.editGoal(
-            dependencies.allocator,
-            dependencies.metadata,
-            dependencies.events,
-            form,
-            now,
-            dependencies.report_timeout_ms,
-        ),
-        .duplicate_goal => controller.duplicateGoal(
-            dependencies.allocator,
-            dependencies.io,
-            dependencies.metadata,
-            form,
-            now,
-        ),
-        .archive_goal => controller.archiveGoal(
-            dependencies.allocator,
-            dependencies.metadata,
-            form,
-            now,
-        ),
-        .reactivate_goal => controller.reactivateGoal(
-            dependencies.allocator,
-            dependencies.metadata,
-            form,
-            now,
-        ),
-        .delete_goal => controller.deleteGoal(
-            dependencies.allocator,
-            dependencies.metadata,
-            form,
-        ),
-        .add_funnel => controller.addFunnel(
-            dependencies.allocator,
-            dependencies.io,
-            dependencies.metadata,
-            form,
-            now,
-        ),
-        .delete_funnel => controller.deleteFunnel(
-            dependencies.allocator,
-            dependencies.metadata,
-            form,
-        ),
-        .add_excluded_network => controller.addExcludedNetwork(
-            dependencies.allocator,
-            dependencies.metadata,
-            form,
-            now,
-        ),
-        .delete_excluded_network => controller.deleteExcludedNetwork(
-            dependencies.allocator,
-            dependencies.metadata,
-            form,
-        ),
-        .update_traffic_policy => controller.updateTrafficPolicy(
-            dependencies.allocator,
-            dependencies.metadata,
-            form,
-            now,
-        ),
-    };
-    operation catch |err| {
-        if (err == error.ReportTimeout) {
-            try writeError(output, .{
-                .status = 503,
-                .title = "Goal validation timed out",
-                .message = "The goal was not saved because observed-entity validation exceeded the report deadline. Narrow the date range and retry.",
-            });
+    if (action == .add_goal or action == .edit_goal) {
+        const submission = (if (action == .add_goal)
+            controller.addGoal(
+                dependencies.allocator,
+                dependencies.io,
+                dependencies.metadata,
+                dependencies.events,
+                form,
+                goal_action_context,
+                now,
+                dependencies.report_timeout_ms,
+            )
+        else
+            controller.editGoal(
+                dependencies.allocator,
+                dependencies.metadata,
+                dependencies.events,
+                form,
+                goal_action_context,
+                now,
+                dependencies.report_timeout_ms,
+            )) catch |err| {
+            if (err != error.ReportTimeout and !isFormError(err) and
+                !isStaleSegmentError(err) and err != error.StaleFilterProperty)
+            {
+                return err;
+            }
+            try formErrorPage(
+                dependencies,
+                output,
+                form,
+                action,
+                goal_action_context,
+                err,
+            );
+            return;
+        };
+        if (submission) |preview| {
+            try goalPreviewPage(
+                dependencies,
+                output,
+                form,
+                action,
+                goal_action_context,
+                preview,
+            );
             return;
         }
-        if (!isFormError(err)) return err;
-        try formErrorPage(dependencies, output, form, action, err);
-        return;
-    };
+    } else {
+        const operation = switch (action) {
+            .add_goal, .edit_goal => unreachable,
+            .duplicate_goal => controller.duplicateGoal(
+                dependencies.allocator,
+                dependencies.io,
+                dependencies.metadata,
+                form,
+                now,
+            ),
+            .archive_goal => controller.archiveGoal(
+                dependencies.allocator,
+                dependencies.metadata,
+                form,
+                now,
+            ),
+            .reactivate_goal => controller.reactivateGoal(
+                dependencies.allocator,
+                dependencies.metadata,
+                form,
+                now,
+            ),
+            .delete_goal => controller.deleteGoal(
+                dependencies.allocator,
+                dependencies.metadata,
+                form,
+            ),
+            .add_funnel => controller.addFunnel(
+                dependencies.allocator,
+                dependencies.io,
+                dependencies.metadata,
+                form,
+                now,
+            ),
+            .delete_funnel => controller.deleteFunnel(
+                dependencies.allocator,
+                dependencies.metadata,
+                form,
+            ),
+            .add_excluded_network => controller.addExcludedNetwork(
+                dependencies.allocator,
+                dependencies.metadata,
+                form,
+                now,
+            ),
+            .delete_excluded_network => controller.deleteExcludedNetwork(
+                dependencies.allocator,
+                dependencies.metadata,
+                form,
+            ),
+            .update_traffic_policy => controller.updateTrafficPolicy(
+                dependencies.allocator,
+                dependencies.metadata,
+                form,
+                now,
+            ),
+        };
+        operation catch |err| {
+            if (!isFormError(err)) return err;
+            try formErrorPage(
+                dependencies,
+                output,
+                form,
+                action,
+                goal_action_context,
+                err,
+            );
+            return;
+        };
+    }
     if (action == .add_excluded_network or
         action == .delete_excluded_network or
         action == .update_traffic_policy)
@@ -2206,6 +2270,9 @@ fn postAction(
         .range = form_context.range,
         .comparison = form_context.comparison,
         .kind = kind,
+        .goal_screen = if (kind == .goal) .list else .none,
+        .analysis_filters = goal_action_context.filters,
+        .analysis_segment_id = goal_action_context.segment_id,
     }, switch (action) {
         .add_goal => "goal-added",
         .edit_goal => "goal-updated",
@@ -2221,11 +2288,96 @@ fn postAction(
     });
 }
 
+fn goalPreviewPage(
+    dependencies: Dependencies,
+    output: *std.Io.Writer,
+    form: controller.Form,
+    action: Action,
+    action_context: controller.GoalActionContext,
+    preview: controller.GoalPreviewSubmission,
+) !void {
+    var query = try goalSubmissionQuery(form, action, action_context);
+    query.goal_preview_response = true;
+    const resolved_calendar = resolvePageCalendar(dependencies, query) catch {
+        try writeError(output, .{
+            .status = 503,
+            .title = "Site calendar unavailable",
+            .message = "The preview cannot be rendered because this site's validated timezone is unavailable.",
+        });
+        return;
+    };
+    var page = controller.loadPage(
+        dependencies.allocator,
+        dependencies.metadata,
+        dependencies.events,
+        .journeys,
+        query,
+        resolved_calendar,
+        null,
+        dependencies.csrf_token,
+        "",
+        dependencies.report_timeout_ms,
+    ) catch |err| {
+        if (err == error.ReportTimeout) {
+            try formErrorPage(
+                dependencies,
+                output,
+                form,
+                action,
+                action_context,
+                err,
+            );
+            return;
+        }
+        return err;
+    };
+    page.goal_draft = preview.draft;
+    if (page.goal_management) |*management| {
+        management.properties = preview.properties;
+        management.result = preview.result;
+        management.result_is_preview = true;
+    } else {
+        return error.MissingGoalManagement;
+    }
+    try writePage(output, 200, page);
+}
+
+fn goalSubmissionQuery(
+    form: controller.Form,
+    action: Action,
+    action_context: controller.GoalActionContext,
+) !model.Query {
+    const form_context = try controller.formContext(form);
+    var query = model.Query{
+        .site = try form.required("site"),
+        .range = form_context.range,
+        .comparison = form_context.comparison,
+        .kind = .goal,
+        .analysis_filters = action_context.filters,
+        .analysis_segment_id = action_context.segment_id,
+        .goal_screen = if (action == .edit_goal) .edit else .new,
+        .goal_entity_set = true,
+        .goal_entity_kind = if (std.mem.eql(
+            u8,
+            form.optional("entity") orelse "page",
+            "event",
+        )) .event else .page,
+        .goal_search = form.optional("search") orelse "",
+    };
+    if (action == .edit_goal) {
+        query.goal_id = try form.required("id");
+    } else if (action != .add_goal) {
+        return error.InvalidGoalAction;
+    }
+    return query;
+}
+
 fn formErrorPage(
     dependencies: Dependencies,
     output: *std.Io.Writer,
     form: controller.Form,
     action: Action,
+    action_context: controller.GoalActionContext,
     failure: anyerror,
 ) !void {
     const form_context = controller.formContext(form) catch {
@@ -2237,22 +2389,34 @@ fn formErrorPage(
         return;
     };
     const site = form.required("site") catch "";
-    var query = model.Query{
-        .site = site,
-        .range = form_context.range,
-        .comparison = form_context.comparison,
-        .kind = switch (action) {
-            .add_goal,
-            .edit_goal,
-            .duplicate_goal,
-            .archive_goal,
-            .reactivate_goal,
-            .delete_goal,
-            => .goal,
-            .add_funnel, .delete_funnel => .funnel,
-            .add_excluded_network, .delete_excluded_network, .update_traffic_policy => .overview,
-        },
-    };
+    var query = if (action == .add_goal or action == .edit_goal)
+        goalSubmissionQuery(form, action, action_context) catch {
+            try writeError(output, .{
+                .status = 400,
+                .title = "Invalid form",
+                .message = "The submitted goal context was missing or invalid.",
+            });
+            return;
+        }
+    else
+        model.Query{
+            .site = site,
+            .range = form_context.range,
+            .comparison = form_context.comparison,
+            .kind = switch (action) {
+                .add_goal,
+                .edit_goal,
+                .duplicate_goal,
+                .archive_goal,
+                .reactivate_goal,
+                .delete_goal,
+                => .goal,
+                .add_funnel, .delete_funnel => .funnel,
+                .add_excluded_network, .delete_excluded_network, .update_traffic_policy => .overview,
+            },
+            .analysis_filters = action_context.filters,
+            .analysis_segment_id = action_context.segment_id,
+        };
     switch (action) {
         .add_goal => query.goal_screen = .new,
         .edit_goal => {
@@ -2269,7 +2433,13 @@ fn formErrorPage(
         },
         else => {},
     }
+    if (isStaleSegmentError(failure)) {
+        query.analysis_segment_id = null;
+    } else if (failure == error.StaleFilterProperty) {
+        query.analysis_filters = .{};
+    }
     if (query.goal_screen == .new or query.goal_screen == .edit) {
+        query.goal_preview_response = true;
         query.goal_entity_set = true;
         query.goal_entity_kind = if (std.mem.eql(
             u8,
@@ -2322,6 +2492,12 @@ fn formErrorPage(
         "The goal was not deleted because the confirmation did not exactly match its current name."
     else if (failure == error.GoalNotObserved)
         "No matching Page or Event was seen in this date range. Confirm the zero-seen definition explicitly to save it."
+    else if (failure == error.ReportTimeout)
+        "The preview exceeded the shared report deadline. Nothing was saved; narrow the date range or filters and retry."
+    else if (isStaleSegmentError(failure))
+        "The selected segment became stale before this goal was submitted. Nothing was saved; the stale segment was removed from this draft."
+    else if (failure == error.StaleFilterProperty)
+        "An ad-hoc property filter became stale before this goal was submitted. Nothing was saved; stale ad-hoc filters were removed from this draft."
     else if (failure == error.GoalNameConflict)
         "The goal was not saved because this site already has a goal with that name."
     else if (failure == error.StaleGoal)
@@ -2349,16 +2525,10 @@ fn formErrorPage(
         => .none,
     };
     if (action == .add_goal or action == .edit_goal) {
-        page.goal_draft = .{
-            .name = form.required("name") catch "",
-            .entity_kind = query.goal_entity_kind,
-            .match_kind = form.required("match") catch "exact",
-            .match_value = form.required("value") catch "",
-            .confirm_unseen = if (form.optional("confirm_unseen")) |value|
-                std.mem.eql(u8, value, "on")
-            else
-                false,
-        };
+        page.goal_draft = try controller.goalDraftFromForm(
+            dependencies.allocator,
+            form,
+        );
     } else if (action == .duplicate_goal) {
         page.goal_draft.name = form.required("name") catch "";
     } else if (action == .add_funnel) {
@@ -2377,7 +2547,16 @@ fn formErrorPage(
             .daily_event_ceiling = form.required("daily_event_ceiling") catch "",
         };
     }
-    try writePage(output, if (failure == error.GoalReferenced) 409 else 422, page);
+    try writePage(
+        output,
+        if (failure == error.ReportTimeout)
+            503
+        else if (failure == error.GoalReferenced)
+            409
+        else
+            422,
+        page,
+    );
 }
 
 fn writePage(output: *std.Io.Writer, status: u16, page: model.Page) !void {
@@ -2781,6 +2960,18 @@ fn canonicalUrl(
         },
         .sessions, .settings => {},
     }
+    if (destination == .journeys and query.goal_screen != .none) {
+        const suffix = try analysis.canonicalFilterUrlSuffix(
+            std.heap.page_allocator,
+            query.analysis_segment_id,
+            query.analysis_filters,
+        );
+        defer std.heap.page_allocator.free(suffix);
+        if (suffix.len != 0) {
+            try output.writeByte('&');
+            try output.writeAll(suffix);
+        }
+    }
 }
 
 fn isInvalidInput(err: anyerror) bool {
@@ -2872,7 +3063,22 @@ fn isFormError(err: anyerror) bool {
         error.InvalidMatchKind,
         error.InvalidGoalEntityKind,
         error.InvalidGoalMatch,
+        error.InvalidGoalIntent,
+        error.InvalidGoalPredicateRule,
         error.InvalidGoalTimestamp,
+        error.MissingAnalysisProperty,
+        error.InvalidAnalysisScalarType,
+        error.InvalidAnalysisOperator,
+        error.InvalidAnalysisOperatorValues,
+        error.InvalidAnalysisOperatorType,
+        error.TooManyAnalysisOperatorValues,
+        error.TooManyAnalysisValues,
+        error.InvalidAnalysisValue,
+        error.InvalidPropertyNumber,
+        error.TooManySelectorPredicates,
+        error.NonCanonicalPageSelector,
+        error.InvalidPageSelector,
+        error.InvalidEventSelector,
         error.GoalNotObserved,
         error.GoalNameConflict,
         error.GoalConfirmationMismatch,

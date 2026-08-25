@@ -1064,7 +1064,7 @@ async function main() {
           candidate.url() === `${origin}/admin/goals` &&
           candidate.request().method() === "POST",
       ),
-      goalForm.locator('button[type="submit"]').click(),
+      goalForm.locator('button[name="intent"][value="save"]').click(),
     ]).then(([post]) => post);
     assert.equal(
       response.status(),
@@ -1115,7 +1115,9 @@ async function main() {
     response = await Promise.all([
       page.waitForNavigation({ waitUntil: "load" }),
       page
-        .locator('form[action="/admin/goals"] button[type="submit"]')
+        .locator(
+          'form[action="/admin/goals"] button[name="intent"][value="save"]',
+        )
         .click(),
     ]).then(([navigation]) => navigation);
     assert.equal(response.status(), 200);

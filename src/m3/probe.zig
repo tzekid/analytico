@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const analysis = @import("../analysis.zig");
 const domain = @import("../domain.zig");
 const report = @import("../report.zig");
@@ -229,6 +230,83 @@ pub fn seed(
     try output.print("M3 fixture committed events={d}\n", .{rows.len});
 }
 
+pub fn goalPredicatesFixture(
+    allocator: std.mem.Allocator,
+    output: *std.Io.Writer,
+    directory: []const u8,
+    site_id: []const u8,
+) !void {
+    try domain.validateUuid(site_id);
+    const event_path = try std.fs.path.join(
+        allocator,
+        &.{ directory, "events.duckdb" },
+    );
+    var store = try events.Store.open(allocator, event_path);
+    defer store.deinit();
+    try store.requireCurrent();
+    const sql_template =
+        \\INSERT INTO events
+        \\SELECT template.* REPLACE (
+        \\  7 AS event_schema_version, 2 AS protocol_version,
+        \\  2 AS tracker_version, CAST(v.event_id AS UUID) AS event_id,
+        \\  v.received_at AS received_at_utc_micros,
+        \\  v.received_at AS occurred_at_utc_micros,
+        \\  CAST('2025-01-01' AS DATE) AS received_date_utc,
+        \\  CAST('2025-01-01' AS DATE) AS site_local_date,
+        \\  0 AS site_utc_offset_minutes, v.kind AS kind,
+        \\  v.event_name AS event_name, v.path AS path,
+        \\  'Goal fixture' AS page_title, 'alpha.example' AS hostname,
+        \\  CAST(v.anonymous_id AS UUID) AS anonymous_id,
+        \\  1 AS identity_quality, '' AS user_id,
+        \\  CAST(v.session_id AS UUID) AS session_id, v.sequence AS sequence,
+        \\  v.sequence = 0 AS session_start, '' AS referrer_host,
+        \\  'DE' AS country_code, 'en' AS language,
+        \\  'Chrome' AS browser_family, 'Linux' AS os_family,
+        \\  'desktop' AS device_category, '' AS utm_source,
+        \\  '' AS utm_medium, '' AS utm_campaign,
+        \\  '' AS utm_term, '' AS utm_content,
+        \\  v.properties AS properties_json, '{}' AS user_traits_json,
+        \\  CASE WHEN v.amount = '' THEN CAST(NULL AS DECIMAL(18, 6))
+        \\       ELSE CAST(v.amount AS DECIMAL(18, 6)) END AS value_amount,
+        \\  v.currency AS value_currency, 0 AS engagement_ms,
+        \\  0 AS max_scroll_depth,
+        \\  from_hex(md5(v.anonymous_id)) AS visitor_day_id,
+        \\  v.sequence = 0 AS visitor_day_start,
+        \\  repeat('9', 64) AS event_payload_digest,
+        \\  1 AS traffic_class, 2 AS classifier_version, '' AS bot_rule,
+        \\  0 AS signal_version, FALSE AS navigator_webdriver,
+        \\  0 AS trusted_interactions, FALSE AS was_visible,
+        \\  FALSE AS was_prerendered, 0 AS viewport_bucket,
+        \\  0 AS beacon_timing_bucket, 0 AS client_hint_consistency,
+        \\  FALSE AS accept_language_present,
+        \\  from_hex('99999999999999999999999999999999') AS network_day_id
+        \\) FROM events template CROSS JOIN (VALUES
+        \\ ('00000000-0000-4000-8000-000000000501',1735689600000000,1,'pageview','/pricing','00000000-0000-4000-8000-0000000005a1','00000000-0000-4000-8000-0000000005b1',0,'{"plan":"pro","page_only":"yes"}','',''),
+        \\ ('00000000-0000-4000-8000-000000000502',1735689601000000,2,'purchase','/pricing','00000000-0000-4000-8000-0000000005a1','00000000-0000-4000-8000-0000000005b1',1,'{"plan":"pro","amount":14.25}','12.500000','EUR'),
+        \\ ('00000000-0000-4000-8000-000000000503',1735689602000000,2,'purchase','/pricing','00000000-0000-4000-8000-0000000005a1','00000000-0000-4000-8000-0000000005b1',2,'{"plan":"pro","amount":"7.5"}','7.500000','USD'),
+        \\ ('00000000-0000-4000-8000-000000000504',1735689603000000,1,'pageview','/welcome','00000000-0000-4000-8000-0000000005a2','00000000-0000-4000-8000-0000000005b2',0,'{"page_only":"yes"}','',''),
+        \\ ('00000000-0000-4000-8000-000000000505',1735689604000000,2,'signup','/welcome','00000000-0000-4000-8000-0000000005a2','00000000-0000-4000-8000-0000000005b2',1,'{"plan":"free"}','','')
+        \\) v(event_id,received_at,kind,event_name,path,anonymous_id,session_id,
+        \\    sequence,properties,amount,currency)
+        \\WHERE template.site_id = '__SITE__'
+        \\  AND template.event_id = CAST(
+        \\    '00000000-0000-4000-8000-000000000001' AS UUID)
+    ;
+    const rendered_sql = try std.mem.replaceOwned(
+        u8,
+        allocator,
+        sql_template,
+        "__SITE__",
+        site_id,
+    );
+    defer allocator.free(rendered_sql);
+    const sql = try allocator.dupeSentinel(u8, rendered_sql, 0);
+    defer allocator.free(sql);
+    try store.database.exec(sql);
+    try store.checkpoint();
+    try output.writeAll("goal predicate fixture committed events=5\n");
+}
+
 pub fn million(
     allocator: std.mem.Allocator,
     output: *std.Io.Writer,
@@ -383,6 +461,7 @@ pub fn goalDiscovery(
                 .prefix => .page_prefix,
             },
             .value = goal.match_value,
+            .predicates = goal.predicates,
         },
     };
     const event_path = try std.fs.path.join(
@@ -426,12 +505,30 @@ pub fn goalDiscovery(
         &store,
         event_request,
     );
+    var signup_count: ?i64 = null;
+    var purchase_count: ?i64 = null;
+    for (custom_events.entities) |entity| {
+        if (std.mem.eql(u8, entity.label, "signup")) {
+            signup_count = entity.eligible_count;
+        } else if (std.mem.eql(u8, entity.label, "purchase")) {
+            purchase_count = entity.eligible_count;
+        }
+    }
+    var purchase_goal_base_evidence = false;
+    for (goals) |goal| {
+        if (goal.match_kind == .event and
+            std.mem.eql(u8, goal.match_value, "purchase"))
+        {
+            purchase_goal_base_evidence = true;
+        }
+    }
     if (policy.strict_mode) {
         if (custom_events.entities.len != 2 or
-            !std.mem.eql(u8, custom_events.entities[0].label, "signup") or
-            custom_events.entities[0].eligible_count != 100_000 or
-            !std.mem.eql(u8, custom_events.entities[1].label, "purchase") or
-            custom_events.entities[1].eligible_count != 99_900)
+            signup_count != 100_000 or
+            purchase_count != if (purchase_goal_base_evidence)
+                @as(i64, 100_000)
+            else
+                99_900)
         {
             return error.InvalidGoalDiscoveryKinds;
         }
@@ -480,12 +577,149 @@ pub fn goalDiscovery(
         .strict_mode = policy.strict_mode,
         .page_entities = pages.entities.len,
         .custom_event_entities = custom_events.entities.len,
-        .strict_signup_count = custom_events.entities[0].eligible_count,
-        .strict_purchase_count = custom_events.entities[1].eligible_count,
+        .strict_signup_count = signup_count.?,
+        .strict_purchase_count = purchase_count.?,
+        .purchase_goal_base_evidence = purchase_goal_base_evidence,
         .timeout_interrupted = true,
         .connection_reused = true,
         .search_value = reused.entities[0].label,
         .search_count = reused.entities[0].eligible_count,
+    }, .{}, output);
+    try output.writeByte('\n');
+}
+
+pub fn goalPredicatesProfile(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    output: *std.Io.Writer,
+    directory: []const u8,
+    site_slug: []const u8,
+    start_date: []const u8,
+    end_date: []const u8,
+    explain: bool,
+) !void {
+    try domain.validateSlug(site_slug);
+    const range = analysis.LocalDateRange{
+        .start = start_date,
+        .end = end_date,
+    };
+    try range.validate();
+    const metadata_path = try std.fs.path.join(
+        allocator,
+        &.{ directory, "meta.db" },
+    );
+    var metadata = try meta.Store.open(allocator, metadata_path);
+    defer metadata.deinit();
+    try metadata.requireCurrent();
+    const site_id = try metadata.siteIdBySlug(allocator, site_slug);
+    const policy = try metadata.sitePolicy(allocator, site_id);
+    const goals = try metadata.listGoals(allocator, site_slug);
+    const resolved = try allocator.alloc(analysis.ResolvedGoal, goals.len);
+    for (resolved, goals) |*target, goal| target.* = .{
+        .id = goal.id,
+        .selector = .{
+            .kind = switch (goal.match_kind) {
+                .event => .exact_event,
+                .path => .exact_page,
+                .prefix => .page_prefix,
+            },
+            .value = goal.match_value,
+            .predicates = goal.predicates,
+        },
+    };
+    const event_path = try std.fs.path.join(
+        allocator,
+        &.{ directory, "events.duckdb" },
+    );
+    var store = try events.Store.open(allocator, event_path);
+    defer store.deinit();
+    try store.requireCurrent();
+    const predicates = [_]analysis.PropertyPredicate{.{
+        .property_ref = .{ .name = "plan", .scalar_type = .missing },
+        .operator = .is,
+    }};
+    const request = analysis.GoalResultRequest{
+        .site_id = site_id,
+        .range = range,
+        .selector = .{
+            .kind = .exact_event,
+            .value = "purchase",
+            .predicates = &predicates,
+        },
+        .active_goals = resolved,
+        .strict_traffic_mode = policy.strict_mode,
+        .timeout_ms = analysis.maximum_timeout_ms,
+    };
+    if (explain) {
+        try output.writeAll(try analysis_store.profileGoalResult(
+            allocator,
+            &store,
+            request,
+        ));
+        return;
+    }
+    if (builtin.mode == .debug) {
+        try std.json.Stringify.value(.{
+            .strict_mode = policy.strict_mode,
+            .selector = "purchase where plan is missing",
+            .performance_enforced = false,
+            .total_matches = @as(?i64, null),
+            .path_cardinality = @as(?i64, null),
+            .sample_micros = &[_]i64{},
+            .p50_micros = @as(?i64, null),
+            .p95_micros = @as(?i64, null),
+            .preview_micros = @as(?i64, null),
+            .preview_property_count = @as(?i64, null),
+            .preview_timeout_interrupted = false,
+            .connection_reused = false,
+        }, .{}, output);
+        try output.writeByte('\n');
+        return;
+    }
+    var timeout_request = request;
+    timeout_request.timeout_ms = 1;
+    if (analysis_store.executeGoalPreview(
+        allocator,
+        &store,
+        timeout_request,
+    )) |_| {
+        return error.ExpectedGoalPreviewTimeout;
+    } else |err| if (err != error.AnalysisTimeout) return err;
+    _ = try analysis_store.executeGoalResult(allocator, &store, request);
+    var samples: [10]i64 = undefined;
+    var last: analysis.GoalResult = undefined;
+    for (&samples) |*elapsed| {
+        const started = std.Io.Clock.awake.now(io).nanoseconds;
+        last = try analysis_store.executeGoalResult(allocator, &store, request);
+        elapsed.* = @intCast(@divTrunc(
+            std.Io.Clock.awake.now(io).nanoseconds - started,
+            std.time.ns_per_us,
+        ));
+    }
+    std.mem.sort(i64, &samples, {}, std.sort.asc(i64));
+    const preview_started = std.Io.Clock.awake.now(io).nanoseconds;
+    const preview = try analysis_store.executeGoalPreview(
+        allocator,
+        &store,
+        request,
+    );
+    const preview_micros: i64 = @intCast(@divTrunc(
+        std.Io.Clock.awake.now(io).nanoseconds - preview_started,
+        std.time.ns_per_us,
+    ));
+    try std.json.Stringify.value(.{
+        .strict_mode = policy.strict_mode,
+        .selector = "purchase where plan is missing",
+        .performance_enforced = true,
+        .total_matches = last.total_matches,
+        .path_cardinality = last.path_cardinality,
+        .sample_micros = samples,
+        .p50_micros = samples[4],
+        .p95_micros = samples[9],
+        .preview_micros = preview_micros,
+        .preview_property_count = preview.properties.property_count,
+        .preview_timeout_interrupted = true,
+        .connection_reused = true,
     }, .{}, output);
     try output.writeByte('\n');
 }
@@ -529,6 +763,7 @@ pub fn goalCapacityRecovery(
         "Capacity probe",
         .event,
         "capacity_probe",
+        &.{},
         next_timestamp,
     ));
 
@@ -557,6 +792,7 @@ pub fn goalCapacityRecovery(
         "Capacity probe",
         .event,
         "capacity_probe",
+        &.{},
         next_timestamp + 1,
     ));
 
@@ -581,6 +817,7 @@ pub fn goalCapacityRecovery(
         "Capacity probe",
         .event,
         "capacity_probe",
+        &.{},
         next_timestamp + 2,
     ));
 
@@ -612,6 +849,7 @@ pub fn goalCapacityRecovery(
         "Capacity probe",
         .event,
         "capacity_probe",
+        &.{},
         next_timestamp + 5,
     );
     try metadata.deleteGoalById(
@@ -745,6 +983,7 @@ pub fn overviewV2(
                 .prefix => .page_prefix,
             },
             .value = goal.match_value,
+            .predicates = goal.predicates,
         },
     };
     const event_path = try std.fs.path.join(allocator, &.{ directory, "events.duckdb" });
@@ -838,6 +1077,7 @@ pub fn filtersV2(
                 .prefix => .page_prefix,
             },
             .value = goal.match_value,
+            .predicates = goal.predicates,
         },
     };
     const event_path = try std.fs.path.join(allocator, &.{ directory, "events.duckdb" });

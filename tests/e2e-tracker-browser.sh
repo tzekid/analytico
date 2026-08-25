@@ -162,7 +162,7 @@ jq -e '
 ' <<<"$human_signal" >/dev/null
 
 doctor=$("$binary" doctor "$fixture")
-[[ "$doctor" == ok\ metadata=v8\ events=v7\ sites=1\ goals=0\ funnels=0\ stored_events=*\ key=ok ]]
+[[ "$doctor" == ok\ metadata=v9\ events=v7\ sites=1\ goals=0\ funnels=0\ stored_events=*\ key=ok ]]
 stored_events=$(sed -n 's/.*stored_events=\([0-9][0-9]*\).*/\1/p' <<<"$doctor")
 expected_events=$(jq -r .stored_events_expected "$fixture/browser-result.json")
 if [[ "$stored_events" != "$expected_events" ]]; then

@@ -50,6 +50,7 @@ semantic, or application state model is consequential and must be added here.
 | D39 | Server-rendered Analyze Breakdown | Extend the single D29 query with bounded aggregate-label search and a shared-deadline typed property catalog | Accepted for 1.0 issue #29 |
 | D40 | Universal filters, segments, and saved views | Resolve one canonical FilterSet context; persist exact site-owned state in metadata schema 7 | Accepted for 1.0 issue #30 |
 | D41 | Guided goal lifecycle and metadata schema 8 | Replace raw goal administration with bounded discovery, archive-first lifecycle, and reference-safe deletion | Accepted for 1.0 issue #33 |
+| D42 | Property-constrained goals and metadata schema 9 | Persist one canonical predicate set per goal and preview one closed goal result under the current context | Accepted for 1.0 issue #34 |
 
 ## D01. MVP interface
 
@@ -2799,3 +2800,156 @@ enhanced desktop/mobile flows, and separate Debug and ReleaseSafe gates.
 `ANALYSIS_QUERY.md`, `DESIGN_SYSTEM.md`, `PERFORMANCE.md`, `OPERATIONS.md`,
 `RELEASE_CONTRACT_1.0.md`, and issue #33. Issues #34 and #35 extend this
 boundary without broadening #33.
+
+## D42. Persist and preview property-constrained goals without a second query model
+
+**Status:** Accepted for Analytico 1.0 issue #34
+
+**Date:** 2026-08-25
+
+**Issue:** #34
+
+**Extends:** D19's durable Turso autocommits, D29's closed typed selector and
+query compiler, D34's active-goal snapshot, D40's canonical FilterSet context,
+and D41's single-row lifecycle mutations. It supersedes the planning package's
+logical `goal_predicates` child-table sketch only where that sketch conflicts
+with D19/D41 atomicity on the pinned engine.
+
+### Context and storage candidates
+
+The D29 domain already validates, canonicalizes, and compiles at most three
+typed property predicates on the matching event row. Metadata schema 8 stores
+only the base kind/value tuple, so neither an active goal nor an explicitly
+selected archived goal can retain those predicates. A child table would make
+create, edit, and duplicate multi-write operations; edit could expose a mixed
+old/new selector after a crash because the pinned Turso/filesystem evidence
+still prohibits claiming an explicit multi-write transaction.
+
+| Candidate | Runtime behavior | Migration, maintenance, and rollback |
+| --- | --- | --- |
+| Add ordered `goal_predicates` children | Mirrors the package's logical model | Makes selector mutation multi-write and crash-visible under D19 |
+| Add fixed columns for three predicate slots | Keeps one-row writes | Repeats property/type/operator/value columns and handles bounded value lists poorly |
+| Replace the table with one canonical predicate document | Keeps one complete selector per row and reuses D29 grammar | Adds one replayable replacement migration and exact parse/reserialize validation |
+
+Select the replacement. Metadata schema 9 creates `goal_definitions_v2` with
+the D41 columns plus one bounded `canonical_predicates_json` document. The
+document is exact schema-1 JSON containing the bytewise ordered and
+deduplicated D29 canonical predicate components. It is at most 32 KiB and is
+accepted from storage only when parsing, validation, and reserialization
+produce the identical bytes. The base kind/value remain closed columns so
+reference checks, discovery, and ordinary lifecycle presentation do not need
+to parse a generic selector document.
+
+The migration copies every schema-8 row with the exact empty predicate
+document, verifies complete row equality, removes `goal_definitions`, and
+writes ledger 9 last. Retry repairs a deterministic partial copy. If the
+source has already been removed, retry accepts only the exact replacement
+shape and canonical content before writing the ledger. Every post-migration
+create, edit, duplicate, archive, reactivate, and delete remains a single
+site-scoped statement; duplicate copies the source predicate document in its
+guarded insert. The 32-active cap, externally created overflow preservation,
+saved-view deletion guard, archive semantics, and stable IDs remain D41.
+
+### Preview, result, and property discovery
+
+No new metric or selector grammar is added. One closed goal-result consumer
+uses the existing D29 site-local range, resolved FilterSet/segment, product
+traffic, strict classifier, canonical person, full-session, selected selector,
+bound-value, and interrupt primitives. It returns exactly:
+
+- total matching events;
+- distinct converting and eligible people and sessions, with converting-person
+  identity compatibility coverage;
+- exact revenue and value-bearing match count per currency, never an implicit
+  cross-currency sum;
+- exact matching-path cardinality and at most ten paths ordered by match count
+  descending then label ascending.
+
+The path sample gives a page-prefix definition concrete historical matches and
+gives an event definition bounded page context. It is labeled as a capped
+sample, not the total. Goal detail runs only this result. The builder preview
+runs the result plus one property catalog under one shared existing deadline.
+The catalog examines only the latest 2,000 eligible events matching the base
+Page/Event selector in the same resolved context, returns at most 100 property
+names with each observed scalar type and sample count, and exposes type
+conflicts without coercion. It is not D39's all-custom-event catalog, a cache,
+an EAV projection, or a durable index.
+
+An ordinary native form submits at most three numbered predicate rows. Each
+row selects a property, one closed type/operator pair, and at most one scalar
+value; the server requires or rejects that value according to the operator.
+The stored D29 representation remains able to carry its full bounded value
+list; the guided #34 form does not need an OR value editor. Standard UI choices
+cannot combine an operator with an incompatible type; malformed direct
+submissions reject before DuckDB.
+
+`intent=preview` renders the request-owned draft, catalog, and historical
+result without writing metadata. `intent=save` reruns the same result before
+its one metadata write. A timeout therefore cannot save, and a successful zero
+result still requires D41's explicit unseen confirmation. There is no draft
+session, preview token, stale-result fallback, client state store, startup data
+request, or network call. JavaScript may enhance the same native submission
+but owns no selector state.
+
+The goal routes preserve their canonical ad-hoc FilterSet and selected segment
+in GET, search, preview, save, error, and redirect state. The controller resolves
+the segment and validates the resulting context for the selected site before
+DuckDB. Preview and detail therefore use the selected local dates, universal
+filters, segment, and traffic policy rather than silently dropping filters.
+The existing bounded URL and 8 KiB body limits remain; a route-specific
+32-field parser accommodates three predicate rows without a Caddy change.
+
+### Compatibility, consumers, and rollback
+
+Every active or explicitly selected goal resolves to its complete D29
+`EventSelector`, so Overview, Trend, Breakdown, `session_converted` filters,
+engaged-session evidence, and later funnel/path/session consumers see the same
+event-row predicates. D34's query-time traffic classifier keeps its documented
+base Page/Event human-evidence input; D42 does not silently make traffic
+quality depend on property JSON. Issues #35, #38, and #41 still own their
+funnel, path, and session/profile interfaces and consume this resolved selector
+without a second predicate representation.
+
+Predicate-free metric-v1 CLI output and SQL remain byte-compatible. The frozen
+metric-v1 selected-goal report has no typed-property grammar; it must reject a
+predicate-bearing goal explicitly instead of reporting the broader base
+selector as if it were exact. The metric-v2 browser goal detail is the
+authoritative predicate-aware result.
+
+Metadata schema 9 changes neither DuckDB event schema 7 nor tracker, Caddy,
+service topology, dependencies, event files, or backup format. Deployment
+stops the sole writer, creates and independently restores a matched
+metadata-8/event-7 backup, proves exact predecessor
+`f1609073444e204f6767a9621f87f2f24c2e0f3d` opens that restore and reproduces
+selected reports, then migrates and verifies schema 9.
+Executable-only rollback is forbidden: restore the matched pair before the
+metadata-8 binary starts. The old binary must refuse migrated metadata.
+
+### Consequences and acceptance evidence
+
+Runtime adds one bounded goal-result statement and, only for preview, one
+bounded property-sample statement under the same two-second budget. Memory is
+bounded by the existing active/selected goal sets, three predicates, 20 D29
+values in stored state, 100 property names with at most five observed scalar-
+type rows each, 2,000 sampled events, 16 currencies, and 10 path rows. No cache,
+projection, worker, draft store, version history, expression tree, dependency,
+or memory/deadline increase is introduced.
+
+Issue #34 must prove exact predicate JSON canonicality and collision
+separation; type/operator/value errors; event-row rather than same-session
+predicate semantics; universal-filter/segment composition; exact totals,
+people, sessions, coverage, currencies, and path samples; zero and timeout
+no-write behavior plus connection reuse; full-selector resolution for current
+consumers; explicit metric-v1 unsupported behavior; and goal-detail p95 below
+700 ms on the standard million-event fixture. It must also prove exact
+schema-8-to-9 copy, genuine partial-copy and after-drop replay, canonical
+corruption refusal, repeated migration, 34-active overflow preservation,
+backup/restore, predecessor read/refusal, matched rollback, and event/report
+preservation. The authenticated JavaScript-disabled and enhanced desktop/mobile
+journey covers preview, save, edit, duplicate, detail, errors, site isolation,
+and no startup data request in separate Debug and ReleaseSafe gates.
+
+**Affected contracts:** `SPEC.md`, `ARCHITECTURE.md`, `DATA_MODEL.md`,
+`ANALYSIS_QUERY.md`, `DESIGN_SYSTEM.md`, `PERFORMANCE.md`, `OPERATIONS.md`,
+`RELEASE_CONTRACT_1.0.md`, and issue #34. Issues #35, #38, and #41 consume the
+complete selector without broadening this decision.

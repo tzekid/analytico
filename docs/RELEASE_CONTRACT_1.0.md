@@ -61,7 +61,7 @@ are not passes.
 
 ### Data semantics
 
-- Protocol version 2, event schema version 7, metadata schema version 8, and
+- Protocol version 2, event schema version 7, metadata schema version 9, and
   metric version 2 are
   documented and exercised together while schema-3 rows upgrade without lost
   facts and the documented protocol-v1 and metric-v1 compatibility paths
@@ -96,6 +96,11 @@ are not passes.
   exact result cardinality and raw measure components, keeps its conditional
   empty-site presence check inside that deadline, and preserves metric-v1
   CLI output without a second browser report engine or result cache.
+- The D42 goal builder persists zero to three exact typed event-row predicates,
+  previews the selected local-date/filter/segment/traffic context before save,
+  exposes observed type conflicts without coercion, and reports exact total,
+  visitor, session, identity-coverage, and per-currency revenue results. Preview
+  timeout performs no metadata write and leaves the analysis connection usable.
 - D34 query classification is reversible, default-off parity is exact, every
   documented human-evidence veto wins, strict mode uses one shared product
   predicate, and traffic-quality v5 exposes bounded contradiction/cap/anomaly
@@ -154,6 +159,13 @@ are not passes.
   restore, old-binary read of the restored pair, refusal of migrated metadata,
   event/report and pre-existing overflow preservation, and matched-pair
   rollback before a binary switch.
+- Metadata schema 9 additionally proves exact
+  `f1609073444e204f6767a9621f87f2f24c2e0f3d` metadata-8/event-7
+  predecessor behavior, complete empty-predicate copy, genuine partial-copy and
+  after-drop replay, canonical-corruption refusal, repeated migration, stable
+  lifecycle/selectors, 34-active overflow preservation, backup plus independent
+  restore, old-binary read of the restored pair, refusal of migrated metadata,
+  event/report preservation, and matched-pair rollback before a binary switch.
 - Core real-browser journeys pass with JavaScript enabled; the complete native
   baseline passes with JavaScript disabled. Mobile, keyboard, focus, contrast,
   reduced-motion, chart/table, zoom, and screen-reader checks meet the written
@@ -173,10 +185,14 @@ are not passes.
   isolation, archived explicit reporting, JavaScript-disabled operation,
   enhanced equivalence, keyboard use, and phone layout. No raw selector syntax,
   hidden client state, or startup API/JSON request is added.
-- The named `e2e-filters` and `e2e-metadata7-migration` gates pass independently
-  alongside `e2e-goals` and `e2e-metadata8-migration`. All four are mandatory
-  parts of `e2e-release-full`; the full packaged gate is not a substitute for
-  being able to reproduce any focused boundary.
+- Predicate-goal acceptance extends that journey with observed property/type
+  discovery, conflict and typed-operator errors, zero/timeout no-write,
+  preview/save/edit/duplicate, exact filtered detail results and currencies,
+  same-session false-positive traps, and a native Analyze handoff.
+- The named `e2e-filters`, `e2e-goals`, `e2e-metadata7-migration`,
+  `e2e-metadata8-migration`, and `e2e-metadata9-migration` gates pass
+  independently. All five are mandatory parts of `e2e-release-full`; the full
+  packaged gate is not a substitute for reproducing any focused boundary.
 - Server-rendered chart families validate bounded typed inputs and stable IDs,
   handle empty/single/constant/missing data honestly, expose no inline handlers,
   and pair every visual value with an exact captioned table/details alternative.

@@ -74,13 +74,13 @@ test "$("$previous" report "$verified" migration 2026-08-23 2026-08-23 \
     overview --format json)" = "$before_report"
 
 test "$("$current" migrate "$live" "$backup")" = \
-    "migrated metadata=v8 events=v7"
+    "migrated metadata=v9 events=v7"
 test "$("$current" doctor "$live")" = \
-    "ok metadata=v8 events=v7 sites=1 goals=1 funnels=1 stored_events=1 key=ok"
+    "ok metadata=v9 events=v7 sites=1 goals=1 funnels=1 stored_events=1 key=ok"
 metadata_facts "$live" >"$fixture/after-metadata.txt"
 cmp "$fixture/before-metadata.txt" "$fixture/after-metadata.txt"
 sqlite3 -separator '|' "$live/meta.db" \
-    'SELECT id, site_id, name, match_kind, match_value, created_at_utc_micros FROM goal_definitions ORDER BY id;' \
+    'SELECT id, site_id, name, match_kind, match_value, created_at_utc_micros FROM goal_definitions_v2 ORDER BY id;' \
     >"$fixture/after-goals.txt"
 cmp "$fixture/before-goals.txt" "$fixture/after-goals.txt"
 test "$(sha256sum "$live/events.duckdb" | cut -d' ' -f1)" = "$before_event_sha"
@@ -91,7 +91,7 @@ test -z "$(sqlite3 "$live/meta.db" 'SELECT default_currency FROM site_settings;'
 test "$(sqlite3 "$live/meta.db" \
     "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='site_origins_unique_origin';")" = 1
 test "$("$current" migrate "$live" "$backup")" = \
-    "migrated metadata=v8 events=v7"
+    "migrated metadata=v9 events=v7"
 if "$previous" doctor "$live" >/dev/null 2>&1; then
     echo "metadata-5 predecessor unexpectedly opened current metadata" >&2
     exit 1
@@ -106,7 +106,7 @@ test "$("$previous" report "$rolled_back" migration 2026-08-23 2026-08-23 \
 
 fresh="$fixture/fresh"
 "$current" init "$fresh" >/dev/null
-test "$(sqlite3 "$fresh/meta.db" 'SELECT max(version) FROM meta_migrations;')" = 8
+test "$(sqlite3 "$fresh/meta.db" 'SELECT max(version) FROM meta_migrations;')" = 9
 test "$(sqlite3 "$fresh/meta.db" 'SELECT count(*) FROM site_settings;')" = 0
 
 duplicate="$fixture/duplicate"

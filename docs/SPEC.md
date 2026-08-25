@@ -75,8 +75,12 @@
   with native list/new/detail/edit destinations. Page/Event discovery is
   bounded by the selected range and analysis deadline; active/archive state,
   stable IDs, reference-safe delete, and explicit zero-seen confirmation are
-  server-owned. Property predicates and historical preview remain issue #34;
-  funnel goal references remain issue #35.
+  server-owned.
+- D42 and issue #34 advance metadata to schema 9 and persist the complete
+  canonical typed selector in one goal row. A stateless native preview uses the
+  current local dates, universal filters/segment, and traffic policy; goal
+  detail reports exact total/people/session/revenue results plus bounded path
+  context. Funnel goal references remain issue #35.
 
 ## 1. Product statement
 

@@ -1,7 +1,7 @@
 # Data model and metric semantics
 
 > **Status:** Sections 1–9 define the shipped analytics-metadata subset in
-> Turso metadata schema 8, DuckDB event schema 7, and metric semantics v1. Authentication storage
+> Turso metadata schema 9, DuckDB event schema 7, and metric semantics v1. Authentication storage
 > remains governed by its own specification. The daily-pseudonym and UTC-day
 > rules remain the compatibility contract for existing rows and current
 > reports. Section 10 records the remaining 1.0 transition; event schema 7 does
@@ -224,15 +224,16 @@ saved state; restored corrupt or otherwise missing references retain D40's
 visible stale behavior. All operations remain site-scoped D19 autocommits. No
 owner/team, public token, widget layout, or DuckDB table is added.
 
-### `goal_definitions`
+### `goal_definitions_v2`
 
 ```sql
-CREATE TABLE goal_definitions (
+CREATE TABLE goal_definitions_v2 (
     id TEXT PRIMARY KEY,
     site_id TEXT NOT NULL,
     name TEXT NOT NULL,
     match_kind INTEGER NOT NULL,
     match_value TEXT NOT NULL,
+    canonical_predicates_json TEXT NOT NULL,
     created_at_utc_micros INTEGER NOT NULL,
     updated_at_utc_micros INTEGER NOT NULL,
     archived_at_utc_micros INTEGER,
@@ -242,6 +243,7 @@ CREATE TABLE goal_definitions (
     CHECK (length(name) BETWEEN 1 AND 120),
     CHECK (match_kind IN (1, 2, 3)),
     CHECK (length(match_value) BETWEEN 1 AND 1024),
+    CHECK (length(canonical_predicates_json) BETWEEN 2 AND 32768),
     CHECK (updated_at_utc_micros >= created_at_utc_micros),
     CHECK (
         archived_at_utc_micros IS NULL OR
@@ -257,7 +259,8 @@ Closed `match_kind` values:
 3. page-path prefix.
 
 Metadata migration 8 deterministically copies every schema-7 `goals` row into
-this replacement table with the same ID, site, name, selector, and creation
+the retired `goal_definitions` table with the same ID, site, name, selector,
+and creation
 time. The initial update time equals the creation time and the archived time is
 null. It verifies count and complete row equality, removes the retired table,
 then writes ledger 8 last. Retry repairs a deterministic partial copy under
@@ -274,7 +277,24 @@ active goals may exist for one site, and create/duplicate/reactivate enforce
 the bound in their single write statement. Page-bounded management reads keep
 archived rows finite. Exact custom-event, exact page, and page-prefix remain
 the only #33 selectors. Regexes and arbitrary expressions are excluded; issue
-#34 owns up to three typed property predicates rather than this base migration.
+#34 owns up to three typed property predicates rather than that base migration.
+
+Metadata migration 9 deterministically copies every schema-8
+`goal_definitions` row into `goal_definitions_v2` with identical lifecycle and
+base-selector fields plus the exact schema-1 empty predicate document
+`{"schema":1,"predicates":[]}`. It verifies complete row equality, removes
+the retired table, and writes ledger 9 last. Retry repairs a genuinely partial
+copy; after source removal it accepts only the exact replacement shape and
+canonical predicate documents. No explicit multi-write Turso transaction is
+claimed.
+
+`canonical_predicates_json` contains zero to three bytewise ordered,
+deduplicated D29 predicate components. Every load parses, validates, and
+reserializes the document and requires identical bytes. Property name, scalar
+type, operator, and bounded canonical values therefore retain one typed
+representation without child-row write races. Create/edit/duplicate remain one
+statement; duplicate copies the complete document. Regex, nested logic, and
+arbitrary expressions remain excluded.
 
 A pre-migration overflow is copied without loss and shown as an operator state.
 It blocks create/duplicate/reactivate and keeps D34 heuristic diagnostics and
@@ -805,8 +825,10 @@ store the explicit optional site currency, and make origin ownership unique;
 event schema 7 and every stored event fact remain unchanged. D40 and issue #30
 advance metadata to schema 7 with exact site-owned segments and saved views.
 D41 and issue #33 advance metadata to schema 8 with a guided active/archive
-goal lifecycle while preserving selectors and stable IDs. The controller
-resolves canonical state before DuckDB, so neither store queries the other;
+goal lifecycle while preserving selectors and stable IDs. D42 and issue #34
+advance metadata to schema 9 with one exact canonical property-predicate
+document per goal. The controller resolves canonical state before DuckDB, so
+neither store queries the other;
 current valid saved-goal references block deletion, while genuinely stale or
 corrupt references remain visible rather than disappearing.
 

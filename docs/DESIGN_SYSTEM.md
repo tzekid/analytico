@@ -173,9 +173,15 @@ controls meet the established touch target, and no primary action clips or
 requires horizontal scrolling. Keyboard and JavaScript-disabled users complete
 the same GET and POST/303/GET flow. Optional enhancement may submit those exact
 forms but cannot add a client router, hidden draft, or selector state model.
-Issue #34 owns property-predicate rows, type conflicts, and historical preview;
-issue #35 owns funnel step composition. The base builder does not render fake
-or disabled versions of those future controls.
+Issue #34 adds at most three numbered predicate rows to that same native form.
+Each row names the property and selects one visibly typed operator; a value is
+required or rejected according to that rule. The server-rendered catalog
+repeats a property once per observed scalar type so conflicts are visible
+rather than coerced. Preview, zero-match confirmation, and save are distinct submit
+intents; timeout/error output preserves the draft and selected context without
+client-owned state. Goal detail pairs every KPI/revenue/path value with exact
+text/table output and labels capped path/property samples. Issue #35 owns
+funnel step composition; #34 does not render fake or disabled funnel controls.
 
 Server validation renders one focused error summary and associates only the
 affected form fields with that summary while preserving submitted values.
