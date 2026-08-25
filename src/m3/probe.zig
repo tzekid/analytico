@@ -415,6 +415,66 @@ pub fn million(
     try output.writeAll("M3 million-event fixture committed events=1000000\n");
 }
 
+pub fn liveScaleFixture(
+    allocator: std.mem.Allocator,
+    output: *std.Io.Writer,
+    directory: []const u8,
+    site_id: []const u8,
+    now_text: []const u8,
+) !void {
+    try domain.validateUuid(site_id);
+    const now_utc_micros = std.fmt.parseInt(i64, now_text, 10) catch
+        return error.InvalidLiveClock;
+    if (now_utc_micros < analysis.live_window_micros) {
+        return error.InvalidLiveClock;
+    }
+    const event_path = try std.fs.path.join(
+        allocator,
+        &.{ directory, "events.duckdb" },
+    );
+    var store = try events.Store.open(allocator, event_path);
+    defer store.deinit();
+    try store.requireCurrent();
+    if (try store.eventCount() != 1_000_000) {
+        return error.InvalidLiveScaleFixture;
+    }
+    const original_max_utc_micros: i64 = 1_736_689_599_000_000;
+    const delta = std.math.sub(
+        i64,
+        now_utc_micros,
+        original_max_utc_micros,
+    ) catch return error.InvalidLiveClock;
+    const sql = try std.fmt.allocPrintSentinel(
+        allocator,
+        "UPDATE events SET " ++
+            "received_date_utc = CAST(to_timestamp((received_at_utc_micros + {d}) / 1000000.0) AS DATE), " ++
+            "site_local_date = CAST(to_timestamp((received_at_utc_micros + {d}) / 1000000.0) AS DATE), " ++
+            "received_at_utc_micros = received_at_utc_micros + {d}, " ++
+            "occurred_at_utc_micros = occurred_at_utc_micros + {d} " ++
+            "WHERE site_id = '{s}'",
+        .{ delta, delta, delta, delta, site_id },
+        0,
+    );
+    defer allocator.free(sql);
+    try store.database.exec(sql);
+    var check = try store.database.query(
+        "SELECT count(*), min(received_at_utc_micros), " ++
+            "max(received_at_utc_micros) FROM events",
+    );
+    defer check.deinit();
+    if (check.rowCount() != 1 or check.int64(0, 0) != 1_000_000 or
+        check.int64(2, 0) != now_utc_micros or
+        check.int64(1, 0) != now_utc_micros - 999_999 * std.time.us_per_s)
+    {
+        return error.InvalidLiveScaleFixture;
+    }
+    try store.checkpoint();
+    try output.print(
+        "Live scale fixture retained events=1000000 latest_receipt={d}\n",
+        .{now_utc_micros},
+    );
+}
+
 pub fn sessionsFixture(
     allocator: std.mem.Allocator,
     output: *std.Io.Writer,
@@ -1757,6 +1817,149 @@ pub fn trafficQualityProfile(
         },
     );
     try output.writeAll(profile);
+}
+
+pub fn liveProfile(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    output: *std.Io.Writer,
+    directory: []const u8,
+    site_slug: []const u8,
+    now_text: []const u8,
+    mode: []const u8,
+    explain: bool,
+) !void {
+    try domain.validateSlug(site_slug);
+    const now_utc_micros = std.fmt.parseInt(i64, now_text, 10) catch
+        return error.InvalidLiveClock;
+    const strict_mode = if (std.mem.eql(u8, mode, "normal"))
+        false
+    else if (std.mem.eql(u8, mode, "strict"))
+        true
+    else
+        return error.InvalidLiveMode;
+    const metadata_path = try std.fs.path.join(
+        allocator,
+        &.{ directory, "meta.db" },
+    );
+    var metadata = try meta.Store.open(allocator, metadata_path);
+    defer metadata.deinit();
+    try metadata.requireCurrent();
+    const site_id = try metadata.siteIdBySlug(allocator, site_slug);
+    const goals = try metadata.listGoals(allocator, site_slug);
+    const resolved = try allocator.alloc(analysis.ResolvedGoal, goals.len);
+    for (resolved, goals) |*target, goal| target.* = .{
+        .id = goal.id,
+        .selector = .{
+            .kind = switch (goal.match_kind) {
+                .event => .exact_event,
+                .path => .exact_page,
+                .prefix => .page_prefix,
+            },
+            .value = goal.match_value,
+            .predicates = goal.predicates,
+        },
+    };
+    const event_path = try std.fs.path.join(
+        allocator,
+        &.{ directory, "events.duckdb" },
+    );
+    var store = try events.Store.open(allocator, event_path);
+    defer store.deinit();
+    try store.requireCurrent();
+    const request = analysis.LiveRequest{
+        .site_id = site_id,
+        .active_goals = resolved,
+        .strict_traffic_mode = strict_mode,
+        .now_utc_micros = now_utc_micros,
+    };
+    if (explain) {
+        try output.writeAll(try analysis_store.profileLive(
+            allocator,
+            &store,
+            request,
+        ));
+        return;
+    }
+
+    var timeout_request = request;
+    timeout_request.timeout_ms = 1;
+    if (analysis_store.executeLive(allocator, &store, timeout_request)) |_| {
+        return error.ExpectedLiveTimeout;
+    } else |err| if (err != error.AnalysisTimeout) return err;
+    const after_timeout = try analysis_store.executeLive(
+        allocator,
+        &store,
+        request,
+    );
+    if (builtin.mode == .debug) {
+        try writeLiveEvidence(
+            output,
+            strict_mode,
+            after_timeout,
+            false,
+            &.{},
+            true,
+            true,
+        );
+        return;
+    }
+    _ = try analysis_store.executeLive(allocator, &store, request);
+    var samples: [10]i64 = undefined;
+    var last = after_timeout;
+    for (&samples) |*elapsed| {
+        const started = std.Io.Clock.awake.now(io).nanoseconds;
+        last = try analysis_store.executeLive(allocator, &store, request);
+        elapsed.* = @intCast(@divTrunc(
+            std.Io.Clock.awake.now(io).nanoseconds - started,
+            std.time.ns_per_us,
+        ));
+    }
+    std.mem.sort(i64, &samples, {}, std.sort.asc(i64));
+    try writeLiveEvidence(
+        output,
+        strict_mode,
+        last,
+        true,
+        &samples,
+        true,
+        true,
+    );
+    if (samples[9] >= 150_000) return error.LivePerformanceBudgetExceeded;
+}
+
+fn writeLiveEvidence(
+    output: *std.Io.Writer,
+    strict_mode: bool,
+    result: analysis.LiveResult,
+    performance_enforced: bool,
+    samples: []const i64,
+    timeout_interrupted: bool,
+    connection_reused: bool,
+) !void {
+    try std.json.Stringify.value(.{
+        .strict_mode = strict_mode,
+        .active_sessions = result.active_sessions,
+        .page_views = result.page_views,
+        .custom_events = result.custom_events,
+        .conversions = result.conversions,
+        .page_rows = result.pages.len,
+        .source_rows = result.sources.len,
+        .event_rows = result.events.len,
+        .goal_rows = result.goals.len,
+        .country_rows = result.countries.len,
+        .device_rows = result.devices.len,
+        .protocol_rows = result.protocols.len,
+        .latest_receipt = result.latest_accepted_at_utc_micros,
+        .performance_enforced = performance_enforced,
+        .sample_micros = samples,
+        .p50_micros = if (samples.len == 0) @as(?i64, null) else samples[4],
+        .p95_micros = if (samples.len == 0) @as(?i64, null) else samples[9],
+        .p99_micros = if (samples.len == 0) @as(?i64, null) else samples[9],
+        .timeout_interrupted = timeout_interrupted,
+        .connection_reused = connection_reused,
+    }, .{}, output);
+    try output.writeByte('\n');
 }
 
 pub fn overviewV2(

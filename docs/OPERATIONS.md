@@ -252,8 +252,8 @@ snapshot, and returned-row counters from that ring. The authenticated dashboard
 boundary exposes a typed site-filtered snapshot seam, but issue #21 deliberately
 adds no Live recent list, manual refresh control, polling, pause/hidden
 behavior, or stale-state UI. D38 and issue #20 consume only one latest safe
-post-watermark outcome for bounded Install correction guidance. Issue #43 owns
-the full Live list and its refresh behavior.
+post-watermark outcome for bounded Install correction guidance. D47 and issue
+#43 render the bounded selected-site Live list and own its refresh behavior.
 
 Ring wrap overwrites the oldest summary and restart clears every slot. No backup
 contains the ring, and logs never expand a summary into input-derived strings.
@@ -526,6 +526,17 @@ metric-v1 parity, exact executable/private DuckDB mapping, one process/listener,
 health/readiness, authenticated direct detail/profile navigation, and the
 JavaScript-disabled 390-pixel timeline. Rollback selects the predecessor
 release; restore data only for independently detected corruption.
+
+D47 Live traffic likewise changes only the application and versioned dashboard
+asset. It adds no schema, Caddy route, tracker, service unit, dependency,
+backup format, or runtime data file. Use the same stopped-writer
+metadata-10/event-7 matched backup and independent restore, prove the exact
+predecessor and metric-v1 parity, then verify the candidate's focused Live
+gate, exact executable/private DuckDB mapping, one process/listener,
+health/readiness, authenticated public Live boundary, five-second polling,
+failed-request stale state, and JavaScript-disabled 390-pixel manual refresh.
+Rollback selects the predecessor release; restore data only for independently
+detected corruption.
 
 ## 11. Retention and site deletion
 

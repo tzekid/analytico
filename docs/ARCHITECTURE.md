@@ -433,6 +433,20 @@ clears the evidence and returns to an empty ring. A mutex protects append and
 snapshot even though the current HTTP accept loop is sequential; callers never
 receive references into the mutable ring.
 
+D47 keeps that separation on Live. One typed DuckDB statement derives the
+selected site's fixed receipt-time current product result under one deadline.
+The controller then combines it with an owned selected-site ring copy and a
+single request clock. The renderer receives only the finite view model. It
+does not query either store or inspect request/session/browser state.
+
+The complete document also retains D30's independent date-range
+traffic-quality result. An authenticated exact `section#live-region` HTMX
+representation omits that durable section and replaces only the bounded
+current region. The first poll occurs after five seconds; pause, hidden-page,
+and failed-request behavior live in the existing optional dashboard asset.
+There is no server result cache, durable last-good state, worker, stream, or
+second application state model.
+
 ## 9. Server-rendered components and charts
 
 The web controller continues to own all store access and produces owned typed

@@ -55,6 +55,7 @@ semantic, or application state model is consequential and must be added here.
 | D44 | Restart-capable funnel evaluation | Fixed bounded position-link plans with persistent-person visitor scope and one typed result | Accepted for 1.0 issue #36 |
 | D45 | Bounded Sessions list | Two-stage bounded raw-event query and typed records | Accepted for 1.0 issue #41 |
 | D46 | Derived session timeline and compatible-person profile | Bounded raw-event detail/profile queries with no durable projection | Accepted for 1.0 issue #42 |
+| D47 | Bounded Live traffic and recent diagnostics | One receipt-time query plus the selected-site restart-scoped ring | Accepted for 1.0 issue #43 |
 
 ## D01. MVP interface
 
@@ -3599,3 +3600,144 @@ verification discovers unrelated corruption.
 **Affected contracts:** `SPEC.md`, `ARCHITECTURE.md`, `DATA_MODEL.md`,
 `ANALYSIS_QUERY.md`, `DESIGN_SYSTEM.md`, `PERFORMANCE.md`, `OPERATIONS.md`,
 `RELEASE_CONTRACT_1.0.md`, and issue #42.
+
+## D47. Derive bounded Live traffic and render recent safe diagnostics
+
+**Status:** Accepted for Analytico 1.0 issue #43
+
+**Date:** 2026-08-25
+
+**Issue:** #43
+
+**Extends:** D29 typed specialized analysis, D30 durable traffic-quality
+diagnostics, D34 product traffic, D38 bounded polling behavior, and the
+issue-#21 process-local diagnostics contract.
+
+### Context and candidates
+
+Live must answer what has reached the selected site in the last 30 minutes,
+show current product activity, and make recent collection failures useful. The
+existing Live route instead owns D30's complete versioned received-UTC
+traffic-quality report over the selected date range. That durable section
+remains required. The #21 ring contains at most 200 safe selected-site
+summaries, clears on restart, and is expressly not a product-metric source.
+
+Candidates:
+
+1. Re-label D30 and append ring rows. This reuses one route, but date-range
+   diagnostics are not a 30-minute product answer and polling reruns the wrong
+   work. It needs no migration but regresses an accepted diagnostic contract.
+2. Compose existing Trend, Breakdown, and report calls. Each query stays typed,
+   but site-local dates replace receipt instants, scans and deadlines repeat,
+   and Live becomes an accidental second query grammar.
+3. Add one closed receipt-time Live request/result and combine it with one
+   copied selected-site ring snapshot. This preserves D29/D30, gives one finite
+   deadline-bound product answer, and keeps recent failures honestly
+   restart-scoped. The application-only change owns one specialized statement
+   and explicit view model.
+
+Select the third candidate. The ordinary authenticated Live document contains
+one current region followed by the unchanged D30 traffic-quality section. An
+exact authenticated HTMX request for `section#live-region` returns only the
+complete current region. HX headers choose a representation after ordinary session,
+route, query, and selected-site validation; they are never authentication or
+authorization inputs.
+
+### Live data semantics
+
+The server samples one nonnegative microsecond request clock. The inclusive
+Live window is `[now - 30 minutes, now]` by `received_at_utc_micros`. Active now
+is the distinct count of product-eligible sessions with any retained event in
+the final five minutes. Page views count kind 1, custom events count kind 2,
+and conversions count current active-Goal selector matches over kinds 1 and 2.
+One event may count for more than one Goal, matching the existing Goal-mask
+semantics.
+
+Product KPIs and current pages, sources, custom events, Goals, countries, and
+devices include only `traffic_class IN (human_presumed, suspected)`. When the
+site policy is strict, the existing complete D34 suspected-session verdict is
+applied before every product answer. Goal selectors retain their property
+predicates. Sources use the earliest retained page view's UTM source, then that
+page's referrer host, then an explicit Direct label. Audience rows count
+distinct sessions.
+Every breakdown is ordered by count descending and label ascending and capped
+at five rows.
+
+Protocol distribution is a durable count of every stored event in the same
+30-minute receipt window, independent of product eligibility. Latest accepted
+receipt is the selected site's latest stored receipt at or before the sampled
+clock and may predate the window. Neither operational fact is relabeled as a
+product metric. No occurrence time, site-local date, calendar comparison,
+FilterSet, segment, or D29 metric grammar changes this fixed region.
+
+One statement returns the finite typed result under the existing one-thread,
+128 MiB, two-second interrupt ceiling. The complete warmed Live statement and
+authenticated fragment must each retain p95 below 150 milliseconds on the
+standard million-event fixture in default and strict modes. A one-millisecond
+interruption must leave the same DuckDB connection usable. A miss follows the
+existing profile, column/predicate narrowing, and prefilter order before any
+cache, index, projection, rollup, thread, memory, or deadline change.
+
+### Recent attempts, rendering, and polling
+
+The controller copies one newest-first selected-site ring snapshot after the
+normal authenticated site resolution. The region shows exact selected-site
+accepted, rejected, duplicate, and store-failure counts since process restart
+and the newest 50 summaries. It states when more selected-site rows are
+retained. Each visible row may contain only formatted receipt time, local
+correlation, protocol, category, terminal outcome, the validated normalized
+subject, normalized origin host, property key names with closed scalar types,
+and stable rejection code already owned by #21. It never adds country, IP or
+prefix, User-Agent, identity/session/user/event ID, referrer, campaign value,
+property value, trait, payload, query, request body, database path, or rule.
+All strings pass through the existing escaped deterministic renderer.
+
+The ring and DuckDB are intentionally not made one atomic snapshot. A commit
+precedes its accepted ring append, and the next five-second refresh converges
+ordinary concurrent activity. The region displays its generated-at clock,
+fixed receipt windows, and the ring's since-restart boundary rather than
+claiming durable realtime synchronization.
+
+The normal GET supplies all useful state and a native Refresh link before
+JavaScript. The existing pinned HTMX asset schedules the first fragment after
+five seconds and no request at startup. A small dashboard hook cancels Live
+requests while paused or while the document is hidden. Failed transport or
+non-success responses do not replace the last successful DOM; they mark that
+region stale and retain its visible server timestamp. Later successful polling
+recovers without a permanent connection. The Pause button and client status
+are enhancement-only; JavaScript-disabled use remains complete manual GETs.
+
+D30's full date-range traffic-quality section stays outside the polled region
+and runs only for a full Live document. Its visible calendar context therefore
+continues to govern that section, while the current region explicitly labels
+its independent receipt windows. Overview and Install do not start polling.
+
+### Security, operations, and acceptance
+
+No metadata/event schema, table, index, result cache, projection, durable
+diagnostic history, worker, service, Caddy route, tracker, dependency, network
+source, thread, connection, memory limit, or deadline changes. The versioned
+dashboard enhancement rotates its immediately prior immutable path and remains
+inside the existing asset budget. Input-controlled rows and HTML remain
+bounded. Renderer, domain, and store responsibilities remain separated.
+
+The existing `e2e-diagnostics` gate expands rather than creating a parallel
+smoke path. It must prove real on-disk stores, loopback HTTP, authentication,
+initial accepted/rejected/duplicate consequences, two-site isolation, safe
+visible fields and escaping, restart clear, protocol-only unattributed 413s,
+205-row wrap, store failure, no sensitive leakage, fixed-window semantics,
+strict/default parity and difference, timeout/reuse, no startup data request,
+five-second polling, pause/hidden/failure/recovery, JavaScript-disabled Refresh,
+keyboard/focus, 390-pixel layout, and million-row query plus fragment budgets.
+
+Deployment changes only the application and versioned dashboard asset. It
+still creates and independently restores a matched metadata-10/event-7 backup,
+proves the exact predecessor and metric-v1 parity, then verifies the exact
+candidate process/private DuckDB, one listener, health/readiness, public Live
+authentication boundary, and installed-artifact browser path. Rollback selects
+the predecessor release; data restore is required only for independently
+detected corruption.
+
+**Affected contracts:** `SPEC.md`, `ARCHITECTURE.md`, `ANALYSIS_QUERY.md`,
+`PROTOCOL.md`, `DESIGN_SYSTEM.md`, `PERFORMANCE.md`, `OPERATIONS.md`,
+`RELEASE_CONTRACT_1.0.md`, and issue #43.

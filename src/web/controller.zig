@@ -2126,6 +2126,170 @@ pub fn loadPage(
     };
 }
 
+pub const maximum_live_attempt_rows: usize = 50;
+
+pub fn loadLiveRegion(
+    allocator: std.mem.Allocator,
+    metadata: *meta.Store,
+    event_store: *events.Store,
+    selected: meta.Site,
+    refresh_url: []const u8,
+    now_utc_micros: i64,
+    snapshot: diagnostics.Snapshot,
+    report_timeout_ms: u32,
+) !model.LiveRegion {
+    if (now_utc_micros < 0) return error.InvalidLiveClock;
+    const goals = try metadata.listGoals(allocator, selected.slug);
+    const policy = try metadata.sitePolicy(allocator, selected.id);
+    const resolved_goals = try resolveAnalysisGoals(allocator, goals);
+    const result = analysis_store.executeLive(
+        allocator,
+        event_store,
+        .{
+            .site_id = selected.id,
+            .active_goals = resolved_goals,
+            .strict_traffic_mode = policy.strict_mode,
+            .now_utc_micros = now_utc_micros,
+            .timeout_ms = report_timeout_ms,
+        },
+    ) catch |err| {
+        if (err == error.AnalysisTimeout) return error.ReportTimeout;
+        return err;
+    };
+
+    const attempts_len = @min(snapshot.summaries.len, maximum_live_attempt_rows);
+    const attempts = try allocator.alloc(model.LiveAttempt, attempts_len);
+    for (attempts, snapshot.summaries[0..attempts_len]) |*target, source| {
+        const properties = try allocator.alloc(
+            model.LiveProperty,
+            source.property_count,
+        );
+        for (properties, source.properties[0..source.property_count]) |*property_target, property_source| {
+            property_target.* = .{
+                .key = try allocator.dupe(u8, property_source.key.slice()),
+                .scalar_type = switch (property_source.scalar_type) {
+                    .string => "string",
+                    .integer => "integer",
+                    .decimal => "decimal",
+                    .boolean => "boolean",
+                    .null => "null",
+                },
+            };
+        }
+        target.* = .{
+            .correlation = source.correlation,
+            .received_at_utc = try formatUtcMicrosSeconds(
+                allocator,
+                source.received_at_utc_micros,
+            ),
+            .protocol = switch (source.protocol) {
+                .v1 => "v1",
+                .v2 => "v2",
+                .pixel => "pixel",
+            },
+            .category = switch (source.category) {
+                .unknown => "Unknown",
+                .pageview => "Page view",
+                .custom => "Custom event",
+                .engagement => "Engagement",
+                .identify => "Identify",
+            },
+            .outcome = switch (source.outcome) {
+                .accepted => "Accepted",
+                .rejected => "Rejected",
+                .duplicate => "Duplicate",
+                .store_failure => "Store failure",
+            },
+            .rejection_code = if (source.rejection_code == .none)
+                ""
+            else
+                @tagName(source.rejection_code),
+            .subject = try allocator.dupe(u8, source.subject.slice()),
+            .origin_host = try allocator.dupe(u8, source.origin_host.slice()),
+            .properties = properties,
+        };
+    }
+
+    const goal_rows = try allocator.alloc(model.LiveCountRow, result.goals.len);
+    for (goal_rows, result.goals) |*target, source| {
+        const goal = goalById(goals, source.goal_id) orelse
+            return error.InvalidLiveGoal;
+        target.* = .{ .label = goal.name, .count = source.count };
+    }
+    std.mem.sort(model.LiveCountRow, goal_rows, {}, liveCountRowLessThan);
+    const visible_goals = goal_rows[0..@min(
+        goal_rows.len,
+        analysis.maximum_live_breakdown_rows,
+    )];
+
+    return .{
+        .refresh_url = refresh_url,
+        .generated_at_utc = try formatUtcMicrosSeconds(
+            allocator,
+            now_utc_micros,
+        ),
+        .generated_at_utc_datetime = try formatUtcMicrosDatetime(
+            allocator,
+            now_utc_micros,
+        ),
+        .latest_accepted_at_utc = if (result.latest_accepted_at_utc_micros) |value|
+            try formatUtcMicrosSeconds(allocator, value)
+        else
+            "Never",
+        .active_sessions = result.active_sessions,
+        .page_views = result.page_views,
+        .custom_events = result.custom_events,
+        .conversions = result.conversions,
+        .pages = try liveCountRows(allocator, result.pages),
+        .sources = try liveCountRows(allocator, result.sources),
+        .events = try liveCountRows(allocator, result.events),
+        .goals = visible_goals,
+        .countries = try liveCountRows(allocator, result.countries),
+        .devices = try liveCountRows(allocator, result.devices),
+        .protocols = try liveProtocolRows(allocator, result.protocols),
+        .attempts = attempts,
+        .retained_attempts = snapshot.summaries.len,
+        .shown_attempts = attempts.len,
+        .accepted_attempts = snapshot.counts.accepted,
+        .rejected_attempts = snapshot.counts.rejected,
+        .duplicate_attempts = snapshot.counts.duplicates,
+        .store_failure_attempts = snapshot.counts.store_failures,
+    };
+}
+
+fn liveCountRows(
+    allocator: std.mem.Allocator,
+    source: []const analysis.LiveRow,
+) ![]const model.LiveCountRow {
+    const rows = try allocator.alloc(model.LiveCountRow, source.len);
+    for (rows, source) |*target, row| target.* = .{
+        .label = row.label,
+        .count = row.count,
+    };
+    return rows;
+}
+
+fn liveProtocolRows(
+    allocator: std.mem.Allocator,
+    source: []const analysis.LiveProtocolRow,
+) ![]const model.LiveCountRow {
+    const rows = try allocator.alloc(model.LiveCountRow, source.len);
+    for (rows, source) |*target, row| target.* = .{
+        .label = try std.fmt.allocPrint(allocator, "v{d}", .{row.version}),
+        .count = row.count,
+    };
+    return rows;
+}
+
+fn liveCountRowLessThan(
+    _: void,
+    left: model.LiveCountRow,
+    right: model.LiveCountRow,
+) bool {
+    if (left.count != right.count) return left.count > right.count;
+    return std.mem.order(u8, left.label, right.label) == .lt;
+}
+
 pub fn loadTrendPage(
     allocator: std.mem.Allocator,
     metadata: *meta.Store,
@@ -3607,6 +3771,54 @@ fn formatUtcMicros(allocator: std.mem.Allocator, micros: i64) ![]const u8 {
             month_day.day_index + 1,
             day_seconds / std.time.s_per_hour,
             day_seconds % std.time.s_per_hour / std.time.s_per_min,
+        },
+    );
+}
+
+fn formatUtcMicrosSeconds(
+    allocator: std.mem.Allocator,
+    micros: i64,
+) ![]const u8 {
+    if (micros < 0) return error.InvalidLiveTimestamp;
+    const seconds: u64 = @intCast(@divFloor(micros, 1_000_000));
+    const epoch = std.time.epoch.EpochSeconds{ .secs = seconds };
+    const year_day = epoch.getEpochDay().calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    const day_seconds = seconds % std.time.s_per_day;
+    return std.fmt.allocPrint(
+        allocator,
+        "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2} UTC",
+        .{
+            year_day.year,
+            @backingInt(month_day.month),
+            month_day.day_index + 1,
+            day_seconds / std.time.s_per_hour,
+            day_seconds % std.time.s_per_hour / std.time.s_per_min,
+            day_seconds % std.time.s_per_min,
+        },
+    );
+}
+
+fn formatUtcMicrosDatetime(
+    allocator: std.mem.Allocator,
+    micros: i64,
+) ![]const u8 {
+    if (micros < 0) return error.InvalidLiveTimestamp;
+    const seconds: u64 = @intCast(@divFloor(micros, 1_000_000));
+    const epoch = std.time.epoch.EpochSeconds{ .secs = seconds };
+    const year_day = epoch.getEpochDay().calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    const day_seconds = seconds % std.time.s_per_day;
+    return std.fmt.allocPrint(
+        allocator,
+        "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z",
+        .{
+            year_day.year,
+            @backingInt(month_day.month),
+            month_day.day_index + 1,
+            day_seconds / std.time.s_per_hour,
+            day_seconds % std.time.s_per_hour / std.time.s_per_min,
+            day_seconds % std.time.s_per_min,
         },
     );
 }

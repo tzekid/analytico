@@ -86,6 +86,13 @@
   routes compose Page, Event, and Goal steps, preserve shared context, and
   preview independent selector availability. D44 and issue #36 add the
   separate ordered result without changing that stored definition.
+- D47 and issue #43 add a fixed receipt-time Live region before D30's retained
+  date-range traffic-quality section. One bounded product query supplies
+  30-minute traffic, five-minute activity, current breakdowns, and durable
+  protocol/latest-receipt facts. The selected-site #21 snapshot supplies only
+  newest safe restart-scoped attempts. Five-second HTMX polling retains native
+  manual refresh and keeps failed last-good HTML visibly stale without a
+  server cache, stream, or durable diagnostic history.
 
 ## 1. Product statement
 

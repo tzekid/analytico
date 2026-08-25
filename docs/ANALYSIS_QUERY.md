@@ -848,3 +848,28 @@ person key. Unknown, duplicate, empty, overlong, cross-site, incompatible, or
 noncanonical state rejects before DuckDB or takes the one documented canonical
 redirect. Neither route accepts a raw membership list or creates a result
 cache, profile projection, data API, or client state model.
+
+## 15. Specialized Live traffic
+
+D47 adds one specialized Live request without extending the ordinary
+metric-by-dimension grammar. It contains one site UUID, one precise
+microsecond request clock, the current active-Goal snapshot, strict-policy
+state, and one timeout. Its fixed receipt windows are 30 minutes for current
+traffic and five minutes for Active now. Calendar dates, comparison, filters,
+segments, and occurrence-time buckets do not enter this request.
+
+One bounded statement returns four KPIs; at most five current pages, sources,
+custom events, Goal matches, countries, and devices; stored protocol counts;
+and the latest accepted receipt. Product answers use the existing product
+classes and optional complete D34 session veto. Protocol and latest-receipt
+facts remain durable operational evidence across stored classes. Active Goal
+predicates compile through the same finite selector fragments and bound values
+used by other specialized analyses.
+
+The typed result is combined only in the controller with one copied,
+selected-site #21 diagnostics snapshot. The newest 50 safe summaries and exact
+since-restart outcome counts are rendering input, never query rows, product
+metrics, or durable history. The complete D30 date-range traffic-quality
+result remains a separate full-document section and is not executed for the
+Live fragment. No cache, index, projection, rollup, or additional query grammar
+is introduced.

@@ -296,6 +296,14 @@ through one bounded error category, so a disk-full write is honestly reported
 as `store_unavailable` rather than guessed from an unstructured native message.
 The public collector status/body contract does not change.
 
+Issue #43 renders the selected-site snapshot on authenticated Live. It shows
+the newest 50 summaries plus exact selected-site outcome counts and labels all
+of them since process restart. It may format only the fields listed above.
+Protocol-only rows without a resolved site remain absent, and no Live feature
+adds country, client, identity, payload, or query fields to the ring. Durable
+30-minute product traffic and protocol counts are queried separately from
+DuckDB and never inferred from retained ring capacity.
+
 ## 5. Pixel page view
 
 Example server-rendered fallback:

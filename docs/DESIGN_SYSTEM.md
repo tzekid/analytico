@@ -253,6 +253,21 @@ Notices use restrained status semantics, errors use alerts, and loading is
 limited to the region whose existing native navigation or form is in flight.
 None of these enhancement states may replace the JavaScript-free baseline.
 
+D47's Live page places one fixed 30-minute current region before the durable
+traffic-quality section. Four compact KPIs and six at-most-five-row current
+breakdowns use existing metric, panel, and mobile-record table primitives.
+The recent-attempt table has a caption, scoped headers, explicit outcome text,
+and per-cell phone labels; color is supplementary. Empty and restart-cleared
+states state why no recent attempt is visible.
+
+The region exposes a native **Refresh Live** link, an enhancement-only Pause
+button with `aria-pressed`, one generated-at `<time>`, and a polite summarized
+client status. Automatic replacement does not turn the complete region into
+an assertive live announcement. A failed request leaves the prior rows visible
+and labels their exact generated-at time stale. Focus on the stable Pause
+control survives a successful outer-region replacement. No loading, pause, or
+stale state hides the ordinary GET action.
+
 The component stylesheet is self-hosted at a versioned `/admin/app.v16.css` path.
 Changing its bytes requires another path revision because existing responses
 may be cached privately for 24 hours.

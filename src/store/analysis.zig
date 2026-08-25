@@ -839,6 +839,339 @@ pub fn profilePersonProfile(
     return output.toOwnedSlice();
 }
 
+pub fn executeLive(
+    allocator: std.mem.Allocator,
+    event_store: *events.Store,
+    request: analysis.LiveRequest,
+) !analysis.LiveResult {
+    try request.validate();
+    var budget = deadline.Budget.init(request.timeout_ms);
+    var result = try executePlan(
+        &event_store.database,
+        try compileLive(allocator, request),
+        &budget,
+    );
+    defer result.deinit();
+    return decodeLive(allocator, request, &result);
+}
+
+pub fn profileLive(
+    allocator: std.mem.Allocator,
+    event_store: *events.Store,
+    request: analysis.LiveRequest,
+) ![]u8 {
+    try request.validate();
+    var output = std.Io.Writer.Allocating.init(allocator);
+    try profileOverviewPlan(
+        allocator,
+        event_store,
+        try compileLive(allocator, request),
+        &output.writer,
+    );
+    return output.toOwnedSlice();
+}
+
+fn compileLive(
+    allocator: std.mem.Allocator,
+    request: analysis.LiveRequest,
+) !StatementPlan {
+    try request.validate();
+    var builder = Builder.init(allocator);
+    if (request.strict_traffic_mode) {
+        var goals: [analysis.maximum_active_goals]traffic.Goal = undefined;
+        for (request.active_goals, 0..) |goal, index| goals[index] = .{
+            .kind = switch (goal.selector.kind) {
+                .exact_event => .event,
+                .exact_page => .path,
+                .page_prefix => .prefix,
+                .saved_goal => return error.UnresolvedGoalSelector,
+            },
+            .value = goal.selector.value,
+        };
+        try builder.write("WITH ");
+        try builder.appendTraffic(try traffic.classifierFragment(
+            allocator,
+            request.site_id,
+            goals[0..request.active_goals.len],
+            true,
+        ));
+        try builder.write(", ");
+    } else try builder.write("WITH ");
+    try builder.write(
+        "stored_window AS MATERIALIZED (SELECT e.* FROM events e" ++
+            " WHERE e.site_id = ",
+    );
+    try builder.bindText(request.site_id);
+    try builder.write(" AND e.received_at_utc_micros BETWEEN ");
+    try builder.bindInteger(try request.windowStart());
+    try builder.write(" AND ");
+    try builder.bindInteger(request.now_utc_micros);
+    try builder.write(
+        "), product_window AS MATERIALIZED (SELECT e.* FROM stored_window e" ++
+            " WHERE e.traffic_class IN (1, 5)",
+    );
+    if (request.strict_traffic_mode) try builder.write(
+        " AND e.session_id NOT IN (SELECT session_id" ++
+            " FROM d34_current_suspected_sessions)",
+    );
+    try builder.write(
+        "), meaningful AS MATERIALIZED (SELECT e.*, ",
+    );
+    try writeGoalMatchMask(&builder, request.active_goals, "e");
+    try builder.write(
+        " AS goal_mask FROM product_window e WHERE e.kind IN (1, 2))," ++
+            " window_sessions AS MATERIALIZED (SELECT session_id," ++
+            " max(received_at_utc_micros)::BIGINT AS last_received" ++
+            " FROM product_window GROUP BY session_id)," ++
+            " session_events AS MATERIALIZED (SELECT e.session_id, e.kind," ++
+            " e.occurred_at_utc_micros, e.sequence," ++
+            " e.received_at_utc_micros, e.event_id, e.utm_source," ++
+            " e.referrer_host, e.country_code, e.device_category" ++
+            " FROM events e JOIN window_sessions w USING (session_id)" ++
+            " WHERE e.site_id = ",
+    );
+    try builder.bindText(request.site_id);
+    try builder.write(
+        " AND e.received_at_utc_micros <= ",
+    );
+    try builder.bindInteger(request.now_utc_micros);
+    try builder.write(" AND e.traffic_class IN (1, 5)");
+    if (request.strict_traffic_mode) try builder.write(
+        " AND e.session_id NOT IN (SELECT session_id" ++
+            " FROM d34_current_suspected_sessions)",
+    );
+    try builder.write(
+        "), session_facts AS MATERIALIZED (SELECT e.session_id," ++
+            " w.last_received, COALESCE(first(CASE" ++
+            " WHEN e.utm_source <> '' THEN e.utm_source" ++
+            " WHEN e.referrer_host <> '' THEN e.referrer_host" ++
+            " ELSE 'Direct' END ORDER BY e.occurred_at_utc_micros," ++
+            " e.sequence, e.received_at_utc_micros, e.event_id)" ++
+            " FILTER (WHERE e.kind = 1), 'Direct') AS source," ++
+            " COALESCE(NULLIF(first(CASE WHEN e.country_code = 'ZZ'" ++
+            " THEN 'Unknown' ELSE e.country_code END ORDER BY" ++
+            " e.occurred_at_utc_micros, e.sequence," ++
+            " e.received_at_utc_micros, e.event_id)" ++
+            " FILTER (WHERE e.kind IN (1, 2)), ''), 'Unknown') AS country," ++
+            " COALESCE(NULLIF(first(e.device_category ORDER BY" ++
+            " e.occurred_at_utc_micros, e.sequence," ++
+            " e.received_at_utc_micros, e.event_id)" ++
+            " FILTER (WHERE e.kind IN (1, 2)), ''), 'Unknown') AS device" ++
+            " FROM session_events e JOIN window_sessions w USING (session_id)" ++
+            " GROUP BY e.session_id, w.last_received)," ++
+            " kpis AS (SELECT count(*) FILTER (WHERE last_received >= ",
+    );
+    try builder.bindInteger(try request.activeStart());
+    try builder.write(
+        ")::BIGINT AS active_sessions FROM session_facts)," ++
+            " event_kpis AS (SELECT" ++
+            " count(*) FILTER (WHERE kind = 1)::BIGINT AS page_views," ++
+            " count(*) FILTER (WHERE kind = 2)::BIGINT AS custom_events," ++
+            " COALESCE(sum(bit_count(goal_mask)), 0)::BIGINT AS conversions" ++
+            " FROM meaningful)," ++
+            " page_rows AS (SELECT path AS label, count(*)::BIGINT AS value" ++
+            " FROM meaningful WHERE kind = 1 GROUP BY path" ++
+            " ORDER BY value DESC, label ASC LIMIT ",
+    );
+    try builder.bindInteger(analysis.maximum_live_breakdown_rows);
+    try builder.write(
+        "), source_rows AS (SELECT source AS label," ++
+            " count(*)::BIGINT AS value FROM session_facts GROUP BY source" ++
+            " ORDER BY value DESC, label ASC LIMIT ",
+    );
+    try builder.bindInteger(analysis.maximum_live_breakdown_rows);
+    try builder.write(
+        "), event_rows AS (SELECT event_name AS label," ++
+            " count(*)::BIGINT AS value FROM meaningful WHERE kind = 2" ++
+            " GROUP BY event_name ORDER BY value DESC, label ASC LIMIT ",
+    );
+    try builder.bindInteger(analysis.maximum_live_breakdown_rows);
+    try builder.write(
+        "), country_rows AS (SELECT country AS label," ++
+            " count(*)::BIGINT AS value FROM session_facts GROUP BY country" ++
+            " ORDER BY value DESC, label ASC LIMIT ",
+    );
+    try builder.bindInteger(analysis.maximum_live_breakdown_rows);
+    try builder.write(
+        "), device_rows AS (SELECT device AS label," ++
+            " count(*)::BIGINT AS value FROM session_facts GROUP BY device" ++
+            " ORDER BY value DESC, label ASC LIMIT ",
+    );
+    try builder.bindInteger(analysis.maximum_live_breakdown_rows);
+    try builder.write(
+        "), protocol_rows AS (SELECT CAST(protocol_version AS VARCHAR) AS label," ++
+            " count(*)::BIGINT AS value FROM stored_window" ++
+            " GROUP BY protocol_version)," ++
+            " goal_counts AS (SELECT CAST('' AS VARCHAR) AS label," ++
+            " 0::BIGINT AS value WHERE FALSE",
+    );
+    for (request.active_goals, 0..) |goal, index| {
+        try builder.write(" UNION ALL SELECT ");
+        try builder.bindText(goal.id);
+        try builder.write(", count(*)::BIGINT FROM meaningful WHERE" ++
+            " (goal_mask & ");
+        try builder.bindInteger(@as(i64, 1) << @intCast(index));
+        try builder.write(") <> 0 HAVING count(*) > 0");
+    }
+    try builder.write(
+        "), goal_rows AS (SELECT label, value FROM goal_counts" ++
+            " ORDER BY value DESC, label ASC",
+    );
+    try builder.write(
+        "), latest AS (SELECT max(received_at_utc_micros)::BIGINT AS value" ++
+            " FROM events WHERE site_id = ",
+    );
+    try builder.bindText(request.site_id);
+    try builder.write(" AND received_at_utc_micros <= ");
+    try builder.bindInteger(request.now_utc_micros);
+    try builder.write(
+        "), output(section, label, value, section_order, position) AS (" ++
+            " SELECT 'kpi', 'active-sessions', active_sessions, 1, 1 FROM kpis" ++
+            " UNION ALL SELECT 'kpi', 'page-views', page_views, 1, 2" ++
+            " FROM event_kpis" ++
+            " UNION ALL SELECT 'kpi', 'custom-events', custom_events, 1, 3" ++
+            " FROM event_kpis" ++
+            " UNION ALL SELECT 'kpi', 'conversions', conversions, 1, 4" ++
+            " FROM event_kpis" ++
+            " UNION ALL SELECT 'page', label, value, 2, 0 FROM page_rows" ++
+            " UNION ALL SELECT 'source', label, value, 3, 0 FROM source_rows" ++
+            " UNION ALL SELECT 'event', label, value, 4, 0 FROM event_rows" ++
+            " UNION ALL SELECT 'goal', label, value, 5, 0 FROM goal_rows" ++
+            " UNION ALL SELECT 'country', label, value, 6, 0 FROM country_rows" ++
+            " UNION ALL SELECT 'device', label, value, 7, 0 FROM device_rows" ++
+            " UNION ALL SELECT 'protocol', label, value, 8, 0 FROM protocol_rows" ++
+            " UNION ALL SELECT 'latest', '', value, 9, 0 FROM latest)" ++
+            " SELECT section, label, value FROM output" ++
+            " ORDER BY section_order, position, value DESC NULLS LAST, label ASC",
+    );
+    return builder.finish();
+}
+
+fn decodeLive(
+    allocator: std.mem.Allocator,
+    request: analysis.LiveRequest,
+    result: *duckdb.Result,
+) !analysis.LiveResult {
+    const maximum_rows = 4 + 5 * analysis.maximum_live_breakdown_rows +
+        analysis.maximum_active_goals + 2 + 1;
+    if (result.columnCount() != 3 or result.rowCount() > maximum_rows) {
+        return error.InvalidLiveResult;
+    }
+    var active_sessions: ?i64 = null;
+    var page_views: ?i64 = null;
+    var custom_events: ?i64 = null;
+    var conversions: ?i64 = null;
+    var latest_seen = false;
+    var latest_accepted_at_utc_micros: ?i64 = null;
+    var pages: std.ArrayList(analysis.LiveRow) = .empty;
+    var sources: std.ArrayList(analysis.LiveRow) = .empty;
+    var event_rows: std.ArrayList(analysis.LiveRow) = .empty;
+    var goals: std.ArrayList(analysis.LiveGoalRow) = .empty;
+    var countries: std.ArrayList(analysis.LiveRow) = .empty;
+    var devices: std.ArrayList(analysis.LiveRow) = .empty;
+    var protocols: std.ArrayList(analysis.LiveProtocolRow) = .empty;
+    for (0..result.rowCount()) |index| {
+        const section = try result.text(allocator, 0, index);
+        const label = try result.text(allocator, 1, index);
+        if (std.mem.eql(u8, section, "latest")) {
+            if (latest_seen or label.len != 0) return error.InvalidLiveResult;
+            latest_seen = true;
+            if (!result.isNull(2, index)) {
+                const value = result.int64(2, index);
+                if (value < 0 or value > request.now_utc_micros) {
+                    return error.InvalidLiveResult;
+                }
+                latest_accepted_at_utc_micros = value;
+            }
+            continue;
+        }
+        if (result.isNull(2, index)) return error.InvalidLiveResult;
+        const value = result.int64(2, index);
+        if (value < 0) return error.InvalidLiveResult;
+        if (std.mem.eql(u8, section, "kpi")) {
+            const slot = if (std.mem.eql(u8, label, "active-sessions"))
+                &active_sessions
+            else if (std.mem.eql(u8, label, "page-views"))
+                &page_views
+            else if (std.mem.eql(u8, label, "custom-events"))
+                &custom_events
+            else if (std.mem.eql(u8, label, "conversions"))
+                &conversions
+            else
+                return error.InvalidLiveResult;
+            if (slot.* != null) return error.InvalidLiveResult;
+            slot.* = value;
+        } else if (std.mem.eql(u8, section, "page")) {
+            try appendLiveRow(allocator, &pages, label, value);
+        } else if (std.mem.eql(u8, section, "source")) {
+            try appendLiveRow(allocator, &sources, label, value);
+        } else if (std.mem.eql(u8, section, "event")) {
+            try appendLiveRow(allocator, &event_rows, label, value);
+        } else if (std.mem.eql(u8, section, "country")) {
+            try appendLiveRow(allocator, &countries, label, value);
+        } else if (std.mem.eql(u8, section, "device")) {
+            try appendLiveRow(allocator, &devices, label, value);
+        } else if (std.mem.eql(u8, section, "goal")) {
+            if (goals.items.len >= request.active_goals.len) {
+                return error.InvalidLiveResult;
+            }
+            var known = false;
+            for (request.active_goals) |goal| {
+                if (std.mem.eql(u8, goal.id, label)) known = true;
+            }
+            if (!known) return error.InvalidLiveResult;
+            for (goals.items) |row| {
+                if (std.mem.eql(u8, row.goal_id, label)) {
+                    return error.InvalidLiveResult;
+                }
+            }
+            try goals.append(allocator, .{ .goal_id = label, .count = value });
+        } else if (std.mem.eql(u8, section, "protocol")) {
+            const version = std.fmt.parseInt(u8, label, 10) catch
+                return error.InvalidLiveResult;
+            if (version != 1 and version != 2) return error.InvalidLiveResult;
+            for (protocols.items) |row| {
+                if (row.version == version) return error.InvalidLiveResult;
+            }
+            try protocols.append(allocator, .{ .version = version, .count = value });
+        } else return error.InvalidLiveResult;
+    }
+    if (active_sessions == null or page_views == null or custom_events == null or
+        conversions == null or !latest_seen)
+    {
+        return error.InvalidLiveResult;
+    }
+    return .{
+        .active_sessions = active_sessions.?,
+        .page_views = page_views.?,
+        .custom_events = custom_events.?,
+        .conversions = conversions.?,
+        .pages = try pages.toOwnedSlice(allocator),
+        .sources = try sources.toOwnedSlice(allocator),
+        .events = try event_rows.toOwnedSlice(allocator),
+        .goals = try goals.toOwnedSlice(allocator),
+        .countries = try countries.toOwnedSlice(allocator),
+        .devices = try devices.toOwnedSlice(allocator),
+        .protocols = try protocols.toOwnedSlice(allocator),
+        .latest_accepted_at_utc_micros = latest_accepted_at_utc_micros,
+    };
+}
+
+fn appendLiveRow(
+    allocator: std.mem.Allocator,
+    rows: *std.ArrayList(analysis.LiveRow),
+    label: []const u8,
+    count: i64,
+) !void {
+    if (label.len == 0 or rows.items.len >= analysis.maximum_live_breakdown_rows) {
+        return error.InvalidLiveResult;
+    }
+    for (rows.items) |row| {
+        if (std.mem.eql(u8, row.label, label)) return error.InvalidLiveResult;
+    }
+    try rows.append(allocator, .{ .label = label, .count = count });
+}
+
 fn executeSessionDetailKey(
     allocator: std.mem.Allocator,
     database: *duckdb.Database,
@@ -9272,6 +9605,129 @@ test "metric v2 executes against a real on-disk schema four store" {
             else => return error.InvalidAnalysisMeasure,
         }
     }
+}
+
+test "Live uses receipt windows, product traffic, full session source, and predicates" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const allocator = std.testing.allocator;
+    const path = try std.fmt.allocPrint(
+        allocator,
+        ".zig-cache/tmp/{s}/events.duckdb",
+        .{temporary.sub_path},
+    );
+    defer allocator.free(path);
+    var event_store = try events.Store.open(allocator, path);
+    defer event_store.deinit();
+    try event_store.migrate();
+    try seedSemanticFixture(&event_store.database);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const values = [_][]const u8{"pro"};
+    const goals = [_]analysis.ResolvedGoal{
+        .{
+            .id = "00000000-0000-4000-8000-000000000401",
+            .selector = .{
+                .kind = .exact_event,
+                .value = "purchase",
+                .predicates = &.{.{
+                    .property_ref = .{ .name = "plan", .scalar_type = .string },
+                    .operator = .is,
+                    .values = &values,
+                }},
+            },
+        },
+        .{
+            .id = "00000000-0000-4000-8000-000000000402",
+            .selector = .{ .kind = .exact_page, .value = "/pricing" },
+        },
+    };
+    const request = analysis.LiveRequest{
+        .site_id = "00000000-0000-4000-8000-000000000024",
+        .active_goals = &goals,
+        .now_utc_micros = 1_767_398_409_000_000,
+    };
+    try event_store.database.exec(
+        \\INSERT INTO events SELECT * REPLACE (
+        \\  CAST('00000000-0000-4000-8000-000000000113' AS UUID) AS event_id,
+        \\  1767398406500000 AS received_at_utc_micros,
+        \\  1767398406500000 AS occurred_at_utc_micros,
+        \\  2 AS kind, 'source_probe' AS event_name,
+        \\  '/source-probe' AS path,
+        \\  CAST('00000000-0000-4000-8000-0000000000b6' AS UUID) AS session_id,
+        \\  0 AS sequence, TRUE AS session_start,
+        \\  'custom-referrer.example' AS referrer_host,
+        \\  'custom-wrong' AS utm_source,
+        \\  repeat('b', 64) AS event_payload_digest
+        \\) FROM events
+        \\WHERE event_id = CAST('00000000-0000-4000-8000-000000000107' AS UUID);
+        \\INSERT INTO events SELECT * REPLACE (
+        \\  CAST('00000000-0000-4000-8000-000000000114' AS UUID) AS event_id,
+        \\  1767398407500000 AS received_at_utc_micros,
+        \\  1767398407500000 AS occurred_at_utc_micros,
+        \\  1 AS kind, 'pageview' AS event_name,
+        \\  '/source-probe' AS path,
+        \\  CAST('00000000-0000-4000-8000-0000000000b6' AS UUID) AS session_id,
+        \\  1 AS sequence, FALSE AS session_start,
+        \\  'page-referrer.example' AS referrer_host,
+        \\  'page-right' AS utm_source,
+        \\  repeat('c', 64) AS event_payload_digest
+        \\) FROM events
+        \\WHERE event_id = CAST('00000000-0000-4000-8000-000000000107' AS UUID);
+    );
+    const live = try executeLive(arena.allocator(), &event_store, request);
+    try std.testing.expectEqual(@as(i64, 5), live.active_sessions);
+    try std.testing.expectEqual(@as(i64, 5), live.page_views);
+    try std.testing.expectEqual(@as(i64, 4), live.custom_events);
+    try std.testing.expectEqual(@as(i64, 3), live.conversions);
+    try std.testing.expectEqual(@as(usize, 5), live.pages.len);
+    try std.testing.expectEqualStrings("/", live.pages[0].label);
+    try std.testing.expectEqualStrings("/ephemeral", live.pages[1].label);
+    try std.testing.expectEqualStrings("/legacy", live.pages[2].label);
+    try std.testing.expectEqualStrings("/pricing", live.pages[3].label);
+    try std.testing.expectEqualStrings("/source-probe", live.pages[4].label);
+    try std.testing.expectEqual(@as(usize, 3), live.events.len);
+    try std.testing.expectEqualStrings("purchase", live.events[0].label);
+    try std.testing.expectEqual(@as(i64, 2), live.events[0].count);
+    try std.testing.expectEqualStrings("delayed_event", live.events[1].label);
+    try std.testing.expectEqual(@as(i64, 1), live.events[1].count);
+    try std.testing.expectEqualStrings("source_probe", live.events[2].label);
+    try std.testing.expectEqual(@as(usize, 3), live.sources.len);
+    try std.testing.expectEqualStrings("Direct", live.sources[0].label);
+    try std.testing.expectEqual(@as(i64, 3), live.sources[0].count);
+    try std.testing.expectEqualStrings("google", live.sources[1].label);
+    try std.testing.expectEqual(@as(i64, 1), live.sources[1].count);
+    try std.testing.expectEqualStrings("page-right", live.sources[2].label);
+    for (live.sources) |row| {
+        try std.testing.expect(!std.mem.eql(u8, row.label, "custom-wrong"));
+    }
+    try std.testing.expectEqual(@as(usize, 2), live.goals.len);
+    try std.testing.expectEqualStrings(goals[0].id, live.goals[0].goal_id);
+    try std.testing.expectEqual(@as(i64, 2), live.goals[0].count);
+    try std.testing.expectEqualStrings(goals[1].id, live.goals[1].goal_id);
+    try std.testing.expectEqual(@as(i64, 1), live.goals[1].count);
+    try std.testing.expectEqual(@as(usize, 4), live.countries.len);
+    try std.testing.expectEqualStrings("US", live.countries[0].label);
+    try std.testing.expectEqual(@as(i64, 2), live.countries[0].count);
+    try std.testing.expectEqualStrings("DE", live.countries[1].label);
+    try std.testing.expectEqualStrings("FR", live.countries[2].label);
+    try std.testing.expectEqualStrings("Unknown", live.countries[3].label);
+    try std.testing.expectEqual(@as(usize, 4), live.devices.len);
+    try std.testing.expectEqual(@as(usize, 1), live.protocols.len);
+    try std.testing.expectEqual(@as(u8, 2), live.protocols[0].version);
+    try std.testing.expectEqual(@as(i64, 12), live.protocols[0].count);
+    try std.testing.expectEqual(
+        request.now_utc_micros,
+        live.latest_accepted_at_utc_micros.?,
+    );
+
+    var strict = request;
+    strict.strict_traffic_mode = true;
+    const strict_live = try executeLive(arena.allocator(), &event_store, strict);
+    try std.testing.expectEqual(live.active_sessions, strict_live.active_sessions);
+    try std.testing.expectEqual(live.page_views, strict_live.page_views);
+    try std.testing.expectEqual(live.custom_events, strict_live.custom_events);
+    try std.testing.expectEqual(live.conversions, strict_live.conversions);
 }
 
 pub fn seedSemanticFixture(database: *duckdb.Database) !void {
