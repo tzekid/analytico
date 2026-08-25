@@ -54,6 +54,7 @@ semantic, or application state model is consequential and must be added here.
 | D43 | Guided funnel lifecycle and metadata schema 10 | Persist one canonical bounded definition and preview independent selector availability | Accepted for 1.0 issue #35 |
 | D44 | Restart-capable funnel evaluation | Fixed bounded position-link plans with persistent-person visitor scope and one typed result | Accepted for 1.0 issue #36 |
 | D45 | Bounded Sessions list | Two-stage bounded raw-event query and typed records | Accepted for 1.0 issue #41 |
+| D46 | Derived session timeline and compatible-person profile | Bounded raw-event detail/profile queries with no durable projection | Accepted for 1.0 issue #42 |
 
 ## D01. MVP interface
 
@@ -3442,3 +3443,142 @@ plans are retained with the compact result.
 `PERFORMANCE.md`, `OPERATIONS.md`, `RELEASE_CONTRACT_1.0.md`, and issue #41.
 Issue #37 extends participation and #42 extends a selected record; neither
 changes this list contract silently.
+
+## D46. Derive bounded session timelines and compatible-person profiles
+
+**Status:** Accepted for Analytico 1.0 issue #42
+
+**Date:** 2026-08-25
+
+**Issue:** #42
+
+**Extends:** D26 explicit identity, D27 site-local presentation, D29 typed
+specialized analysis, D34 product traffic, D40 shared context, and D45 bounded
+Sessions. It does not implement #37 generated funnel participation.
+
+### Context and candidates
+
+Schema 7 already stores every retained Page, custom, engagement, identify,
+identity-link, property, trait, exact-value, and deterministic ordering fact
+needed by a session timeline or profile. The product also requires a
+250-millisecond session-detail p95, bounded first HTML, compatible-only
+cross-session identity, honest retention limits, and no replay subsystem.
+
+| Candidate | Runtime and correctness | Migration, maintenance, and rollback |
+| --- | --- | --- |
+| Use the existing CLI `sessionTimelineIds` and `resolvePerson` helpers directly | Reuses early identity evidence, but returns IDs or a minimal profile without HTTP pagination, full summaries, shared deadlines, active Goals, or response bounds | No migration, but creates an unreviewed second query contract in the controller |
+| Add durable session and mutable person/profile projections | Fast reads are possible | Conflicts with D26's derived-profile rule and adds write invalidation, migration, backup, retention, and rollback machinery before a measured need |
+| Derive one bounded detail timeline and one bounded compatible-person profile from existing events and links | Preserves the authoritative append-only facts and late-event behavior; finite pages and shared deadlines bound work | No schema or data migration; application-only rollback; repeated raw scans must meet the existing measured budgets |
+
+Select the third candidate. The authenticated package routes are
+`/admin/sites/{site}/sessions/{session}` and
+`/admin/sites/{site}/users/{person}`. The session is one validated UUID. The
+person is one percent-encoded canonical key and may be only an explicitly
+linked `u:<user-id>` or unlinked persistent `a:<uuid>` identity. Ephemeral and
+legacy-daily sessions remain inspectable and labeled, but never receive a
+profile link. A stale anonymous key that has since linked no longer resolves as
+an anonymous profile.
+
+The user ID is already authenticated operator-visible input. It remains
+bounded to the protocol's 160 UTF-8 bytes without controls, is encoded as one
+path component, is never an authorization input, and is protected by the
+existing no-referrer and no Analytico access-log contract. An opaque profile
+identifier or profile table is not introduced merely to duplicate that key.
+
+### Detail and profile semantics
+
+A detail request binds the site and session UUID, proves at least one retained
+product-eligible Page or custom event, expands the existing D45 full-session
+summary for exactly that key, and returns one fixed page of 50 timeline
+entries plus lookahead. Page, custom, and successful identify events remain
+separate. Repeated engagement transport rows are grouped by deterministic
+page-visit occurrence plus path and rendered as one meaningful sum, maximum
+scroll depth, and fragment count. Revisiting one path therefore does not merge
+two visits. Timeline order remains plausible occurrence, sequence, receipt,
+and event UUID. A late accepted event may move or alter a later result.
+
+Each Page/custom entry carries one bounded active-Goal match mask. The
+controller maps its at most 32 bits to the already resolved Goal names; no Goal
+or user string becomes SQL. Archived or deleted definitions can cease to name
+a historical match, but the underlying event remains visible. Properties,
+traits, paths, user IDs, and exact values are returned as typed bounded data
+and escaped by the deterministic renderer. Raw IP, full User-Agent, network
+evidence, arbitrary query strings, and request payloads are neither stored nor
+introduced into the result.
+
+A compatible-person header derives all-retained first and last meaningful
+activity, session count, active engagement, current active-Goal matches,
+latest successful identify traits, linked anonymous count, and exact totals
+per observed currency. It labels those values as retained history. The related
+session list remains a separate contextual answer: it applies the visible
+site-local date, segment, FilterSet, optional Goal, and strict policy plus the
+exact person key, then reuses D45's 25-record summary and stable pagination.
+Lifetime totals and contextual rows are never presented as the same range.
+
+Rejected identity conflicts do not create events or a second link. Live owns
+the restart-scoped rejection reason; the profile shows one unambiguous stored
+identity resolution and never merges the rejected user. Reset creates a new
+anonymous/session identity and can therefore resolve to a different profile.
+Anonymous devices are never joined without an equal explicit user ID.
+
+The original Sessions context remains canonical in detail/profile links and a
+clear list return link. `timeline-page` is distinct from the existing Sessions
+`page`. The conditional previous/next header links are omitted: reproducing
+them would rerun the complete contextual list on the detail budget, while the
+profile's chronological related-session list supplies bounded navigation.
+
+### Bounds, performance, operations, and acceptance
+
+Every statement executes on the existing one-thread DuckDB owner under one
+two-second request budget. A complete detail call includes existence, summary,
+and timeline work and retains the package p95 below 250 milliseconds on the
+standard million-event fixture. The contextual related-session page retains
+D45's below-400-millisecond p95. Profile summary plus contextual page must
+remain inside the two-second request deadline. Timeline pages contain at most
+50 entries, session/profile pages at most 25 records, active Goals at most 32,
+and currencies at most 16; a seventeenth currency fails closed.
+
+No cache, additional prepared-statement template, result membership, durable
+projection, table, index, schema migration, tracker, Caddy route, client data
+request, dependency, worker, thread, connection, or memory/deadline increase is
+accepted before a reproduced measured miss follows the existing optimization
+order. D45's one exact detail template and resettable request arena remain the
+only specialized lifetime mechanisms.
+
+The post-YAGNI ReleaseSafe source measured complete detail p95 at 40,066 and
+43,364 microseconds in two normal runs and 45,414 and 44,438 microseconds in
+two strict runs. Complete identified-profile calls measured 568,004 and
+634,100 microseconds normal and 646,406 and 692,460 microseconds strict. The
+same exact million rows retained both an explicitly linked two-device user and
+an unlinked persistent-anonymous profile. No candidate beyond the selected raw
+derived statements was needed.
+
+The exact final real-HTTP lifecycle retained D45's pre-collector list phase,
+then stopped the writer, proved one duplicate, restarted, and measured the
+persisted #42 browser/detail/profile phase. ReleaseSafe list/detail p95 and
+complete profile time were 148,859/40,178/587,443 microseconds normal and
+184,732/40,046/642,536 microseconds strict. List and detail/profile RSS were
+2,021 and 5,928 KiB per warmed 200-request cohort. The list view model compiles
+its identical canonical detail-link suffix once per response rather than once
+per visible record. D45's exact 8 MiB allocator threshold and every existing
+memory, thread, and deadline bound remain unchanged.
+
+The existing `e2e-sessions` gate expands to cover the real authenticated list,
+detail, and profile routes. Its on-disk and Chromium journey must prove
+cross-device explicit identity, reset separation, rejected conflict/no merge,
+anonymous-only history, deterministic late/tied ordering, per-visit engagement
+aggregation, properties/traits/value/Goal output, current and missing-
+engagement states, retention copy, site isolation, encoded IDs, JavaScript-off
+desktop/mobile/keyboard use, response and RSS bounds, timeout/reuse, and the
+million-row budgets. Existing M2 identity and metric-v1 gates remain unchanged.
+
+Deployment changes only the application artifact. It still creates and
+independently restores a matched metadata-10/event-7 backup, proves the exact
+predecessor, and then verifies the exact candidate process, private DuckDB,
+health, public authenticated route, and focused browser path. Rollback selects
+the predecessor artifact; data restore is required only if ordinary
+verification discovers unrelated corruption.
+
+**Affected contracts:** `SPEC.md`, `ARCHITECTURE.md`, `DATA_MODEL.md`,
+`ANALYSIS_QUERY.md`, `DESIGN_SYSTEM.md`, `PERFORMANCE.md`, `OPERATIONS.md`,
+`RELEASE_CONTRACT_1.0.md`, and issue #42.

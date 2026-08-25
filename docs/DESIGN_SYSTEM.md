@@ -229,13 +229,31 @@ width every record becomes a single labeled grid, primary controls retain
 44-pixel targets, and no field requires horizontal page scrolling. #41 emits no
 dead session-detail link before #42 supplies that destination.
 
+D46 turns the Session heading into an ordinary native detail link. The detail
+uses a two-column desktop hierarchy with a summary/context region and a
+chronological timeline; phone width stacks them in reading order. Every entry
+has a visible local time, type, path or event name, and applicable properties,
+traits, Goal names, exact value, or engagement summary. Engagement copy says
+how many transport fragments were combined and never resembles replay.
+`Current` says that activity is incomplete by the same 30-minute receipt rule;
+missing engagement says so explicitly.
+
+Compatible identified and persistent-anonymous identities receive a named
+profile link. The profile distinguishes **Retained history** totals from
+**Sessions matching this context**, labels explicit-link versus anonymous-only
+identity, and states that retention may remove older activity. Ephemeral and
+legacy identities have no disabled or dead profile control. Rejected conflicts
+are described as not merged; Live remains the diagnostic-reason destination.
+At phone width the timeline and related sessions remain labeled vertical
+records with no unavoidable page-level overflow.
+
 Server validation renders one focused error summary and associates only the
 affected form fields with that summary while preserving submitted values.
 Notices use restrained status semantics, errors use alerts, and loading is
 limited to the region whose existing native navigation or form is in flight.
 None of these enhancement states may replace the JavaScript-free baseline.
 
-The component stylesheet is self-hosted at a versioned `/admin/app.v15.css` path.
+The component stylesheet is self-hosted at a versioned `/admin/app.v16.css` path.
 Changing its bytes requires another path revision because existing responses
 may be cached privately for 24 hours.
 

@@ -75,8 +75,12 @@ pub const Query = struct {
     funnel_id: []const u8 = "",
     funnel_page: u32 = 1,
     funnel_preview_response: bool = false,
+    session_screen: SessionScreen = .list,
+    session_id: []const u8 = "",
+    profile_person_key: []const u8 = "",
     session_goal_id: []const u8 = "",
     session_page: u32 = 1,
+    session_timeline_page: u32 = 1,
 };
 
 pub const GoalScreen = enum {
@@ -93,6 +97,12 @@ pub const FunnelScreen = enum {
     new,
     detail,
     edit,
+};
+
+pub const SessionScreen = enum {
+    list,
+    detail,
+    profile,
 };
 
 pub const ReportTimeBasis = enum {
@@ -398,6 +408,7 @@ pub const SessionRevenue = struct {
 };
 
 pub const SessionRecord = struct {
+    detail_url: []const u8,
     short_id: []const u8,
     identity: []const u8,
     identity_state: []const u8,
@@ -423,6 +434,45 @@ pub const SessionList = struct {
     selected_goal_name: []const u8,
     previous_url: ?[]const u8,
     next_url: ?[]const u8,
+};
+
+pub const SessionTimelineEntry = struct {
+    kind: []const u8,
+    occurred_at: []const u8,
+    title: []const u8,
+    path: []const u8,
+    properties_json: []const u8,
+    user_id: []const u8,
+    user_traits_json: []const u8,
+    value: []const u8,
+    engagement: []const u8,
+    max_scroll_depth: i64,
+    engagement_fragments: i64,
+    goal_names: []const []const u8,
+};
+
+pub const SessionDetail = struct {
+    summary: SessionRecord,
+    timeline: []const SessionTimelineEntry,
+    profile_url: ?[]const u8,
+    back_url: []const u8,
+    previous_timeline_url: ?[]const u8,
+    next_timeline_url: ?[]const u8,
+};
+
+pub const PersonProfile = struct {
+    identity: []const u8,
+    identity_state: []const u8,
+    latest_traits_json: []const u8,
+    linked_anonymous_ids: i64,
+    first_seen: []const u8,
+    last_seen: []const u8,
+    sessions: i64,
+    engagement: []const u8,
+    conversions: i64,
+    revenue: []const SessionRevenue,
+    related_sessions: SessionList,
+    back_url: []const u8,
 };
 
 pub const FormErrorTarget = enum {
@@ -455,6 +505,8 @@ pub const Page = struct {
     goal_management: ?GoalManagement = null,
     funnel_management: ?FunnelManagement = null,
     session_list: ?SessionList = null,
+    session_detail: ?SessionDetail = null,
+    person_profile: ?PersonProfile = null,
     goals: []const meta.Goal,
     funnels: []const meta.Funnel,
     saved_views: []const meta.SavedView = &.{},

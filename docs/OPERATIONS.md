@@ -517,6 +517,16 @@ JavaScript-disabled 390-pixel result. Rollback stops the writer and restores
 the predecessor release symlink; because the schema pair is unchanged, a data
 restore is required only if ordinary verification finds unrelated corruption.
 
+D46 session detail/profile likewise changes only the application artifact. It
+adds no metadata/event migration, Caddy route, tracker, service unit,
+dependency, backup format, or runtime data file. Use the same stopped-writer
+metadata-10/event-7 matched backup and independent restore, prove the exact
+predecessor, then verify the candidate's focused list/detail/profile gate,
+metric-v1 parity, exact executable/private DuckDB mapping, one process/listener,
+health/readiness, authenticated direct detail/profile navigation, and the
+JavaScript-disabled 390-pixel timeline. Rollback selects the predecessor
+release; restore data only for independently detected corruption.
+
 ## 11. Retention and site deletion
 
 Run maintenance with the service stopped:

@@ -221,7 +221,7 @@ pub fn handle(
         }
         return true;
     }
-    if (routeFor(path)) |route| {
+    if (routeFor(dependencies.allocator, path)) |route| {
         if (!std.mem.eql(u8, request.method, "GET")) {
             try methodNotAllowed(output, "GET");
             return true;
@@ -341,9 +341,12 @@ const Route = struct {
     goal_id: []const u8 = "",
     funnel_screen: model.FunnelScreen = .none,
     funnel_id: []const u8 = "",
+    session_screen: model.SessionScreen = .list,
+    session_id: []const u8 = "",
+    profile_person_key: []const u8 = "",
 };
 
-fn routeFor(path: []const u8) ?Route {
+fn routeFor(allocator: std.mem.Allocator, path: []const u8) ?Route {
     const prefix = "/admin/sites/";
     if (!std.mem.startsWith(u8, path, prefix)) return null;
     const site, const suffix = std.mem.cutScalar(u8, path[prefix.len..], '/') orelse
@@ -424,6 +427,37 @@ fn routeFor(path: []const u8) ?Route {
         .destination = .sessions,
         .default_kind = .overview,
     };
+    const session_prefix = "sessions/";
+    if (std.mem.startsWith(u8, suffix, session_prefix)) {
+        const id = suffix[session_prefix.len..];
+        domain.validateUuid(id) catch return null;
+        return .{
+            .site = site,
+            .destination = .sessions,
+            .default_kind = .overview,
+            .session_screen = .detail,
+            .session_id = id,
+        };
+    }
+    const profile_prefix = "users/";
+    if (std.mem.startsWith(u8, suffix, profile_prefix)) {
+        const encoded = suffix[profile_prefix.len..];
+        if (encoded.len == 0 or std.mem.indexOfScalar(u8, encoded, '/') != null) {
+            return null;
+        }
+        const person_key = controller.decodePathComponent(
+            allocator,
+            encoded,
+        ) catch return null;
+        analysis.validateCompatiblePersonKey(person_key) catch return null;
+        return .{
+            .site = site,
+            .destination = .sessions,
+            .default_kind = .overview,
+            .session_screen = .profile,
+            .profile_person_key = person_key,
+        };
+    }
     if (std.mem.eql(u8, suffix, "live")) return .{
         .site = site,
         .destination = .live,
@@ -1065,6 +1099,9 @@ fn getPage(
             selected.slug,
             &default_range,
             .previous,
+            route.session_screen,
+            route.session_id,
+            route.profile_person_key,
         )
     else
         controller.finishQuery(
@@ -1203,8 +1240,20 @@ fn getPage(
             try writeError(output, .{
                 .status = 422,
                 .title = "Too many session currencies",
-                .message = "A selected session contains more than 16 exact currencies. Narrow the date, Goal, segment, or filter context and retry.",
+                .message = "The selected session or retained profile contains more than 16 exact currencies, so this bounded view was not rendered. No currencies were converted or combined.",
                 .return_url = request.target,
+            });
+        } else if (err == error.SessionNotFound) {
+            try writeError(output, .{
+                .status = 404,
+                .title = "Session not found",
+                .message = "The selected session does not exist for this site or has no retained eligible activity.",
+            });
+        } else if (err == error.PersonNotFound) {
+            try writeError(output, .{
+                .status = 404,
+                .title = "Profile not found",
+                .message = "The selected compatible user or anonymous identity has no retained eligible activity for this site.",
             });
         } else if (err == error.SiteNotFound or err == error.GoalNotFound or
             err == error.FunnelNotFound)
@@ -3194,7 +3243,17 @@ fn canonicalUrl(
                 },
             }
         },
-        .sessions => try output.writeAll("/sessions"),
+        .sessions => switch (query.session_screen) {
+            .list => try output.writeAll("/sessions"),
+            .detail => {
+                try output.writeAll("/sessions/");
+                try urlComponent(output, query.session_id);
+            },
+            .profile => {
+                try output.writeAll("/users/");
+                try urlComponent(output, query.profile_person_key);
+            },
+        },
         .live => try output.writeAll("/live"),
         .settings => try output.writeAll("/settings/general"),
     }
@@ -3370,6 +3429,9 @@ fn isInvalidInput(err: anyerror) bool {
         error.OverviewMetricNotApplicable,
         error.OverviewHighlightNotApplicable,
         error.InvalidSessionPage,
+        error.InvalidSessionTimelinePage,
+        error.InvalidProfilePerson,
+        error.InvalidSessionManagementState,
         error.InvalidSessionGoal,
         error.InvalidSessionClock,
         error.SessionOptionsNotApplicable,
@@ -3579,6 +3641,30 @@ test "canonical dashboard URL preserves Overview trend handoff state" {
         "/admin/sites/example/overview?v=1&from=2025-01-01&to=2025-01-02&compare=previous&metric=revenue-EUR",
         output.written(),
     );
+}
+
+test "session detail and encoded profile routes remain exact" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const detail = routeFor(
+        arena.allocator(),
+        "/admin/sites/example/sessions/00000000-0000-4000-8000-000000000043",
+    ).?;
+    try std.testing.expectEqual(model.SessionScreen.detail, detail.session_screen);
+    try std.testing.expectEqualStrings(
+        "00000000-0000-4000-8000-000000000043",
+        detail.session_id,
+    );
+    const profile = routeFor(
+        arena.allocator(),
+        "/admin/sites/example/users/u%3Auser%2FA%2B%E9%9B%AA",
+    ).?;
+    try std.testing.expectEqual(model.SessionScreen.profile, profile.session_screen);
+    try std.testing.expectEqualStrings("u:user/A+雪", profile.profile_person_key);
+    try std.testing.expect(routeFor(
+        arena.allocator(),
+        "/admin/sites/example/users/u:user/A",
+    ) == null);
 }
 
 test "goal and funnel post-submit page loads retain stale recovery" {

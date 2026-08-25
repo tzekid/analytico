@@ -980,3 +980,22 @@ current active-Goal match count, and exact per-currency value totals. These are
 query results, not mutable facts. Retention or a late accepted event may change
 a later result honestly. Event schema 7, metadata schema 10, backup format, and
 all migration rows remain unchanged.
+
+## 18. Derived session-detail and profile facts
+
+D46 adds no session, timeline, user, trait, or profile table. A detail request
+binds one site plus session UUID to the existing product-eligible events and
+`identity_links`. Page, custom, and accepted identify facts remain individual
+timeline entries. Engagement fragments derive a stable page-visit occurrence
+from the complete plausible ordering and aggregate only within that occurrence
+and path. The result carries sums, maximum scroll depth, fragment count, and a
+fixed 50-entry page; it does not expose transport payloads.
+
+A profile key is derived and never stored. Only `u:<user_id>` and unlinked
+persistent `a:<uuid>` keys are compatible. Retained-history totals derive from
+all product-eligible events for that key; latest traits retain D26's descending
+plausible-order rule. The separately paginated related-session result applies
+the selected site-local context before expanding full retained summaries.
+Retention can move first/last retained activity or remove the profile entirely,
+and the UI states that limitation. Event schema 7, metadata schema 10, backup
+format, and every migration row remain unchanged.

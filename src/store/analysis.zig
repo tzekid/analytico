@@ -584,6 +584,34 @@ const SessionKey = struct {
     started_at_utc_micros: i64,
 };
 
+const SessionSummaryRequest = struct {
+    site_id: []const u8,
+    active_goals: []const analysis.ResolvedGoal,
+    now_utc_micros: i64,
+
+    fn fromList(request: analysis.SessionListRequest) SessionSummaryRequest {
+        return .{
+            .site_id = request.site_id,
+            .active_goals = request.active_goals,
+            .now_utc_micros = request.now_utc_micros,
+        };
+    }
+
+    fn fromDetail(request: analysis.SessionDetailRequest) SessionSummaryRequest {
+        return .{
+            .site_id = request.site_id,
+            .active_goals = request.active_goals,
+            .now_utc_micros = request.now_utc_micros,
+        };
+    }
+
+    fn validate(self: SessionSummaryRequest) !void {
+        try domain.validateUuid(self.site_id);
+        try analysis.validateActiveGoals(self.active_goals);
+        if (self.now_utc_micros < 0) return error.InvalidSessionClock;
+    }
+};
+
 pub fn executeSessionList(
     allocator: std.mem.Allocator,
     event_store: *events.Store,
@@ -591,11 +619,26 @@ pub fn executeSessionList(
 ) !analysis.SessionPage {
     try request.validate();
     var budget = deadline.Budget.init(request.timeout_ms);
+    return executeSessionListWithBudget(
+        allocator,
+        event_store,
+        request,
+        &budget,
+    );
+}
+
+fn executeSessionListWithBudget(
+    allocator: std.mem.Allocator,
+    event_store: *events.Store,
+    request: analysis.SessionListRequest,
+    budget: *deadline.Budget,
+) !analysis.SessionPage {
+    try request.validate();
     const keys = try executeSessionKeys(
         allocator,
         &event_store.database,
         request,
-        &budget,
+        budget,
     );
     const visible_count = @min(keys.len, @as(usize, analysis.session_page_size));
     return .{
@@ -605,9 +648,9 @@ pub fn executeSessionList(
             try executeSessionDetails(
                 allocator,
                 event_store,
-                request,
+                SessionSummaryRequest.fromList(request),
                 keys[0..visible_count],
-                &budget,
+                budget,
             ),
         .has_more = keys.len > visible_count,
     };
@@ -638,13 +681,552 @@ pub fn profileSessionList(
             event_store,
             try compileSessionDetails(
                 allocator,
-                request,
+                SessionSummaryRequest.fromList(request),
                 keys[0..visible_count],
             ),
             &output.writer,
         );
     }
     return output.toOwnedSlice();
+}
+
+pub fn executeSessionDetail(
+    allocator: std.mem.Allocator,
+    event_store: *events.Store,
+    request: analysis.SessionDetailRequest,
+) !analysis.SessionDetail {
+    try request.validate();
+    var budget = deadline.Budget.init(request.timeout_ms);
+    const key = try executeSessionDetailKey(
+        allocator,
+        &event_store.database,
+        request,
+        &budget,
+    );
+    const rows = try executeSessionDetails(
+        allocator,
+        event_store,
+        SessionSummaryRequest.fromDetail(request),
+        &.{key},
+        &budget,
+    );
+    if (rows.len != 1) return error.InvalidSessionDetailResult;
+    const timeline = try executeSessionTimeline(
+        allocator,
+        &event_store.database,
+        request,
+        &budget,
+    );
+    const visible_count = @min(
+        timeline.len,
+        @as(usize, analysis.session_timeline_page_size),
+    );
+    return .{
+        .summary = rows[0],
+        .timeline = timeline[0..visible_count],
+        .has_more = timeline.len > visible_count,
+    };
+}
+
+pub fn profileSessionDetail(
+    allocator: std.mem.Allocator,
+    event_store: *events.Store,
+    request: analysis.SessionDetailRequest,
+) ![]u8 {
+    try request.validate();
+    var output = std.Io.Writer.Allocating.init(allocator);
+    try output.writer.writeAll("SESSION DETAIL KEY STATEMENT\n");
+    try profileOverviewPlan(
+        allocator,
+        event_store,
+        try compileSessionDetailKey(allocator, request),
+        &output.writer,
+    );
+    var budget = deadline.Budget.init(request.timeout_ms);
+    const key = try executeSessionDetailKey(
+        allocator,
+        &event_store.database,
+        request,
+        &budget,
+    );
+    try output.writer.writeAll("SESSION DETAIL SUMMARY STATEMENT\n");
+    try profileOverviewPlan(
+        allocator,
+        event_store,
+        try compileSessionDetails(
+            allocator,
+            SessionSummaryRequest.fromDetail(request),
+            &.{key},
+        ),
+        &output.writer,
+    );
+    try output.writer.writeAll("SESSION TIMELINE STATEMENT\n");
+    try profileOverviewPlan(
+        allocator,
+        event_store,
+        try compileSessionTimeline(allocator, request),
+        &output.writer,
+    );
+    return output.toOwnedSlice();
+}
+
+pub fn executePersonProfile(
+    allocator: std.mem.Allocator,
+    event_store: *events.Store,
+    request: analysis.SessionListRequest,
+) !analysis.PersonProfile {
+    try request.validate();
+    if (request.profile_person_key == null) return error.MissingProfilePerson;
+    var budget = deadline.Budget.init(request.timeout_ms);
+    const summary = try executePersonSummary(
+        allocator,
+        &event_store.database,
+        request,
+        &budget,
+    );
+    const sessions = try executeSessionListWithBudget(
+        allocator,
+        event_store,
+        request,
+        &budget,
+    );
+    return .{ .summary = summary, .sessions = sessions };
+}
+
+pub fn profilePersonProfile(
+    allocator: std.mem.Allocator,
+    event_store: *events.Store,
+    request: analysis.SessionListRequest,
+) ![]u8 {
+    try request.validate();
+    if (request.profile_person_key == null) return error.MissingProfilePerson;
+    var output = std.Io.Writer.Allocating.init(allocator);
+    try output.writer.writeAll("PERSON RETAINED SUMMARY STATEMENT\n");
+    try profileOverviewPlan(
+        allocator,
+        event_store,
+        try compilePersonSummary(allocator, request),
+        &output.writer,
+    );
+    try output.writer.writeAll("PERSON CONTEXT SESSION KEY STATEMENT\n");
+    try profileOverviewPlan(
+        allocator,
+        event_store,
+        try compileSessionKeys(allocator, request),
+        &output.writer,
+    );
+    var budget = deadline.Budget.init(request.timeout_ms);
+    const keys = try executeSessionKeys(
+        allocator,
+        &event_store.database,
+        request,
+        &budget,
+    );
+    const visible_count = @min(keys.len, @as(usize, analysis.session_page_size));
+    if (visible_count != 0) {
+        try output.writer.writeAll("PERSON CONTEXT SESSION DETAIL STATEMENT\n");
+        try profileOverviewPlan(
+            allocator,
+            event_store,
+            try compileSessionDetails(
+                allocator,
+                SessionSummaryRequest.fromList(request),
+                keys[0..visible_count],
+            ),
+            &output.writer,
+        );
+    }
+    return output.toOwnedSlice();
+}
+
+fn executeSessionDetailKey(
+    allocator: std.mem.Allocator,
+    database: *duckdb.Database,
+    request: analysis.SessionDetailRequest,
+    budget: *deadline.Budget,
+) !SessionKey {
+    var result = try executePlan(
+        database,
+        try compileSessionDetailKey(allocator, request),
+        budget,
+    );
+    defer result.deinit();
+    if (result.columnCount() != 2 or result.rowCount() != 1) {
+        return error.SessionNotFound;
+    }
+    const key = SessionKey{
+        .id = try result.text(allocator, 0, 0),
+        .started_at_utc_micros = result.int64(1, 0),
+    };
+    if (!std.mem.eql(u8, key.id, request.session_id) or
+        key.started_at_utc_micros < 0)
+    {
+        return error.InvalidSessionDetailResult;
+    }
+    return key;
+}
+
+fn compileSessionDetailKey(
+    allocator: std.mem.Allocator,
+    request: analysis.SessionDetailRequest,
+) !StatementPlan {
+    try request.validate();
+    var builder = Builder.init(allocator);
+    try builder.write(
+        "SELECT CAST(session_id AS VARCHAR)," ++
+            " min(occurred_at_utc_micros)::BIGINT" ++
+            " FROM events WHERE site_id = ",
+    );
+    try builder.bindText(request.site_id);
+    try builder.write(" AND session_id = CAST(");
+    try builder.bindText(request.session_id);
+    try builder.write(
+        " AS UUID) AND kind IN (1, 2)" ++
+            " AND traffic_class IN (1, 5) GROUP BY session_id",
+    );
+    return builder.finish();
+}
+
+fn executeSessionTimeline(
+    allocator: std.mem.Allocator,
+    database: *duckdb.Database,
+    request: analysis.SessionDetailRequest,
+    budget: *deadline.Budget,
+) ![]const analysis.SessionTimelineRow {
+    var result = try executePlan(
+        database,
+        try compileSessionTimeline(allocator, request),
+        budget,
+    );
+    defer result.deinit();
+    const maximum_rows = @as(usize, analysis.session_timeline_page_size) + 1;
+    if (result.columnCount() != 14 or result.rowCount() > maximum_rows) {
+        return error.InvalidSessionTimelineResult;
+    }
+    const rows = try allocator.alloc(
+        analysis.SessionTimelineRow,
+        result.rowCount(),
+    );
+    for (rows, 0..) |*row, index| {
+        const raw_kind = result.int64(0, index);
+        const kind: analysis.SessionTimelineKind = switch (raw_kind) {
+            1 => .page,
+            2 => .custom,
+            3 => .engagement,
+            4 => .identify,
+            else => return error.InvalidSessionTimelineResult,
+        };
+        const occurred = result.int64(4, index);
+        const engagement_ms = result.int64(10, index);
+        const max_scroll_depth = result.int64(11, index);
+        const engagement_fragments = result.int64(12, index);
+        const raw_goal_mask = result.int64(13, index);
+        const valid_goal_mask: u64 = if (request.active_goals.len == 32)
+            std.math.maxInt(u32)
+        else
+            (@as(u64, 1) << @intCast(request.active_goals.len)) - 1;
+        if (occurred < 0 or engagement_ms < 0 or max_scroll_depth < 0 or
+            max_scroll_depth > 100 or engagement_fragments <= 0 or
+            raw_goal_mask < 0 or raw_goal_mask > std.math.maxInt(u32) or
+            (@as(u64, @intCast(raw_goal_mask)) & ~valid_goal_mask) != 0 or
+            (kind != .engagement and
+                (engagement_ms != 0 or max_scroll_depth != 0 or
+                    engagement_fragments != 1)) or
+            (kind == .engagement and raw_goal_mask != 0))
+        {
+            return error.InvalidSessionTimelineResult;
+        }
+        const value_amount = if (result.isNull(8, index))
+            null
+        else
+            try result.text(allocator, 8, index);
+        const value_currency = try result.text(allocator, 9, index);
+        if (value_amount) |amount| {
+            if ((property.numberType(amount) catch
+                return error.InvalidSessionTimelineResult) != .decimal)
+            {
+                return error.InvalidSessionTimelineResult;
+            }
+            domain.validateCurrency(value_currency) catch
+                return error.InvalidSessionTimelineResult;
+        } else if (value_currency.len != 0) {
+            return error.InvalidSessionTimelineResult;
+        }
+        row.* = .{
+            .kind = kind,
+            .event_name = try result.text(allocator, 1, index),
+            .path = try result.text(allocator, 2, index),
+            .page_title = try result.text(allocator, 3, index),
+            .occurred_at_utc_micros = occurred,
+            .properties_json = try result.text(allocator, 5, index),
+            .user_id = try result.text(allocator, 6, index),
+            .user_traits_json = try result.text(allocator, 7, index),
+            .value_amount = value_amount,
+            .value_currency = value_currency,
+            .engagement_ms = engagement_ms,
+            .max_scroll_depth = max_scroll_depth,
+            .engagement_fragments = engagement_fragments,
+            .goal_mask = @intCast(raw_goal_mask),
+        };
+    }
+    return rows;
+}
+
+fn compileSessionTimeline(
+    allocator: std.mem.Allocator,
+    request: analysis.SessionDetailRequest,
+) !StatementPlan {
+    try request.validate();
+    var builder = Builder.init(allocator);
+    try builder.write(
+        "WITH ordered AS MATERIALIZED (SELECT e.*," ++
+            " sum(CASE WHEN e.kind = 1 THEN 1 ELSE 0 END) OVER" ++
+            " (ORDER BY e.occurred_at_utc_micros, e.sequence," ++
+            " e.received_at_utc_micros, e.event_id) AS page_visit" ++
+            " FROM events e WHERE e.site_id = ",
+    );
+    try builder.bindText(request.site_id);
+    try builder.write(" AND e.session_id = CAST(");
+    try builder.bindText(request.session_id);
+    try builder.write(
+        " AS UUID) AND e.traffic_class IN (1, 5))," ++
+            " event_rows AS (SELECT e.kind, e.event_name, e.path," ++
+            " e.page_title, e.occurred_at_utc_micros," ++
+            " e.properties_json, e.user_id, e.user_traits_json," ++
+            " CAST(e.value_amount AS VARCHAR) AS value_amount," ++
+            " e.value_currency, 0::BIGINT AS engagement_ms," ++
+            " 0::BIGINT AS max_scroll_depth," ++
+            " 1::BIGINT AS engagement_fragments, CASE" ++
+            " WHEN e.kind IN (1, 2) THEN ",
+    );
+    try writeGoalMatchMask(&builder, request.active_goals, "e");
+    try builder.write(
+        " ELSE 0::UBIGINT END AS goal_mask, e.sequence," ++
+            " e.received_at_utc_micros, e.event_id FROM ordered e" ++
+            " WHERE e.kind <> 3)," ++
+            " engagement_rows AS (SELECT 3::UTINYINT AS kind," ++
+            " 'engagement' AS event_name, e.path," ++
+            " first(e.page_title ORDER BY e.occurred_at_utc_micros DESC," ++
+            " e.sequence DESC, e.received_at_utc_micros DESC," ++
+            " e.event_id DESC) AS page_title," ++
+            " first(e.occurred_at_utc_micros ORDER BY" ++
+            " e.occurred_at_utc_micros DESC, e.sequence DESC," ++
+            " e.received_at_utc_micros DESC, e.event_id DESC)::BIGINT" ++
+            " AS occurred_at_utc_micros, '{}' AS properties_json," ++
+            " '' AS user_id, '{}' AS user_traits_json," ++
+            " CAST(NULL AS VARCHAR) AS value_amount," ++
+            " '' AS value_currency, sum(e.engagement_ms)::BIGINT," ++
+            " max(e.max_scroll_depth)::BIGINT," ++
+            " count(*)::BIGINT AS engagement_fragments," ++
+            " 0::UBIGINT AS goal_mask," ++
+            " first(e.sequence ORDER BY e.occurred_at_utc_micros DESC," ++
+            " e.sequence DESC, e.received_at_utc_micros DESC," ++
+            " e.event_id DESC) AS sequence," ++
+            " first(e.received_at_utc_micros ORDER BY" ++
+            " e.occurred_at_utc_micros DESC, e.sequence DESC," ++
+            " e.received_at_utc_micros DESC, e.event_id DESC)" ++
+            " AS received_at_utc_micros," ++
+            " first(e.event_id ORDER BY e.occurred_at_utc_micros DESC," ++
+            " e.sequence DESC, e.received_at_utc_micros DESC," ++
+            " e.event_id DESC) AS event_id FROM ordered e" ++
+            " WHERE e.kind = 3 GROUP BY e.page_visit, e.path)," ++
+            " timeline AS (SELECT * FROM event_rows UNION ALL" ++
+            " SELECT * FROM engagement_rows) SELECT kind, event_name, path," ++
+            " page_title, occurred_at_utc_micros, properties_json, user_id," ++
+            " user_traits_json, value_amount, value_currency, engagement_ms," ++
+            " max_scroll_depth, engagement_fragments, goal_mask" ++
+            " FROM timeline ORDER BY occurred_at_utc_micros, sequence," ++
+            " received_at_utc_micros, event_id LIMIT ",
+    );
+    try builder.bindInteger(
+        @as(i64, analysis.session_timeline_page_size) + 1,
+    );
+    try builder.write(" OFFSET ");
+    try builder.bindInteger(try request.offset());
+    return builder.finish();
+}
+
+fn executePersonSummary(
+    allocator: std.mem.Allocator,
+    database: *duckdb.Database,
+    request: analysis.SessionListRequest,
+    budget: *deadline.Budget,
+) !analysis.PersonSummary {
+    const person_key = request.profile_person_key orelse
+        return error.MissingProfilePerson;
+    var result = try executePlan(
+        database,
+        try compilePersonSummary(allocator, request),
+        budget,
+    );
+    defer result.deinit();
+    if (result.columnCount() != 13 or result.rowCount() == 0) {
+        return error.InvalidPersonProfileResult;
+    }
+    if (result.rowCount() > analysis.maximum_currency_series + 1) {
+        return error.TooManyAnalysisCurrencies;
+    }
+    var summary: analysis.PersonSummary = undefined;
+    var seen_summary = false;
+    var revenue: std.ArrayList(analysis.SessionRevenue) = .empty;
+    var expected_currency_position: i64 = 1;
+    for (0..result.rowCount()) |index| {
+        const section = try result.text(allocator, 0, index);
+        const result_person = try result.text(allocator, 1, index);
+        if (!std.mem.eql(u8, result_person, person_key)) {
+            return error.InvalidPersonProfileResult;
+        }
+        if (std.mem.eql(u8, section, "summary")) {
+            if (result.isNull(2, index) or result.isNull(3, index)) {
+                return error.PersonNotFound;
+            }
+            if (seen_summary or !result.isNull(9, index) or
+                result.int64(11, index) != 0 or
+                result.int64(12, index) != 0)
+            {
+                return error.InvalidPersonProfileResult;
+            }
+            const first_seen = result.int64(2, index);
+            const last_seen = result.int64(3, index);
+            const sessions = result.int64(4, index);
+            const engagement_ms = result.int64(5, index);
+            const conversions = result.int64(6, index);
+            const linked = result.int64(8, index);
+            if (first_seen < 0 or first_seen > last_seen or sessions <= 0 or
+                engagement_ms < 0 or conversions < 0 or linked < 0 or
+                (std.mem.startsWith(u8, person_key, "a:") and linked != 0) or
+                (std.mem.startsWith(u8, person_key, "u:") and linked == 0))
+            {
+                return error.InvalidPersonProfileResult;
+            }
+            summary = .{
+                .person_key = result_person,
+                .first_seen_utc_micros = first_seen,
+                .last_seen_utc_micros = last_seen,
+                .sessions = sessions,
+                .engagement_ms = engagement_ms,
+                .conversions = conversions,
+                .latest_traits_json = try result.text(allocator, 7, index),
+                .linked_anonymous_ids = linked,
+                .revenue = &.{},
+            };
+            seen_summary = true;
+        } else if (std.mem.eql(u8, section, "revenue")) {
+            if (!seen_summary or result.isNull(9, index) or
+                result.int64(12, index) != expected_currency_position)
+            {
+                return error.InvalidPersonProfileResult;
+            }
+            const decimal = try result.text(allocator, 9, index);
+            const currency = try result.text(allocator, 10, index);
+            const value_count = result.int64(11, index);
+            if ((property.numberType(decimal) catch
+                return error.InvalidPersonProfileResult) != .decimal or
+                value_count <= 0)
+            {
+                return error.InvalidPersonProfileResult;
+            }
+            domain.validateCurrency(currency) catch
+                return error.InvalidPersonProfileResult;
+            try revenue.append(allocator, .{
+                .decimal = decimal,
+                .currency = currency,
+                .value_count = value_count,
+            });
+            expected_currency_position += 1;
+        } else return error.InvalidPersonProfileResult;
+    }
+    if (!seen_summary) return error.PersonNotFound;
+    summary.revenue = try revenue.toOwnedSlice(allocator);
+    return summary;
+}
+
+fn compilePersonSummary(
+    allocator: std.mem.Allocator,
+    request: analysis.SessionListRequest,
+) !StatementPlan {
+    try request.validate();
+    const person_key = request.profile_person_key orelse
+        return error.MissingProfilePerson;
+    var builder = Builder.init(allocator);
+    try builder.write(
+        "WITH person_events AS MATERIALIZED (SELECT e.*," ++
+            " CASE WHEN e.identity_quality = 1" ++
+            " AND COALESCE(l.user_id, e.user_id, '') <> ''" ++
+            " THEN 'u:' || COALESCE(l.user_id, e.user_id)" ++
+            " WHEN e.identity_quality = 1" ++
+            " THEN 'a:' || CAST(e.anonymous_id AS VARCHAR)" ++
+            " ELSE NULL END AS person_key FROM events e" ++
+            " LEFT JOIN identity_links l ON l.site_id = e.site_id" ++
+            " AND l.anonymous_id = e.anonymous_id WHERE e.site_id = ",
+    );
+    try builder.bindText(request.site_id);
+    try builder.write(
+        " AND e.traffic_class IN (1, 5))," ++
+            " selected AS MATERIALIZED (SELECT * FROM person_events" ++
+            " WHERE person_key = ",
+    );
+    try builder.bindText(person_key);
+    try builder.write(
+        "), meaningful_sessions AS MATERIALIZED" ++
+            " (SELECT DISTINCT session_id FROM selected" ++
+            " WHERE kind IN (1, 2)), profile_events AS NOT MATERIALIZED" ++
+            " (SELECT e.* FROM selected e JOIN meaningful_sessions s" ++
+            " USING (session_id)), profile_summary AS (SELECT" ++
+            " min(occurred_at_utc_micros) FILTER" ++
+            " (WHERE kind IN (1, 2))::BIGINT AS first_seen," ++
+            " max(occurred_at_utc_micros) FILTER" ++
+            " (WHERE kind IN (1, 2))::BIGINT AS last_seen," ++
+            " count(DISTINCT session_id)::BIGINT AS sessions," ++
+            " COALESCE(sum(engagement_ms), 0)::BIGINT AS engagement_ms," ++
+            " COALESCE(sum(CASE WHEN kind IN (1, 2) THEN ",
+    );
+    try writeGoalMatchCount(&builder, request.active_goals, "profile_events");
+    try builder.write(
+        " ELSE 0 END), 0)::BIGINT AS conversions," ++
+            " COALESCE(first(user_traits_json ORDER BY" ++
+            " occurred_at_utc_micros DESC, sequence DESC," ++
+            " received_at_utc_micros DESC, event_id DESC)" ++
+            " FILTER (WHERE kind = 4), '{}') AS latest_traits_json" ++
+            " FROM profile_events), profile_revenue AS" ++
+            " (SELECT value_currency," ++
+            " CAST(sum(value_amount) AS VARCHAR) AS amount," ++
+            " count(value_amount)::BIGINT AS value_count," ++
+            " row_number() OVER (ORDER BY value_currency)::BIGINT" ++
+            " AS currency_position FROM profile_events" ++
+            " WHERE kind IN (1, 2) AND value_amount IS NOT NULL" ++
+            " GROUP BY value_currency) SELECT 'summary' AS section, ",
+    );
+    try builder.bindText(person_key);
+    try builder.write(
+        " AS person_key, first_seen, last_seen, sessions," ++
+            " engagement_ms, conversions, latest_traits_json, ",
+    );
+    if (std.mem.startsWith(u8, person_key, "u:")) {
+        try builder.write("(SELECT count(*)::BIGINT FROM identity_links" ++
+            " WHERE site_id = ");
+        try builder.bindText(request.site_id);
+        try builder.write(" AND user_id = ");
+        try builder.bindText(person_key[2..]);
+        try builder.write(")");
+    } else try builder.write("0::BIGINT");
+    try builder.write(
+        " AS linked_anonymous_ids, CAST(NULL AS VARCHAR) AS amount," ++
+            " '' AS value_currency, 0::BIGINT AS value_count," ++
+            " 0::BIGINT AS currency_position FROM profile_summary" ++
+            " UNION ALL SELECT 'revenue', ",
+    );
+    try builder.bindText(person_key);
+    try builder.write(
+        ", 0::BIGINT, 0::BIGINT, 0::BIGINT, 0::BIGINT, 0::BIGINT," ++
+            " '', 0::BIGINT, amount, value_currency, value_count," ++
+            " currency_position FROM profile_revenue ORDER BY" ++
+            " currency_position LIMIT ",
+    );
+    try builder.bindInteger(
+        @as(i64, analysis.maximum_currency_series) + 2,
+    );
+    return builder.finish();
 }
 
 fn executeSessionKeys(
@@ -687,7 +1269,7 @@ fn executeSessionKeys(
 fn executeSessionDetails(
     allocator: std.mem.Allocator,
     event_store: *events.Store,
-    request: analysis.SessionListRequest,
+    request: SessionSummaryRequest,
     keys: []const SessionKey,
     budget: *deadline.Budget,
 ) ![]const analysis.SessionRow {
@@ -873,7 +1455,8 @@ fn compileSessionKeys(
         request.filters,
         selected_goal,
     );
-    const include_person = hasPersonClause(request.filters.clauses);
+    const include_person = hasPersonClause(request.filters.clauses) or
+        request.profile_person_key != null;
     const include_engagement = hasSessionFieldClause(
         request.filters.clauses,
         .session_engagement_ms,
@@ -1148,7 +1731,7 @@ fn compileSessionKeys(
         );
     }
     const has_row_qualification = request.filters.clauses.len != 0 or
-        selected_goal != null;
+        selected_goal != null or request.profile_person_key != null;
     if (has_row_qualification) {
         try builder.write(
             ", qualified_sessions AS (SELECT DISTINCT e.session_id," ++
@@ -1158,6 +1741,10 @@ fn compileSessionKeys(
         for (request.filters.clauses) |clause| {
             try builder.write(" AND ");
             try writeClause(&builder, clause, "e", "s");
+        }
+        if (request.profile_person_key) |person_key| {
+            try builder.write(" AND e.person_key = ");
+            try builder.bindText(person_key);
         }
         if (request.strict_traffic_mode) try builder.write(
             " AND e.session_id NOT IN (SELECT session_id" ++
@@ -1196,7 +1783,7 @@ fn compileSessionKeys(
 
 fn compileSessionDetails(
     allocator: std.mem.Allocator,
-    request: analysis.SessionListRequest,
+    request: SessionSummaryRequest,
     keys: []const SessionKey,
 ) !StatementPlan {
     try request.validate();
@@ -7247,7 +7834,7 @@ test "declared maximum filters selectors and active goals still compile bounded"
     };
     const session_details = try compileSessionDetails(
         allocator,
-        session_request,
+        SessionSummaryRequest.fromList(session_request),
         &page_keys,
     );
     try std.testing.expect(session_details.sql.len <= maximum_sql_bytes);
@@ -7452,6 +8039,99 @@ test "session list expands bounded full records on disk" {
         \\) FROM events
         \\WHERE event_id = CAST('00000000-0000-4000-8000-000000000107' AS UUID);
     );
+    try event_store.database.exec(
+        \\INSERT INTO identity_links VALUES (
+        \\  '00000000-0000-4000-8000-000000000024',
+        \\  CAST('00000000-0000-4000-8000-0000000000a9' AS UUID),
+        \\  'user-a', 1767398409000000,
+        \\  CAST('00000000-0000-4000-8000-000000000219' AS UUID)
+        \\);
+        \\INSERT INTO events SELECT * REPLACE (
+        \\  CAST('00000000-0000-4000-8000-000000000211' AS UUID) AS event_id,
+        \\  1767398405100000 AS received_at_utc_micros,
+        \\  1767398405100000 AS occurred_at_utc_micros,
+        \\  3 AS kind, 'engagement' AS event_name,
+        \\  2 AS sequence, FALSE AS session_start,
+        \\  5000 AS engagement_ms, 40 AS max_scroll_depth,
+        \\  CAST('00000000-0000-4000-8000-000000000211' AS BLOB) AS visitor_day_id,
+        \\  FALSE AS visitor_day_start, repeat('1', 64) AS event_payload_digest
+        \\) FROM events
+        \\WHERE event_id = CAST('00000000-0000-4000-8000-000000000108' AS UUID);
+        \\INSERT INTO events SELECT * REPLACE (
+        \\  CAST('00000000-0000-4000-8000-000000000212' AS UUID) AS event_id,
+        \\  1767398405200000 AS received_at_utc_micros,
+        \\  1767398405200000 AS occurred_at_utc_micros,
+        \\  1 AS kind, 'pageview' AS event_name, '/other' AS path,
+        \\  'Other' AS page_title, 3 AS sequence, FALSE AS session_start,
+        \\  0 AS engagement_ms, 0 AS max_scroll_depth,
+        \\  CAST('00000000-0000-4000-8000-000000000212' AS BLOB) AS visitor_day_id,
+        \\  FALSE AS visitor_day_start, repeat('2', 64) AS event_payload_digest
+        \\) FROM events
+        \\WHERE event_id = CAST('00000000-0000-4000-8000-000000000107' AS UUID);
+        \\INSERT INTO events SELECT * REPLACE (
+        \\  CAST('00000000-0000-4000-8000-000000000213' AS UUID) AS event_id,
+        \\  1767398405300000 AS received_at_utc_micros,
+        \\  1767398405300000 AS occurred_at_utc_micros,
+        \\  3 AS kind, 'engagement' AS event_name, '/other' AS path,
+        \\  'Other' AS page_title, 4 AS sequence, FALSE AS session_start,
+        \\  7000 AS engagement_ms, 65 AS max_scroll_depth,
+        \\  CAST('00000000-0000-4000-8000-000000000213' AS BLOB) AS visitor_day_id,
+        \\  FALSE AS visitor_day_start, repeat('3', 64) AS event_payload_digest
+        \\) FROM events
+        \\WHERE event_id = CAST('00000000-0000-4000-8000-000000000108' AS UUID);
+        \\INSERT INTO events SELECT * REPLACE (
+        \\  CAST('00000000-0000-4000-8000-000000000214' AS UUID) AS event_id,
+        \\  1767398405400000 AS received_at_utc_micros,
+        \\  1767398405400000 AS occurred_at_utc_micros,
+        \\  1 AS kind, 'pageview' AS event_name, '/' AS path,
+        \\  'Home again' AS page_title, 5 AS sequence, FALSE AS session_start,
+        \\  0 AS engagement_ms, 0 AS max_scroll_depth,
+        \\  CAST('00000000-0000-4000-8000-000000000214' AS BLOB) AS visitor_day_id,
+        \\  FALSE AS visitor_day_start, repeat('4', 64) AS event_payload_digest
+        \\) FROM events
+        \\WHERE event_id = CAST('00000000-0000-4000-8000-000000000107' AS UUID);
+        \\INSERT INTO events SELECT * REPLACE (
+        \\  CAST('00000000-0000-4000-8000-000000000215' AS UUID) AS event_id,
+        \\  1767398405500000 AS received_at_utc_micros,
+        \\  1767398405500000 AS occurred_at_utc_micros,
+        \\  3 AS kind, 'engagement' AS event_name, '/' AS path,
+        \\  'Home again' AS page_title, 6 AS sequence, FALSE AS session_start,
+        \\  3000 AS engagement_ms, 80 AS max_scroll_depth,
+        \\  CAST('00000000-0000-4000-8000-000000000215' AS BLOB) AS visitor_day_id,
+        \\  FALSE AS visitor_day_start, repeat('5', 64) AS event_payload_digest
+        \\) FROM events
+        \\WHERE event_id = CAST('00000000-0000-4000-8000-000000000108' AS UUID);
+        \\INSERT INTO events SELECT * REPLACE (
+        \\  CAST('00000000-0000-4000-8000-000000000218' AS UUID) AS event_id,
+        \\  1767398409000000 AS received_at_utc_micros,
+        \\  1767398409000000 AS occurred_at_utc_micros,
+        \\  1 AS kind, 'pageview' AS event_name, '/device-two' AS path,
+        \\  'Device two' AS page_title,
+        \\  CAST('00000000-0000-4000-8000-0000000000a9' AS UUID) AS anonymous_id,
+        \\  1 AS identity_quality, '' AS user_id,
+        \\  CAST('00000000-0000-4000-8000-0000000000b9' AS UUID) AS session_id,
+        \\  0 AS sequence, TRUE AS session_start,
+        \\  'desktop' AS device_category,
+        \\  CAST('00000000-0000-4000-8000-000000000218' AS BLOB) AS visitor_day_id,
+        \\  TRUE AS visitor_day_start, repeat('8', 64) AS event_payload_digest
+        \\) FROM events
+        \\WHERE event_id = CAST('00000000-0000-4000-8000-000000000107' AS UUID);
+        \\INSERT INTO events SELECT * REPLACE (
+        \\  CAST('00000000-0000-4000-8000-000000000219' AS UUID) AS event_id,
+        \\  1767398410000000 AS received_at_utc_micros,
+        \\  1767398410000000 AS occurred_at_utc_micros,
+        \\  4 AS kind, 'identify' AS event_name, '/device-two' AS path,
+        \\  'Device two' AS page_title,
+        \\  CAST('00000000-0000-4000-8000-0000000000a9' AS UUID) AS anonymous_id,
+        \\  1 AS identity_quality, 'user-a' AS user_id,
+        \\  CAST('00000000-0000-4000-8000-0000000000b9' AS UUID) AS session_id,
+        \\  1 AS sequence, FALSE AS session_start,
+        \\  '{"device":"second","plan":"business"}' AS user_traits_json,
+        \\  CAST('00000000-0000-4000-8000-000000000219' AS BLOB) AS visitor_day_id,
+        \\  FALSE AS visitor_day_start, repeat('9', 64) AS event_payload_digest
+        \\) FROM events
+        \\WHERE event_id = CAST('00000000-0000-4000-8000-000000000106' AS UUID);
+    );
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const goals = [_]analysis.ResolvedGoal{
@@ -7471,7 +8151,7 @@ test "session list expands bounded full records on disk" {
         .now_utc_micros = 1_767_400_209_000_000,
     };
     const page = try executeSessionList(arena.allocator(), &event_store, request);
-    try std.testing.expectEqual(@as(usize, 6), page.rows.len);
+    try std.testing.expectEqual(@as(usize, 7), page.rows.len);
     try std.testing.expect(!page.has_more);
     const identified = findSessionRow(
         page.rows,
@@ -7501,8 +8181,8 @@ test "session list expands bounded full records on disk" {
         page.rows,
         "00000000-0000-4000-8000-0000000000b2",
     ) orelse return error.MissingSessionFixtureRow;
-    try std.testing.expectEqual(@as(i64, 1_000), engaged_session.duration_ms);
-    try std.testing.expectEqual(@as(i64, 10_000), engaged_session.engagement_ms);
+    try std.testing.expectEqual(@as(i64, 1_500), engaged_session.duration_ms);
+    try std.testing.expectEqual(@as(i64, 25_000), engaged_session.engagement_ms);
     const custom_only = findSessionRow(
         page.rows,
         "00000000-0000-4000-8000-0000000000b6",
@@ -7525,7 +8205,7 @@ test "session list expands bounded full records on disk" {
         &event_store,
         strict_request,
     );
-    try std.testing.expectEqual(@as(usize, 5), strict_page.rows.len);
+    try std.testing.expectEqual(@as(usize, 6), strict_page.rows.len);
     try std.testing.expect(findSessionRow(
         strict_page.rows,
         "00000000-0000-4000-8000-0000000000b7",
@@ -7688,7 +8368,7 @@ test "session list expands bounded full records on disk" {
     try std.testing.expectEqual(@as(usize, 1), property_page.rows.len);
     try std.testing.expectEqualStrings(identified.session_id, property_page.rows[0].session_id);
 
-    const trait_values = [_][]const u8{"enterprise"};
+    const trait_values = [_][]const u8{"business"};
     const trait_filter = [_]analysis.Clause{.{
         .scope = .person,
         .field = .{ .kind = .user_trait, .property_ref = .{
@@ -7706,8 +8386,11 @@ test "session list expands bounded full records on disk" {
         &event_store,
         person_trait,
     );
-    try std.testing.expectEqual(@as(usize, 1), trait_page.rows.len);
-    try std.testing.expectEqualStrings(identified.session_id, trait_page.rows[0].session_id);
+    try std.testing.expectEqual(@as(usize, 2), trait_page.rows.len);
+    try std.testing.expect(findSessionRow(
+        trait_page.rows,
+        identified.session_id,
+    ) != null);
 
     const converted_filter = [_]analysis.Clause{.{
         .scope = .session,
@@ -7783,8 +8466,15 @@ test "session list expands bounded full records on disk" {
         &event_store,
         identified_only,
     );
-    try std.testing.expectEqual(@as(usize, 1), identified_page.rows.len);
-    try std.testing.expectEqualStrings(identified.session_id, identified_page.rows[0].session_id);
+    try std.testing.expectEqual(@as(usize, 2), identified_page.rows.len);
+    try std.testing.expect(findSessionRow(
+        identified_page.rows,
+        identified.session_id,
+    ) != null);
+    try std.testing.expect(findSessionRow(
+        identified_page.rows,
+        "00000000-0000-4000-8000-0000000000b9",
+    ) != null);
 
     var current_edge = request;
     current_edge.now_utc_micros = identified.last_received_at_utc_micros +
@@ -7821,6 +8511,125 @@ test "session list expands bounded full records on disk" {
     try std.testing.expect(
         identified.last_activity_utc_micros <
             identified.last_received_at_utc_micros,
+    );
+
+    const engaged_detail = try executeSessionDetail(
+        arena.allocator(),
+        &event_store,
+        .{
+            .site_id = request.site_id,
+            .session_id = engaged_session.session_id,
+            .active_goals = &goals,
+            .now_utc_micros = request.now_utc_micros,
+        },
+    );
+    try std.testing.expectEqual(@as(i64, 25_000), engaged_detail.summary.engagement_ms);
+    try std.testing.expectEqual(@as(usize, 6), engaged_detail.timeline.len);
+    try std.testing.expect(!engaged_detail.has_more);
+    try std.testing.expectEqual(analysis.SessionTimelineKind.page, engaged_detail.timeline[0].kind);
+    try std.testing.expectEqual(analysis.SessionTimelineKind.engagement, engaged_detail.timeline[1].kind);
+    try std.testing.expectEqual(@as(i64, 15_000), engaged_detail.timeline[1].engagement_ms);
+    try std.testing.expectEqual(@as(i64, 2), engaged_detail.timeline[1].engagement_fragments);
+    try std.testing.expectEqualStrings("/", engaged_detail.timeline[1].path);
+    try std.testing.expectEqual(analysis.SessionTimelineKind.page, engaged_detail.timeline[2].kind);
+    try std.testing.expectEqualStrings("/other", engaged_detail.timeline[2].path);
+    try std.testing.expectEqual(analysis.SessionTimelineKind.engagement, engaged_detail.timeline[3].kind);
+    try std.testing.expectEqual(@as(i64, 7_000), engaged_detail.timeline[3].engagement_ms);
+    try std.testing.expectEqual(@as(i64, 65), engaged_detail.timeline[3].max_scroll_depth);
+    try std.testing.expectEqual(analysis.SessionTimelineKind.page, engaged_detail.timeline[4].kind);
+    try std.testing.expectEqualStrings("/", engaged_detail.timeline[4].path);
+    try std.testing.expectEqual(analysis.SessionTimelineKind.engagement, engaged_detail.timeline[5].kind);
+    try std.testing.expectEqual(@as(i64, 3_000), engaged_detail.timeline[5].engagement_ms);
+    try std.testing.expectEqual(@as(i64, 1), engaged_detail.timeline[5].engagement_fragments);
+
+    const converted_detail = try executeSessionDetail(
+        arena.allocator(),
+        &event_store,
+        .{
+            .site_id = request.site_id,
+            .session_id = identified.session_id,
+            .active_goals = &goals,
+            .now_utc_micros = request.now_utc_micros,
+        },
+    );
+    var purchase_goal_rows: usize = 0;
+    for (converted_detail.timeline) |entry| {
+        if (std.mem.eql(u8, entry.event_name, "purchase")) {
+            try std.testing.expectEqual(@as(u32, 3), entry.goal_mask);
+            purchase_goal_rows += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 2), purchase_goal_rows);
+    var empty_timeline_request = analysis.SessionDetailRequest{
+        .site_id = request.site_id,
+        .session_id = identified.session_id,
+        .active_goals = &goals,
+        .timeline_page = 2,
+        .now_utc_micros = request.now_utc_micros,
+    };
+    const empty_timeline = try executeSessionDetail(
+        arena.allocator(),
+        &event_store,
+        empty_timeline_request,
+    );
+    try std.testing.expectEqual(@as(usize, 0), empty_timeline.timeline.len);
+    empty_timeline_request.site_id = "00000000-0000-4000-8000-000000000099";
+    try std.testing.expectError(
+        error.SessionNotFound,
+        executeSessionDetail(
+            arena.allocator(),
+            &event_store,
+            empty_timeline_request,
+        ),
+    );
+
+    var user_profile_request = request;
+    user_profile_request.profile_person_key = "u:user-a";
+    const user_profile = try executePersonProfile(
+        arena.allocator(),
+        &event_store,
+        user_profile_request,
+    );
+    try std.testing.expectEqual(@as(i64, 3), user_profile.summary.sessions);
+    try std.testing.expectEqual(@as(i64, 2), user_profile.summary.linked_anonymous_ids);
+    try std.testing.expectEqual(@as(i64, 4), user_profile.summary.conversions);
+    try std.testing.expectEqualStrings(
+        "{\"device\":\"second\",\"plan\":\"business\"}",
+        user_profile.summary.latest_traits_json,
+    );
+    try std.testing.expectEqual(@as(usize, 3), user_profile.summary.revenue.len);
+    try std.testing.expectEqual(@as(usize, 2), user_profile.sessions.rows.len);
+    try std.testing.expect(findSessionRow(
+        user_profile.sessions.rows,
+        identified.session_id,
+    ) != null);
+    try std.testing.expect(findSessionRow(
+        user_profile.sessions.rows,
+        "00000000-0000-4000-8000-0000000000b9",
+    ) != null);
+
+    var anonymous_profile_request = request;
+    anonymous_profile_request.profile_person_key =
+        "a:00000000-0000-4000-8000-0000000000a2";
+    const anonymous_profile = try executePersonProfile(
+        arena.allocator(),
+        &event_store,
+        anonymous_profile_request,
+    );
+    try std.testing.expectEqual(@as(i64, 1), anonymous_profile.summary.sessions);
+    try std.testing.expectEqual(@as(i64, 25_000), anonymous_profile.summary.engagement_ms);
+    try std.testing.expectEqual(@as(i64, 0), anonymous_profile.summary.linked_anonymous_ids);
+    try std.testing.expectEqual(@as(usize, 1), anonymous_profile.sessions.rows.len);
+    var stale_anonymous_request = request;
+    stale_anonymous_request.profile_person_key =
+        "a:00000000-0000-4000-8000-0000000000a1";
+    try std.testing.expectError(
+        error.PersonNotFound,
+        executePersonProfile(
+            arena.allocator(),
+            &event_store,
+            stale_anonymous_request,
+        ),
     );
 
     try event_store.database.exec(
@@ -7866,7 +8675,7 @@ test "session list expands bounded full records on disk" {
         &event_store,
         second_page_request,
     );
-    try std.testing.expectEqual(@as(usize, 8), second_page.rows.len);
+    try std.testing.expectEqual(@as(usize, 9), second_page.rows.len);
     try std.testing.expect(!second_page.has_more);
     try std.testing.expectEqualStrings(
         "42000000-0000-4000-8000-000000000000",

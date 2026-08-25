@@ -10,7 +10,7 @@ const controller = @import("controller.zig");
 const model = @import("model.zig");
 
 pub const stylesheet = @embedFile("style.css");
-pub const stylesheet_path = "/admin/app.v15.css";
+pub const stylesheet_path = "/admin/app.v16.css";
 pub const htmx = @embedFile("htmx_js");
 pub const htmx_gzip = @embedFile("htmx_gzip");
 pub const htmx_path = "/admin/htmx.28fae7bb.js";
@@ -589,6 +589,14 @@ fn primaryNavigation(
         destination_query.goal_page = 1;
         destination_query.goal_search = "";
         destination_query.goal_entity_page = 1;
+        destination_query.session_screen = .list;
+        destination_query.session_id = "";
+        destination_query.profile_person_key = "";
+        destination_query.session_timeline_page = 1;
+        if (destination != .sessions) {
+            destination_query.session_goal_id = "";
+            destination_query.session_page = 1;
+        }
         var default_analysis_series = [_]analysis.Metric{.{ .kind = .visitors }};
         if (destination == .analyze and
             destination_query.analysis_series.len == 0 and
@@ -1056,6 +1064,35 @@ fn analysisStateHiddenFields(output: *std.Io.Writer, value: model.Page) !void {
             "segment",
             value.query.analysis_segment_id orelse "",
         );
+        if (value.query.session_screen != .list) {
+            try hidden(
+                output,
+                "session_screen",
+                @tagName(value.query.session_screen),
+            );
+            try hidden(output, "session_id", value.query.session_id);
+            try hidden(
+                output,
+                "profile_person",
+                value.query.profile_person_key,
+            );
+            var page_buffer: [16]u8 = undefined;
+            try hidden(
+                output,
+                "session_page",
+                try std.fmt.bufPrint(&page_buffer, "{d}", .{
+                    value.query.session_page,
+                }),
+            );
+            var timeline_buffer: [16]u8 = undefined;
+            try hidden(
+                output,
+                "timeline_page",
+                try std.fmt.bufPrint(&timeline_buffer, "{d}", .{
+                    value.query.session_timeline_page,
+                }),
+            );
+        }
     }
 }
 
@@ -2587,6 +2624,14 @@ fn reportNavigation(output: *std.Io.Writer, value: model.Page) !void {
 }
 
 fn sessionSection(output: *std.Io.Writer, value: model.Page) !void {
+    return switch (value.query.session_screen) {
+        .list => sessionListSection(output, value),
+        .detail => sessionDetailSection(output, value),
+        .profile => personProfileSection(output, value),
+    };
+}
+
+fn sessionListSection(output: *std.Io.Writer, value: model.Page) !void {
     const sessions = value.session_list orelse return error.MissingSessionList;
     try output.writeAll(
         "<section class=\"session-workspace\" aria-labelledby=\"session-list-heading\">" ++
@@ -2627,54 +2672,9 @@ fn sessionSection(output: *std.Io.Writer, value: model.Page) !void {
     } else {
         try output.writeAll("<ol class=\"session-list\">");
         for (sessions.rows) |session| {
-            try output.writeAll("<li><article class=\"session-record\"><header><div><span class=\"eyebrow\">Session</span><h3>");
-            try text(output, session.short_id);
-            try output.writeAll("</h3></div><strong class=\"session-status\">");
-            try output.writeAll(if (session.current)
-                "Current · activity received within 30 minutes"
-            else
-                "Ended");
-            try output.writeAll("</strong></header><dl class=\"session-facts\">");
-            try sessionFact(output, "Identity", session.identity);
-            try sessionFact(output, "Identity state", session.identity_state);
-            try sessionFact(output, "Started", session.started_at);
-            try sessionFact(output, "Last activity", session.last_activity);
-            try sessionFact(output, "Last received", session.last_received);
-            try sessionFact(output, "Landing page", session.landing_page);
-            try sessionFact(output, "Acquisition", session.acquisition);
-            try sessionFact(output, "Country", session.country);
-            try sessionFact(output, "Device and browser", session.client);
-            try sessionFact(output, "Duration", session.duration);
-            try sessionFact(output, "Active engagement", session.engagement);
-            try output.print(
-                "<div><dt>Page views</dt><dd>{d}</dd></div>" ++
-                    "<div><dt>Custom events</dt><dd>{d}</dd></div>" ++
-                    "<div><dt>Conversions (Goal matches)</dt><dd>{d}</dd></div>",
-                .{
-                    session.page_views,
-                    session.custom_events,
-                    session.conversions,
-                },
-            );
-            try output.writeAll("<div><dt>Exact revenue</dt><dd>");
-            if (session.revenue.len == 0) {
-                try output.writeAll("None");
-            } else {
-                try output.writeAll("<ul class=\"session-revenue\">");
-                for (session.revenue) |amount| {
-                    try output.writeAll("<li>");
-                    try text(output, amount.amount);
-                    try output.print(
-                        " · {d} {s}</li>",
-                        .{
-                            amount.value_count,
-                            if (amount.value_count == 1) "value" else "values",
-                        },
-                    );
-                }
-                try output.writeAll("</ul>");
-            }
-            try output.writeAll("</dd></div></dl></article></li>");
+            try output.writeAll("<li>");
+            try sessionRecord(output, session, true);
+            try output.writeAll("</li>");
         }
         try output.writeAll("</ol>");
     }
@@ -2690,6 +2690,216 @@ fn sessionSection(output: *std.Io.Writer, value: model.Page) !void {
         try output.writeAll("\">Next</a>");
     }
     try output.writeAll("</nav></section>");
+}
+
+fn sessionDetailSection(output: *std.Io.Writer, value: model.Page) !void {
+    const detail = value.session_detail orelse return error.MissingSessionDetail;
+    try output.writeAll(
+        "<section class=\"session-workspace session-detail-workspace\" " ++
+            "aria-labelledby=\"session-detail-heading\"><div class=\"analysis-heading\"><div>" ++
+            "<span class=\"eyebrow\">Session detail</span><h2 id=\"session-detail-heading\">Session ",
+    );
+    try text(output, detail.summary.short_id);
+    try output.writeAll("</h2><p class=\"muted\">Chronological retained activity. Late accepted events may change this derived view.</p></div><a href=\"");
+    try attribute(output, detail.back_url);
+    try output.writeAll("\">Back to Sessions</a></div><div class=\"session-detail-layout\"><div><h3>Summary</h3>");
+    try sessionRecord(output, detail.summary, false);
+    if (detail.profile_url) |url| {
+        try output.writeAll("<p><a class=\"button button-secondary\" href=\"");
+        try attribute(output, url);
+        try output.writeAll("\">Open compatible profile</a></p>");
+    }
+    try output.writeAll("</div><div><h3>Timeline</h3>");
+    if (detail.timeline.len == 0) {
+        try components.emptyState(output, .{
+            .id = "session-timeline-empty",
+            .title = "No entries on this page",
+            .message = "This bounded timeline page has no retained entries.",
+        });
+    } else {
+        try output.writeAll("<ol class=\"session-timeline\">");
+        for (detail.timeline) |entry| {
+            try output.writeAll("<li><article><header><span class=\"eyebrow\">");
+            try text(output, entry.kind);
+            try output.writeAll("</span><h4>");
+            try text(output, entry.title);
+            try output.writeAll("</h4><time>");
+            try text(output, entry.occurred_at);
+            try output.writeAll("</time></header><dl class=\"session-facts\">");
+            if (entry.path.len != 0) try sessionFact(output, "Path", entry.path);
+            if (!std.mem.eql(u8, entry.properties_json, "{}")) {
+                try sessionFact(output, "Properties", entry.properties_json);
+            }
+            if (entry.user_id.len != 0) try sessionFact(output, "User ID", entry.user_id);
+            if (!std.mem.eql(u8, entry.user_traits_json, "{}")) {
+                try sessionFact(output, "Traits", entry.user_traits_json);
+            }
+            if (entry.value.len != 0) try sessionFact(output, "Exact value", entry.value);
+            if (entry.engagement.len != 0) {
+                try sessionFact(output, "Active engagement", entry.engagement);
+                try output.print(
+                    "<div><dt>Maximum scroll depth</dt><dd>{d}%</dd></div>" ++
+                        "<div><dt>Transport fragments combined</dt><dd>{d}</dd></div>",
+                    .{ entry.max_scroll_depth, entry.engagement_fragments },
+                );
+            }
+            if (entry.goal_names.len != 0) {
+                try output.writeAll("<div><dt>Goal matches</dt><dd><ul>");
+                for (entry.goal_names) |name| {
+                    try output.writeAll("<li>");
+                    try text(output, name);
+                    try output.writeAll("</li>");
+                }
+                try output.writeAll("</ul></dd></div>");
+            }
+            try output.writeAll("</dl></article></li>");
+        }
+        try output.writeAll("</ol>");
+    }
+    try sessionPagination(
+        output,
+        "Session timeline pagination",
+        detail.previous_timeline_url,
+        detail.next_timeline_url,
+    );
+    try output.writeAll("</div></div></section>");
+}
+
+fn personProfileSection(output: *std.Io.Writer, value: model.Page) !void {
+    const profile = value.person_profile orelse return error.MissingPersonProfile;
+    try output.writeAll(
+        "<section class=\"session-workspace person-profile\" aria-labelledby=\"person-profile-heading\">" ++
+            "<div class=\"analysis-heading\"><div><span class=\"eyebrow\">Compatible profile</span>" ++
+            "<h2 id=\"person-profile-heading\">",
+    );
+    try text(output, profile.identity);
+    try output.writeAll("</h2><p class=\"muted\">");
+    try text(output, profile.identity_state);
+    try output.writeAll(". Derived from retained product-eligible events; retention may remove older activity. Rejected identity conflicts are not merged.</p></div><a href=\"");
+    try attribute(output, profile.back_url);
+    try output.writeAll("\">Back to Sessions</a></div><section aria-labelledby=\"retained-history-heading\"><h3 id=\"retained-history-heading\">Retained history</h3><dl class=\"session-facts\">");
+    try sessionFact(output, "First seen", profile.first_seen);
+    try sessionFact(output, "Last seen", profile.last_seen);
+    try sessionFact(output, "Active engagement", profile.engagement);
+    try output.print(
+        "<div><dt>Sessions</dt><dd>{d}</dd></div>" ++
+            "<div><dt>Conversions (current active Goals)</dt><dd>{d}</dd></div>" ++
+            "<div><dt>Explicitly linked anonymous identities</dt><dd>{d}</dd></div>",
+        .{ profile.sessions, profile.conversions, profile.linked_anonymous_ids },
+    );
+    if (!std.mem.eql(u8, profile.latest_traits_json, "{}")) {
+        try sessionFact(output, "Latest identify traits", profile.latest_traits_json);
+    }
+    try output.writeAll("<div><dt>Exact revenue</dt><dd>");
+    try sessionRevenue(output, profile.revenue);
+    try output.writeAll("</dd></div></dl></section><section aria-labelledby=\"context-sessions-heading\"><h3 id=\"context-sessions-heading\">Sessions matching this context</h3>");
+    if (profile.related_sessions.selected_goal_name.len != 0) {
+        try output.writeAll("<p class=\"analysis-focus\">Restricted to <strong>");
+        try text(output, profile.related_sessions.selected_goal_name);
+        try output.writeAll("</strong>.</p>");
+    }
+    if (profile.related_sessions.rows.len == 0) {
+        try components.emptyState(output, .{
+            .id = "profile-sessions-empty",
+            .title = "No sessions match this context",
+            .message = "The retained profile exists, but no related session matches the selected range, Goal, segment, filters, and traffic policy.",
+        });
+    } else {
+        try output.writeAll("<ol class=\"session-list\">");
+        for (profile.related_sessions.rows) |session| {
+            try output.writeAll("<li>");
+            try sessionRecord(output, session, true);
+            try output.writeAll("</li>");
+        }
+        try output.writeAll("</ol>");
+    }
+    try sessionPagination(
+        output,
+        "Profile sessions pagination",
+        profile.related_sessions.previous_url,
+        profile.related_sessions.next_url,
+    );
+    try output.writeAll("</section></section>");
+}
+
+fn sessionRecord(
+    output: *std.Io.Writer,
+    session: model.SessionRecord,
+    linked_heading: bool,
+) !void {
+    try output.writeAll("<article class=\"session-record\"><header><div><span class=\"eyebrow\">Session</span><h3>");
+    if (linked_heading) {
+        try output.writeAll("<a href=\"");
+        try attribute(output, session.detail_url);
+        try output.writeAll("\">");
+    }
+    try text(output, session.short_id);
+    if (linked_heading) try output.writeAll("</a>");
+    try output.writeAll("</h3></div><strong class=\"session-status\">");
+    try output.writeAll(if (session.current)
+        "Current · activity received within 30 minutes; activity may be incomplete"
+    else
+        "Ended");
+    try output.writeAll("</strong></header><dl class=\"session-facts\">");
+    try sessionFact(output, "Identity", session.identity);
+    try sessionFact(output, "Identity state", session.identity_state);
+    try sessionFact(output, "Started", session.started_at);
+    try sessionFact(output, "Last activity", session.last_activity);
+    try sessionFact(output, "Last received", session.last_received);
+    try sessionFact(output, "Landing page", session.landing_page);
+    try sessionFact(output, "Acquisition", session.acquisition);
+    try sessionFact(output, "Country", session.country);
+    try sessionFact(output, "Device and browser", session.client);
+    try sessionFact(output, "Duration", session.duration);
+    try sessionFact(output, "Active engagement", session.engagement);
+    try output.print(
+        "<div><dt>Page views</dt><dd>{d}</dd></div>" ++
+            "<div><dt>Custom events</dt><dd>{d}</dd></div>" ++
+            "<div><dt>Conversions (Goal matches)</dt><dd>{d}</dd></div>",
+        .{ session.page_views, session.custom_events, session.conversions },
+    );
+    try output.writeAll("<div><dt>Exact revenue</dt><dd>");
+    try sessionRevenue(output, session.revenue);
+    try output.writeAll("</dd></div></dl></article>");
+}
+
+fn sessionRevenue(
+    output: *std.Io.Writer,
+    revenue: []const model.SessionRevenue,
+) !void {
+    if (revenue.len == 0) return output.writeAll("None");
+    try output.writeAll("<ul class=\"session-revenue\">");
+    for (revenue) |amount| {
+        try output.writeAll("<li>");
+        try text(output, amount.amount);
+        try output.print(
+            " · {d} {s}</li>",
+            .{ amount.value_count, if (amount.value_count == 1) "value" else "values" },
+        );
+    }
+    try output.writeAll("</ul>");
+}
+
+fn sessionPagination(
+    output: *std.Io.Writer,
+    label: []const u8,
+    previous_url: ?[]const u8,
+    next_url: ?[]const u8,
+) !void {
+    try output.writeAll("<nav class=\"session-pagination\" aria-label=\"");
+    try attribute(output, label);
+    try output.writeAll("\">");
+    if (previous_url) |url| {
+        try output.writeAll("<a rel=\"prev\" href=\"");
+        try attribute(output, url);
+        try output.writeAll("\">Previous</a>");
+    }
+    if (next_url) |url| {
+        try output.writeAll("<a rel=\"next\" href=\"");
+        try attribute(output, url);
+        try output.writeAll("\">Next</a>");
+    }
+    try output.writeAll("</nav>");
 }
 
 fn sessionFact(
@@ -4637,8 +4847,15 @@ fn canonicalUrlSeparated(
             .comparison = adjusted.comparison,
             .analysis_filters = adjusted.analysis_filters,
             .analysis_segment_id = adjusted.analysis_segment_id,
+            .session_screen = adjusted.session_screen,
+            .session_id = adjusted.session_id,
+            .profile_person_key = adjusted.profile_person_key,
             .session_goal_id = adjusted.session_goal_id,
-            .session_page = page_number,
+            .session_page = if (adjusted.session_screen == .list)
+                page_number
+            else
+                adjusted.session_page,
+            .session_timeline_page = adjusted.session_timeline_page,
         };
         const parameters = try controller.canonicalSessionParameters(
             std.heap.page_allocator,
@@ -4851,7 +5068,17 @@ fn canonicalPath(
                 },
             }
         },
-        .sessions => try output.writeAll("/sessions"),
+        .sessions => switch (query.session_screen) {
+            .list => try output.writeAll("/sessions"),
+            .detail => {
+                try output.writeAll("/sessions/");
+                try urlComponent(output, query.session_id);
+            },
+            .profile => {
+                try output.writeAll("/users/");
+                try urlComponent(output, query.profile_person_key);
+            },
+        },
         .live => try output.writeAll("/live"),
         .settings => try output.writeAll("/settings/general"),
     }
@@ -5003,6 +5230,7 @@ test "Sessions render exact semantic summaries and native controls" {
         .value_count = 1,
     }};
     const rows = [_]model.SessionRecord{.{
+        .detail_url = "/admin/sites/example/sessions/00000000-0000-4000-8000-0000000000b1?v=1&from=2026-01-03&to=2026-01-03&compare=none",
         .short_id = "000000b1",
         .identity = "user-a",
         .identity_state = "Identified user",
@@ -5069,7 +5297,11 @@ test "Sessions render exact semantic summaries and native controls" {
     ) != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "name=\"goal\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "rel=\"next\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, html, "/sessions/") == null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        html,
+        "/sessions/00000000-0000-4000-8000-0000000000b1",
+    ) != null);
 }
 
 test "Analyze chart coordinates retain exact rate and average components" {
@@ -5214,5 +5446,5 @@ test "production stylesheet mirrors the approved accessible design tokens" {
 
     try std.testing.expect(std.mem.indexOf(u8, stylesheet, "@import") == null);
     try std.testing.expect(std.mem.indexOf(u8, stylesheet, "url(") == null);
-    try std.testing.expectEqualStrings("/admin/app.v15.css", stylesheet_path);
+    try std.testing.expectEqualStrings("/admin/app.v16.css", stylesheet_path);
 }

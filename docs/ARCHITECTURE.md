@@ -520,3 +520,17 @@ retains request values. DuckDB keeps its 128 MiB query-memory limit while its
 native allocator flush threshold is fixed at 8 MiB. These lifecycle bounds
 avoid treating allocator oscillation as result state and add no worker,
 connection, cache entry, or concurrency path.
+
+## 13. Bounded session-detail and profile path
+
+D46 keeps detail/profile beside the D45 specialized consumer. The adapter
+recognizes the package's session-UUID and percent-encoded compatible-person
+routes, finishes their shared context, and resolves active Goals and policy
+before calling the Store. DuckDB derives one detail summary/timeline or one
+retained profile/contextual session page on the same connection and deadline.
+
+The controller formats site-local times, identity state, Goal names, exact
+values, and retained-history copy into closed view models. The renderer escapes
+those values and performs no database, clock, session, filesystem, or network
+work. There is no profile table, identity service, JSON endpoint, client
+fetch, replay process, second DuckDB reader, cache, or background task.

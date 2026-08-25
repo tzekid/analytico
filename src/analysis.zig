@@ -26,6 +26,7 @@ pub const maximum_property_catalog_events: u32 = 2_000;
 pub const maximum_suggestions: u8 = 50;
 pub const maximum_goal_path_rows: u8 = 10;
 pub const session_page_size: u8 = 25;
+pub const session_timeline_page_size: u8 = 50;
 
 pub const LocalDateRange = struct {
     start: []const u8,
@@ -1329,6 +1330,7 @@ pub const SessionListRequest = struct {
     active_goals: []const ResolvedGoal = &.{},
     selected_goal_index: ?u8 = null,
     strict_traffic_mode: bool = false,
+    profile_person_key: ?[]const u8 = null,
     page: u32 = 1,
     now_utc_micros: i64,
     timeout_ms: u32 = maximum_timeout_ms,
@@ -1343,6 +1345,7 @@ pub const SessionListRequest = struct {
                 return error.InvalidSessionGoal;
             }
         }
+        if (self.profile_person_key) |key| try validateCompatiblePersonKey(key);
         if (self.page == 0 or self.page > maximum_page) {
             return error.InvalidSessionPage;
         }
@@ -1381,6 +1384,29 @@ pub const SessionListRequest = struct {
     }
 };
 
+pub fn validateCompatiblePersonKey(value: []const u8) !void {
+    if (value.len < 3) return error.InvalidProfilePerson;
+    if (std.mem.startsWith(u8, value, "a:")) {
+        try domain.validateUuid(value[2..]);
+        return;
+    }
+    if (!std.mem.startsWith(u8, value, "u:") or value.len > 162 or
+        !std.unicode.utf8ValidateSlice(value[2..]))
+    {
+        return error.InvalidProfilePerson;
+    }
+    var index: usize = 2;
+    while (index < value.len) : (index += 1) {
+        const byte = value[index];
+        if (byte < 0x20 or byte == 0x7f) return error.InvalidProfilePerson;
+        if (byte == 0xc2 and index + 1 < value.len and
+            value[index + 1] >= 0x80 and value[index + 1] <= 0x9f)
+        {
+            return error.InvalidProfilePerson;
+        }
+    }
+}
+
 pub const SessionRevenue = struct {
     decimal: []const u8,
     currency: []const u8,
@@ -1413,6 +1439,88 @@ pub const SessionRow = struct {
 pub const SessionPage = struct {
     rows: []const SessionRow,
     has_more: bool,
+};
+
+pub const SessionTimelineKind = enum(u8) {
+    page = 1,
+    custom = 2,
+    engagement = 3,
+    identify = 4,
+};
+
+pub const SessionTimelineRow = struct {
+    kind: SessionTimelineKind,
+    event_name: []const u8,
+    path: []const u8,
+    page_title: []const u8,
+    occurred_at_utc_micros: i64,
+    properties_json: []const u8,
+    user_id: []const u8,
+    user_traits_json: []const u8,
+    value_amount: ?[]const u8,
+    value_currency: []const u8,
+    engagement_ms: i64,
+    max_scroll_depth: i64,
+    engagement_fragments: i64,
+    goal_mask: u32,
+};
+
+pub const SessionDetailRequest = struct {
+    site_id: []const u8,
+    session_id: []const u8,
+    active_goals: []const ResolvedGoal = &.{},
+    timeline_page: u32 = 1,
+    now_utc_micros: i64,
+    timeout_ms: u32 = maximum_timeout_ms,
+
+    pub fn validate(self: SessionDetailRequest) !void {
+        try domain.validateUuid(self.site_id);
+        try domain.validateUuid(self.session_id);
+        try validateActiveGoals(self.active_goals);
+        if (self.timeline_page == 0 or self.timeline_page > maximum_page) {
+            return error.InvalidSessionTimelinePage;
+        }
+        if (self.now_utc_micros < 0) return error.InvalidSessionClock;
+        if (self.timeout_ms == 0 or self.timeout_ms > maximum_timeout_ms) {
+            return error.InvalidAnalysisTimeout;
+        }
+    }
+
+    pub fn offset(self: SessionDetailRequest) !i64 {
+        try self.validate();
+        const value = std.math.mul(
+            u64,
+            @as(u64, self.timeline_page - 1),
+            session_timeline_page_size,
+        ) catch return error.InvalidSessionTimelinePage;
+        if (value > std.math.maxInt(i64)) {
+            return error.InvalidSessionTimelinePage;
+        }
+        return @intCast(value);
+    }
+};
+
+pub const SessionDetail = struct {
+    summary: SessionRow,
+    timeline: []const SessionTimelineRow,
+    has_more: bool,
+};
+
+pub const PersonSummary = struct {
+    person_key: []const u8,
+    first_seen_utc_micros: i64,
+    last_seen_utc_micros: i64,
+    sessions: i64,
+    engagement_ms: i64,
+    conversions: i64,
+    latest_traits_json: []const u8,
+    linked_anonymous_ids: i64,
+    revenue: []const SessionRevenue,
+};
+
+pub const PersonProfile = struct {
+    summary: PersonSummary,
+    sessions: SessionPage,
 };
 
 pub const FunnelAvailabilityRequest = struct {
@@ -2010,7 +2118,7 @@ pub const OverviewExecution = struct {
     }
 };
 
-fn validateActiveGoals(goals: []const ResolvedGoal) !void {
+pub fn validateActiveGoals(goals: []const ResolvedGoal) !void {
     if (goals.len > maximum_active_goals) return error.TooManyActiveGoals;
     for (goals, 0..) |goal, index| {
         try goal.validate();
