@@ -80,7 +80,11 @@
   canonical typed selector in one goal row. A stateless native preview uses the
   current local dates, universal filters/segment, and traffic policy; goal
   detail reports exact total/people/session/revenue results plus bounded path
-  context. Funnel goal references remain issue #35.
+  context.
+- D43 and issue #35 advance metadata to schema 10 and replace raw multi-row
+  funnels with one canonical bounded definition. Stable native management
+  routes compose Page, Event, and Goal steps, preserve shared context, and
+  preview independent selector availability; #36 retains ordered evaluation.
 
 ## 1. Product statement
 
@@ -198,9 +202,21 @@ in the selected range requires explicit confirmation. Archive removes a goal
 from default active metrics while preserving its stable ID and explicit
 historical reportability. Current saved Trend or Breakdown references refuse
 delete and offer archive. Forms work without JavaScript, preserve submitted
-values and exact errors, and never expose an expression language. Property
-predicates, match preview, goal-result expansion, and funnel references remain
-owned by their later issues.
+values and exact errors, and never expose an expression language. D42 adds the
+complete property-aware selector, filtered preview, and exact goal result.
+
+Funnel administration is also a guided browser flow rather than the retired
+`kind=value` textarea. Stable list, new, detail, and edit routes carry one
+request-owned draft containing two through eight Page, Event, or Goal steps;
+direct steps may add up to three D29 predicates with at most one scalar value
+each. Native forms add, remove, and
+move steps, choose sequential/consecutive order, Sessions/Visitors scope, and
+one closed same-session or bounded window, preview selector availability, and
+save or archive one stable definition. Archived or missing Goal references are
+visible and block preview/save until replaced or restored. D43 preview reports
+independent matching-event counts only. #36 owns ordered funnel evaluation,
+conversion/timing results, comparison, and visualization; #37 owns session
+drill-through.
 
 ### F5. CLI
 

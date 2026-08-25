@@ -180,8 +180,23 @@ repeats a property once per observed scalar type so conflicts are visible
 rather than coerced. Preview, zero-match confirmation, and save are distinct submit
 intents; timeout/error output preserves the draft and selected context without
 client-owned state. Goal detail pairs every KPI/revenue/path value with exact
-text/table output and labels capped path/property samples. Issue #35 owns
-funnel step composition; #34 does not render fake or disabled funnel controls.
+text/table output and labels capped path/property samples. D43 owns funnel step
+composition; #34 does not render fake or disabled funnel controls.
+
+D43 replaces the raw funnel textarea with stable list, new, detail, and edit
+pages. The builder renders two through eight numbered step records with named
+Page, Event, and Goal choices; direct steps expose at most three of the same
+typed predicate controls. Native Add, Remove, Move up, and Move down buttons
+submit the complete bounded draft. Order, scope, and window selects explain
+consecutive ordering, visitor scope, and cross-session behavior without
+claiming that #35 evaluates them.
+
+Preview labels every count as independent selector availability rather than
+progression. A zero count and an archived or missing Goal reference use visible
+text and not color alone. At phone width the numbered records stack without
+clipping, every move/action keeps a visible name and 44-pixel target, and the
+same forms work with JavaScript disabled. Optional enhancement may replace only
+the submitted builder region; it owns no hidden draft or alternate step order.
 
 Server validation renders one focused error summary and associates only the
 affected form fields with that summary while preserving submitted values.
@@ -189,7 +204,7 @@ Notices use restrained status semantics, errors use alerts, and loading is
 limited to the region whose existing native navigation or form is in flight.
 None of these enhancement states may replace the JavaScript-free baseline.
 
-The component stylesheet is self-hosted at a versioned `/admin/app.v12.css` path.
+The component stylesheet is self-hosted at a versioned `/admin/app.v13.css` path.
 Changing its bytes requires another path revision because existing responses
 may be cached privately for 24 hours.
 

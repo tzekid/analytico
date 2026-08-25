@@ -1152,15 +1152,17 @@ async function main() {
       page.getByRole("link", { name: "Funnels" }).click(),
     ]).then(([navigation]) => navigation);
     assert.equal(response.status(), 200);
-    const funnelForm = page.locator('form[action="/admin/funnels"]');
-    await funnelForm.locator("xpath=ancestor::details/summary").click();
-    await funnelForm.locator('input[name="name"]').fill("Checkout");
-    await funnelForm
-      .locator('textarea[name="steps"]')
-      .fill("path=/pricing\nevent=signup");
     response = await Promise.all([
       page.waitForNavigation({ waitUntil: "load" }),
-      funnelForm.locator('button[type="submit"]').click(),
+      page.getByRole("link", { name: "New funnel", exact: true }).click(),
+    ]).then(([navigation]) => navigation);
+    assert.equal(response.status(), 200);
+    const funnelForm = page.locator("form.funnel-builder");
+    await funnelForm.locator('input[name="name"]').fill("Checkout");
+    await funnelForm.locator('input[name="step_value_1"]').fill("/pricing");
+    response = await Promise.all([
+      page.waitForNavigation({ waitUntil: "load" }),
+      funnelForm.getByRole("button", { name: "Save funnel", exact: true }).click(),
     ]).then(([navigation]) => navigation);
     assert.equal(response.status(), 200);
     assert.equal(
@@ -1168,15 +1170,20 @@ async function main() {
       "Funnel added.",
     );
 
-    const checkoutItem = page.locator("li", { hasText: "Checkout" });
     response = await Promise.all([
       page.waitForNavigation({ waitUntil: "load" }),
-      checkoutItem.locator("button", { hasText: "Delete" }).click(),
+      page.getByRole("link", { name: "Checkout", exact: true }).click(),
+    ]).then(([navigation]) => navigation);
+    assert.equal(response.status(), 200);
+    response = await Promise.all([
+      page.waitForNavigation({ waitUntil: "load" }),
+      page.locator('form[action^="/admin/funnels/archive"]')
+        .getByRole("button", { name: "Archive", exact: true }).click(),
     ]).then(([navigation]) => navigation);
     assert.equal(response.status(), 200);
     assert.equal(
       await page.locator('.notice[role="status"]').textContent(),
-      "Funnel deleted.",
+      "Funnel archived.",
     );
 
     response = await page.goto(route("example", "settings/general"), {

@@ -2,8 +2,9 @@ const std = @import("std");
 const turso = @import("turso");
 const analysis = @import("../analysis.zig");
 const domain = @import("../domain.zig");
+const funnel = @import("../funnel.zig");
 
-pub const schema_version: i64 = 9;
+pub const schema_version: i64 = 10;
 pub const maximum_excluded_networks: usize = 16;
 pub const maximum_active_goals: usize = 32;
 pub const maximum_saved_entities: usize = 32;
@@ -90,6 +91,15 @@ pub const Funnel = struct {
     id: []u8,
     name: []u8,
     step_count: i64,
+    definition: funnel.Definition,
+    created_at_utc_micros: i64,
+    updated_at_utc_micros: i64,
+    archived_at_utc_micros: ?i64,
+};
+
+pub const FunnelPage = struct {
+    funnels: []Funnel,
+    has_more: bool,
 };
 
 pub const FunnelStepInput = struct {
@@ -439,6 +449,320 @@ pub const Store = struct {
             std.log.err("metadata migration v9 failed: {s}", .{@errorName(err)});
             return err;
         };
+        if (current < 10) self.migrateFunnelDefinitions() catch |err| {
+            std.log.err("metadata migration v10 failed: {s}", .{@errorName(err)});
+            return err;
+        };
+    }
+
+    fn migrateFunnelDefinitions(self: *Store) !void {
+        const parent_exists = try self.tableExists("funnels");
+        const child_exists = try self.tableExists("funnel_steps");
+        const replacement_exists = try self.tableExists("funnel_definitions");
+        if (child_exists and !parent_exists) {
+            return error.InvalidFunnelMigrationState;
+        }
+        if (parent_exists and !child_exists and !replacement_exists) {
+            return error.InvalidFunnelMigrationState;
+        }
+        if (!parent_exists and !child_exists and !replacement_exists) {
+            return error.MissingFunnelMigrationSource;
+        }
+        if (!replacement_exists) {
+            _ = try self.connection.exec(
+                \\CREATE TABLE funnel_definitions (
+                \\  id TEXT PRIMARY KEY,
+                \\  site_id TEXT NOT NULL,
+                \\  name TEXT NOT NULL,
+                \\  canonical_definition_json TEXT NOT NULL,
+                \\  created_at_utc_micros INTEGER NOT NULL,
+                \\  updated_at_utc_micros INTEGER NOT NULL,
+                \\  archived_at_utc_micros INTEGER,
+                \\  FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE CASCADE,
+                \\  UNIQUE (site_id, name),
+                \\  CHECK (length(id) = 36),
+                \\  CHECK (length(name) BETWEEN 1 AND 120),
+                \\  CHECK (length(canonical_definition_json) BETWEEN 2 AND 8192),
+                \\  CHECK (updated_at_utc_micros >= created_at_utc_micros),
+                \\  CHECK (archived_at_utc_micros IS NULL OR
+                \\    archived_at_utc_micros >= created_at_utc_micros)
+                \\)
+            , &.{}, .{});
+        }
+        if (child_exists) {
+            try self.copyLegacyFunnels();
+            try self.verifyLegacyFunnelCopy(true);
+            try self.validateFunnelReplacement();
+            try self.validateFunnelDocuments();
+            _ = try self.connection.exec("DROP TABLE funnel_steps", &.{}, .{});
+        }
+        if (parent_exists) {
+            try self.verifyLegacyFunnelCopy(false);
+            try self.validateFunnelReplacement();
+            try self.validateFunnelDocuments();
+            _ = try self.connection.exec("DROP TABLE funnels", &.{}, .{});
+        } else {
+            try self.validateFunnelReplacement();
+            try self.validateFunnelDocuments();
+        }
+        _ = try self.connection.exec(
+            \\INSERT INTO meta_migrations
+            \\  (version, name, applied_at_utc_micros)
+            \\VALUES (10, 'guided-funnel-definitions', 0)
+            \\ON CONFLICT(version) DO NOTHING
+        , &.{}, .{});
+    }
+
+    const LegacyFunnelParent = struct {
+        id: []const u8,
+        site_id: []const u8,
+        name: []const u8,
+        created_at_utc_micros: i64,
+    };
+
+    fn legacyFunnelParents(
+        self: *Store,
+        allocator: std.mem.Allocator,
+    ) ![]LegacyFunnelParent {
+        var rows = try self.connection.query(
+            \\SELECT id, site_id, name, created_at_utc_micros
+            \\FROM funnels ORDER BY id
+        , &.{}, .{});
+        defer rows.deinit();
+        var result: std.ArrayList(LegacyFunnelParent) = .empty;
+        while (try rows.next()) |row| {
+            try result.append(allocator, .{
+                .id = try allocator.dupe(u8, try row.get([]const u8, 0)),
+                .site_id = try allocator.dupe(u8, try row.get([]const u8, 1)),
+                .name = try allocator.dupe(u8, try row.get([]const u8, 2)),
+                .created_at_utc_micros = try row.get(i64, 3),
+            });
+        }
+        try rows.finish(null);
+        return result.toOwnedSlice(allocator);
+    }
+
+    fn copyLegacyFunnels(self: *Store) !void {
+        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        const parents = try self.legacyFunnelParents(allocator);
+        for (parents) |parent| {
+            const encoded = try self.legacyFunnelJson(allocator, parent.id);
+            _ = self.connection.execParams(
+                \\INSERT INTO funnel_definitions
+                \\  (id, site_id, name, canonical_definition_json,
+                \\   created_at_utc_micros, updated_at_utc_micros,
+                \\   archived_at_utc_micros)
+                \\VALUES (?1, ?2, ?3, ?4, ?5, ?5, NULL)
+                \\ON CONFLICT(id) DO NOTHING
+            , .{
+                parent.id,
+                parent.site_id,
+                parent.name,
+                encoded,
+                parent.created_at_utc_micros,
+            }, .{}) catch |err| {
+                if (isConstraintError(err)) return error.InvalidFunnelReplacement;
+                return err;
+            };
+        }
+    }
+
+    fn verifyLegacyFunnelCopy(
+        self: *Store,
+        include_steps: bool,
+    ) !void {
+        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        const parents = try self.legacyFunnelParents(allocator);
+        if (try self.scalar("SELECT count(*) FROM funnel_definitions") !=
+            @as(i64, @intCast(parents.len)))
+        {
+            return error.FunnelMigrationMismatch;
+        }
+        for (parents) |parent| {
+            var rows = try self.connection.queryParams(
+                \\SELECT site_id, name, canonical_definition_json,
+                \\       created_at_utc_micros, updated_at_utc_micros,
+                \\       archived_at_utc_micros
+                \\FROM funnel_definitions WHERE id = ?1
+            , .{parent.id}, .{});
+            errdefer rows.deinit();
+            const row = (try rows.next()) orelse
+                return error.FunnelMigrationMismatch;
+            if (!std.mem.eql(u8, try row.get([]const u8, 0), parent.site_id) or
+                !std.mem.eql(u8, try row.get([]const u8, 1), parent.name) or
+                try row.get(i64, 3) != parent.created_at_utc_micros or
+                try row.get(i64, 4) != parent.created_at_utc_micros or
+                try row.get(?i64, 5) != null)
+            {
+                return error.FunnelMigrationMismatch;
+            }
+            const replacement_json = try allocator.dupe(
+                u8,
+                try row.get([]const u8, 2),
+            );
+            if ((try rows.next()) != null) return error.FunnelMigrationMismatch;
+            try rows.finish(null);
+            rows.deinit();
+            if (include_steps) {
+                const expected = try self.legacyFunnelJson(allocator, parent.id);
+                if (!std.mem.eql(u8, replacement_json, expected)) {
+                    return error.FunnelMigrationMismatch;
+                }
+            }
+        }
+    }
+
+    fn legacyFunnelJson(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        funnel_id: []const u8,
+    ) ![]const u8 {
+        var rows = try self.connection.queryParams(
+            \\SELECT step_index, name, match_kind, match_value
+            \\FROM funnel_steps WHERE funnel_id = ?1 ORDER BY step_index
+        , .{funnel_id}, .{});
+        defer rows.deinit();
+        var steps: std.ArrayList(funnel.LegacyStep) = .empty;
+        var expected_index: i64 = 0;
+        while (try rows.next()) |row| : (expected_index += 1) {
+            if (try row.get(i64, 0) != expected_index) {
+                return error.InvalidLegacyFunnelSteps;
+            }
+            const kind_value = try row.get(i64, 2);
+            if (kind_value < 1 or kind_value > 3) {
+                return error.InvalidLegacyFunnelSteps;
+            }
+            try steps.append(allocator, .{
+                .name = try allocator.dupe(u8, try row.get([]const u8, 1)),
+                .match_kind = @fromBackingInt(@intCast(kind_value)),
+                .match_value = try allocator.dupe(
+                    u8,
+                    try row.get([]const u8, 3),
+                ),
+            });
+        }
+        try rows.finish(null);
+        const definition = funnel.legacyDefinition(
+            allocator,
+            steps.items,
+        ) catch return error.InvalidLegacyFunnelSteps;
+        return funnel.canonicalJson(allocator, definition);
+    }
+
+    fn validateFunnelReplacement(self: *Store) !void {
+        var rows = try self.connection.query(
+            "PRAGMA table_info(funnel_definitions)",
+            &.{},
+            .{},
+        );
+        defer rows.deinit();
+        const names = [_][]const u8{
+            "id",
+            "site_id",
+            "name",
+            "canonical_definition_json",
+            "created_at_utc_micros",
+            "updated_at_utc_micros",
+            "archived_at_utc_micros",
+        };
+        const types = [_][]const u8{
+            "TEXT",
+            "TEXT",
+            "TEXT",
+            "TEXT",
+            "INTEGER",
+            "INTEGER",
+            "INTEGER",
+        };
+        var column: usize = 0;
+        while (try rows.next()) |row| : (column += 1) {
+            if (column >= names.len or
+                try row.get(i64, 0) != @as(i64, @intCast(column)) or
+                !std.mem.eql(u8, try row.get([]const u8, 1), names[column]) or
+                !std.mem.eql(u8, try row.get([]const u8, 2), types[column]) or
+                try row.get(i64, 3) != @intFromBool(column != 0 and column != 6) or
+                try row.get(i64, 5) != @intFromBool(column == 0))
+            {
+                return error.InvalidFunnelReplacement;
+            }
+        }
+        try rows.finish(null);
+        if (column != names.len) return error.InvalidFunnelReplacement;
+
+        const expected_schema =
+            "CREATE TABLE funnel_definitions (id TEXT PRIMARY KEY, " ++
+            "site_id TEXT NOT NULL, name TEXT NOT NULL, " ++
+            "canonical_definition_json TEXT NOT NULL, " ++
+            "created_at_utc_micros INTEGER NOT NULL, " ++
+            "updated_at_utc_micros INTEGER NOT NULL, " ++
+            "archived_at_utc_micros INTEGER, FOREIGN KEY (site_id) " ++
+            "REFERENCES sites (id) ON DELETE CASCADE, UNIQUE (site_id, name), " ++
+            "CHECK (length (id) = 36), CHECK (length (name) BETWEEN 1 AND 120), " ++
+            "CHECK (length (canonical_definition_json) BETWEEN 2 AND 8192), " ++
+            "CHECK (updated_at_utc_micros >= created_at_utc_micros), " ++
+            "CHECK (archived_at_utc_micros IS NULL OR " ++
+            "archived_at_utc_micros >= created_at_utc_micros))";
+        var schema_rows = try self.connection.query(
+            "SELECT sql FROM sqlite_schema " ++
+                "WHERE type = 'table' AND name = 'funnel_definitions'",
+            &.{},
+            .{},
+        );
+        defer schema_rows.deinit();
+        const schema_row = (try schema_rows.next()) orelse
+            return error.InvalidFunnelReplacement;
+        if (!std.mem.eql(
+            u8,
+            try schema_row.get([]const u8, 0),
+            expected_schema,
+        )) return error.InvalidFunnelReplacement;
+        if ((try schema_rows.next()) != null) {
+            return error.InvalidFunnelReplacement;
+        }
+        try schema_rows.finish(null);
+
+        var invalid = try self.connection.query(
+            \\SELECT count(*) FROM funnel_definitions
+            \\WHERE length(id) != 36 OR length(name) NOT BETWEEN 1 AND 120
+            \\   OR length(canonical_definition_json) NOT BETWEEN 2 AND 8192
+            \\   OR updated_at_utc_micros < created_at_utc_micros
+            \\   OR (archived_at_utc_micros IS NOT NULL AND
+            \\       archived_at_utc_micros < created_at_utc_micros)
+        , &.{}, .{});
+        defer invalid.deinit();
+        const invalid_row = (try invalid.next()) orelse
+            return error.MissingCountRow;
+        if (try invalid_row.get(i64, 0) != 0) {
+            return error.InvalidFunnelReplacement;
+        }
+        try invalid.finish(null);
+    }
+
+    fn validateFunnelDocuments(self: *Store) !void {
+        var rows = try self.connection.query(
+            \\SELECT canonical_definition_json
+            \\FROM funnel_definitions ORDER BY id
+        , &.{}, .{});
+        defer rows.deinit();
+        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer arena.deinit();
+        while (try rows.next()) |row| {
+            _ = arena.reset(.retain_capacity);
+            _ = funnel.parseExactCanonicalJson(
+                arena.allocator(),
+                try row.get([]const u8, 0),
+            ) catch return error.InvalidFunnelDocument;
+        }
+        try rows.finish(null);
+    }
+
+    pub fn validateFunnelDefinitions(self: *Store) !void {
+        try self.validateFunnelReplacement();
+        try self.validateFunnelDocuments();
     }
 
     fn migrateGoalPredicates(self: *Store) !void {
@@ -1905,6 +2229,14 @@ pub const Store = struct {
             \\       ))
             \\    )
             \\  )
+            \\  AND NOT EXISTS (
+            \\    SELECT 1
+            \\    FROM funnel_definitions,
+            \\         json_each(canonical_definition_json, '$.steps') AS step
+            \\    WHERE funnel_definitions.site_id = ?1
+            \\      AND json_extract(step.value, '$.kind') = 'goal'
+            \\      AND json_extract(step.value, '$.goal_id') = ?2
+            \\  )
         ,
             .{ site_id, id, confirmed_name, expected_updated_at },
             .{},
@@ -1965,43 +2297,53 @@ pub const Store = struct {
         steps: []const FunnelStepInput,
         created_at: i64,
     ) !void {
-        try domain.validateUuid(id);
-        try domain.validateName(name, 120);
         if (steps.len < 2 or steps.len > 8) return error.InvalidFunnelLength;
+        const legacy = try allocator.alloc(funnel.LegacyStep, steps.len);
         for (steps) |step| {
             try domain.validateName(step.name, 120);
             try validateMatch(step.match_kind, step.match_value);
         }
-        const site_id = try self.siteIdBySlug(allocator, site_slug);
-
-        _ = try self.connection.execParams(
-            \\INSERT INTO funnels (id, site_id, name, created_at_utc_micros)
-            \\VALUES (?1, ?2, ?3, ?4)
-        ,
-            .{ id, site_id, name, created_at },
-            .{},
-        );
-        errdefer _ = self.connection.execParams(
-            "DELETE FROM funnels WHERE id = ?1",
-            .{id},
-            .{},
-        ) catch 0;
         for (steps, 0..) |step, index| {
-            _ = try self.connection.execParams(
-                \\INSERT INTO funnel_steps
-                \\  (funnel_id, step_index, name, match_kind, match_value)
-                \\VALUES (?1, ?2, ?3, ?4, ?5)
-            ,
-                .{
-                    id,
-                    @as(i64, @intCast(index)),
-                    step.name,
-                    @backingInt(step.match_kind),
-                    step.match_value,
-                },
-                .{},
-            );
+            legacy[index] = .{
+                .name = step.name,
+                .match_kind = step.match_kind,
+                .match_value = step.match_value,
+            };
         }
+        try self.addFunnelDefinition(
+            allocator,
+            id,
+            site_slug,
+            name,
+            try funnel.legacyDefinition(allocator, legacy),
+            created_at,
+        );
+    }
+
+    pub fn addFunnelDefinition(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        id: []const u8,
+        site_slug: []const u8,
+        name: []const u8,
+        definition: funnel.Definition,
+        created_at: i64,
+    ) !void {
+        try domain.validateUuid(id);
+        try domain.validateName(name, 120);
+        if (created_at < 0) return error.InvalidFunnelTimestamp;
+        const canonical = try funnel.canonicalJson(allocator, definition);
+        const site_id = try self.siteIdBySlug(allocator, site_slug);
+        _ = self.connection.execParams(
+            \\INSERT INTO funnel_definitions
+            \\  (id, site_id, name, canonical_definition_json,
+            \\   created_at_utc_micros, updated_at_utc_micros,
+            \\   archived_at_utc_micros)
+            \\VALUES (?1, ?2, ?3, ?4, ?5, ?5, NULL)
+        , .{ id, site_id, name, canonical, created_at }, .{}) catch |err| {
+            if (isConstraintError(err)) return error.FunnelNameConflict;
+            return err;
+        };
     }
 
     pub fn funnelSteps(
@@ -2010,31 +2352,18 @@ pub const Store = struct {
         site_slug: []const u8,
         funnel_name: []const u8,
     ) ![]FunnelStep {
-        var rows = try self.connection.queryParams(
-            \\SELECT funnel_steps.step_index, funnel_steps.name,
-            \\       funnel_steps.match_kind, funnel_steps.match_value
-            \\FROM funnel_steps
-            \\JOIN funnels ON funnels.id = funnel_steps.funnel_id
-            \\JOIN sites ON sites.id = funnels.site_id
-            \\WHERE sites.slug = ?1 AND funnels.name = ?2
-            \\ORDER BY funnel_steps.step_index
-        ,
-            .{ site_slug, funnel_name },
-            .{},
-        );
-        defer rows.deinit();
-        var result: std.ArrayList(FunnelStep) = .empty;
-        while (try rows.next()) |row| {
-            try result.append(allocator, .{
-                .index = try row.get(i64, 0),
-                .name = try allocator.dupe(u8, try row.get([]const u8, 1)),
-                .match_kind = @fromBackingInt(@intCast(try row.get(i64, 2))),
-                .match_value = try allocator.dupe(u8, try row.get([]const u8, 3)),
-            });
-        }
-        try rows.finish(null);
-        if (result.items.len == 0) return error.FunnelNotFound;
-        return result.toOwnedSlice(allocator);
+        const stored = try self.funnelByName(allocator, site_slug, funnel_name);
+        if (stored.archived_at_utc_micros != null) return error.FunnelArchived;
+        const legacy = funnel.legacySteps(allocator, stored.definition) catch
+            return error.UnsupportedLegacyFunnel;
+        const result = try allocator.alloc(FunnelStep, legacy.len);
+        for (legacy, 0..) |step, index| result[index] = .{
+            .index = @intCast(index),
+            .name = try allocator.dupe(u8, step.name),
+            .match_kind = step.match_kind,
+            .match_value = try allocator.dupe(u8, step.match_value),
+        };
+        return result;
     }
 
     pub fn listFunnels(
@@ -2042,29 +2371,206 @@ pub const Store = struct {
         allocator: std.mem.Allocator,
         site_slug: []const u8,
     ) ![]Funnel {
+        return (try self.listFunnelDefinitions(allocator, site_slug, 1)).funnels;
+    }
+
+    pub fn listFunnelDefinitions(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        site_slug: []const u8,
+        page: u32,
+    ) !FunnelPage {
+        if (page == 0 or page > 1_000_000) return error.InvalidFunnelPage;
         var rows = try self.connection.queryParams(
-            \\SELECT funnels.id, funnels.name, count(funnel_steps.step_index)
-            \\FROM funnels
-            \\JOIN sites ON sites.id = funnels.site_id
-            \\LEFT JOIN funnel_steps ON funnel_steps.funnel_id = funnels.id
+            \\SELECT funnel_definitions.id, funnel_definitions.name,
+            \\       funnel_definitions.canonical_definition_json,
+            \\       funnel_definitions.created_at_utc_micros,
+            \\       funnel_definitions.updated_at_utc_micros,
+            \\       funnel_definitions.archived_at_utc_micros
+            \\FROM funnel_definitions
+            \\JOIN sites ON sites.id = funnel_definitions.site_id
             \\WHERE sites.slug = ?1
-            \\GROUP BY funnels.id, funnels.name
-            \\ORDER BY funnels.name
-        ,
-            .{site_slug},
-            .{},
-        );
+            \\ORDER BY funnel_definitions.name, funnel_definitions.id
+            \\LIMIT 51 OFFSET ?2
+        , .{
+            site_slug,
+            @as(i64, @intCast((page - 1) * 50)),
+        }, .{});
         defer rows.deinit();
         var result: std.ArrayList(Funnel) = .empty;
         while (try rows.next()) |row| {
-            try result.append(allocator, .{
-                .id = try allocator.dupe(u8, try row.get([]const u8, 0)),
-                .name = try allocator.dupe(u8, try row.get([]const u8, 1)),
-                .step_count = try row.get(i64, 2),
-            });
+            try result.append(allocator, try readFunnel(allocator, row));
         }
         try rows.finish(null);
-        return result.toOwnedSlice(allocator);
+        const has_more = result.items.len > 50;
+        if (has_more) result.items.len = 50;
+        return .{ .funnels = try result.toOwnedSlice(allocator), .has_more = has_more };
+    }
+
+    pub fn funnelById(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        site_slug: []const u8,
+        id: []const u8,
+    ) !Funnel {
+        try domain.validateUuid(id);
+        return self.loadFunnel(allocator, site_slug, .id, id);
+    }
+
+    pub fn funnelByName(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        site_slug: []const u8,
+        name: []const u8,
+    ) !Funnel {
+        try domain.validateName(name, 120);
+        return self.loadFunnel(allocator, site_slug, .name, name);
+    }
+
+    const FunnelLookup = enum { id, name };
+
+    fn loadFunnel(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        site_slug: []const u8,
+        lookup: FunnelLookup,
+        value: []const u8,
+    ) !Funnel {
+        const sql = switch (lookup) {
+            .id =>
+            \\SELECT funnel_definitions.id, funnel_definitions.name,
+            \\       funnel_definitions.canonical_definition_json,
+            \\       funnel_definitions.created_at_utc_micros,
+            \\       funnel_definitions.updated_at_utc_micros,
+            \\       funnel_definitions.archived_at_utc_micros
+            \\FROM funnel_definitions
+            \\JOIN sites ON sites.id = funnel_definitions.site_id
+            \\WHERE sites.slug = ?1 AND funnel_definitions.id = ?2
+            ,
+            .name =>
+            \\SELECT funnel_definitions.id, funnel_definitions.name,
+            \\       funnel_definitions.canonical_definition_json,
+            \\       funnel_definitions.created_at_utc_micros,
+            \\       funnel_definitions.updated_at_utc_micros,
+            \\       funnel_definitions.archived_at_utc_micros
+            \\FROM funnel_definitions
+            \\JOIN sites ON sites.id = funnel_definitions.site_id
+            \\WHERE sites.slug = ?1 AND funnel_definitions.name = ?2
+            ,
+        };
+        var rows = try self.connection.queryParams(sql, .{ site_slug, value }, .{});
+        defer rows.deinit();
+        const row = (try rows.next()) orelse return error.FunnelNotFound;
+        const result = try readFunnel(allocator, row);
+        if ((try rows.next()) != null) return error.UnexpectedFunnelRow;
+        try rows.finish(null);
+        return result;
+    }
+
+    pub fn editFunnel(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        site_slug: []const u8,
+        id: []const u8,
+        expected_updated_at: i64,
+        name: []const u8,
+        definition: funnel.Definition,
+        now_micros: i64,
+    ) !void {
+        try domain.validateUuid(id);
+        try domain.validateName(name, 120);
+        if (expected_updated_at < 0 or now_micros <= expected_updated_at) {
+            return error.InvalidFunnelTimestamp;
+        }
+        const canonical = try funnel.canonicalJson(allocator, definition);
+        const site_id = try self.siteIdBySlug(allocator, site_slug);
+        const changed = self.connection.execParams(
+            \\UPDATE funnel_definitions
+            \\SET name = ?4, canonical_definition_json = ?5,
+            \\    updated_at_utc_micros = ?6
+            \\WHERE site_id = ?1 AND id = ?2
+            \\  AND updated_at_utc_micros = ?3
+        , .{
+            site_id,
+            id,
+            expected_updated_at,
+            name,
+            canonical,
+            now_micros,
+        }, .{}) catch |err| {
+            if (isConstraintError(err)) return error.FunnelNameConflict;
+            return err;
+        };
+        if (changed != 1) return error.StaleFunnel;
+    }
+
+    pub fn archiveFunnel(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        site_slug: []const u8,
+        id: []const u8,
+        expected_updated_at: i64,
+        now_micros: i64,
+    ) !void {
+        try self.setFunnelArchived(
+            allocator,
+            site_slug,
+            id,
+            expected_updated_at,
+            now_micros,
+            true,
+        );
+    }
+
+    pub fn reactivateFunnel(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        site_slug: []const u8,
+        id: []const u8,
+        expected_updated_at: i64,
+        now_micros: i64,
+    ) !void {
+        try self.setFunnelArchived(
+            allocator,
+            site_slug,
+            id,
+            expected_updated_at,
+            now_micros,
+            false,
+        );
+    }
+
+    fn setFunnelArchived(
+        self: *Store,
+        allocator: std.mem.Allocator,
+        site_slug: []const u8,
+        id: []const u8,
+        expected_updated_at: i64,
+        now_micros: i64,
+        archived: bool,
+    ) !void {
+        try domain.validateUuid(id);
+        if (expected_updated_at < 0 or now_micros <= expected_updated_at) {
+            return error.InvalidFunnelTimestamp;
+        }
+        const site_id = try self.siteIdBySlug(allocator, site_slug);
+        const changed = if (archived)
+            try self.connection.execParams(
+                \\UPDATE funnel_definitions
+                \\SET archived_at_utc_micros = ?4, updated_at_utc_micros = ?4
+                \\WHERE site_id = ?1 AND id = ?2
+                \\  AND updated_at_utc_micros = ?3
+                \\  AND archived_at_utc_micros IS NULL
+            , .{ site_id, id, expected_updated_at, now_micros }, .{})
+        else
+            try self.connection.execParams(
+                \\UPDATE funnel_definitions
+                \\SET archived_at_utc_micros = NULL, updated_at_utc_micros = ?4
+                \\WHERE site_id = ?1 AND id = ?2
+                \\  AND updated_at_utc_micros = ?3
+                \\  AND archived_at_utc_micros IS NOT NULL
+            , .{ site_id, id, expected_updated_at, now_micros }, .{});
+        if (changed != 1) return error.StaleFunnel;
     }
 
     pub fn deleteFunnel(
@@ -2075,7 +2581,7 @@ pub const Store = struct {
     ) !void {
         const site_id = try self.siteIdBySlug(allocator, site_slug);
         const changed = try self.connection.execParams(
-            "DELETE FROM funnels WHERE site_id = ?1 AND name = ?2",
+            "DELETE FROM funnel_definitions WHERE site_id = ?1 AND name = ?2",
             .{ site_id, name },
             .{},
         );
@@ -2605,7 +3111,7 @@ pub const Store = struct {
         return .{
             .sites = try self.scalar("SELECT COUNT(*) FROM sites"),
             .goals = try self.scalar("SELECT COUNT(*) FROM goal_definitions_v2"),
-            .funnels = try self.scalar("SELECT COUNT(*) FROM funnels"),
+            .funnels = try self.scalar("SELECT COUNT(*) FROM funnel_definitions"),
         };
     }
 
@@ -2637,6 +3143,25 @@ pub const Store = struct {
         return result.toOwnedSlice(allocator);
     }
 };
+
+fn readFunnel(
+    allocator: std.mem.Allocator,
+    row: anytype,
+) !Funnel {
+    const definition = funnel.parseExactCanonicalJson(
+        allocator,
+        try row.get([]const u8, 2),
+    ) catch return error.InvalidFunnelDocument;
+    return .{
+        .id = try allocator.dupe(u8, try row.get([]const u8, 0)),
+        .name = try allocator.dupe(u8, try row.get([]const u8, 1)),
+        .step_count = @intCast(definition.steps.len),
+        .definition = definition,
+        .created_at_utc_micros = try row.get(i64, 3),
+        .updated_at_utc_micros = try row.get(i64, 4),
+        .archived_at_utc_micros = try row.get(?i64, 5),
+    };
+}
 
 fn validateSavedEntity(
     id: []const u8,
@@ -3101,6 +3626,209 @@ test "goal capacity preserves conflict and stale mutation precedence" {
         2,
     );
     try std.testing.expectEqual(@as(usize, 1), second_page.goals.len);
+    try std.testing.expect(!second_page.has_more);
+}
+
+test "funnel definitions are guarded site scoped and shape reference safe" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const backing = std.testing.allocator;
+    const path = try std.fmt.allocPrint(
+        backing,
+        ".zig-cache/tmp/{s}/meta.db",
+        .{temporary.sub_path},
+    );
+    defer backing.free(path);
+    var store = try Store.open(backing, path);
+    defer store.deinit();
+    try store.migrate();
+    var arena = std.heap.ArenaAllocator.init(backing);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    _ = try store.createSite(allocator, .{
+        .id = "00000000-0000-4000-8000-000000000351",
+        .slug = "alpha",
+        .name = "Alpha",
+        .origin = "https://alpha.example",
+        .timezone_name = "UTC",
+        .default_currency = "",
+        .created_at_utc_micros = 1,
+    });
+    _ = try store.createSite(allocator, .{
+        .id = "00000000-0000-4000-8000-000000000352",
+        .slug = "beta",
+        .name = "Beta",
+        .origin = "https://beta.example",
+        .timezone_name = "UTC",
+        .default_currency = "",
+        .created_at_utc_micros = 1,
+    });
+    const goal_id = "00000000-0000-4000-8000-000000000353";
+    try store.addGoal(
+        allocator,
+        goal_id,
+        "alpha",
+        "Signup",
+        .event,
+        "signup",
+        &.{},
+        2,
+    );
+    const collision_values = [_][]const u8{goal_id};
+    const collision_predicates = [_]analysis.PropertyPredicate{.{
+        .property_ref = .{ .name = "goal_text", .scalar_type = .string },
+        .operator = .is,
+        .values = &collision_values,
+    }};
+    const steps = [_]funnel.Step{
+        .{ .direct = .{ .selector = .{
+            .kind = .exact_event,
+            .value = goal_id,
+            .predicates = &collision_predicates,
+        } } },
+        .{ .goal = goal_id },
+    };
+    const funnel_id = "00000000-0000-4000-8000-000000000354";
+    try store.addFunnelDefinition(
+        allocator,
+        funnel_id,
+        "alpha",
+        "Signup path",
+        .{ .steps = &steps },
+        3,
+    );
+    const created = try store.funnelById(allocator, "alpha", funnel_id);
+    try std.testing.expectEqual(@as(i64, 2), created.step_count);
+    try std.testing.expectEqual(@as(i64, 3), created.updated_at_utc_micros);
+    try std.testing.expectError(
+        error.InvalidFunnelTimestamp,
+        store.editFunnel(
+            allocator,
+            "alpha",
+            funnel_id,
+            3,
+            "Signup path",
+            .{ .steps = &steps },
+            3,
+        ),
+    );
+    try std.testing.expectError(
+        error.StaleFunnel,
+        store.editFunnel(
+            allocator,
+            "beta",
+            funnel_id,
+            3,
+            "Signup path",
+            .{ .steps = &steps },
+            4,
+        ),
+    );
+    try std.testing.expectError(
+        error.FunnelNameConflict,
+        store.addFunnelDefinition(
+            allocator,
+            "00000000-0000-4000-8000-000000000355",
+            "alpha",
+            "Signup path",
+            .{ .steps = &steps },
+            4,
+        ),
+    );
+    try std.testing.expectError(
+        error.FunnelNotFound,
+        store.funnelById(allocator, "beta", funnel_id),
+    );
+    try std.testing.expectError(
+        error.GoalReferenced,
+        store.deleteGoalById(allocator, "alpha", goal_id, 2, "Signup"),
+    );
+    try store.archiveFunnel(allocator, "alpha", funnel_id, 3, 4);
+    try std.testing.expectError(
+        error.GoalReferenced,
+        store.deleteGoalById(allocator, "alpha", goal_id, 2, "Signup"),
+    );
+    try std.testing.expectError(
+        error.StaleFunnel,
+        store.reactivateFunnel(allocator, "alpha", funnel_id, 3, 5),
+    );
+    try store.reactivateFunnel(allocator, "alpha", funnel_id, 4, 5);
+    const direct_only = [_]funnel.Step{
+        steps[0],
+        .{ .direct = .{ .selector = .{
+            .kind = .exact_page,
+            .value = "/complete",
+        } } },
+    };
+    try store.editFunnel(
+        allocator,
+        "alpha",
+        funnel_id,
+        5,
+        "Signup path",
+        .{ .steps = &direct_only },
+        6,
+    );
+    try store.deleteGoalById(allocator, "alpha", goal_id, 2, "Signup");
+    try std.testing.expectError(
+        error.UnsupportedLegacyFunnel,
+        store.funnelSteps(allocator, "alpha", "Signup path"),
+    );
+    const compatible_only = [_]funnel.Step{
+        .{ .direct = .{ .selector = .{
+            .kind = .exact_event,
+            .value = goal_id,
+        } } },
+        direct_only[1],
+    };
+    try store.editFunnel(
+        allocator,
+        "alpha",
+        funnel_id,
+        6,
+        "Signup path",
+        .{ .steps = &compatible_only },
+        7,
+    );
+    const compatible = try store.funnelSteps(allocator, "alpha", "Signup path");
+    try std.testing.expectEqual(@as(usize, 2), compatible.len);
+    try std.testing.expectEqualStrings(goal_id, compatible[0].match_value);
+
+    var richer = (try store.funnelById(allocator, "alpha", funnel_id)).definition;
+    richer.scope = .visitors;
+    try store.editFunnel(
+        allocator,
+        "alpha",
+        funnel_id,
+        7,
+        "Signup path",
+        richer,
+        8,
+    );
+    try std.testing.expectError(
+        error.UnsupportedLegacyFunnel,
+        store.funnelSteps(allocator, "alpha", "Signup path"),
+    );
+
+    for (0..51) |index| {
+        try store.addFunnelDefinition(
+            allocator,
+            try std.fmt.allocPrint(
+                allocator,
+                "10000000-0000-4000-8000-{d:0>12}",
+                .{index},
+            ),
+            "alpha",
+            try std.fmt.allocPrint(allocator, "Paged funnel {d:0>2}", .{index}),
+            .{ .steps = &direct_only },
+            @intCast(index + 10),
+        );
+    }
+    const first_page = try store.listFunnelDefinitions(allocator, "alpha", 1);
+    const second_page = try store.listFunnelDefinitions(allocator, "alpha", 2);
+    try std.testing.expectEqual(@as(usize, 50), first_page.funnels.len);
+    try std.testing.expect(first_page.has_more);
+    try std.testing.expectEqual(@as(usize, 2), second_page.funnels.len);
     try std.testing.expect(!second_page.has_more);
 }
 

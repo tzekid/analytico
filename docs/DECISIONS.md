@@ -51,6 +51,7 @@ semantic, or application state model is consequential and must be added here.
 | D40 | Universal filters, segments, and saved views | Resolve one canonical FilterSet context; persist exact site-owned state in metadata schema 7 | Accepted for 1.0 issue #30 |
 | D41 | Guided goal lifecycle and metadata schema 8 | Replace raw goal administration with bounded discovery, archive-first lifecycle, and reference-safe deletion | Accepted for 1.0 issue #33 |
 | D42 | Property-constrained goals and metadata schema 9 | Persist one canonical predicate set per goal and preview one closed goal result under the current context | Accepted for 1.0 issue #34 |
+| D43 | Guided funnel lifecycle and metadata schema 10 | Persist one canonical bounded definition and preview independent selector availability | Accepted for 1.0 issue #35 |
 
 ## D01. MVP interface
 
@@ -2953,3 +2954,154 @@ and no startup data request in separate Debug and ReleaseSafe gates.
 `ANALYSIS_QUERY.md`, `DESIGN_SYSTEM.md`, `PERFORMANCE.md`, `OPERATIONS.md`,
 `RELEASE_CONTRACT_1.0.md`, and issue #34. Issues #35, #38, and #41 consume the
 complete selector without broadening this decision.
+
+## D43. Replace multi-row funnels with one canonical definition and bounded builder preview
+
+**Status:** Accepted for Analytico 1.0 issue #35
+
+**Date:** 2026-08-25
+
+**Issue:** #35
+
+**Extends:** D19's durable Turso autocommits, D29's closed typed selector and
+query compiler, D40's canonical FilterSet context, D41's reference-safe goal
+lifecycle, and D42's complete property-aware goal selector. It leaves #36 as
+the sole owner of ordered funnel evaluation and result visualization.
+
+### Context and persistence candidates
+
+Metadata schema 9 stores one funnel parent and 2–8 mutable child rows. Create
+uses durable autocommits plus compensating parent deletion, but edit, reorder,
+settings, step predicates, and Goal references would require replacing several
+rows. A crash between those writes could expose a mixed definition on the
+pinned Turso/filesystem evidence. The browser also still exposes the retired
+`kind=value` textarea rather than a typed builder.
+
+| Candidate | Runtime behavior | Migration, maintenance, and rollback |
+| --- | --- | --- |
+| Extend the parent and retain normalized step/predicate children | Mirrors the package's logical tables | Every edit remains multi-write and crash-visible under D19 |
+| Add immutable child revisions plus an active pointer | Keeps the old revision visible until pointer change | Adds orphan cleanup, revision retention, and multiple writes for a feature with no history requirement |
+| Store one canonical bounded definition document per funnel | One guarded row contains the complete mutable definition | Adds one replayable replacement migration and exact parse/reserialize validation |
+
+Select the canonical document. Metadata schema 10 creates
+`funnel_definitions` with ID, site, name, canonical definition JSON, created
+time, updated time, and optional archived time. The schema-1 document is at
+most 8 KiB and contains:
+
+- order `sequential` or `consecutive`;
+- scope `sessions` or `visitors`;
+- `window_seconds` from the closed set `0`, `3600`, `86400`, `604800`, or
+  `2592000`, where zero means same session;
+- two through eight ordered Page, page-prefix, Event, or Goal steps.
+
+A direct Page/Event step contains one D29 `EventSelector` plus zero through
+three exact canonical predicate strings, each with at most the guided builder's
+one scalar value. Predicate strings are bytewise
+sorted and deduplicated. A Goal step contains only one stable goal UUID and
+resolves that goal's complete current D42 selector; it cannot layer a second
+predicate set. Every read parses, validates, reserializes, and requires
+byte-identical JSON. No expression engine, regex, arbitrary SQL, workflow
+schema, or definition history is introduced.
+
+### Migration, compatibility, and references
+
+Schema-9 definitions migrate with behavior-preserving defaults: sequential,
+Sessions, same-session, direct selectors, no predicates, active state, and
+updated time equal to created time. The old application always derived each
+step name from its match value. Migration requires that equality, contiguous
+indexes, two through eight steps, and valid selectors; incomplete or
+externally altered rows fail closed rather than being invented or discarded.
+
+The replayable D19 sequence creates and repairs replacement rows, verifies
+complete source equality, validates every document, drops `funnel_steps`,
+drops `funnels`, and writes ledger 10 last. Retry explicitly handles a partial
+replacement, the verified child-dropped/parent-retained state, and the fully
+after-drop/missing-ledger state. Any noncanonical replacement, invalid source,
+or inconsistent mixed state fails closed. The exact predecessor is deployed
+commit `d58316145ff2e7fecb834bedc2e5ea7034349952`; rollback restores the matched
+metadata-9/event-7 pair before that binary starts.
+
+CLI add/show/delete continues over definitions representable by the original
+direct-selector grammar. The frozen metric-v1 funnel report accepts only a
+sequential, Sessions, same-session, direct, predicate-free definition. It
+explicitly refuses Goal references, predicates, visitor scope, consecutive
+order, or a bounded cross-session window until #36; it never silently runs a
+broader query. The stable detail page retains that frozen result only for an
+active compatible definition and labels it as compatibility output; richer or
+archived definitions show no invented result.
+
+D41's conditional goal delete additionally inspects only the `steps` array of
+site-owned active or archived funnel documents. A step is a reference only
+when its exact shape is `kind=goal` with the selected `goal_id`. The same UUID
+inside a direct value or predicate is not a reference. Goal archive remains
+allowed and makes the funnel visibly stale; reactivation restores it. A
+normalized reference table would duplicate the canonical source and add
+multi-write maintenance, so it is not added.
+
+### Builder and preview boundary
+
+Stable authenticated GET routes expose
+`/admin/sites/{slug}/journeys/funnels`, `/new`, `/{id}`, and `/{id}/edit`.
+One ordinary URL-encoded form carries the complete request-owned draft. Add,
+remove, move-up, move-down, preview, and save intents submit that same form;
+non-save intents return a complete server-rendered draft and a successful save
+redirects to the canonical GET. There is no draft table, preview token, local
+storage, client state store, or client router. List reads return at most 50
+rows plus next-page state.
+
+The full-draft `/admin/funnels` and `/admin/funnels/edit` mutation routes reuse
+D40's exact 65,536-byte saved-state request boundary and add only a 128-field
+parser for finite numbered controls.
+This is necessary because percent-encoding an at-most-8-KiB canonical document
+can exceed the ordinary 8 KiB form ceiling; every valid stored or migrated
+definition must remain editable without JavaScript. Other funnel lifecycle
+forms retain the ordinary ceiling. The builder preserves the selected
+site-local range, ad-hoc filters, and segment. Preview and save resolve that
+context before a metadata write. A stale segment or property returns a
+preserved 422 draft with only the stale context removed; a timeout returns an
+honest no-write failure.
+
+#35 preview is one specialized selector-availability statement. It scans the
+eligible filtered event relation once under the existing two-second deadline
+and returns one independent matching-event count per resolved step. Zero
+matches are explicit. Archived or missing Goal references refuse preview and
+save until replaced or reactivated. The result is labeled as selector
+availability, not entrants, progression, conversion, or timing.
+
+Issue #36 owns sequential/consecutive evaluation, Sessions/Visitors and window
+semantics, one-event/one-step ordering, comparison, drop-off and time metrics,
+the 1.2-second target, and funnel-result visualization. Issue #37 owns the
+generated session drill-through. D43 does not prebuild either interface.
+
+### Security, operations, and acceptance
+
+Mutations are site-scoped single statements guarded by stable ID and update
+time. Exact Origin and CSRF checks precede them. Renderers receive owned typed
+models and perform no database, filesystem, session, clock, random, or network
+work. Input values remain context-safely escaped and bound; no raw path,
+property, goal, or definition document enters logs or SQL structure.
+
+Metadata schema 10 changes no event file, tracker, service unit, process
+topology, dependency, or backup format. The issue adds only the two full-draft
+funnel mutation routes to D40's existing Caddy saved-state matcher; exact
+65,536-byte input reaches the application and 65,537 bytes returns 413 before
+upstream dispatch. Deployment stops the sole writer, creates and independently
+restores a matched metadata-9/event-7 backup plus predecessor Caddy file, proves
+the exact predecessor opens it and reproduces selected reports, migrates,
+proves event/report parity and old-binary refusal, and only then promotes the
+candidate.
+
+Issue #35 must prove canonical collisions and bounds; exact migration copy and
+every interruption state; backup, restore, predecessor read/refusal, and
+matched rollback; site-isolated guarded lifecycle; shape-aware Goal reference
+conflicts; legacy report parity/refusal; one-scan preview semantics, deadline,
+and reuse; stale-context no-write behavior; exact auth/input handling; and real
+JavaScript-disabled plus enhanced desktop/mobile builder flows. The focused
+funnel and metadata-10 gates are mandatory independently and inside the full
+packaged release qualification. The funnel gate also proves the exact Caddy
+body boundary and complete route-set match.
+
+**Affected contracts:** `SPEC.md`, `ARCHITECTURE.md`, `DATA_MODEL.md`,
+`ANALYSIS_QUERY.md`, `DESIGN_SYSTEM.md`, `PERFORMANCE.md`, `OPERATIONS.md`,
+`RELEASE_CONTRACT_1.0.md`, and issue #35. Issues #36 and #37 extend results and
+drill-through without changing D43's stored definition.

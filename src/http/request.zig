@@ -205,7 +205,9 @@ fn isSavedStatePath(path: []const u8) bool {
         std.mem.eql(u8, path, "/admin/saved-views") or
         std.mem.eql(u8, path, "/admin/saved-views/duplicate") or
         std.mem.eql(u8, path, "/admin/saved-views/rename") or
-        std.mem.eql(u8, path, "/admin/saved-views/delete");
+        std.mem.eql(u8, path, "/admin/saved-views/delete") or
+        std.mem.eql(u8, path, "/admin/funnels") or
+        std.mem.eql(u8, path, "/admin/funnels/edit");
 }
 
 fn trimLine(line: []const u8) []const u8 {
@@ -262,6 +264,8 @@ test "only authenticated analysis state routes receive the 64 KiB form bound" {
         "/admin/saved-views/duplicate",
         "/admin/saved-views/rename",
         "/admin/saved-views/delete",
+        "/admin/funnels",
+        "/admin/funnels/edit",
     }) |target| {
         try std.testing.expectEqual(
             @as(usize, max_saved_state_body_bytes),
@@ -270,6 +274,7 @@ test "only authenticated analysis state routes receive the 64 KiB form bound" {
     }
     inline for (.{
         "/admin/goals",
+        "/admin/funnels/archive",
         "/admin/sites/example/overview",
         "/admin/segments-elsewhere",
         "/v1/event",

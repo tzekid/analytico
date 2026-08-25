@@ -514,6 +514,29 @@ pub fn build(b: *std.Build) void {
         "e2e-metadata9-migration",
         "Migrate and roll back the exact deployed metadata-8/event-7 predecessor",
     ).dependOn(&metadata9_migration_e2e.step);
+
+    const funnels_e2e = b.addSystemCommand(&.{
+        "bash",
+        "tests/e2e-funnels.sh",
+    });
+    funnels_e2e.addArtifactArg(app);
+    funnels_e2e.step.dependOn(b.getInstallStep());
+    b.step(
+        "e2e-funnels",
+        "Build and persist funnels through real stores, Caddy, and Chromium",
+    ).dependOn(&funnels_e2e.step);
+
+    const metadata10_migration_e2e = b.addSystemCommand(&.{
+        "bash",
+        "scripts/run-metadata9-gate.sh",
+    });
+    metadata10_migration_e2e.addArtifactArg(app);
+    metadata10_migration_e2e.addArg("tests/e2e-metadata10-migration.sh");
+    metadata10_migration_e2e.step.dependOn(b.getInstallStep());
+    b.step(
+        "e2e-metadata10-migration",
+        "Migrate and roll back the exact deployed metadata-9/event-7 predecessor",
+    ).dependOn(&metadata10_migration_e2e.step);
 }
 
 fn addHtmxAssets(

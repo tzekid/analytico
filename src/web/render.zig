@@ -1,13 +1,15 @@
 const std = @import("std");
 const analysis = @import("../analysis.zig");
 const diagnostics = @import("../diagnostics.zig");
+const funnel_domain = @import("../funnel.zig");
 const report = @import("../report.zig");
+const meta = @import("../store/meta.zig");
 const charts = @import("charts.zig");
 const components = @import("components.zig");
 const model = @import("model.zig");
 
 pub const stylesheet = @embedFile("style.css");
-pub const stylesheet_path = "/admin/app.v12.css";
+pub const stylesheet_path = "/admin/app.v13.css";
 pub const htmx = @embedFile("htmx_js");
 pub const htmx_gzip = @embedFile("htmx_gzip");
 pub const htmx_path = "/admin/htmx.28fae7bb.js";
@@ -89,6 +91,13 @@ pub fn page(output: *std.Io.Writer, value: model.Page) !void {
             if (value.goal_management != null) {
                 try goalManagement(output, value);
                 if (value.goal_management.?.screen == .detail) {
+                    try reportSection(output, value);
+                }
+            } else if (value.funnel_management != null) {
+                try funnelManagement(output, value);
+                if (value.funnel_management.?.screen == .detail and
+                    value.result != null)
+                {
                     try reportSection(output, value);
                 }
             } else {
@@ -2569,8 +2578,13 @@ fn journeyNavigation(output: *std.Io.Writer, value: model.Page) !void {
     try journeyTypeLink(output, value.query, .funnel, "Funnels");
     try output.writeAll("</nav>");
     const show_legacy_goals = value.goal_management == null;
+    const show_legacy_funnels = value.funnel_management == null;
+    var legacy_funnel_count: usize = 0;
+    if (show_legacy_funnels) for (value.funnels) |funnel| {
+        legacy_funnel_count += @intFromBool(legacyFunnelCompatible(funnel));
+    };
     if ((show_legacy_goals and value.goals.len != 0) or
-        value.funnels.len != 0)
+        legacy_funnel_count != 0)
     {
         try output.writeAll("<div class=\"conversion-navigation\"><span class=\"eyebrow\">Definitions</span><nav aria-label=\"Journey definitions\">");
     }
@@ -2579,15 +2593,32 @@ fn journeyNavigation(output: *std.Io.Writer, value: model.Page) !void {
             try reportLink(output, value.query, .goal, goal.name, goal.name);
         }
     }
-    for (value.funnels) |funnel| {
-        try reportLink(output, value.query, .funnel, funnel.name, funnel.name);
-    }
+    if (show_legacy_funnels) for (value.funnels) |funnel| {
+        if (legacyFunnelCompatible(funnel)) {
+            try reportLink(output, value.query, .funnel, funnel.name, funnel.name);
+        }
+    };
     if ((show_legacy_goals and value.goals.len != 0) or
-        value.funnels.len != 0)
+        legacy_funnel_count != 0)
     {
         try output.writeAll("</nav></div>");
     }
     try output.writeAll("</div>");
+}
+
+fn legacyFunnelCompatible(value: meta.Funnel) bool {
+    if (value.archived_at_utc_micros != null or
+        value.definition.order != .sequential or
+        value.definition.scope != .sessions or
+        value.definition.window != .same_session)
+    {
+        return false;
+    }
+    for (value.definition.steps) |step| switch (step) {
+        .goal => return false,
+        .direct => |direct| if (direct.selector.predicates.len != 0) return false,
+    };
+    return true;
 }
 
 fn journeyTypeLink(
@@ -2894,6 +2925,406 @@ fn campaignTabs(output: *std.Io.Writer, query: model.Query) !void {
         try output.writeAll("</a>");
     }
     try output.writeAll("</nav>");
+}
+
+fn funnelBuilder(
+    output: *std.Io.Writer,
+    value: model.Page,
+    management: model.FunnelManagement,
+) !void {
+    const selected = management.selected;
+    const has_draft = value.funnel_draft.steps.len != 0;
+    const name = if (has_draft)
+        value.funnel_draft.name
+    else if (selected) |definition|
+        definition.name
+    else
+        "";
+    const order = if (has_draft)
+        value.funnel_draft.order
+    else if (selected) |definition|
+        definition.order
+    else
+        funnel_domain.Order.sequential;
+    const scope = if (has_draft)
+        value.funnel_draft.scope
+    else if (selected) |definition|
+        definition.scope
+    else
+        funnel_domain.Scope.sessions;
+    const window = if (has_draft)
+        value.funnel_draft.window
+    else if (selected) |definition|
+        definition.window
+    else
+        funnel_domain.Window.same_session;
+    const steps = management.draft_steps;
+
+    try output.writeAll("<section class=\"panel\"><h2>");
+    try output.writeAll(if (management.screen == .edit) "Edit funnel" else "New funnel");
+    try output.writeAll(
+        "</h2><p>Compose two through eight ordered Page, Event, or Goal steps. " ++
+            "Preview reports each selector's independent event availability; " ++
+            "ordered conversion and timing remain a separate result.</p>" ++
+            "<form class=\"funnel-builder\" method=\"post\" action=\"",
+    );
+    try attribute(output, if (management.screen == .edit)
+        management.edit_action_url
+    else
+        management.create_action_url);
+    try output.writeAll("\" hx-boost=\"true\" hx-sync=\"this:drop\">");
+    try formCommon(output, value);
+    if (selected) |definition| try funnelIdentityFields(output, definition);
+    try output.print("<input type=\"hidden\" name=\"step_count\" value=\"{d}\">", .{steps.len});
+    try output.writeAll("<label>Name<input name=\"name\" maxlength=\"120\" required");
+    try formErrorAttributes(output, value, .funnel);
+    try output.writeAll(" value=\"");
+    try attribute(output, name);
+    try output.writeAll("\"></label><div class=\"funnel-settings\"><label>Order<select name=\"order\">");
+    try selectedOption(output, "sequential", "Sequential", order == .sequential);
+    try selectedOption(output, "consecutive", "Consecutive tracked events", order == .consecutive);
+    try output.writeAll("</select></label><label>Scope<select name=\"scope\">");
+    try selectedOption(output, "sessions", "Sessions", scope == .sessions);
+    try selectedOption(output, "visitors", "Visitors", scope == .visitors);
+    try output.writeAll("</select></label><label>Conversion window<select name=\"window_seconds\">");
+    inline for (.{
+        .{ funnel_domain.Window.same_session, "Same session" },
+        .{ funnel_domain.Window.one_hour, "1 hour" },
+        .{ funnel_domain.Window.one_day, "1 day" },
+        .{ funnel_domain.Window.seven_days, "7 days" },
+        .{ funnel_domain.Window.thirty_days, "30 days" },
+    }) |option| {
+        var seconds: [16]u8 = undefined;
+        try selectedOption(
+            output,
+            try std.fmt.bufPrint(&seconds, "{d}", .{option[0].seconds()}),
+            option[1],
+            window == option[0],
+        );
+    }
+    try output.writeAll(
+        "</select></label></div><p class=\"muted\">Consecutive checks the next" ++
+            " qualifying tracked Page/Event. Visitor scope and cross-session" ++
+            " windows require compatible persistent identity; #36 owns their" ++
+            " evaluated results.</p><ol class=\"funnel-steps\">",
+    );
+    for (steps) |step| try funnelStepEditor(
+        output,
+        step,
+        management.goals,
+        steps.len,
+    );
+    try output.writeAll("</ol><div class=\"management-actions\">");
+    if (steps.len < funnel_domain.maximum_steps) {
+        try output.writeAll("<button class=\"button-secondary\" type=\"submit\" formnovalidate name=\"intent\" value=\"add-step\">Add step</button>");
+    }
+    try output.writeAll(
+        "<button class=\"button-secondary\" type=\"submit\" name=\"intent\"" ++
+            " formnovalidate value=\"refresh\">Update step controls</button>" ++
+            "<button class=\"button-secondary\" type=\"submit\" name=\"intent\"" ++
+            " value=\"preview\">Preview selector availability</button>" ++
+            "<button type=\"submit\" name=\"intent\" value=\"save\">" ++
+            "Save funnel</button></div></form></section>",
+    );
+}
+
+fn funnelStepEditor(
+    output: *std.Io.Writer,
+    step: model.FunnelStepView,
+    goals: []const model.GoalDefinitionView,
+    step_count: usize,
+) !void {
+    const one_based = step.index + 1;
+    try output.print("<li><fieldset class=\"funnel-step\"><legend>Step {d}</legend><div class=\"funnel-step-heading\"><strong>", .{one_based});
+    try text(output, step.label);
+    try output.writeAll("</strong><span class=\"management-actions\">");
+    if (step.index != 0) {
+        try output.print("<button class=\"button-secondary\" type=\"submit\" formnovalidate name=\"intent\" value=\"move-up-{d}\">Move up</button>", .{one_based});
+    }
+    if (step.index + 1 < step_count) {
+        try output.print("<button class=\"button-secondary\" type=\"submit\" formnovalidate name=\"intent\" value=\"move-down-{d}\">Move down</button>", .{one_based});
+    }
+    if (step_count > funnel_domain.minimum_steps) {
+        try output.print("<button class=\"button-secondary\" type=\"submit\" formnovalidate name=\"intent\" value=\"remove-step-{d}\">Remove</button>", .{one_based});
+    }
+    try output.print("</span></div><label>Step type<select name=\"step_kind_{d}\">", .{one_based});
+    try selectedOption(output, "page", "Page equals", step.draft.kind == .exact_page);
+    try selectedOption(output, "page-prefix", "Page starts with", step.draft.kind == .page_prefix);
+    try selectedOption(output, "event", "Custom event equals", step.draft.kind == .exact_event);
+    try selectedOption(output, "goal", "Saved goal", step.draft.kind == .saved_goal);
+    try output.writeAll("</select></label>");
+    if (step.draft.kind == .saved_goal) {
+        try funnelGoalSelect(output, step, goals, one_based);
+    } else {
+        try funnelDirectFields(output, step, one_based);
+    }
+    if (step.stale) try components.feedback(output, .{
+        .kind = .warning,
+        .message = "This Goal reference is archived or unavailable. Preview and save are blocked until it is replaced or reactivated.",
+    });
+    if (step.matching_events) |count| {
+        if (count < 0) return error.InvalidFunnelAvailability;
+        try output.print("<p class=\"selector-availability\"><strong>Selector availability:</strong> {d} matching event(s).", .{count});
+        if (count == 0) {
+            try output.writeAll(" <span class=\"status-text\">Zero matches in this context.</span>");
+        }
+        try output.writeAll(" This is not funnel progression.</p>");
+    }
+    try output.writeAll("</fieldset></li>");
+}
+
+fn funnelGoalSelect(
+    output: *std.Io.Writer,
+    step: model.FunnelStepView,
+    goals: []const model.GoalDefinitionView,
+    one_based: usize,
+) !void {
+    try output.print("<label>Goal<select name=\"step_goal_{d}\">", .{one_based});
+    if (step.stale) {
+        try output.writeAll("<option value=\"");
+        try attribute(output, step.draft.goal_id);
+        try output.writeAll("\" selected>Unavailable or archived goal · ");
+        try text(output, step.draft.goal_id);
+        try output.writeAll("</option>");
+    }
+    for (goals) |goal| {
+        try output.writeAll("<option value=\"");
+        try attribute(output, goal.id);
+        try output.writeAll("\"");
+        if (std.mem.eql(u8, goal.id, step.draft.goal_id)) {
+            try output.writeAll(" selected");
+        }
+        try output.writeAll(">");
+        try text(output, goal.name);
+        try output.writeAll("</option>");
+    }
+    try output.writeAll("</select></label>");
+}
+
+fn funnelDirectFields(
+    output: *std.Io.Writer,
+    step: model.FunnelStepView,
+    one_based: usize,
+) !void {
+    try output.print("<label>Exact value<input name=\"step_value_{d}\" maxlength=\"1024\" required value=\"", .{one_based});
+    try attribute(output, step.draft.value);
+    try output.writeAll("\"></label><fieldset class=\"predicate-builder\"><legend>Optional event properties</legend>");
+    for (0..analysis.maximum_selector_predicates) |predicate_index| {
+        const predicate = if (predicate_index < step.draft.predicates.len)
+            step.draft.predicates[predicate_index]
+        else
+            model.GoalPredicateDraft{};
+        const predicate_one_based = predicate_index + 1;
+        try output.print("<div class=\"predicate-row\"><label>Property {d}<input name=\"step_property_{d}_{d}\" maxlength=\"120\" value=\"", .{ predicate_one_based, one_based, predicate_one_based });
+        try attribute(output, predicate.property_name);
+        try output.print("\"></label><label>Type and rule<select name=\"step_rule_{d}_{d}\">", .{ one_based, predicate_one_based });
+        try goalRuleOptions(output, predicate.rule, null);
+        try output.print("</select></label><label>Value<input name=\"step_predicate_value_{d}_{d}\" maxlength=\"1024\" value=\"", .{ one_based, predicate_one_based });
+        try attribute(output, predicate.value);
+        try output.writeAll("\"></label></div>");
+    }
+    try output.writeAll("</fieldset>");
+}
+
+fn funnelDetail(
+    output: *std.Io.Writer,
+    value: model.Page,
+    management: model.FunnelManagement,
+) !void {
+    const definition = management.selected.?;
+    try output.writeAll("<section class=\"panel\"><div class=\"split-heading\"><div><h2>");
+    try text(output, definition.name);
+    try output.writeAll("</h2><p><strong>");
+    try output.writeAll(if (definition.archived) "Archived" else "Active");
+    try output.writeAll("</strong> · ");
+    try text(output, @tagName(definition.order));
+    try output.writeAll(" · ");
+    try text(output, @tagName(definition.scope));
+    try output.writeAll(" · ");
+    try text(output, funnelWindowLabel(definition.window));
+    try output.writeAll("</p></div><a class=\"button-secondary\" href=\"");
+    try attribute(output, definition.edit_url);
+    try output.writeAll("\">Edit funnel</a></div><dl class=\"definition-grid\"><div><dt>Created</dt><dd>");
+    try text(output, definition.created_at);
+    try output.writeAll("</dd></div><div><dt>Updated</dt><dd>");
+    try text(output, definition.updated_at);
+    try output.writeAll("</dd></div></dl><ol class=\"definition-list\">");
+    var stale = false;
+    for (definition.steps) |step| {
+        stale = stale or step.stale;
+        try output.writeAll("<li><strong>");
+        try text(output, step.label);
+        try output.writeAll("</strong>");
+        if (step.stale) try output.writeAll(" · stale Goal reference");
+        if (step.draft.predicates.len != 0) {
+            try output.writeAll("<ul class=\"definition-list\" aria-label=\"Step predicates\">");
+            for (step.draft.predicates) |predicate| {
+                try output.writeAll("<li><code>");
+                try text(output, predicate.property_name);
+                try output.writeAll("</code> · ");
+                try text(output, predicate.rule);
+                if (predicate.value.len != 0) {
+                    try output.writeAll(" · <code>");
+                    try text(output, predicate.value);
+                    try output.writeAll("</code>");
+                }
+                try output.writeAll("</li>");
+            }
+            try output.writeAll("</ul>");
+        }
+        try output.writeAll("</li>");
+    }
+    try output.writeAll("</ol>");
+    if (stale) try components.feedback(output, .{
+        .kind = .warning,
+        .message = "This funnel has an archived or unavailable Goal reference. Edit the step or reactivate the goal before previewing or running it.",
+    });
+    if (value.result != null) {
+        try output.writeAll(
+            "<p class=\"muted\">The compatibility result below preserves the" ++
+                " original sequential, Sessions, same-session report. #36 owns" ++
+                " the complete settings-aware funnel result.</p>",
+        );
+    } else {
+        try output.writeAll(
+            "<p class=\"muted\">Ordered conversion, drop-off, timing, and" ++
+                " comparison arrive with the dedicated funnel result. This page" ++
+                " does not infer them from selector counts.</p>",
+        );
+    }
+    try output.writeAll("<form method=\"post\" action=\"");
+    try output.writeAll(if (definition.archived)
+        "/admin/funnels/reactivate"
+    else
+        "/admin/funnels/archive");
+    try attribute(output, management.action_suffix);
+    try output.writeAll("\" hx-boost=\"true\" hx-sync=\"this:drop\">");
+    try formCommon(output, value);
+    try funnelIdentityFields(output, definition);
+    try output.writeAll("<button class=\"button-secondary\" type=\"submit\">");
+    try output.writeAll(if (definition.archived) "Reactivate" else "Archive");
+    try output.writeAll("</button></form></section>");
+}
+
+fn funnelIdentityFields(
+    output: *std.Io.Writer,
+    definition: model.FunnelDefinitionView,
+) !void {
+    try output.writeAll("<input type=\"hidden\" name=\"id\" value=\"");
+    try attribute(output, definition.id);
+    try output.print("\"><input type=\"hidden\" name=\"updated_at\" value=\"{d}\">", .{definition.updated_at_utc_micros});
+}
+
+fn selectedOption(
+    output: *std.Io.Writer,
+    value: []const u8,
+    label: []const u8,
+    selected: bool,
+) !void {
+    try output.writeAll("<option value=\"");
+    try attribute(output, value);
+    try output.writeAll("\"");
+    if (selected) try output.writeAll(" selected");
+    try output.writeAll(">");
+    try text(output, label);
+    try output.writeAll("</option>");
+}
+
+fn funnelWindowLabel(window: funnel_domain.Window) []const u8 {
+    return switch (window) {
+        .same_session => "same session",
+        .one_hour => "1 hour",
+        .one_day => "1 day",
+        .seven_days => "7 days",
+        .thirty_days => "30 days",
+    };
+}
+
+fn funnelManagement(output: *std.Io.Writer, value: model.Page) !void {
+    const management = value.funnel_management.?;
+    try output.writeAll(
+        "<nav class=\"management-actions\" aria-label=\"Funnel management\">" ++
+            "<a href=\"",
+    );
+    try attribute(output, management.list_url);
+    try output.writeAll("\"");
+    if (management.screen == .list) try output.writeAll(" aria-current=\"page\"");
+    try output.writeAll(">All funnels</a><a class=\"button\" href=\"");
+    try attribute(output, management.new_url);
+    try output.writeAll("\"");
+    if (management.screen == .new) try output.writeAll(" aria-current=\"page\"");
+    try output.writeAll(">New funnel</a></nav>");
+    if (management.filter_count != 0 or management.segment_name.len != 0) {
+        try output.writeAll("<p class=\"muted\">Selector availability uses ");
+        if (management.segment_name.len != 0) {
+            try output.writeAll("segment <strong>");
+            try text(output, management.segment_name);
+            try output.writeAll("</strong>");
+            if (management.filter_count != 0) try output.writeAll(" plus ");
+        }
+        if (management.filter_count != 0) {
+            try output.print("{d} ad-hoc filter(s)", .{management.filter_count});
+        }
+        try output.writeAll(" from the current analysis context.</p>");
+    }
+    switch (management.screen) {
+        .list => try funnelList(output, management),
+        .new, .edit => try funnelBuilder(output, value, management),
+        .detail => try funnelDetail(output, value, management),
+        .none => unreachable,
+    }
+}
+
+fn funnelList(
+    output: *std.Io.Writer,
+    management: model.FunnelManagement,
+) !void {
+    try output.writeAll("<section class=\"panel\"><h2>Funnels</h2>");
+    if (management.definitions.len == 0) {
+        try components.emptyState(output, .{
+            .id = "funnels-empty",
+            .title = "No funnels yet",
+            .message = "Build a two-to-eight-step Page, Event, or Goal sequence without writing selector syntax.",
+        });
+    } else {
+        try output.writeAll(
+            "<div class=\"table-scroll mobile-records\"><table>" ++
+                "<caption>Funnel definitions</caption><thead><tr>" ++
+                "<th scope=\"col\">Funnel</th><th scope=\"col\">State</th>" ++
+                "<th scope=\"col\">Steps</th><th scope=\"col\">Settings</th>" ++
+                "<th scope=\"col\">Updated</th></tr></thead><tbody>",
+        );
+        for (management.definitions) |definition| {
+            try output.writeAll("<tr><th scope=\"row\" data-label=\"Funnel\"><a href=\"");
+            try attribute(output, definition.detail_url);
+            try output.writeAll("\">");
+            try text(output, definition.name);
+            try output.writeAll("</a></th><td data-label=\"State\">");
+            try output.writeAll(if (definition.archived) "Archived" else "Active");
+            try output.print("</td><td data-label=\"Steps\">{d}</td><td data-label=\"Settings\">", .{definition.steps.len});
+            try text(output, @tagName(definition.order));
+            try output.writeAll(" · ");
+            try text(output, @tagName(definition.scope));
+            try output.writeAll(" · ");
+            try text(output, funnelWindowLabel(definition.window));
+            try output.writeAll("</td><td data-label=\"Updated\">");
+            try text(output, definition.updated_at);
+            try output.writeAll("</td></tr>");
+        }
+        try output.writeAll("</tbody></table></div><nav aria-label=\"Funnel pages\">");
+        if (management.previous_definitions_url) |previous| {
+            try output.writeAll("<a rel=\"prev\" href=\"");
+            try attribute(output, previous);
+            try output.writeAll("\">Previous</a>");
+        }
+        if (management.next_definitions_url) |next| {
+            try output.writeAll("<a rel=\"next\" href=\"");
+            try attribute(output, next);
+            try output.writeAll("\">Next</a>");
+        }
+        try output.writeAll("</nav>");
+    }
+    try output.writeAll("</section>");
 }
 
 fn goalManagement(output: *std.Io.Writer, value: model.Page) !void {
@@ -3488,43 +3919,37 @@ fn goalSelectorLabel(goal: model.GoalDefinitionView) []const u8 {
 }
 
 fn definitions(output: *std.Io.Writer, value: model.Page) !void {
-    try output.writeAll("<details class=\"management\"");
-    if (value.form_error.len != 0 or value.notice.len != 0) {
-        try output.writeAll(" open");
-    }
     try output.print(
-        "><summary><span>Funnel definitions</span><span class=\"muted\">{d} funnels</span></summary>" ++
-            "<section class=\"panel\"><p><a href=\"",
+        "<details class=\"management\"><summary><span>Funnel definitions</span>" ++
+            "<span class=\"muted\">{d} funnels</span></summary><section class=\"panel\">" ++
+            "<h2>Funnels</h2><ul class=\"definition-list\">",
         .{value.funnels.len},
     );
-    var goal_query = value.query;
-    goal_query.kind = .goal;
-    goal_query.subject = "";
-    goal_query.goal_screen = .list;
-    goal_query.goal_id = "";
-    try canonicalUrl(output, .journeys, goal_query, 1);
-    try output.writeAll("\">Manage goals</a></p><h2>Funnels</h2><ul class=\"definition-list\">");
     for (value.funnels) |funnel| {
-        try output.writeAll("<li><strong>");
+        var detail_query = value.query;
+        detail_query.kind = .funnel;
+        detail_query.subject = "";
+        detail_query.funnel_screen = .detail;
+        detail_query.funnel_id = funnel.id;
+        detail_query.funnel_page = 1;
+        try output.writeAll("<li><a href=\"");
+        try canonicalUrl(output, .journeys, detail_query, 1);
+        try output.writeAll("\"><strong>");
         try text(output, funnel.name);
-        try output.print("</strong> <span class=\"muted\">{d} steps</span> ", .{
+        try output.print("</strong></a> <span class=\"muted\">{d} steps</span></li>", .{
             funnel.step_count,
         });
-        try deleteForm(output, "/admin/funnels/delete", value, funnel.name);
-        try output.writeAll("</li>");
     }
     if (value.funnels.len == 0) try output.writeAll("<li>No funnels yet.</li>");
-    try output.writeAll("</ul><h3>Add funnel</h3><form method=\"post\" action=\"/admin/funnels\" hx-boost=\"true\" hx-sync=\"this:drop\">");
-    try formCommon(output, value);
-    try output.writeAll("<label>Name<input name=\"name\" maxlength=\"120\" required");
-    try formErrorAttributes(output, value, .funnel);
-    try output.writeAll(" value=\"");
-    try attribute(output, value.funnel_draft.name);
-    try output.writeAll("\"></label><label>Steps, one <code>kind=value</code> per line<textarea name=\"steps\" maxlength=\"8192\" required");
-    try formErrorAttributes(output, value, .funnel);
-    try output.writeAll(">");
-    try text(output, value.funnel_draft.steps);
-    try output.writeAll("</textarea></label><button type=\"submit\">Add funnel</button></form></section></details>");
+    var list_query = value.query;
+    list_query.kind = .funnel;
+    list_query.subject = "";
+    list_query.funnel_screen = .list;
+    list_query.funnel_id = "";
+    list_query.funnel_page = 1;
+    try output.writeAll("</ul><p><a class=\"button\" href=\"");
+    try canonicalUrl(output, .journeys, list_query, 1);
+    try output.writeAll("\">Manage funnels</a></p></section></details>");
 }
 
 fn selfExclusions(output: *std.Io.Writer, value: model.Page) !void {
@@ -3749,6 +4174,9 @@ fn queryUrl(
     adjusted.goal_page = 1;
     adjusted.goal_search = "";
     adjusted.goal_entity_page = 1;
+    adjusted.funnel_screen = .none;
+    adjusted.funnel_id = "";
+    adjusted.funnel_page = 1;
     adjusted.page = page_number;
     if (kind.isList()) {
         adjusted.comparison = .none;
@@ -3879,13 +4307,11 @@ fn canonicalUrlSeparated(
         } else {
             try urlComponent(output, adjusted.overview_metric.name());
         }
-        const suffix = try analysis.canonicalFilterUrlSuffix(
-            std.heap.page_allocator,
-            adjusted.analysis_segment_id,
-            adjusted.analysis_filters,
+        var parts = std.mem.splitScalar(
+            u8,
+            adjusted.canonical_filter_suffix,
+            '&',
         );
-        defer std.heap.page_allocator.free(suffix);
-        var parts = std.mem.splitScalar(u8, suffix, '&');
         while (parts.next()) |part| {
             if (part.len == 0) continue;
             try output.writeAll(separator);
@@ -4000,6 +4426,11 @@ fn canonicalUrlSeparated(
                     try output.print("entity-page={d}", .{adjusted.goal_entity_page});
                 }
             }
+        } else if (adjusted.funnel_screen != .none) {
+            if (adjusted.funnel_screen == .list and adjusted.funnel_page != 1) {
+                try output.writeAll(separator);
+                try output.print("funnel-page={d}", .{adjusted.funnel_page});
+            }
         } else if (adjusted.subject.len != 0) {
             try output.writeAll(separator);
             try output.writeAll("subject=");
@@ -4023,14 +4454,14 @@ fn canonicalUrlSeparated(
         },
         .sessions, .settings => {},
     }
-    if (destination == .journeys and adjusted.goal_screen != .none) {
-        const suffix = try analysis.canonicalFilterUrlSuffix(
-            std.heap.page_allocator,
-            adjusted.analysis_segment_id,
-            adjusted.analysis_filters,
+    if (destination == .journeys and
+        (adjusted.goal_screen != .none or adjusted.funnel_screen != .none))
+    {
+        var parts = std.mem.splitScalar(
+            u8,
+            adjusted.canonical_filter_suffix,
+            '&',
         );
-        defer std.heap.page_allocator.free(suffix);
-        var parts = std.mem.splitScalar(u8, suffix, '&');
         while (parts.next()) |part| {
             if (part.len == 0) continue;
             try output.writeAll(separator);
@@ -4061,6 +4492,17 @@ fn canonicalPath(
         .analyze => try output.writeAll("/analyze"),
         .journeys => if (query.kind == .funnel) {
             try output.writeAll("/journeys/funnels");
+            switch (query.funnel_screen) {
+                .none, .list => {},
+                .new => try output.writeAll("/new"),
+                .detail, .edit => {
+                    try output.writeByte('/');
+                    try output.writeAll(query.funnel_id);
+                    if (query.funnel_screen == .edit) {
+                        try output.writeAll("/edit");
+                    }
+                },
+            }
         } else {
             try output.writeAll("/journeys/goals");
             switch (query.goal_screen) {
@@ -4361,5 +4803,5 @@ test "production stylesheet mirrors the approved accessible design tokens" {
 
     try std.testing.expect(std.mem.indexOf(u8, stylesheet, "@import") == null);
     try std.testing.expect(std.mem.indexOf(u8, stylesheet, "url(") == null);
-    try std.testing.expectEqualStrings("/admin/app.v12.css", stylesheet_path);
+    try std.testing.expectEqualStrings("/admin/app.v13.css", stylesheet_path);
 }

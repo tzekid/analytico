@@ -1321,6 +1321,54 @@ pub const GoalPreviewResult = struct {
     properties: PropertyCatalog,
 };
 
+pub const FunnelAvailabilityRequest = struct {
+    site_id: []const u8,
+    range: LocalDateRange,
+    selectors: []const EventSelector,
+    filters: FilterSet = .{},
+    active_goals: []const ResolvedGoal = &.{},
+    strict_traffic_mode: bool = false,
+    timeout_ms: u32 = maximum_timeout_ms,
+
+    pub fn validate(self: FunnelAvailabilityRequest) !void {
+        try domain.validateUuid(self.site_id);
+        try self.range.validate();
+        if (self.selectors.len < 2 or self.selectors.len > 8) {
+            return error.InvalidFunnelLength;
+        }
+        for (self.selectors) |selector| {
+            try selector.validate();
+            if (selector.kind == .saved_goal) return error.UnresolvedGoalSelector;
+        }
+        try self.filters.validate();
+        if (self.timeout_ms == 0 or self.timeout_ms > maximum_timeout_ms) {
+            return error.InvalidAnalysisTimeout;
+        }
+        try validateActiveGoals(self.active_goals);
+    }
+
+    pub fn execution(self: FunnelAvailabilityRequest) Execution {
+        return .{
+            .query = .{
+                .site_id = self.site_id,
+                .range = self.range,
+                .mode = .breakdown,
+                .metric = .{ .kind = .page_views },
+                .dimension = .{ .kind = .page },
+                .filters = self.filters,
+            },
+            .active_goals = self.active_goals,
+            .strict_traffic_mode = self.strict_traffic_mode,
+            .timeout_ms = self.timeout_ms,
+        };
+    }
+};
+
+pub const FunnelAvailabilityRow = struct {
+    step_index: u8,
+    matching_events: i64,
+};
+
 pub const BreakdownPageResult = struct {
     breakdown: BreakdownResult,
     properties: PropertyCatalog,

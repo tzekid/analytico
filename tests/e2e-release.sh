@@ -56,7 +56,7 @@ data="$fixture/data"
 "$release_binary" event add "$data" release pageview / \
     1785456000000000 2026-07-31 203.0.113.1 Chrome Linux desktop >/dev/null
 test "$("$release_binary" doctor "$data")" = \
-    "ok metadata=v9 events=v7 sites=1 goals=0 funnels=0 stored_events=1 key=ok"
+    "ok metadata=v10 events=v7 sites=1 goals=0 funnels=0 stored_events=1 key=ok"
 report=$("$release_binary" report "$data" release 2026-07-31 2026-07-31 \
     overview --format json)
 test "$report" = \
@@ -77,6 +77,7 @@ if [[ ${3:-} == "--full" ]]; then
         tests/e2e-m7.sh \
         tests/e2e-filters.sh \
         tests/e2e-goals.sh \
+        tests/e2e-funnels.sh \
         tests/e2e-passkey-p1.sh
     do
         printf 'running full release gate: %s\n' "$gate"
@@ -93,6 +94,8 @@ if [[ ${3:-} == "--full" ]]; then
         tests/e2e-metadata8-migration.sh
     bash scripts/run-metadata8-gate.sh "$release_binary" \
         tests/e2e-metadata9-migration.sh
+    bash scripts/run-metadata9-gate.sh "$release_binary" \
+        tests/e2e-metadata10-migration.sh
 fi
 
 echo "release archive checksum, linkage, proxy, and fresh-data checks passed"

@@ -129,7 +129,7 @@ test "$(sqlite3 "$partial/meta.db" 'SELECT count(*) FROM goal_definitions;')" = 
 partial_backup="$fixture/partial-backup"
 "$current" backup "$partial" "$partial_backup" >/dev/null
 test "$("$current" migrate "$partial" "$partial_backup")" = \
-    "migrated metadata=v9 events=v7"
+    "migrated metadata=v10 events=v7"
 test "$(sqlite3 "$partial/meta.db" 'SELECT count(*) FROM goal_definitions_v2;')" = 2
 sqlite3 -separator '|' "$partial/meta.db" \
     'SELECT id, site_id, name, match_kind, match_value, created_at_utc_micros, updated_at_utc_micros, archived_at_utc_micros FROM goal_definitions_v2 ORDER BY id;' \
@@ -150,7 +150,7 @@ test "$(sqlite3 "$after_drop/meta.db" \
 after_drop_backup="$fixture/after-drop-backup"
 "$current" backup "$after_drop" "$after_drop_backup" >/dev/null
 test "$("$current" migrate "$after_drop" "$after_drop_backup")" = \
-    "migrated metadata=v9 events=v7"
+    "migrated metadata=v10 events=v7"
 test "$(sqlite3 "$after_drop/meta.db" \
     "SELECT count(*) FROM meta_migrations WHERE version=8 AND name='guided-goal-lifecycle';")" = 1
 test "$(sqlite3 "$after_drop/meta.db" \
@@ -180,9 +180,9 @@ test "$(sqlite3 "$corrupt/meta.db" \
     "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='goals';")" = 1
 
 test "$("$current" migrate "$live" "$backup")" = \
-    "migrated metadata=v9 events=v7"
+    "migrated metadata=v10 events=v7"
 test "$("$current" doctor "$live")" = \
-    "ok metadata=v9 events=v7 sites=1 goals=2 funnels=0 stored_events=14 key=ok"
+    "ok metadata=v10 events=v7 sites=1 goals=2 funnels=0 stored_events=14 key=ok"
 sqlite3 -separator '|' "$live/meta.db" \
     'SELECT id, site_id, name, match_kind, match_value, created_at_utc_micros FROM goal_definitions_v2 ORDER BY id;' \
     >"$fixture/after-goals.txt"
@@ -197,7 +197,7 @@ test "$(sha256sum "$live/events.duckdb" | cut -d' ' -f1)" = "$before_event_sha"
 test "$("$current" report "$live" migration 2025-01-01 2025-01-02 \
     overview --format json)" = "$before_v1"
 test "$(metric_v2_semantics "$current" "$live")" = "$before_v2"
-test "$("$current" migrate "$live")" = "migrated metadata=v9 events=v7"
+test "$("$current" migrate "$live")" = "migrated metadata=v10 events=v7"
 if "$previous" doctor "$live" >/dev/null 2>&1; then
     echo "metadata-7 predecessor unexpectedly opened metadata 8" >&2
     exit 1
@@ -230,7 +230,7 @@ sqlite3 -separator '|' "$overflow/meta.db" \
 overflow_backup="$fixture/overflow-backup"
 "$current" backup "$overflow" "$overflow_backup" >/dev/null
 test "$("$current" migrate "$overflow" "$overflow_backup")" = \
-    "migrated metadata=v9 events=v7"
+    "migrated metadata=v10 events=v7"
 test "$(sqlite3 "$overflow/meta.db" \
     'SELECT count(*) FROM goal_definitions_v2 WHERE archived_at_utc_micros IS NULL;')" = 34
 sqlite3 -separator '|' "$overflow/meta.db" \
@@ -275,10 +275,10 @@ test "$("$previous" report "$rolled_back" migration 2025-01-01 2025-01-02 \
 
 fresh="$fixture/fresh"
 "$current" init "$fresh" >/dev/null
-test "$(sqlite3 "$fresh/meta.db" 'SELECT max(version) FROM meta_migrations;')" = 9
+test "$(sqlite3 "$fresh/meta.db" 'SELECT max(version) FROM meta_migrations;')" = 10
 test "$(sqlite3 "$fresh/meta.db" \
     "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='goal_definitions_v2';")" = 1
 test "$(sqlite3 "$fresh/meta.db" \
     "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='goals';")" = 0
 
-printf 'metadata8_migration_e2e=pass predecessor=54f49ed309638da04eb1cd3fd67652832727068a metadata=7-to-9 events=7 rows=preserved saved_views=preserved reports=v1+v2 interruption=partial-copy replay=idempotent overflow=34-preserved+analysis-blocked+mutations-recovered rollback=matched-pair\n'
+printf 'metadata8_migration_e2e=pass predecessor=54f49ed309638da04eb1cd3fd67652832727068a metadata=7-to-10 events=7 rows=preserved saved_views=preserved reports=v1+v2 interruption=partial-copy replay=idempotent overflow=34-preserved+analysis-blocked+mutations-recovered rollback=matched-pair\n'

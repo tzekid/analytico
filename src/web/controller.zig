@@ -3,6 +3,7 @@ const analysis = @import("../analysis.zig");
 const calendar = @import("../calendar.zig");
 const diagnostics = @import("../diagnostics.zig");
 const domain = @import("../domain.zig");
+const funnel = @import("../funnel.zig");
 const report = @import("../report.zig");
 const timezone = @import("../timezone.zig");
 const events = @import("../store/events.zig");
@@ -33,6 +34,13 @@ pub const Form = struct {
         body: []const u8,
     ) !Form {
         return parseBounded(allocator, body, 8 * 1024, 32);
+    }
+
+    pub fn parseFunnel(
+        allocator: std.mem.Allocator,
+        body: []const u8,
+    ) !Form {
+        return parseBounded(allocator, body, 64 * 1024, 128);
     }
 
     fn parseBounded(
@@ -692,6 +700,8 @@ pub const ParsedQuery = struct {
     goal_entity_page: u32 = 1,
     goal_fields_set: bool = false,
     goal_entity_set: bool = false,
+    funnel_page: u32 = 1,
+    funnel_fields_set: bool = false,
 };
 
 pub fn parseQuery(
@@ -824,6 +834,13 @@ pub fn parseQuery(
             {
                 return error.InvalidGoalDiscoveryPage;
             }
+        } else if (std.mem.eql(u8, name, "funnel-page")) {
+            query.funnel_fields_set = true;
+            query.funnel_page = std.fmt.parseInt(u32, value, 10) catch
+                return error.InvalidFunnelPage;
+            if (query.funnel_page == 0 or query.funnel_page > 1_000_000) {
+                return error.InvalidFunnelPage;
+            }
         } else {
             return error.UnknownQueryField;
         }
@@ -842,19 +859,47 @@ pub fn parseGoalActionContext(
     allocator: std.mem.Allocator,
     target: []const u8,
 ) !GoalActionContext {
+    return parseAnalysisActionContext(allocator, target, .goal) catch |err| {
+        return switch (err) {
+            error.InvalidAnalysisActionContext => error.InvalidGoalActionContext,
+            error.NonCanonicalAnalysisActionContext => error.NonCanonicalGoalActionContext,
+            else => err,
+        };
+    };
+}
+
+pub fn parseFunnelActionContext(
+    allocator: std.mem.Allocator,
+    target: []const u8,
+) !GoalActionContext {
+    return parseAnalysisActionContext(allocator, target, .funnel) catch |err| {
+        return switch (err) {
+            error.InvalidAnalysisActionContext => error.InvalidFunnelActionContext,
+            error.NonCanonicalAnalysisActionContext => error.NonCanonicalFunnelActionContext,
+            else => err,
+        };
+    };
+}
+
+fn parseAnalysisActionContext(
+    allocator: std.mem.Allocator,
+    target: []const u8,
+    expected_kind: report.Kind,
+) !GoalActionContext {
     const marker = std.mem.findScalar(u8, target, '?') orelse return .{};
     const encoded = target[marker + 1 ..];
-    if (encoded.len == 0) return error.InvalidGoalActionContext;
-    const parsed = try parseQuery(allocator, target, .goal);
+    if (encoded.len == 0) return error.InvalidAnalysisActionContext;
+    const parsed = try parseQuery(allocator, target, expected_kind);
     if (parsed.site.len != 0 or parsed.from != null or parsed.to != null or
         parsed.comparison != null or parsed.notice.len != 0 or
-        parsed.report_set or parsed.kind != .goal or parsed.subject.len != 0 or
+        parsed.report_set or parsed.kind != expected_kind or
+        parsed.subject.len != 0 or
         parsed.campaign_dimension != .all or parsed.sort != .count or
         parsed.limit != report.default_limit or parsed.page != 1 or
         parsed.overview_selection_set or parsed.highlighted_interval.len != 0 or
-        parsed.goal_fields_set)
+        parsed.goal_fields_set or parsed.funnel_fields_set)
     {
-        return error.InvalidGoalActionContext;
+        return error.InvalidAnalysisActionContext;
     }
     const canonical = try analysis.canonicalFilterUrlSuffix(
         allocator,
@@ -863,7 +908,7 @@ pub fn parseGoalActionContext(
     );
     defer allocator.free(canonical);
     if (!std.mem.eql(u8, encoded, canonical)) {
-        return error.NonCanonicalGoalActionContext;
+        return error.NonCanonicalAnalysisActionContext;
     }
     return .{ .filters = parsed.filters, .segment_id = parsed.segment_id };
 }
@@ -920,6 +965,7 @@ pub fn finishQuery(
         .goal_search = parsed.goal_search,
         .goal_entity_page = parsed.goal_entity_page,
         .goal_entity_set = parsed.goal_entity_set,
+        .funnel_page = parsed.funnel_page,
     };
     try validateQuery(query);
     return query;
@@ -1465,6 +1511,11 @@ pub fn loadPage(
     query.site = selected.slug;
     query.analysis_site_id = selected.id;
     try validateQuery(query);
+    query.canonical_filter_suffix = try analysis.canonicalFilterUrlSuffix(
+        allocator,
+        query.analysis_segment_id,
+        query.analysis_filters,
+    );
     if (query.highlighted_interval.len != 0) {
         try validateGeneratedOverviewHighlight(
             allocator,
@@ -1475,9 +1526,13 @@ pub fn loadPage(
     }
 
     const goals = try metadata.listGoals(allocator, selected.slug);
-    const funnels = try metadata.listFunnels(allocator, selected.slug);
+    const funnels = if (query.funnel_screen == .none)
+        try metadata.listFunnels(allocator, selected.slug)
+    else
+        &.{};
     const collection_policy = try metadata.sitePolicy(allocator, selected.id);
-    const has_analysis_context = destination == .overview or query.goal_screen != .none;
+    const has_analysis_context = destination == .overview or
+        query.goal_screen != .none or query.funnel_screen != .none;
     const segments: []const meta.Segment = if (destination == .overview)
         try metadata.listSegments(allocator, selected.slug)
     else
@@ -1626,6 +1681,70 @@ pub fn loadPage(
         };
         if (query.goal_screen == .detail) query.subject = selected_definition.?.name;
     }
+    var funnel_management: ?model.FunnelManagement = null;
+    var selected_funnel_definition: ?meta.Funnel = null;
+    if (query.funnel_screen != .none) {
+        const definitions = if (query.funnel_screen == .list)
+            try metadata.listFunnelDefinitions(
+                allocator,
+                selected.slug,
+                query.funnel_page,
+            )
+        else
+            meta.FunnelPage{ .funnels = &.{}, .has_more = false };
+        selected_funnel_definition = switch (query.funnel_screen) {
+            .detail, .edit => try metadata.funnelById(
+                allocator,
+                selected.slug,
+                query.funnel_id,
+            ),
+            .none, .list, .new => null,
+        };
+        const selected_view = if (selected_funnel_definition) |definition|
+            try funnelDefinitionView(allocator, query, definition, goals)
+        else
+            null;
+        funnel_management = .{
+            .screen = query.funnel_screen,
+            .definitions = try funnelDefinitionViews(
+                allocator,
+                query,
+                definitions.funnels,
+                goals,
+            ),
+            .selected = selected_view,
+            .draft_steps = if (selected_view) |view|
+                view.steps
+            else if (query.funnel_screen == .new)
+                try defaultFunnelStepViews(allocator)
+            else
+                &.{},
+            .goals = try goalDefinitionViews(allocator, query, goals),
+            .filter_count = query.analysis_filters.clauses.len,
+            .segment_name = resolved_filters.segment_name,
+            .list_url = try funnelManagementUrl(allocator, query, .list, ""),
+            .new_url = try funnelManagementUrl(allocator, query, .new, ""),
+            .create_action_url = try funnelActionUrl(allocator, query, false),
+            .edit_action_url = try funnelActionUrl(allocator, query, true),
+            .action_suffix = try goalActionSuffix(allocator, query),
+            .previous_definitions_url = if (query.funnel_page > 1)
+                try funnelDefinitionsPageUrl(
+                    allocator,
+                    query,
+                    query.funnel_page - 1,
+                )
+            else
+                null,
+            .next_definitions_url = if (definitions.has_more)
+                try funnelDefinitionsPageUrl(
+                    allocator,
+                    query,
+                    query.funnel_page + 1,
+                )
+            else
+                null,
+        };
+    }
     const state = if (destination == .overview)
         try analysisState(allocator, destination, query)
     else
@@ -1643,7 +1762,9 @@ pub fn loadPage(
     {
         query.subject = goals[0].name;
     }
-    if (query.kind == .funnel and query.subject.len == 0 and funnels.len != 0) {
+    if (query.funnel_screen == .none and query.kind == .funnel and
+        query.subject.len == 0 and funnels.len != 0)
+    {
         query.subject = funnels[0].name;
     }
 
@@ -1652,11 +1773,31 @@ pub fn loadPage(
         try metadata.goalByName(allocator, selected.slug, query.subject)
     else
         null;
-    const selected_steps: ?[]const meta.FunnelStep = if (query.kind == .funnel and
-        query.subject.len != 0)
-        try metadata.funnelSteps(allocator, selected.slug, query.subject)
-    else
-        null;
+    const selected_steps: ?[]const meta.FunnelStep = value: {
+        if (query.kind != .funnel) break :value null;
+        if (query.funnel_screen == .none and query.subject.len != 0) {
+            break :value try metadata.funnelSteps(
+                allocator,
+                selected.slug,
+                query.subject,
+            );
+        }
+        if (query.funnel_screen == .detail) {
+            const definition = selected_funnel_definition orelse
+                break :value null;
+            const compatible = metadata.funnelSteps(
+                allocator,
+                selected.slug,
+                definition.name,
+            ) catch |err| switch (err) {
+                error.UnsupportedLegacyFunnel, error.FunnelArchived => break :value null,
+                else => return err,
+            };
+            query.subject = definition.name;
+            break :value compatible;
+        }
+        break :value null;
+    };
     const has_subject = switch (query.kind) {
         .goal => selected_goal != null,
         .funnel => selected_steps != null,
@@ -1678,7 +1819,9 @@ pub fn loadPage(
     };
     const result: ?report.Result = if (destination.runsReport() and
         destination != .overview and has_subject and
-        (query.kind != .goal or query.goal_screen == .none))
+        (query.kind != .goal or query.goal_screen == .none) and
+        (query.kind != .funnel or query.funnel_screen == .none or
+            query.funnel_screen == .detail))
         try reports.runWithTimeout(
             allocator,
             event_store,
@@ -1777,6 +1920,7 @@ pub fn loadPage(
         .overview_kpis = overview_kpis,
         .overview_details = overview_details,
         .goal_management = goal_management,
+        .funnel_management = funnel_management,
         .goals = goals,
         .funnels = funnels,
         .selected_segment_name = resolved_filters.segment_name,
@@ -3043,6 +3187,229 @@ fn goalEntitiesPageUrl(
     return output.toOwnedSlice();
 }
 
+fn funnelDefinitionViews(
+    allocator: std.mem.Allocator,
+    query: model.Query,
+    definitions: []const meta.Funnel,
+    goals: []const meta.Goal,
+) ![]const model.FunnelDefinitionView {
+    const result = try allocator.alloc(model.FunnelDefinitionView, definitions.len);
+    for (result, definitions) |*target, definition| {
+        target.* = try funnelDefinitionView(allocator, query, definition, goals);
+    }
+    return result;
+}
+
+fn funnelDefinitionView(
+    allocator: std.mem.Allocator,
+    query: model.Query,
+    definition: meta.Funnel,
+    goals: []const meta.Goal,
+) !model.FunnelDefinitionView {
+    return .{
+        .id = definition.id,
+        .name = definition.name,
+        .order = definition.definition.order,
+        .scope = definition.definition.scope,
+        .window = definition.definition.window,
+        .steps = try funnelStepViews(
+            allocator,
+            definition.definition.steps,
+            goals,
+            null,
+        ),
+        .archived = definition.archived_at_utc_micros != null,
+        .created_at = try formatUtcMicros(
+            allocator,
+            definition.created_at_utc_micros,
+        ),
+        .updated_at = try formatUtcMicros(
+            allocator,
+            definition.updated_at_utc_micros,
+        ),
+        .updated_at_utc_micros = definition.updated_at_utc_micros,
+        .detail_url = try funnelManagementUrl(
+            allocator,
+            query,
+            .detail,
+            definition.id,
+        ),
+        .edit_url = try funnelManagementUrl(
+            allocator,
+            query,
+            .edit,
+            definition.id,
+        ),
+    };
+}
+
+fn funnelStepViews(
+    allocator: std.mem.Allocator,
+    steps: []const funnel.Step,
+    goals: []const meta.Goal,
+    availability: ?[]const analysis.FunnelAvailabilityRow,
+) ![]const model.FunnelStepView {
+    if (availability) |rows| if (rows.len != steps.len) {
+        return error.InvalidFunnelAvailability;
+    };
+    const result = try allocator.alloc(model.FunnelStepView, steps.len);
+    for (result, steps, 0..) |*target, step, index| {
+        const matching = if (availability) |rows| value: {
+            if (rows[index].step_index != @as(u8, @intCast(index))) {
+                return error.InvalidFunnelAvailability;
+            }
+            break :value rows[index].matching_events;
+        } else null;
+        target.* = switch (step) {
+            .direct => |direct| .{
+                .index = index,
+                .draft = .{
+                    .kind = direct.selector.kind,
+                    .value = direct.selector.value,
+                    .predicates = try funnelPredicateDrafts(
+                        allocator,
+                        direct.selector.predicates,
+                    ),
+                },
+                .label = try std.fmt.allocPrint(
+                    allocator,
+                    "{s} · {s}",
+                    .{ direct.selector.kind.name(), direct.selector.value },
+                ),
+                .matching_events = matching,
+            },
+            .goal => |goal_id| value: {
+                const goal = goalById(goals, goal_id);
+                break :value .{
+                    .index = index,
+                    .draft = .{ .kind = .saved_goal, .goal_id = goal_id },
+                    .label = if (goal) |resolved|
+                        try std.fmt.allocPrint(
+                            allocator,
+                            "Goal · {s}",
+                            .{resolved.name},
+                        )
+                    else
+                        try std.fmt.allocPrint(
+                            allocator,
+                            "Unavailable goal · {s}",
+                            .{goal_id},
+                        ),
+                    .stale = goal == null,
+                    .matching_events = matching,
+                };
+            },
+        };
+    }
+    return result;
+}
+
+fn funnelPredicateDrafts(
+    allocator: std.mem.Allocator,
+    predicates: []const analysis.PropertyPredicate,
+) ![]const model.GoalPredicateDraft {
+    const result = try allocator.alloc(model.GoalPredicateDraft, predicates.len);
+    for (result, predicates) |*target, predicate| target.* = .{
+        .property_name = predicate.property_ref.name,
+        .rule = try std.fmt.allocPrint(
+            allocator,
+            "{s}:{s}",
+            .{
+                predicate.property_ref.scalar_type.name(),
+                predicate.operator.name(),
+            },
+        ),
+        .value = if (predicate.values.len == 0) "" else predicate.values[0],
+    };
+    return result;
+}
+
+fn defaultFunnelStepViews(
+    allocator: std.mem.Allocator,
+) ![]const model.FunnelStepView {
+    const steps = [_]funnel.Step{
+        .{ .direct = .{ .selector = .{
+            .kind = .exact_page,
+            .value = "/",
+        } } },
+        .{ .direct = .{ .selector = .{
+            .kind = .exact_event,
+            .value = "signup",
+        } } },
+    };
+    return funnelStepViews(allocator, &steps, &.{}, null);
+}
+
+fn funnelManagementUrl(
+    allocator: std.mem.Allocator,
+    query: model.Query,
+    screen: model.FunnelScreen,
+    funnel_id: []const u8,
+) ![]const u8 {
+    var output = std.Io.Writer.Allocating.init(allocator);
+    errdefer output.deinit();
+    try output.writer.print(
+        "/admin/sites/{s}/journeys/funnels",
+        .{query.site},
+    );
+    switch (screen) {
+        .none, .list => {},
+        .new => try output.writer.writeAll("/new"),
+        .detail, .edit => {
+            try domain.validateUuid(funnel_id);
+            try output.writer.print("/{s}", .{funnel_id});
+            if (screen == .edit) try output.writer.writeAll("/edit");
+        },
+    }
+    try output.writer.print(
+        "?from={s}&to={s}&compare={s}",
+        .{ query.range.start, query.range.end, query.comparison.name() },
+    );
+    try appendGoalFilterSuffix(&output.writer, allocator, query);
+    return output.toOwnedSlice();
+}
+
+fn funnelActionUrl(
+    allocator: std.mem.Allocator,
+    query: model.Query,
+    edit: bool,
+) ![]const u8 {
+    var output = std.Io.Writer.Allocating.init(allocator);
+    errdefer output.deinit();
+    try output.writer.writeAll(if (edit)
+        "/admin/funnels/edit"
+    else
+        "/admin/funnels");
+    const suffix = try analysis.canonicalFilterUrlSuffix(
+        allocator,
+        query.analysis_segment_id,
+        query.analysis_filters,
+    );
+    defer allocator.free(suffix);
+    if (suffix.len != 0) {
+        try output.writer.writeByte('?');
+        try output.writer.writeAll(suffix);
+    }
+    return output.toOwnedSlice();
+}
+
+fn funnelDefinitionsPageUrl(
+    allocator: std.mem.Allocator,
+    query: model.Query,
+    page: u32,
+) ![]const u8 {
+    if (page == 0 or page > 1_000_000) return error.InvalidFunnelPage;
+    var output = std.Io.Writer.Allocating.init(allocator);
+    errdefer output.deinit();
+    try output.writer.print(
+        "/admin/sites/{s}/journeys/funnels?from={s}&to={s}&compare={s}",
+        .{ query.site, query.range.start, query.range.end, query.comparison.name() },
+    );
+    if (page != 1) try output.writer.print("&funnel-page={d}", .{page});
+    try appendGoalFilterSuffix(&output.writer, allocator, query);
+    return output.toOwnedSlice();
+}
+
 fn goalUrlComponent(output: *std.Io.Writer, value: []const u8) !void {
     const hex = "0123456789ABCDEF";
     for (value) |byte| {
@@ -3705,55 +4072,542 @@ pub fn goalDraftFromForm(
     };
 }
 
+pub const FunnelSubmission = struct {
+    draft: model.FunnelDraft,
+    steps: []const model.FunnelStepView,
+    previewed: bool,
+};
+
+const FunnelIntent = union(enum) {
+    add_step,
+    remove_step: usize,
+    move_up: usize,
+    move_down: usize,
+    refresh,
+    preview,
+    save,
+};
+
 pub fn addFunnel(
     allocator: std.mem.Allocator,
     io: std.Io,
     metadata: *meta.Store,
+    event_store: *events.Store,
     form: Form,
+    action_context: GoalActionContext,
     now_micros: i64,
-) !void {
+    report_timeout_ms: u32,
+) !?FunnelSubmission {
     const site = try form.required("site");
-    const name = try form.required("name");
-    const encoded_steps = try form.required("steps");
     try domain.validateSlug(site);
-    var steps: std.ArrayList(meta.FunnelStepInput) = .empty;
-    var lines = std.mem.splitScalar(u8, encoded_steps, '\n');
-    while (lines.next()) |raw_line| {
-        const line = std.mem.trim(u8, raw_line, " \t\r");
-        if (line.len == 0) continue;
-        if (steps.items.len >= 8) return error.InvalidFunnelLength;
-        const kind_text, const value = std.mem.cutScalar(u8, line, '=') orelse
-            return error.InvalidFunnelStep;
-        const trimmed_kind = std.mem.trim(u8, kind_text, " \t");
-        const trimmed_value = std.mem.trim(u8, value, " \t");
-        try steps.append(allocator, .{
-            .name = trimmed_value,
-            .match_kind = try domain.MatchKind.parse(trimmed_kind),
-            .match_value = trimmed_value,
-        });
+    var draft = try funnelDraftFromForm(allocator, form);
+    const intent = try funnelIntent(form);
+    if (try applyFunnelDraftIntent(allocator, &draft, intent)) {
+        const active_goals = try metadata.listGoals(allocator, site);
+        return .{
+            .draft = draft,
+            .steps = try funnelDraftStepViews(
+                allocator,
+                draft.steps,
+                active_goals,
+                null,
+            ),
+            .previewed = false,
+        };
     }
-    if (steps.items.len < 2) return error.InvalidFunnelLength;
+    try domain.validateName(draft.name, 120);
+    const definition = try funnelDefinitionFromDraft(allocator, draft);
+    const availability = try evaluateFunnelAvailability(
+        allocator,
+        metadata,
+        event_store,
+        site,
+        try formContext(form),
+        action_context,
+        definition,
+        report_timeout_ms,
+    );
+    const active_goals = try metadata.listGoals(allocator, site);
+    if (switch (intent) {
+        .preview => true,
+        else => false,
+    }) return .{
+        .draft = draft,
+        .steps = try funnelDraftStepViews(
+            allocator,
+            draft.steps,
+            active_goals,
+            availability,
+        ),
+        .previewed = true,
+    };
     const id = try domain.randomUuid(io);
-    try metadata.addFunnel(
+    try metadata.addFunnelDefinition(
         allocator,
         &id,
         site,
-        name,
-        steps.items,
+        draft.name,
+        definition,
+        now_micros,
+    );
+    return null;
+}
+
+pub fn editFunnel(
+    allocator: std.mem.Allocator,
+    metadata: *meta.Store,
+    event_store: *events.Store,
+    form: Form,
+    action_context: GoalActionContext,
+    now_micros: i64,
+    report_timeout_ms: u32,
+) !?FunnelSubmission {
+    const site = try form.required("site");
+    try domain.validateSlug(site);
+    try verifyFunnelEditTarget(allocator, metadata, site, form);
+    var draft = try funnelDraftFromForm(allocator, form);
+    const intent = try funnelIntent(form);
+    if (try applyFunnelDraftIntent(allocator, &draft, intent)) {
+        const active_goals = try metadata.listGoals(allocator, site);
+        return .{
+            .draft = draft,
+            .steps = try funnelDraftStepViews(
+                allocator,
+                draft.steps,
+                active_goals,
+                null,
+            ),
+            .previewed = false,
+        };
+    }
+    try domain.validateName(draft.name, 120);
+    const definition = try funnelDefinitionFromDraft(allocator, draft);
+    const availability = try evaluateFunnelAvailability(
+        allocator,
+        metadata,
+        event_store,
+        site,
+        try formContext(form),
+        action_context,
+        definition,
+        report_timeout_ms,
+    );
+    const active_goals = try metadata.listGoals(allocator, site);
+    if (switch (intent) {
+        .preview => true,
+        else => false,
+    }) return .{
+        .draft = draft,
+        .steps = try funnelDraftStepViews(
+            allocator,
+            draft.steps,
+            active_goals,
+            availability,
+        ),
+        .previewed = true,
+    };
+    try metadata.editFunnel(
+        allocator,
+        site,
+        try form.required("id"),
+        try funnelTimestamp(form),
+        draft.name,
+        definition,
+        now_micros,
+    );
+    return null;
+}
+
+fn verifyFunnelEditTarget(
+    allocator: std.mem.Allocator,
+    metadata: *meta.Store,
+    site: []const u8,
+    form: Form,
+) !void {
+    const current = try metadata.funnelById(
+        allocator,
+        site,
+        try form.required("id"),
+    );
+    if (current.updated_at_utc_micros != try funnelTimestamp(form)) {
+        return error.StaleFunnel;
+    }
+}
+
+pub fn archiveFunnel(
+    allocator: std.mem.Allocator,
+    metadata: *meta.Store,
+    form: Form,
+    now_micros: i64,
+) !void {
+    try metadata.archiveFunnel(
+        allocator,
+        try form.required("site"),
+        try form.required("id"),
+        try funnelTimestamp(form),
         now_micros,
     );
 }
 
-pub fn deleteFunnel(
+pub fn reactivateFunnel(
     allocator: std.mem.Allocator,
     metadata: *meta.Store,
     form: Form,
+    now_micros: i64,
 ) !void {
-    try metadata.deleteFunnel(
+    try metadata.reactivateFunnel(
         allocator,
         try form.required("site"),
-        try form.required("name"),
+        try form.required("id"),
+        try funnelTimestamp(form),
+        now_micros,
     );
+}
+
+fn funnelIntent(form: Form) !FunnelIntent {
+    const raw = try form.required("intent");
+    if (std.mem.eql(u8, raw, "add-step")) return .add_step;
+    if (std.mem.eql(u8, raw, "preview")) return .preview;
+    if (std.mem.eql(u8, raw, "refresh")) return .refresh;
+    if (std.mem.eql(u8, raw, "save")) return .save;
+    inline for (.{
+        .{ "remove-step-", "remove" },
+        .{ "move-up-", "up" },
+        .{ "move-down-", "down" },
+    }) |candidate| {
+        if (std.mem.startsWith(u8, raw, candidate[0])) {
+            const one_based = std.fmt.parseInt(
+                usize,
+                raw[candidate[0].len..],
+                10,
+            ) catch return error.InvalidFunnelIntent;
+            if (one_based == 0 or one_based > funnel.maximum_steps) {
+                return error.InvalidFunnelIntent;
+            }
+            const index = one_based - 1;
+            if (std.mem.eql(u8, candidate[1], "remove")) {
+                return .{ .remove_step = index };
+            }
+            if (std.mem.eql(u8, candidate[1], "up")) {
+                return .{ .move_up = index };
+            }
+            return .{ .move_down = index };
+        }
+    }
+    return error.InvalidFunnelIntent;
+}
+
+fn applyFunnelDraftIntent(
+    allocator: std.mem.Allocator,
+    draft: *model.FunnelDraft,
+    intent: FunnelIntent,
+) !bool {
+    switch (intent) {
+        .preview, .save => return false,
+        .refresh => {},
+        .add_step => {
+            if (draft.steps.len >= funnel.maximum_steps) {
+                return error.InvalidFunnelLength;
+            }
+            const steps = try allocator.alloc(
+                model.FunnelStepDraft,
+                draft.steps.len + 1,
+            );
+            @memcpy(steps[0..draft.steps.len], draft.steps);
+            steps[steps.len - 1] = .{ .kind = .exact_event, .value = "event" };
+            draft.steps = steps;
+        },
+        .remove_step => |index| {
+            if (draft.steps.len <= funnel.minimum_steps or index >= draft.steps.len) {
+                return error.InvalidFunnelLength;
+            }
+            const steps = try allocator.alloc(
+                model.FunnelStepDraft,
+                draft.steps.len - 1,
+            );
+            @memcpy(steps[0..index], draft.steps[0..index]);
+            @memcpy(steps[index..], draft.steps[index + 1 ..]);
+            draft.steps = steps;
+        },
+        .move_up => |index| {
+            if (index == 0 or index >= draft.steps.len) {
+                return error.InvalidFunnelIntent;
+            }
+            const steps = try allocator.dupe(model.FunnelStepDraft, draft.steps);
+            std.mem.swap(model.FunnelStepDraft, &steps[index - 1], &steps[index]);
+            draft.steps = steps;
+        },
+        .move_down => |index| {
+            if (index + 1 >= draft.steps.len) return error.InvalidFunnelIntent;
+            const steps = try allocator.dupe(model.FunnelStepDraft, draft.steps);
+            std.mem.swap(model.FunnelStepDraft, &steps[index], &steps[index + 1]);
+            draft.steps = steps;
+        },
+    }
+    return true;
+}
+
+pub fn funnelDraftFromForm(
+    allocator: std.mem.Allocator,
+    form: Form,
+) !model.FunnelDraft {
+    const count = std.fmt.parseInt(
+        usize,
+        try form.required("step_count"),
+        10,
+    ) catch return error.InvalidFunnelLength;
+    if (count < funnel.minimum_steps or count > funnel.maximum_steps) {
+        return error.InvalidFunnelLength;
+    }
+    const steps = try allocator.alloc(model.FunnelStepDraft, count);
+    for (steps, 0..) |*step, index| {
+        const one_based = index + 1;
+        const kind_field = try std.fmt.allocPrint(
+            allocator,
+            "step_kind_{d}",
+            .{one_based},
+        );
+        const value_field = try std.fmt.allocPrint(
+            allocator,
+            "step_value_{d}",
+            .{one_based},
+        );
+        const goal_field = try std.fmt.allocPrint(
+            allocator,
+            "step_goal_{d}",
+            .{one_based},
+        );
+        const kind = analysis.SelectorKind.parse(try form.required(kind_field)) catch
+            return error.InvalidFunnelStep;
+        const predicates = try allocator.alloc(
+            model.GoalPredicateDraft,
+            analysis.maximum_selector_predicates,
+        );
+        for (predicates, 0..) |*predicate, predicate_index| {
+            const predicate_one_based = predicate_index + 1;
+            const property_field = try std.fmt.allocPrint(
+                allocator,
+                "step_property_{d}_{d}",
+                .{ one_based, predicate_one_based },
+            );
+            const rule_field = try std.fmt.allocPrint(
+                allocator,
+                "step_rule_{d}_{d}",
+                .{ one_based, predicate_one_based },
+            );
+            const predicate_value_field = try std.fmt.allocPrint(
+                allocator,
+                "step_predicate_value_{d}_{d}",
+                .{ one_based, predicate_one_based },
+            );
+            predicate.* = .{
+                .property_name = form.optional(property_field) orelse "",
+                .rule = form.optional(rule_field) orelse "string:is",
+                .value = form.optional(predicate_value_field) orelse "",
+            };
+        }
+        step.* = .{
+            .kind = kind,
+            .value = form.optional(value_field) orelse "",
+            .goal_id = form.optional(goal_field) orelse "",
+            .predicates = predicates,
+        };
+    }
+    const raw_window = std.fmt.parseInt(
+        u32,
+        try form.required("window_seconds"),
+        10,
+    ) catch return error.InvalidFunnelWindow;
+    return .{
+        .name = try form.required("name"),
+        .order = try funnel.Order.parse(try form.required("order")),
+        .scope = try funnel.Scope.parse(try form.required("scope")),
+        .window = try funnel.Window.fromSeconds(raw_window),
+        .steps = steps,
+    };
+}
+
+fn funnelDefinitionFromDraft(
+    allocator: std.mem.Allocator,
+    draft: model.FunnelDraft,
+) !funnel.Definition {
+    const steps = try allocator.alloc(funnel.Step, draft.steps.len);
+    for (steps, draft.steps) |*target, step| {
+        if (step.kind == .saved_goal) {
+            target.* = .{ .goal = step.goal_id };
+            continue;
+        }
+        var predicates: std.ArrayList(analysis.PropertyPredicate) = .empty;
+        for (step.predicates) |predicate| {
+            if (predicate.property_name.len == 0) {
+                if (predicate.value.len != 0) return error.MissingAnalysisProperty;
+                continue;
+            }
+            const scalar_name, const operator_name = std.mem.cutScalar(
+                u8,
+                predicate.rule,
+                ':',
+            ) orelse return error.InvalidFunnelPredicateRule;
+            const scalar_type = try analysis.ScalarType.parse(scalar_name);
+            const values = if (predicate.value.len == 0)
+                &.{}
+            else
+                try allocator.dupe([]const u8, &.{predicate.value});
+            const parsed = analysis.PropertyPredicate{
+                .property_ref = .{
+                    .name = predicate.property_name,
+                    .scalar_type = scalar_type,
+                },
+                .operator = try analysis.Operator.parse(operator_name),
+                .values = values,
+            };
+            try parsed.validate();
+            try predicates.append(allocator, parsed);
+        }
+        target.* = .{ .direct = .{ .selector = .{
+            .kind = step.kind,
+            .value = step.value,
+            .predicates = try predicates.toOwnedSlice(allocator),
+        } } };
+    }
+    const definition = funnel.Definition{
+        .order = draft.order,
+        .scope = draft.scope,
+        .window = draft.window,
+        .steps = steps,
+    };
+    try definition.validate();
+    const canonical = try funnel.canonicalJson(allocator, definition);
+    defer allocator.free(canonical);
+    return definition;
+}
+
+fn evaluateFunnelAvailability(
+    allocator: std.mem.Allocator,
+    metadata: *meta.Store,
+    event_store: *events.Store,
+    site_slug: []const u8,
+    context: FormContext,
+    action_context: GoalActionContext,
+    definition: funnel.Definition,
+    report_timeout_ms: u32,
+) ![]const analysis.FunnelAvailabilityRow {
+    const site = try metadata.siteConfigurationBySlug(allocator, site_slug);
+    const policy = try metadata.sitePolicy(allocator, site.id);
+    const active_goals = try metadata.listGoals(allocator, site_slug);
+    const resolved_filters = try resolveFilters(
+        allocator,
+        metadata,
+        policy,
+        site_slug,
+        action_context.filters,
+        action_context.segment_id,
+    );
+    const selectors = try allocator.alloc(
+        analysis.EventSelector,
+        definition.steps.len,
+    );
+    for (selectors, definition.steps) |*selector, step| selector.* = switch (step) {
+        .direct => |direct| direct.selector,
+        .goal => |goal_id| value: {
+            const goal = metadata.goalById(
+                allocator,
+                site_slug,
+                goal_id,
+            ) catch |err| {
+                if (err == error.GoalNotFound) return error.StaleFunnelGoal;
+                return err;
+            };
+            if (goal.archived_at_utc_micros != null) return error.StaleFunnelGoal;
+            break :value goalSelector(goal);
+        },
+    };
+    return analysis_store.executeFunnelAvailability(
+        allocator,
+        event_store,
+        .{
+            .site_id = site.id,
+            .range = context.range,
+            .selectors = selectors,
+            .filters = resolved_filters.filters,
+            .active_goals = if (policy.strict_mode)
+                try resolveAnalysisGoals(allocator, active_goals)
+            else
+                &.{},
+            .strict_traffic_mode = policy.strict_mode,
+            .timeout_ms = report_timeout_ms,
+        },
+    ) catch |err| {
+        if (err == error.AnalysisTimeout) return error.ReportTimeout;
+        return err;
+    };
+}
+
+fn funnelDraftStepViews(
+    allocator: std.mem.Allocator,
+    steps: []const model.FunnelStepDraft,
+    goals: []const meta.Goal,
+    availability: ?[]const analysis.FunnelAvailabilityRow,
+) ![]const model.FunnelStepView {
+    if (availability) |rows| if (rows.len != steps.len) {
+        return error.InvalidFunnelAvailability;
+    };
+    const result = try allocator.alloc(model.FunnelStepView, steps.len);
+    for (result, steps, 0..) |*target, step, index| {
+        const matching = if (availability) |rows| value: {
+            if (rows[index].step_index != @as(u8, @intCast(index))) {
+                return error.InvalidFunnelAvailability;
+            }
+            break :value rows[index].matching_events;
+        } else null;
+        if (step.kind == .saved_goal) {
+            const goal = goalById(goals, step.goal_id);
+            target.* = .{
+                .index = index,
+                .draft = step,
+                .label = if (goal) |resolved|
+                    try std.fmt.allocPrint(allocator, "Goal · {s}", .{resolved.name})
+                else
+                    try std.fmt.allocPrint(
+                        allocator,
+                        "Unavailable goal · {s}",
+                        .{step.goal_id},
+                    ),
+                .stale = goal == null,
+                .matching_events = matching,
+            };
+        } else {
+            target.* = .{
+                .index = index,
+                .draft = step,
+                .label = try std.fmt.allocPrint(
+                    allocator,
+                    "{s} · {s}",
+                    .{ step.kind.name(), step.value },
+                ),
+                .matching_events = matching,
+            };
+        }
+    }
+    return result;
+}
+
+pub fn funnelDraftViews(
+    allocator: std.mem.Allocator,
+    steps: []const model.FunnelStepDraft,
+    goals: []const meta.Goal,
+) ![]const model.FunnelStepView {
+    return funnelDraftStepViews(allocator, steps, goals, null);
+}
+
+fn funnelTimestamp(form: Form) !i64 {
+    const value = std.fmt.parseInt(
+        i64,
+        try form.required("updated_at"),
+        10,
+    ) catch return error.InvalidFunnelTimestamp;
+    if (value < 0) return error.InvalidFunnelTimestamp;
+    return value;
 }
 
 pub fn addExcludedNetwork(
@@ -3819,6 +4673,9 @@ pub fn verifyCsrf(form: Form, expected: []const u8) !void {
 pub fn validateQuery(query: model.Query) !void {
     try domain.validateSlug(query.site);
     query.range.validate() catch return error.InvalidReportRange;
+    if (query.goal_screen != .none and query.funnel_screen != .none) {
+        return error.InvalidJourneyManagementState;
+    }
     if (query.goal_screen != .none) {
         if (query.kind != .goal or query.subject.len != 0 or
             query.goal_page == 0 or query.goal_page > 1_000_000 or
@@ -3848,6 +4705,28 @@ pub fn validateQuery(query: model.Query) !void {
                 try domain.validateUuid(query.goal_id);
                 if (query.goal_page != 1) {
                     return error.InvalidGoalManagementState;
+                }
+            },
+            .none => unreachable,
+        }
+    }
+    if (query.funnel_screen != .none) {
+        if (query.kind != .funnel or query.subject.len != 0 or
+            query.funnel_page == 0 or query.funnel_page > 1_000_000)
+        {
+            return error.InvalidFunnelManagementState;
+        }
+        switch (query.funnel_screen) {
+            .list => if (query.funnel_id.len != 0) {
+                return error.InvalidFunnelManagementState;
+            },
+            .new => if (query.funnel_id.len != 0 or query.funnel_page != 1) {
+                return error.InvalidFunnelManagementState;
+            },
+            .detail, .edit => {
+                try domain.validateUuid(query.funnel_id);
+                if (query.funnel_page != 1) {
+                    return error.InvalidFunnelManagementState;
                 }
             },
             .none => unreachable,
@@ -5181,7 +6060,9 @@ fn validNotice(value: []const u8) bool {
         "goal-reactivated",
         "goal-deleted",
         "funnel-added",
-        "funnel-deleted",
+        "funnel-updated",
+        "funnel-archived",
+        "funnel-reactivated",
         "network-exclusion-added",
         "network-exclusion-deleted",
         "traffic-policy-updated",

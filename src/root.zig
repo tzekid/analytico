@@ -8,6 +8,7 @@ comptime {
     _ = @import("calendar.zig");
     _ = @import("report.zig");
     _ = @import("analysis.zig");
+    _ = @import("funnel.zig");
     _ = @import("analysis_probe.zig");
     _ = @import("diagnostics.zig");
     _ = @import("tracker_asset.zig");

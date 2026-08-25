@@ -57,6 +57,39 @@ UNION ALL SELECT 'auth-bootstrap', id, token_hash, expires_at_utc_seconds,
 ORDER BY 1, 2, 3;
 SQL
 }
+current_metadata_facts() {
+    sqlite3 -separator '|' "$1/meta.db" <<'SQL'
+SELECT 'site', id, slug, name, created_at_utc_micros,
+       COALESCE(disabled_at_utc_micros, '') FROM sites
+UNION ALL SELECT 'origin', site_id, origin, '', '', '' FROM site_origins
+UNION ALL SELECT 'timezone', site_id, zone_name, revision, rebucket_pending, ''
+  FROM site_timezones
+UNION ALL SELECT 'property', site_id, property_name, '', '', ''
+  FROM site_event_properties
+UNION ALL SELECT 'policy', site_id, strict_mode, daily_event_ceiling,
+                 updated_at_utc_micros, '' FROM site_traffic_policy
+UNION ALL SELECT 'settings', site_id, default_currency, '', '', ''
+  FROM site_settings
+UNION ALL SELECT 'funnel', id, site_id, name, created_at_utc_micros, ''
+  FROM funnel_definitions
+UNION ALL SELECT 'step', definition.id, CAST(step.key AS INTEGER),
+                 json_extract(step.value, '$.value'),
+                 CASE json_extract(step.value, '$.kind')
+                   WHEN 'event' THEN 1
+                   WHEN 'page' THEN 2
+                   WHEN 'page-prefix' THEN 3
+                 END,
+                 json_extract(step.value, '$.value')
+  FROM funnel_definitions AS definition,
+       json_each(definition.canonical_definition_json, '$.steps') AS step
+UNION ALL SELECT 'auth-config', id, origin, rp_id, created_at_utc_seconds,
+                 updated_at_utc_seconds FROM auth_config
+UNION ALL SELECT 'auth-bootstrap', id, token_hash, expires_at_utc_seconds,
+                 created_at_utc_seconds, COALESCE(consumed_at_utc_seconds, '')
+  FROM auth_bootstrap
+ORDER BY 1, 2, 3;
+SQL
+}
 metadata_facts "$live" >"$fixture/before-metadata.txt"
 sqlite3 -separator '|' "$live/meta.db" \
     'SELECT id, site_id, name, match_kind, match_value, created_at_utc_micros FROM goals ORDER BY id;' \
@@ -107,21 +140,21 @@ test "$(sqlite3 "$interrupted/meta.db" \
 interrupted_retry="$fixture/interrupted-retry"
 "$current" restore "$interrupted_backup" "$interrupted_retry" --verify >/dev/null
 test "$("$current" migrate "$interrupted_retry" "$interrupted_backup")" = \
-    "migrated metadata=v9 events=v7"
+    "migrated metadata=v10 events=v7"
 test "$("$current" doctor "$interrupted_retry")" = \
-    "ok metadata=v9 events=v7 sites=1 goals=1 funnels=1 stored_events=1 key=ok"
+    "ok metadata=v10 events=v7 sites=1 goals=1 funnels=1 stored_events=1 key=ok"
 test "$(sqlite3 "$interrupted_retry/meta.db" \
     'SELECT count(*) FROM segments;')" = 0
 test "$(sqlite3 "$interrupted_retry/meta.db" \
     'SELECT count(*) FROM saved_views;')" = 0
 test "$("$current" migrate "$interrupted_retry")" = \
-    "migrated metadata=v9 events=v7"
+    "migrated metadata=v10 events=v7"
 
 test "$("$current" migrate "$live" "$backup")" = \
-    "migrated metadata=v9 events=v7"
+    "migrated metadata=v10 events=v7"
 test "$("$current" doctor "$live")" = \
-    "ok metadata=v9 events=v7 sites=1 goals=1 funnels=1 stored_events=1 key=ok"
-metadata_facts "$live" >"$fixture/after-metadata.txt"
+    "ok metadata=v10 events=v7 sites=1 goals=1 funnels=1 stored_events=1 key=ok"
+current_metadata_facts "$live" >"$fixture/after-metadata.txt"
 cmp "$fixture/before-metadata.txt" "$fixture/after-metadata.txt"
 sqlite3 -separator '|' "$live/meta.db" \
     'SELECT id, site_id, name, match_kind, match_value, created_at_utc_micros FROM goal_definitions_v2 ORDER BY id;' \
@@ -137,7 +170,7 @@ test "$(sqlite3 "$live/meta.db" 'SELECT count(*) FROM saved_views;')" = 0
 test "$(sqlite3 "$live/meta.db" \
     "SELECT count(*) FROM meta_migrations WHERE version=7 AND name='segments-and-saved-views';")" = 1
 test "$("$current" migrate "$live" "$backup")" = \
-    "migrated metadata=v9 events=v7"
+    "migrated metadata=v10 events=v7"
 if "$previous" doctor "$live" >/dev/null 2>&1; then
     echo "metadata-6 predecessor unexpectedly opened current metadata" >&2
     exit 1
@@ -152,8 +185,8 @@ test "$("$previous" report "$rolled_back" migration 2026-08-23 2026-08-23 \
 
 fresh="$fixture/fresh"
 "$current" init "$fresh" >/dev/null
-test "$(sqlite3 "$fresh/meta.db" 'SELECT max(version) FROM meta_migrations;')" = 9
+test "$(sqlite3 "$fresh/meta.db" 'SELECT max(version) FROM meta_migrations;')" = 10
 test "$(sqlite3 "$fresh/meta.db" 'SELECT count(*) FROM segments;')" = 0
 test "$(sqlite3 "$fresh/meta.db" 'SELECT count(*) FROM saved_views;')" = 0
 
-printf 'metadata7_migration_e2e=pass predecessor=a2d71c046a8b8b632429336f58ff0d1eebfea7b3 metadata=6-to-8 events=7 rows=preserved goals=preserved-active interruption=retried replay=idempotent rollback=matched-pair\n'
+printf 'metadata7_migration_e2e=pass predecessor=a2d71c046a8b8b632429336f58ff0d1eebfea7b3 metadata=6-to-10 events=7 rows=preserved goals=preserved-active funnels=canonical-preserved interruption=retried replay=idempotent rollback=matched-pair\n'

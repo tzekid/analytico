@@ -2,7 +2,7 @@
 
 > **Status:** Sections 1–10 describe the shipped one-process runtime, its frozen
 > protocol-v1 compatibility path, additive protocol-v2 collector foundation,
-> event schema 7, metadata schema 9, protocol-v2 tracker anonymous identity,
+> event schema 7, metadata schema 10, protocol-v2 tracker anonymous identity,
 > and 30-minute client sessions. The remaining 1.0 evolution is stated
 > separately below; it preserves this runtime shape and lands only with its
 > issue evidence.
@@ -158,6 +158,12 @@ replaces that table once with D42's canonical predicate-set document. The
 controller resolves the complete selector before DuckDB; Turso still never
 queries event rows and DuckDB never reads metadata.
 
+Metadata schema 10 replaces the legacy funnel parent/step rows with D43's one
+canonical bounded definition row. The plain funnel domain owns exact
+serialization and validation without I/O. The controller resolves Goal steps
+to complete D42 selectors and passes only owned selectors to DuckDB; stale
+references never become partial queries.
+
 Decision D29 adds a parallel pure `AnalysisQuery` model and finite metric-v2
 store compiler. The domain model validates and canonicalizes state without I/O;
 the store chooses only enum-reviewed fragments and binds every value. Current
@@ -196,9 +202,23 @@ definition and archive state. The controller loads either the bounded active
 snapshot or at most three explicitly selected goal IDs before analysis; DuckDB
 never resolves a goal ID. A separate finite discovery statement returns Page
 or custom-event labels, eligible count, and last receipt time under the current
-site/range/policy deadline. It remains local to the goal builder until #35
-provides a second consumer with identical semantics. The renderer receives one
-owned typed list/new/detail/edit model and performs no I/O or allocation.
+site/range/policy deadline. Discovery remains local to the goal builder. D43's
+funnel preview instead consumes already resolved selectors through its distinct
+single availability statement; it does not reuse or broaden discovery. The
+renderer receives one owned typed list/new/detail/edit model and performs no
+I/O or allocation.
+
+D43 applies the same boundary to funnel management. Turso owns stable
+definitions and lifecycle state; one row contains the complete ordered draft.
+The controller owns stable list/new/detail/edit routes, resolves shared filter
+context and Goal references, and executes at most one specialized
+step-availability statement under the existing deadline. The renderer receives
+owned step labels, settings, counts, errors, and action URLs. It does not parse
+canonical JSON, resolve a goal, or compute funnel progression.
+The full-draft `/admin/funnels` and `/admin/funnels/edit` POST routes reuse
+D40's exact 65,536-byte request/Caddy boundary because URL form encoding can
+expand the bounded canonical document; all other funnel actions retain the
+ordinary 8 KiB request ceiling.
 
 The serving process configures one query thread, a bounded memory limit, a
 bounded temporary directory, no community extensions, and no external file or
@@ -356,6 +376,12 @@ facts and diagnostics remain independent of strict state. Strict product
 queries exclude only current suspects after all human-evidence vetoes and
 derive distinct eligible session/daily-identity boundaries. A goal snapshot is
 bound as data; DuckDB never queries Turso.
+
+The D43 builder preview compiles up to eight resolved selectors into one
+single-scan statement and returns one independent matching-event count per
+step. It is not an ordered funnel report. D43 leaves sequential/consecutive,
+session/visitor window, drop-off, timing, comparison, and result visualization
+to #36.
 
 The shipped metric-v1 reports continue to convert UTC dates directly. The D27
 range resolver converts inclusive local dates into half-open UTC instants with

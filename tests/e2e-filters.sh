@@ -137,6 +137,8 @@ saved_state_paths=(
     /admin/saved-views/duplicate
     /admin/saved-views/rename
     /admin/saved-views/delete
+    /admin/funnels
+    /admin/funnels/edit
 )
 head -c 65536 /dev/zero | tr '\0' x >"$fixture/body-64k"
 for route in "${saved_state_paths[@]}"; do
@@ -190,7 +192,7 @@ TMPDIR=/tmp NODE_PATH="$module_root" \
 
 cat "$fixture/browser.json"
 printf '{"origin":"enforced","csrf":"enforced",'
-printf '"saved_route_count":12,"saved_route_body_bytes":65536,'
+printf '"saved_route_count":14,"saved_route_body_bytes":65536,'
 printf '"saved_route_plus_one_status":413,'
 printf '"unauthenticated_exact_status":401,'
 printf '"unauthenticated_plus_one_status":413,'

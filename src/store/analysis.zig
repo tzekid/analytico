@@ -595,6 +595,58 @@ pub fn profileGoalResult(
     return output.toOwnedSlice();
 }
 
+pub fn executeFunnelAvailability(
+    allocator: std.mem.Allocator,
+    event_store: *events.Store,
+    request: analysis.FunnelAvailabilityRequest,
+) ![]const analysis.FunnelAvailabilityRow {
+    try request.validate();
+    var budget = deadline.Budget.init(request.timeout_ms);
+    var result = try executePlan(
+        &event_store.database,
+        try compileFunnelAvailability(allocator, request),
+        &budget,
+    );
+    defer result.deinit();
+    if (result.columnCount() != 2 or result.rowCount() != request.selectors.len) {
+        return error.InvalidFunnelAvailability;
+    }
+    const rows = try allocator.alloc(
+        analysis.FunnelAvailabilityRow,
+        request.selectors.len,
+    );
+    errdefer allocator.free(rows);
+    for (rows, 0..) |*row, index| {
+        const step_index = result.int64(0, index);
+        const matching_events = result.int64(1, index);
+        if (step_index != @as(i64, @intCast(index)) or matching_events < 0) {
+            return error.InvalidFunnelAvailability;
+        }
+        row.* = .{
+            .step_index = @intCast(step_index),
+            .matching_events = matching_events,
+        };
+    }
+    return rows;
+}
+
+pub fn profileFunnelAvailability(
+    allocator: std.mem.Allocator,
+    event_store: *events.Store,
+    request: analysis.FunnelAvailabilityRequest,
+) ![]u8 {
+    try request.validate();
+    var output = std.Io.Writer.Allocating.init(allocator);
+    try output.writer.writeAll("FUNNEL SELECTOR AVAILABILITY STATEMENT\n");
+    try profileOverviewPlan(
+        allocator,
+        event_store,
+        try compileFunnelAvailability(allocator, request),
+        &output.writer,
+    );
+    return output.toOwnedSlice();
+}
+
 fn executeGoalResultWithBudget(
     allocator: std.mem.Allocator,
     event_store: *events.Store,
@@ -898,6 +950,31 @@ pub fn compileGoalPropertyCatalog(
     try builder.bindInteger(analysis.maximum_property_catalog_events);
     try builder.write("), ");
     try writePropertyCatalogExpansion(&builder);
+    return builder.finish();
+}
+
+pub fn compileFunnelAvailability(
+    allocator: std.mem.Allocator,
+    request: analysis.FunnelAvailabilityRequest,
+) !StatementPlan {
+    try request.validate();
+    const execution = request.execution();
+    try execution.validate();
+    var builder = Builder.init(allocator);
+    try writeCommon(&builder, execution, request.range, false, false);
+    try builder.write(", availability_counts AS (SELECT [");
+    for (request.selectors, 0..) |selector, index| {
+        if (index != 0) try builder.write(", ");
+        try builder.write("count(*) FILTER (WHERE ");
+        try writeSelector(&builder, selector, "e");
+        try builder.write(")::BIGINT");
+    }
+    try builder.write(
+        "] AS counts FROM qualified e)" ++
+            " SELECT (generate_subscripts(counts, 1) - 1)::BIGINT" ++
+            " AS step_index, unnest(counts)::BIGINT AS matching_events" ++
+            " FROM availability_counts ORDER BY step_index",
+    );
     return builder.finish();
 }
 
@@ -5524,6 +5601,41 @@ test "compiler binds property pointers and filter values without SQL interpolati
     try std.testing.expect(planContainsText(compiled.primary_rows, "/plan"));
 }
 
+test "funnel availability compiles all selectors over one qualified relation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const adversarial = "x'); SELECT * FROM events; --";
+    const values = [_][]const u8{adversarial};
+    const predicates = [_]analysis.PropertyPredicate{.{
+        .property_ref = .{ .name = "plan", .scalar_type = .string },
+        .operator = .is,
+        .values = &values,
+    }};
+    const selectors = [_]analysis.EventSelector{
+        .{ .kind = .page_prefix, .value = "/" },
+        .{
+            .kind = .exact_event,
+            .value = "signup",
+            .predicates = &predicates,
+        },
+    };
+    const plan = try compileFunnelAvailability(arena.allocator(), .{
+        .site_id = "00000000-0000-4000-8000-000000000024",
+        .range = .{ .start = "2026-01-01", .end = "2026-01-02" },
+        .selectors = &selectors,
+    });
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        std.mem.count(u8, plan.sql, "FROM qualified e"),
+    );
+    try std.testing.expectEqual(
+        selectors.len,
+        std.mem.count(u8, plan.sql, "count(*) FILTER"),
+    );
+    try std.testing.expect(std.mem.indexOf(u8, plan.sql, adversarial) == null);
+    try std.testing.expect(planContainsText(plan, adversarial));
+}
+
 test "Breakdown search and catalog context remain bound SQL inputs" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -6038,6 +6150,47 @@ test "metric v2 executes against a real on-disk schema four store" {
     try std.testing.expectEqual(@as(i64, 1), filtered_goal_result.total_matches);
     try std.testing.expectEqual(@as(usize, 1), filtered_goal_result.revenue.len);
     try std.testing.expectEqualStrings("EUR", filtered_goal_result.revenue[0].currency);
+
+    const funnel_selectors = [_]analysis.EventSelector{
+        .{
+            .kind = .exact_event,
+            .value = "purchase",
+            .predicates = &goal_predicates,
+        },
+        .{ .kind = .page_prefix, .value = "/" },
+        .{ .kind = .exact_page, .value = "/pricing" },
+        .{ .kind = .exact_event, .value = "never" },
+    };
+    const funnel_availability = try executeFunnelAvailability(
+        query_allocator,
+        &event_store,
+        .{
+            .site_id = site,
+            .range = range,
+            .selectors = &funnel_selectors,
+        },
+    );
+    try std.testing.expectEqual(@as(usize, 4), funnel_availability.len);
+    try std.testing.expectEqual(@as(i64, 2), funnel_availability[0].matching_events);
+    try std.testing.expectEqual(@as(i64, 5), funnel_availability[1].matching_events);
+    try std.testing.expectEqual(@as(i64, 1), funnel_availability[2].matching_events);
+    try std.testing.expectEqual(@as(i64, 0), funnel_availability[3].matching_events);
+
+    const filtered_funnel_availability = try executeFunnelAvailability(
+        query_allocator,
+        &event_store,
+        .{
+            .site_id = site,
+            .range = range,
+            .selectors = &funnel_selectors,
+            .filters = .{ .clauses = &goal_filters },
+        },
+    );
+    try std.testing.expectEqual(@as(i64, 1), filtered_funnel_availability[0].matching_events);
+    try std.testing.expectEqual(@as(i64, 0), filtered_funnel_availability[1].matching_events);
+    try std.testing.expectEqual(@as(i64, 0), filtered_funnel_availability[2].matching_events);
+    try std.testing.expectEqual(@as(i64, 0), filtered_funnel_availability[3].matching_events);
+    _ = try event_store.eventCount();
 
     inline for (@typeInfo(analysis.MetricKind).@"enum".field_values) |raw| {
         const kind: analysis.MetricKind = @fromBackingInt(@intCast(raw));

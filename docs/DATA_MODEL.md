@@ -1,7 +1,7 @@
 # Data model and metric semantics
 
 > **Status:** Sections 1–9 define the shipped analytics-metadata subset in
-> Turso metadata schema 9, DuckDB event schema 7, and metric semantics v1. Authentication storage
+> Turso metadata schema 10, DuckDB event schema 7, and metric semantics v1. Authentication storage
 > remains governed by its own specification. The daily-pseudonym and UTC-day
 > rules remain the compatibility contract for existing rows and current
 > reports. Section 10 records the remaining 1.0 transition; event schema 7 does
@@ -305,34 +305,59 @@ Deletion refuses a current valid saved Trend or Breakdown reference to the
 exact goal UUID and offers archive. The UUID is not a database foreign key
 because D40 canonical state remains the source of truth. The guard compares
 the structured Breakdown selector or a finite exact Trend-series form, never a
-whole-document UUID substring. Issue #35 must extend the same guard when it
-adds real funnel goal references.
+whole-document UUID substring. D43 extends that same guard to the exact
+site-owned Goal-step shape in canonical funnel definitions.
 
-### `funnels` and `funnel_steps`
+### `funnel_definitions`
 
 ```sql
-CREATE TABLE funnels (
+CREATE TABLE funnel_definitions (
     id TEXT PRIMARY KEY,
     site_id TEXT NOT NULL,
     name TEXT NOT NULL,
+    canonical_definition_json TEXT NOT NULL,
     created_at_utc_micros INTEGER NOT NULL,
+    updated_at_utc_micros INTEGER NOT NULL,
+    archived_at_utc_micros INTEGER,
     FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE CASCADE,
-    UNIQUE (site_id, name)
-);
-
-CREATE TABLE funnel_steps (
-    funnel_id TEXT NOT NULL,
-    step_index INTEGER NOT NULL,
-    name TEXT NOT NULL,
-    match_kind INTEGER NOT NULL,
-    match_value TEXT NOT NULL,
-    PRIMARY KEY (funnel_id, step_index),
-    FOREIGN KEY (funnel_id) REFERENCES funnels(id) ON DELETE CASCADE,
-    CHECK (step_index BETWEEN 0 AND 7)
+    UNIQUE (site_id, name),
+    CHECK (length(id) = 36),
+    CHECK (length(name) BETWEEN 1 AND 120),
+    CHECK (length(canonical_definition_json) BETWEEN 2 AND 8192),
+    CHECK (updated_at_utc_micros >= created_at_utc_micros),
+    CHECK (
+        archived_at_utc_micros IS NULL OR
+        archived_at_utc_micros >= created_at_utc_micros
+    )
 );
 ```
 
-A funnel has 2–8 steps. Steps use the same closed match kinds as goals.
+Metadata schema 10 replaces the schema-9 `funnels` plus `funnel_steps`
+pair with one complete mutable row. `canonical_definition_json` is exact
+schema-1 JSON containing closed order, scope, window, and two through eight
+ordered steps. Direct steps use exact Page, page-prefix, or Event selectors
+with zero through three canonical D29 predicates of at most one scalar value
+each. Goal steps store only a
+stable goal UUID and resolve its complete current D42 selector.
+
+Every load parses and reserializes the document and requires byte-identical
+content. Direct predicate strings are bytewise sorted and deduplicated. The
+closed window seconds are `0`, `3600`, `86400`, `604800`, and `2592000`; zero
+means same session. An active funnel has no archived timestamp.
+
+Migration maps every valid predecessor definition to sequential, Sessions,
+same-session, direct, predicate-free, active state with updated time equal to
+created time. It requires two through eight contiguous steps and the original
+application invariant `name = match_value` for each step. Invalid or
+crash-incomplete predecessor rows fail closed. Copy verification precedes the
+two source-table drops, and replay validates partial-copy,
+child-dropped/parent-retained, and fully after-drop states before ledger 10.
+
+Goal deletion checks only `kind=goal` step objects for the exact UUID in every
+site-owned active or archived funnel. A matching string in a direct value or
+predicate is not a reference. Archive preserves the row and reference; a
+referenced archived or missing goal makes preview and execution stale until
+the goal is reactivated or the step is replaced.
 
 ## 3. DuckDB events
 

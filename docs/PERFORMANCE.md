@@ -575,6 +575,51 @@ and are not presented as final-candidate evidence. These are repeated
 warm-database statement measurements, not a cold database-open claim; the
 separate explain process preserves the fresh-process evidence.
 
+### Analytico 1.0 guided-funnel gate
+
+D43 keeps one canonical funnel definition at no more than 8 KiB, two through
+eight steps, and three predicates per direct step. The full-draft
+`/admin/funnels` and `/admin/funnels/edit` forms reuse D40's exact 65,536-byte
+saved-state request boundary with at most 128 fields because percent-encoding
+can expand the canonical values; all other funnel forms retain the ordinary
+8 KiB ceiling. Management reads return at most 50 definitions plus `has_more`.
+Create, edit, archive, and reactivate each use one guarded metadata statement;
+no draft, revision history, reference index, cache, projection, rollup, worker,
+dependency, network request, or larger deadline is introduced.
+
+Builder preview resolves at most eight selectors and returns exactly one
+independent matching-event count per step from one specialized statement under
+the unchanged two-second interrupt deadline. The production-path gate uses the
+standard million-event fixture, records the exact statement plan and repeated
+ReleaseSafe timings, and asserts timeout plus connection reuse. This is
+selector-availability evidence only: #36 retains the 1.2-second ordered funnel
+target and owns progression, scope/window semantics, timing, comparison, and
+result visualization.
+
+Two independent 2026-08-25 post-review ReleaseSafe runs exercised the same
+final code. The focused run measured the eight-selector strict statement at
+`96,379`, `97,990`, `103,120`, `107,127`, `109,646`, `111,407`, `113,186`,
+`113,478`, `115,762`, and `118,031` microseconds. The extracted full-package
+run measured `93,947`, `95,415`, `100,143`, `103,925`, `105,152`, `105,504`,
+`110,146`, `110,488`, `110,765`, and `135,700` microseconds. The larger p95 was
+`135,700` microseconds against the unchanged two-second ceiling. Earlier
+pre-final candidates measured `91,023` through `102,856` and `92,457` through
+`109,454` microseconds; those observations remain evidence but are not
+presented as the final code. The separate analyzed plan and compiler assertion
+prove one specialized statement with every selector aggregated over one
+`qualified` relation. The Debug gate executes the same semantic/browser path
+but explicitly does not present Debug timings as performance evidence.
+
+The authenticated browser gate measures response bytes and startup requests
+for list, new, edit, preview, and lifecycle states. A stale segment or property
+between GET and POST must preserve the bounded draft, remove only the stale
+context, return 422, and perform no metadata write. A miss keeps the original
+plan and samples visible and follows the existing SQL column/prefilter order;
+it does not authorize a larger deadline or speculative storage mechanism.
+The same production-path gate proves every full-draft route is in the bounded
+Caddy matcher, an exact 65,536-byte declared request reaches the application,
+and 65,537 bytes returns 413 rather than 502.
+
 ### M4 production-MVP baseline
 
 The current ReleaseSafe package contains a 26,341,344-byte executable and a
