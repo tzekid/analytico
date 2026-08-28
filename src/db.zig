@@ -178,6 +178,17 @@ pub fn backup(source: *Db, destination: *Db) !void {
     if (rc != c.SQLITE_DONE or finish_rc != c.SQLITE_OK) return error.SqliteBackupFailed;
 }
 
+pub fn integrity(database: *Db, allocator: std.mem.Allocator) !void {
+    var statement = try database.prepare(allocator, "PRAGMA integrity_check");
+    defer statement.deinit();
+    if (try statement.step() != .row or !std.mem.eql(u8, statement.columnText(0), "ok")) {
+        return error.IntegrityCheckFailed;
+    }
+    var foreign_keys = try database.prepare(allocator, "PRAGMA foreign_key_check");
+    defer foreign_keys.deinit();
+    if (try foreign_keys.step() == .row) return error.ForeignKeyCheckFailed;
+}
+
 test "vendored sqlite is linked" {
     try std.testing.expectEqualStrings("3.53.4", std.mem.span(c.sqlite3_libversion()));
 }

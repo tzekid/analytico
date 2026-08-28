@@ -26,12 +26,10 @@ pub fn run(
     if (std.mem.eql(u8, args[1], "init") and args.len == 3) {
         return ops.init(allocator, io, output, args[2]);
     }
-    if (std.mem.eql(u8, args[1], "migrate") and args.len == 3) return ops.migrate(allocator, io, output, args[2]);
     const data = option(args, "--data") orelse "data";
     if (std.mem.eql(u8, args[1], "doctor")) return ops.doctor(allocator, io, output, data);
-    if (std.mem.eql(u8, args[1], "integrity")) return ops.integrity(allocator, io, output, data);
-    if (std.mem.eql(u8, args[1], "backup") and args.len >= 4) return ops.backup(allocator, io, output, args[2], args[3]);
-    if (std.mem.eql(u8, args[1], "restore") and args.len >= 5 and std.mem.eql(u8, args[4], "--verify")) {
+    if (std.mem.eql(u8, args[1], "backup") and args.len == 4) return ops.backup(allocator, io, output, args[2], args[3]);
+    if (std.mem.eql(u8, args[1], "restore") and args.len == 4) {
         return ops.restore(allocator, io, output, args[2], args[3]);
     }
     if (std.mem.eql(u8, args[1], "prune") and args.len >= 3) {
@@ -68,11 +66,10 @@ pub fn run(
         if (std.mem.eql(u8, args[2], "flow") and args.len >= 5) return reports.flow(allocator, output, &store, site.id, args[4], try reports.resolveOptions(args));
         if (std.mem.eql(u8, args[2], "friction")) return reports.friction(allocator, output, &store, site.id, option(args, "--flow") orelse "", try reports.resolveOptions(args));
         if (std.mem.eql(u8, args[2], "paths")) {
-            const from_path = option(args, "--from") orelse option(args, "--path") orelse return error.MissingFromPath;
+            const from_path = option(args, "--from") orelse return error.MissingFromPath;
             return reports.paths(allocator, output, &store, site.id, from_path, try reports.resolveDaysOptions(args));
         }
         if (std.mem.eql(u8, args[2], "campaign-economics")) return reports.campaignEconomics(allocator, output, &store, site.id, try reports.resolveOptions(args));
-        if (std.mem.eql(u8, args[2], "retention")) return error.ProductModeNotImplemented;
         const options_value = try reports.resolveOptions(args);
         return reports.run(allocator, output, &store, site.id, args[2], options_value);
     }
@@ -284,7 +281,6 @@ pub fn writeUsage(output: *std.Io.Writer) !void {
         \\
         \\Administration:
         \\  analytico init <data-dir>
-        \\  analytico migrate <data-dir>
         \\  analytico site add <slug> <origin> --mode lite|session [--data <dir>]
         \\  analytico site origin-add <slug> <origin> [--data <dir>]
         \\  analytico site list|show|snippet|disable ... [--data <dir>]
@@ -292,9 +288,9 @@ pub fn writeUsage(output: *std.Io.Writer) !void {
         \\Operations:
         \\  analytico serve --data <dir> --listen 127.0.0.1:4318
         \\  analytico stats --data <dir>
-        \\  analytico doctor|integrity --data <dir>
+        \\  analytico doctor --data <dir>
         \\  analytico backup <data-dir> <new-backup.db>
-        \\  analytico restore <backup.db> <new-data-dir> --verify
+        \\  analytico restore <backup.db> <new-data-dir>
         \\  analytico prune <data-dir> --before YYYY-MM-DD --backup <new-backup.db>
         \\  analytico vacuum <data-dir> --backup <new-backup.db>
         \\  analytico tail <site> [--limit 50] [--follow] --data <dir>

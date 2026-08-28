@@ -42,16 +42,23 @@ test "$(curl --fail --silent "$asset_url" | wc -c)" -gt 10000
 now_ms=$(date +%s%3N)
 browser_body=$(printf '{"v":1,"site":"%s","sent_at_ms":%s,"records":[{"event_id":"550e8400-e29b-41d4-a716-446655440000","type":"page_view","page_id":"550e8400-e29b-41d4-a716-446655440001","session_id":"550e8400-e29b-41d4-a716-446655440002","occurred_at_ms":%s,"tracking_mode":"session","consent_mode":"analytics","tracker_version":"1","release_id":"test","internal":false,"path":"/landing","page_type":"landing","utm_source":"search","utm_campaign":"launch","utm_content":"hero","navigation_type":"navigate","viewport_class":"desktop","language":"en"},{"event_id":"550e8400-e29b-41d4-a716-446655440003","type":"event","page_id":"550e8400-e29b-41d4-a716-446655440001","session_id":"550e8400-e29b-41d4-a716-446655440002","occurred_at_ms":%s,"tracking_mode":"session","consent_mode":"analytics","tracker_version":"1","release_id":"test","internal":false,"name":"registration_started","path":"/register","properties":{"flow":"registration"}},{"event_id":"550e8400-e29b-41d4-a716-446655440006","type":"event","page_id":"550e8400-e29b-41d4-a716-446655440001","session_id":"550e8400-e29b-41d4-a716-446655440002","occurred_at_ms":%s,"tracking_mode":"session","consent_mode":"analytics","tracker_version":"1","release_id":"test","internal":false,"name":"flow_started","path":"/register","properties":{"flow":"registration","step":"start"}},{"event_id":"550e8400-e29b-41d4-a716-446655440004","type":"page_summary","page_id":"550e8400-e29b-41d4-a716-446655440001","session_id":"550e8400-e29b-41d4-a716-446655440002","occurred_at_ms":%s,"tracking_mode":"session","consent_mode":"analytics","tracker_version":"1","release_id":"test","internal":false,"visible_ms":12000,"active_ms":10000,"interaction_count":2,"max_scroll":75,"sections":["hero"],"last_section":"hero","selection_count":0,"copy_count":0,"outbound_clicks":0,"downloads":0,"form_attempts":1,"lcp_ms":500}]}' "$public_id" "$now_ms" "$now_ms" "$now_ms" "$now_ms" "$now_ms")
 
+missing_client=$(curl --silent -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$port/e" \
+  -H 'Origin: https://example.test' -H 'Content-Type: text/plain;charset=UTF-8' --data-binary "$browser_body")
+test "$missing_client" = 400
 curl --fail --silent -o /dev/null -X POST "http://127.0.0.1:$port/e" \
-  -H 'Origin: https://example.test' -H 'Content-Type: text/plain;charset=UTF-8' --data-binary "$browser_body"
+  -H 'Origin: https://example.test' -H 'X-Forwarded-For: 198.51.100.10' \
+  -H 'Content-Type: text/plain;charset=UTF-8' --data-binary "$browser_body"
 curl --fail --silent -o /dev/null -X POST "http://127.0.0.1:$port/e" \
-  -H 'Origin: https://example.test' -H 'Content-Type: text/plain;charset=UTF-8' --data-binary "$browser_body"
+  -H 'Origin: https://example.test' -H 'X-Forwarded-For: 198.51.100.10' \
+  -H 'Content-Type: text/plain;charset=UTF-8' --data-binary "$browser_body"
 denied=$(curl --silent -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$port/e" \
-  -H 'Origin: https://denied.test' -H 'Content-Type: text/plain;charset=UTF-8' --data-binary "$browser_body")
+  -H 'Origin: https://denied.test' -H 'X-Forwarded-For: 198.51.100.10' \
+  -H 'Content-Type: text/plain;charset=UTF-8' --data-binary "$browser_body")
 test "$denied" = 403
 conflict_body=$(printf '%s' "$browser_body" | sed 's#/landing#/changed#')
 conflict=$(curl --silent -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$port/e" \
-  -H 'Origin: https://example.test' -H 'Content-Type: text/plain;charset=UTF-8' --data-binary "$conflict_body")
+  -H 'Origin: https://example.test' -H 'X-Forwarded-For: 198.51.100.10' \
+  -H 'Content-Type: text/plain;charset=UTF-8' --data-binary "$conflict_body")
 test "$conflict" = 409
 
 now_s=$(date +%s)
@@ -80,7 +87,7 @@ wait "$server_pid"
 server_pid=
 grep -q serve_stopped "$journey_root/server.log"
 
-"$app" restore "$journey_root/backup.db" "$journey_root/restored" --verify
+"$app" restore "$journey_root/backup.db" "$journey_root/restored"
 "$app" doctor --data "$journey_root/restored" | grep -q 'page_views=1 summaries=1 events=3'
 
 printf 'e2e ok\n'

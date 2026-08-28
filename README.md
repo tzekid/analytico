@@ -36,5 +36,5 @@ analytico site snippet plosca https://analytico.example --data ./data --rum
 analytico serve --data ./data --listen 127.0.0.1:4318
 ```
 
-Run `analytico help`, or see [PRODUCT.md](PRODUCT.md) and
-[operations](docs/OPERATIONS.md), for the command surface.
+Run `analytico help`, or see [PRODUCT.md](PRODUCT.md), the collection
+[protocol](docs/PROTOCOL.md), and [operations](docs/OPERATIONS.md).

@@ -1,14 +1,18 @@
 [Unit]
 Description=Analytico CLI-first analytics collector
+Documentation=https://github.com/tzekid/analytico
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/opt/analytico/current/bin/analytico serve --data %h/.local/share/analytico --listen 127.0.0.1:4318
+WorkingDirectory=%h/.local/share/analytico-sqlite
+ExecStartPre=%h/.local/opt/analytico/current/bin/analytico doctor --data %h/.local/share/analytico-sqlite
+ExecStart=%h/.local/opt/analytico/current/bin/analytico serve --data %h/.local/share/analytico-sqlite --listen 127.0.0.1:4318
 Restart=on-failure
 RestartSec=2s
 TimeoutStopSec=3s
+KillSignal=SIGTERM
 UMask=0077
 
 NoNewPrivileges=yes

@@ -30,7 +30,6 @@ pub fn resolveOptions(args: []const []const u8) !Options {
     var format: Format = .table;
     if (flag(args, "--json")) format = .json;
     if (flag(args, "--csv")) format = .csv;
-    if (option(args, "--format")) |value| format = std.meta.stringToEnum(Format, value) orelse return error.InvalidFormat;
     const path = option(args, "--path") orelse "";
     if (path.len != 0) try domain.validatePath(path);
     return .{
@@ -284,8 +283,13 @@ fn reportSql(kind: []const u8) ?[]const u8 {
     \\ count(DISTINCT path) AS pages FROM filtered LIMIT ?10
     ;
     if (std.mem.eql(u8, kind, "pages")) return
-    \\SELECT pv.path,count(*) AS views,count(DISTINCT pv.visitor_day_id) AS visitors,
-    \\ coalesce(round(avg(ps.active_ms)),0) AS avg_active_ms,coalesce(round(avg(ps.max_scroll)),0) AS avg_scroll
+    \\SELECT pv.path,coalesce(max(pv.page_type),'') AS page_type,coalesce(max(pv.content_id),'') AS content_id,
+    \\ count(*) AS views,count(DISTINCT pv.visitor_day_id) AS visitors,
+    \\ coalesce(round(avg(ps.visible_ms)),0) AS avg_visible_ms,coalesce(round(avg(ps.active_ms)),0) AS avg_active_ms,
+    \\ coalesce(round(avg(ps.first_interaction_ms)),0) AS avg_first_interaction_ms,
+    \\ coalesce(round(avg(ps.max_scroll)),0) AS avg_scroll,coalesce(sum(ps.copy_count),0) AS copies,
+    \\ coalesce(sum(ps.outbound_clicks),0) AS outbound_clicks,coalesce(sum(ps.downloads),0) AS downloads,
+    \\ coalesce(sum(ps.form_attempts),0) AS form_attempts
     \\FROM page_views pv LEFT JOIN page_summaries ps ON ps.site_id=pv.site_id AND ps.page_id=pv.page_id
     \\WHERE pv.internal=0 AND pv.traffic_class IN ('human_like','unknown') AND pv.site_id=? AND pv.received_at_ms>=? AND pv.received_at_ms<?
     \\AND (?='' OR coalesce(pv.release_id,'')=?) AND (?='' OR coalesce(pv.utm_campaign,'')=?) AND (?='' OR pv.path=?)
@@ -308,11 +312,17 @@ fn reportSql(kind: []const u8) ?[]const u8 {
     \\AND pv.utm_campaign IS NOT NULL GROUP BY source,campaign,content ORDER BY views DESC LIMIT ?
     ;
     if (std.mem.eql(u8, kind, "sections")) return
+    \\WITH filtered AS (
+    \\ SELECT pv.site_id,pv.page_id FROM page_views pv WHERE pv.internal=0 AND pv.traffic_class IN ('human_like','unknown')
+    \\ AND pv.site_id=?1 AND pv.received_at_ms>=?2 AND pv.received_at_ms<?3
+    \\ AND (?4='' OR coalesce(pv.release_id,'')=?5) AND (?6='' OR coalesce(pv.utm_campaign,'')=?7) AND (?8='' OR pv.path=?9)
+    \\), summaries AS (
+    \\ SELECT ps.* FROM page_summaries ps JOIN filtered f ON f.site_id=ps.site_id AND f.page_id=ps.page_id
+    \\)
     \\SELECT j.value AS section,count(*) AS exposures,
-    \\ round(100.0*count(*)/max(1,(SELECT count(*) FROM page_views x WHERE x.internal=0 AND x.traffic_class IN ('human_like','unknown') AND x.site_id=pv.site_id AND x.received_at_ms>=?2 AND x.received_at_ms<?3 AND (?9='' OR x.path=?9))),1) AS exposure_percent
-    \\FROM page_views pv JOIN page_summaries ps ON ps.site_id=pv.site_id AND ps.page_id=pv.page_id, json_each(ps.sections_json) j
-    \\WHERE pv.internal=0 AND pv.traffic_class IN ('human_like','unknown') AND pv.site_id=?1 AND pv.received_at_ms>=?2 AND pv.received_at_ms<?3
-    \\AND (?4='' OR coalesce(pv.release_id,'')=?5) AND (?6='' OR coalesce(pv.utm_campaign,'')=?7) AND (?8='' OR pv.path=?9)
+    \\ round(100.0*count(*)/max(1,(SELECT count(*) FROM filtered)),1) AS exposure_percent,
+    \\ sum(CASE WHEN ps.last_section=j.value THEN 1 ELSE 0 END) AS final_section
+    \\FROM summaries ps, json_each(ps.sections_json) j
     \\GROUP BY j.value ORDER BY exposures DESC,j.value LIMIT ?10
     ;
     if (std.mem.eql(u8, kind, "actions")) return
@@ -357,25 +367,29 @@ fn reportSql(kind: []const u8) ?[]const u8 {
     ;
     if (std.mem.eql(u8, kind, "performance")) return
     \\WITH base AS (
-    \\ SELECT coalesce(pv.page_type,'') AS page_type,coalesce(pv.release_id,'') AS release_id,pv.device,ps.*
+    \\ SELECT coalesce(pv.page_type,'') AS page_type,coalesce(pv.release_id,'') AS release_id,
+    \\ coalesce(pv.navigation_type,'') AS navigation_type,pv.device,ps.*
     \\ FROM page_views pv JOIN page_summaries ps ON ps.site_id=pv.site_id AND ps.page_id=pv.page_id
     \\ WHERE pv.internal=0 AND pv.traffic_class IN ('human_like','unknown') AND pv.site_id=?1 AND pv.received_at_ms>=?2 AND pv.received_at_ms<?3
     \\ AND (?4='' OR coalesce(pv.release_id,'')=?5) AND (?6='' OR coalesce(pv.utm_campaign,'')=?7) AND (?8='' OR pv.path=?9)
     \\), samples AS (
-    \\ SELECT page_type,release_id,device,'ttfb' metric,ttfb_ms value FROM base WHERE ttfb_ms IS NOT NULL UNION ALL
-    \\ SELECT page_type,release_id,device,'fcp',fcp_ms FROM base WHERE fcp_ms IS NOT NULL UNION ALL
-    \\ SELECT page_type,release_id,device,'lcp',lcp_ms FROM base WHERE lcp_ms IS NOT NULL UNION ALL
-    \\ SELECT page_type,release_id,device,'inp',inp_ms FROM base WHERE inp_ms IS NOT NULL UNION ALL
-    \\ SELECT page_type,release_id,device,'cls_milli',cls_milli FROM base WHERE cls_milli IS NOT NULL
+    \\ SELECT page_type,release_id,navigation_type,device,'ttfb' metric,ttfb_ms value FROM base WHERE ttfb_ms IS NOT NULL UNION ALL
+    \\ SELECT page_type,release_id,navigation_type,device,'fcp',fcp_ms FROM base WHERE fcp_ms IS NOT NULL UNION ALL
+    \\ SELECT page_type,release_id,navigation_type,device,'lcp',lcp_ms FROM base WHERE lcp_ms IS NOT NULL UNION ALL
+    \\ SELECT page_type,release_id,navigation_type,device,'inp',inp_ms FROM base WHERE inp_ms IS NOT NULL UNION ALL
+    \\ SELECT page_type,release_id,navigation_type,device,'cls_milli',cls_milli FROM base WHERE cls_milli IS NOT NULL UNION ALL
+    \\ SELECT page_type,release_id,navigation_type,device,'long_frame_count',long_frame_count FROM base WHERE long_frame_count IS NOT NULL UNION ALL
+    \\ SELECT page_type,release_id,navigation_type,device,'blocking_ms',blocking_ms FROM base WHERE blocking_ms IS NOT NULL
     \\), ranked AS (
-    \\ SELECT *,row_number() OVER(PARTITION BY page_type,release_id,device,metric ORDER BY value) rn,
-    \\ count(*) OVER(PARTITION BY page_type,release_id,device,metric) n FROM samples
+    \\ SELECT *,row_number() OVER(PARTITION BY page_type,release_id,navigation_type,device,metric ORDER BY value) rn,
+    \\ count(*) OVER(PARTITION BY page_type,release_id,navigation_type,device,metric) n FROM samples
     \\)
-    \\SELECT page_type,release_id,device,metric,max(n) samples,
+    \\SELECT page_type,release_id,navigation_type,device,metric,max(n) samples,
     \\ min(CASE WHEN rn*100>=n*50 THEN value END) p50,
     \\ min(CASE WHEN rn*100>=n*75 THEN value END) p75,
     \\ min(CASE WHEN rn*100>=n*95 THEN value END) p95
-    \\FROM ranked GROUP BY page_type,release_id,device,metric ORDER BY page_type,release_id,device,metric LIMIT ?10
+    \\FROM ranked GROUP BY page_type,release_id,navigation_type,device,metric
+    \\ORDER BY page_type,release_id,navigation_type,device,metric LIMIT ?10
     ;
     return null;
 }

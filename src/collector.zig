@@ -66,7 +66,6 @@ pub const Record = struct {
 pub const Client = struct {
     peer_ip: []const u8,
     user_agent: []const u8,
-    country: ?[]const u8,
 };
 
 pub const Result = struct {
@@ -163,23 +162,26 @@ pub fn ingest(
     allocator: std.mem.Allocator,
     store: *store_mod.Store,
     master_key: [32]u8,
+    site: store_mod.Site,
     envelope: Envelope,
     source: Source,
     client: Client,
 ) !Result {
-    var site = try store.siteByPublicId(envelope.site);
-    defer site.deinit(store.allocator);
     if (!site.enabled) return error.SiteDisabled;
     const received_at_ms = try domain.nowMilliseconds();
     if (envelope.sent_at_ms > received_at_ms + 5 * 60 * 1000 or
         envelope.sent_at_ms < received_at_ms - 90 * 24 * 60 * 60 * 1000) return error.InvalidSentAt;
     const date = try domain.utcDate(received_at_ms);
-    const dimensions = classify(client.user_agent, client.country, false);
-    var coarse_buffer: [96]u8 = undefined;
-    const coarse = try std.fmt.bufPrint(&coarse_buffer, "{s}/{s}/{s}", .{
-        dimensions.browser, dimensions.operating_system, dimensions.device,
-    });
-    const visitor_id = domain.visitorDayId(master_key, site.public_id, &date, client.peer_ip, coarse);
+    var dimensions: Dimensions = undefined;
+    var visitor_id: [16]u8 = undefined;
+    if (source == .browser) {
+        dimensions = classify(client.user_agent);
+        var coarse_buffer: [96]u8 = undefined;
+        const coarse = try std.fmt.bufPrint(&coarse_buffer, "{s}/{s}/{s}", .{
+            dimensions.browser, dimensions.operating_system, dimensions.device,
+        });
+        visitor_id = domain.visitorDayId(master_key, site.public_id, &date, client.peer_ip, coarse);
+    }
 
     try store.database.exec("BEGIN IMMEDIATE");
     errdefer store.database.exec("ROLLBACK") catch {};
@@ -254,11 +256,9 @@ const Dimensions = struct {
     operating_system: []const u8,
     device: []const u8,
     traffic_class: []const u8,
-    country: ?[]const u8,
 };
 
-fn classify(user_agent: []const u8, country: ?[]const u8, internal: bool) Dimensions {
-    if (internal) return .{ .browser = "unknown", .operating_system = "unknown", .device = "unknown", .traffic_class = "internal", .country = country };
+fn classify(user_agent: []const u8) Dimensions {
     const monitor = containsIgnoreCase(user_agent, "monitor") or containsIgnoreCase(user_agent, "uptime") or containsIgnoreCase(user_agent, "statuscake");
     const bot = containsIgnoreCase(user_agent, "bot") or containsIgnoreCase(user_agent, "crawler") or
         containsIgnoreCase(user_agent, "spider") or containsIgnoreCase(user_agent, "headless") or
@@ -271,7 +271,6 @@ fn classify(user_agent: []const u8, country: ?[]const u8, internal: bool) Dimens
         .operating_system = os,
         .device = device,
         .traffic_class = if (monitor) "monitor" else if (bot) "known_bot" else if (user_agent.len == 0) "unknown" else "human_like",
-        .country = country,
     };
 }
 
@@ -313,7 +312,7 @@ fn insertPageView(
     try statement.bindText(23, record.tracker_version);
     try statement.bindText(24, record.consent_mode);
     try statement.bindBool(25, record.internal);
-    try statement.bindOptionalText(26, dimensions.country);
+    try statement.bindNull(26);
     try statement.bindText(27, dimensions.browser);
     try statement.bindText(28, dimensions.operating_system);
     try statement.bindText(29, dimensions.device);

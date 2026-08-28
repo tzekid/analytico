@@ -1,7 +1,6 @@
 const std = @import("std");
 const collector = @import("collector.zig");
 const domain = @import("domain.zig");
-const ops = @import("ops.zig");
 const store_mod = @import("store.zig");
 const trackers = @import("tracker_assets.zig");
 
@@ -23,7 +22,6 @@ const Headers = struct {
     origin: ?[]const u8 = null,
     user_agent: []const u8 = "",
     forwarded_for: ?[]const u8 = null,
-    country: ?[]const u8 = null,
     signature_timestamp: ?[]const u8 = null,
     signature: ?[]const u8 = null,
     content_type: ?[]const u8 = null,
@@ -34,7 +32,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
         return error.ListenerMustBeLoopback;
     }
     const paths = try store_mod.Paths.init(allocator, options.data);
-    var master_key = try ops.readKey(io, paths.key);
+    var master_key = try store_mod.readKey(io, paths.key);
     defer std.crypto.secureZero(u8, &master_key);
     var store = try store_mod.Store.open(allocator, io, options.data, true);
     defer store.close();
@@ -161,11 +159,14 @@ fn serveConnection(
             };
         }
 
-        const result = collector.ingest(arena, store, master_key, envelope, source, .{
-            .peer_ip = clientIp(headers.forwarded_for),
-            .user_agent = headers.user_agent[0..@min(headers.user_agent.len, 512)],
-            .country = validCountry(headers.country),
-        }) catch |err| {
+        const client: collector.Client = if (source == .browser) .{
+            .peer_ip = clientIp(headers.forwarded_for) catch {
+                try rejection(arena, store, "invalid_client_addresses");
+                return respondError(&request, .bad_request, "invalid_client_address", headers.origin);
+            },
+            .user_agent = headers.user_agent,
+        } else .{ .peer_ip = "", .user_agent = "" };
+        const result = collector.ingest(arena, store, master_key, site, envelope, source, client) catch |err| {
             const status: std.http.Status = if (storageError(err)) .service_unavailable else if (err == error.EventIdConflict) .conflict else if (err == error.SiteDisabled) .forbidden else .unprocessable_entity;
             if (storageError(err)) try rejection(arena, store, "storage_failures") else if (err == error.EventIdConflict) try rejection(arena, store, "conflicts") else try rejection(arena, store, "rejected_records");
             return respondError(&request, status, safeCode(err), if (source == .browser) headers.origin else null);
@@ -188,25 +189,22 @@ fn copyHeaders(allocator: std.mem.Allocator, request: *const std.http.Server.Req
     var out = Headers{};
     var iterator = request.iterateHeaders();
     while (iterator.next()) |header| {
-        const value = try allocator.dupe(u8, header.value);
         if (std.ascii.eqlIgnoreCase(header.name, "origin")) {
             if (out.origin != null) return error.DuplicateHeader;
-            out.origin = value;
+            out.origin = try allocator.dupe(u8, header.value);
         } else if (std.ascii.eqlIgnoreCase(header.name, "user-agent")) {
-            out.user_agent = value;
+            out.user_agent = try allocator.dupe(u8, header.value[0..@min(header.value.len, 512)]);
         } else if (std.ascii.eqlIgnoreCase(header.name, "x-forwarded-for")) {
             if (out.forwarded_for != null) return error.DuplicateHeader;
-            out.forwarded_for = value;
-        } else if (std.ascii.eqlIgnoreCase(header.name, "cf-ipcountry")) {
-            out.country = value;
+            out.forwarded_for = try allocator.dupe(u8, header.value);
         } else if (std.ascii.eqlIgnoreCase(header.name, "x-analytico-timestamp")) {
             if (out.signature_timestamp != null) return error.DuplicateHeader;
-            out.signature_timestamp = value;
+            out.signature_timestamp = try allocator.dupe(u8, header.value);
         } else if (std.ascii.eqlIgnoreCase(header.name, "x-analytico-signature")) {
             if (out.signature != null) return error.DuplicateHeader;
-            out.signature = value;
+            out.signature = try allocator.dupe(u8, header.value);
         } else if (std.ascii.eqlIgnoreCase(header.name, "content-type")) {
-            out.content_type = value;
+            out.content_type = try allocator.dupe(u8, header.value);
         }
     }
     return out;
@@ -252,18 +250,13 @@ fn rejection(allocator: std.mem.Allocator, store: *store_mod.Store, name: []cons
     _ = try statement.step();
 }
 
-fn clientIp(forwarded: ?[]const u8) []const u8 {
-    const raw = forwarded orelse return "127.0.0.1";
-    const first = std.mem.trim(u8, raw[0 .. std.mem.findScalar(u8, raw, ',') orelse raw.len], " \t");
-    if (first.len == 0 or first.len > 64) return "127.0.0.1";
-    _ = std.Io.net.IpAddress.parse(first, 0) catch return "127.0.0.1";
-    return first;
-}
-
-fn validCountry(value: ?[]const u8) ?[]const u8 {
-    const country = value orelse return null;
-    if (country.len != 2 or !std.ascii.isUpper(country[0]) or !std.ascii.isUpper(country[1])) return null;
-    return country;
+fn clientIp(forwarded: ?[]const u8) ![]const u8 {
+    const raw = forwarded orelse return error.MissingClientAddress;
+    if (std.mem.findScalar(u8, raw, ',') != null) return error.InvalidClientAddress;
+    const address = std.mem.trim(u8, raw, " \t");
+    if (address.len == 0 or address.len > 64) return error.InvalidClientAddress;
+    _ = std.Io.net.IpAddress.parse(address, 0) catch return error.InvalidClientAddress;
+    return address;
 }
 
 fn safeCode(err: anyerror) []const u8 {

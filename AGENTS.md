@@ -1,9 +1,9 @@
 # Analytico engineering doctrine
 
-This file is normative. `PRODUCT.md`, `docs/ARCHITECTURE.md`,
-`docs/PROTOCOL.md`, and `docs/PERFORMANCE.md` follow it in that order.
-Historical release documents describe the archived Turso/DuckDB product and
-do not govern this implementation.
+This file is normative. `PRODUCT.md`, `docs/PROTOCOL.md`, and
+`docs/OPERATIONS.md` follow it in that order. The schema and source define
+implementation detail. The archived Turso/DuckDB product survives in Git
+history and does not govern this implementation.
 
 ## Product boundary
 
@@ -34,8 +34,8 @@ normalization -> durable SQLite transaction -> fixed report query -> CLI.
 - Raw events are evidence; report meanings are fixed, versioned definitions.
 - One process owns writes. WAL, foreign keys, prepared statements, bounded
   inputs, and short transactions are mandatory.
-- Migrations are numbered, compiled in, and run only by an explicit command.
-  Normal `serve` refuses a non-current schema.
+- A later schema change adds its numbered compiled migration and explicit
+  migration command together. Normal `serve` refuses a non-current schema.
 
 ## Data safety
 

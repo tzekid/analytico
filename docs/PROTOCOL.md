@@ -23,6 +23,10 @@ Each `(site,event_id)` is idempotent. Reusing an event ID with the same
 canonical payload is a duplicate and succeeds. Reusing it with different
 content is a 409 conflict. A 204 means the whole batch committed durably.
 
+The loopback proxy must replace `X-Forwarded-For` with the immediate client's
+validated network address. Browser collection fails closed when this header is
+missing or invalid; Analytico never substitutes the loopback address.
+
 Internal requests include `X-Analytico-Timestamp` (Unix seconds) and
 `X-Analytico-Signature` (lowercase hex HMAC-SHA256 of
 `timestamp + "." + body`). The timestamp must be within five minutes. `/i`

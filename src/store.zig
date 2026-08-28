@@ -15,6 +15,19 @@ pub const Paths = struct {
     }
 };
 
+pub fn readKey(io: std.Io, path: []const u8) ![32]u8 {
+    const stat = try std.Io.Dir.cwd().statFile(io, path, .{ .follow_symlinks = false });
+    if (stat.kind != .file or stat.size != 32) return error.InvalidKeyFile;
+    if (stat.permissions.toMode() & 0o777 != 0o600) return error.InsecureKeyPermissions;
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+    var key: [32]u8 = undefined;
+    var reader_buffer: [32]u8 = undefined;
+    var reader = file.reader(io, &reader_buffer);
+    try reader.interface.readSliceAll(&key);
+    return key;
+}
+
 pub const Site = struct {
     id: i64,
     public_id: []u8,
@@ -156,16 +169,5 @@ pub const Store = struct {
 
     pub fn checkpoint(self: *Store) !void {
         try self.database.exec("PRAGMA wal_checkpoint(TRUNCATE)");
-    }
-
-    pub fn integrity(self: *Store) !void {
-        var statement = try self.database.prepare(self.allocator, "PRAGMA integrity_check");
-        defer statement.deinit();
-        if (try statement.step() != .row or !std.mem.eql(u8, statement.columnText(0), "ok")) {
-            return error.IntegrityCheckFailed;
-        }
-        var fk = try self.database.prepare(self.allocator, "PRAGMA foreign_key_check");
-        defer fk.deinit();
-        if (try fk.step() == .row) return error.ForeignKeyCheckFailed;
     }
 };

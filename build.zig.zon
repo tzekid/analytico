@@ -11,7 +11,6 @@
         "assets",
         "vendor/sqlite/sqlite3.c",
         "vendor/sqlite/sqlite3.h",
-        "vendor/sqlite/sqlite3ext.h",
         "vendor/sqlite/README.md",
         "tests",
         "tools",
@@ -21,6 +20,5 @@
         "PRODUCT.md",
         "README.md",
         "LICENSE",
-        "THIRD_PARTY_NOTICES.md",
     },
 }

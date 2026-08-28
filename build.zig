@@ -28,7 +28,6 @@ pub fn build(b: *std.Build) void {
             "-DSQLITE_DEFAULT_FOREIGN_KEYS=1",
             "-DSQLITE_DQS=0",
             "-DSQLITE_OMIT_LOAD_EXTENSION",
-            "-DSQLITE_ENABLE_DBSTAT_VTAB",
         },
     });
     inline for (.{

@@ -36,8 +36,10 @@
   var formAttempts = 0;
   var queued = [];
   var sentSummary = false;
+  /* @session-begin */
   var actionTimers = new Map();
   var recentAction = { id: "", times: [] };
+  /* @session-end */
   /* @rum-begin */
   var rum = {
     ttfb_ms: null,
@@ -250,9 +252,11 @@
     return 0;
   }
 
+  /* @session-begin */
   function actionElement(target) {
     return target && target.closest && target.closest("[data-analytics-action]");
   }
+  /* @session-end */
 
   function onClick(event) {
     interact(event);
@@ -264,25 +268,30 @@
         if (link.hasAttribute("download") || /\.(pdf|zip|csv|docx?|xlsx?|ics)$/i.test(url.pathname)) downloads++;
       } catch (_) {}
     }
+    /* @session-begin */
     var action = actionElement(event.target);
-    if (!action) return;
-    var id = clean(action.dataset.analyticsAction || "", 64);
-    if (!id) return;
-    track("action_started", { action: id });
-    var now = Date.now();
-    if (recentAction.id !== id) recentAction = { id: id, times: [] };
-    recentAction.times = recentAction.times.filter(function (time) { return now - time <= 1200; });
-    recentAction.times.push(now);
-    if (recentAction.times.length === 3) track("rage_click", { action: id, click_bucket: 3 });
-    if (actionTimers.size < 8 && !actionTimers.has(id)) {
-      var timer = setTimeout(function () {
-        actionTimers.delete(id);
-        track("action_unresponsive", { action: id, duration_bucket: "10s+" });
-      }, 10000);
-      actionTimers.set(id, { timer: timer, started: now });
+    if (action) {
+      var id = clean(action.dataset.analyticsAction || "", 64);
+      if (id) {
+        track("action_started", { action: id });
+        var now = Date.now();
+        if (recentAction.id !== id) recentAction = { id: id, times: [] };
+        recentAction.times = recentAction.times.filter(function (time) { return now - time <= 1200; });
+        recentAction.times.push(now);
+        if (recentAction.times.length === 3) track("rage_click", { action: id, click_bucket: 3 });
+        if (actionTimers.size < 8 && !actionTimers.has(id)) {
+          var timer = setTimeout(function () {
+            actionTimers.delete(id);
+            track("action_unresponsive", { action: id, duration_bucket: "10s+" });
+          }, 10000);
+          actionTimers.set(id, { timer: timer, started: now });
+        }
+      }
     }
+    /* @session-end */
   }
 
+  /* @session-begin */
   function finishAction(id, outcome, properties) {
     id = clean(id, 64);
     if (!id) return "";
@@ -298,13 +307,16 @@
     if (duration !== null) safe.duration_bucket = duration < 100 ? "under-100ms" : duration < 500 ? "100-499ms" : duration < 2000 ? "500-1999ms" : "2-9s";
     return track("action_" + outcome, safe);
   }
+  /* @session-end */
 
   function summary() {
     if (sentSummary) return;
     sentSummary = true;
     settle(Date.now());
+    /* @session-begin */
     actionTimers.forEach(function (state) { clearTimeout(state.timer); });
     actionTimers.clear();
+    /* @session-end */
     var record = Object.assign(base(uuid(), "page_summary"), {
       visible_ms: Math.round(visibleMs),
       active_ms: Math.round(activeMs),
@@ -397,12 +409,12 @@
   }
   /* @rum-end */
 
-  window.analytico = {
-    track: track,
-    actionSucceeded: function (id, properties) { return finishAction(id, "succeeded", properties); },
-    actionFailed: function (id, properties) { return finishAction(id, "failed", properties); },
-    flow: function (name, properties) { return track(name, properties); }
-  };
+  window.analytico = { track: track };
+  /* @session-begin */
+  window.analytico.actionSucceeded = function (id, properties) { return finishAction(id, "succeeded", properties); };
+  window.analytico.actionFailed = function (id, properties) { return finishAction(id, "failed", properties); };
+  window.analytico.flow = function (name, properties) { return track(name, properties); };
+  /* @session-end */
 
   pageView();
   if (pageType === "404") track("page_not_found", {});

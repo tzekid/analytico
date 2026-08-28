@@ -1,14 +1,43 @@
 analytics.example.com {
 	encode zstd gzip
 
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		-Server
+	}
+
+	request_body {
+		max_size 8KiB
+	}
+
 	@tracker path /t/*
-	header @tracker Cache-Control "public, max-age=31536000, immutable"
-	reverse_proxy @tracker 127.0.0.1:4318
+	handle @tracker {
+		reverse_proxy 127.0.0.1:4318 {
+			header_up X-Forwarded-For {http.request.remote.host}
+			header_up -CF-IPCountry
+
+			transport http {
+				dial_timeout 2s
+				response_header_timeout 3s
+			}
+		}
+	}
 
 	@events path /e
-	reverse_proxy @events 127.0.0.1:4318
+	handle @events {
+		reverse_proxy 127.0.0.1:4318 {
+			header_up X-Forwarded-For {http.request.remote.host}
+			header_up -CF-IPCountry
 
-	respond /healthz 404
-	respond /readyz 404
-	respond 404
+			transport http {
+				dial_timeout 2s
+				response_header_timeout 3s
+			}
+		}
+	}
+
+	handle {
+		respond "not found" 404
+	}
 }
