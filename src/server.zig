@@ -32,6 +32,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
         return error.ListenerMustBeLoopback;
     }
     const paths = try store_mod.Paths.init(allocator, options.data);
+    defer paths.deinit(allocator);
     var master_key = try store_mod.readKey(io, paths.key);
     defer std.crypto.secureZero(u8, &master_key);
     var store = try store_mod.Store.open(allocator, io, options.data, true);

@@ -8,10 +8,17 @@ pub const Paths = struct {
     key: []const u8,
 
     pub fn init(allocator: std.mem.Allocator, directory: []const u8) !Paths {
+        const database = try std.fs.path.join(allocator, &.{ directory, "analytico.db" });
+        errdefer allocator.free(database);
         return .{
-            .database = try std.fs.path.join(allocator, &.{ directory, "analytico.db" }),
+            .database = database,
             .key = try std.fs.path.join(allocator, &.{ directory, "secret.key" }),
         };
+    }
+
+    pub fn deinit(self: Paths, allocator: std.mem.Allocator) void {
+        allocator.free(self.database);
+        allocator.free(self.key);
     }
 };
 
@@ -52,8 +59,10 @@ pub const Store = struct {
 
     pub fn open(allocator: std.mem.Allocator, io: std.Io, directory: []const u8, write: bool) !Store {
         const paths = try Paths.init(allocator, directory);
+        defer paths.deinit(allocator);
         const writer_lock: ?std.Io.File = if (write) block: {
             const lock_path = try std.fs.path.join(allocator, &.{ directory, "writer.lock" });
+            defer allocator.free(lock_path);
             break :block std.Io.Dir.cwd().createFile(io, lock_path, .{
                 .read = true,
                 .truncate = false,

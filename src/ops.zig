@@ -13,6 +13,7 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, output: *std.Io.Writer, di
     try std.Io.Dir.cwd().createDir(io, directory, @fromBackingInt(@intCast(0o700)));
     errdefer std.Io.Dir.cwd().deleteTree(io, directory) catch {};
     const paths = try store_mod.Paths.init(allocator, directory);
+    defer paths.deinit(allocator);
     try createEmptyFile(io, paths.database);
     var database = try db_mod.Db.open(allocator, paths.database, true);
     defer database.close();
@@ -26,6 +27,7 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, output: *std.Io.Writer, di
 
 pub fn doctor(allocator: std.mem.Allocator, io: std.Io, output: *std.Io.Writer, directory: []const u8) !void {
     const paths = try store_mod.Paths.init(allocator, directory);
+    defer paths.deinit(allocator);
     _ = try store_mod.readKey(io, paths.key);
     var store = try store_mod.Store.open(allocator, io, directory, false);
     defer store.close();
@@ -50,6 +52,7 @@ pub fn backup(
     const key_destination = try std.fmt.allocPrint(allocator, "{s}.key", .{destination});
     try requireMissing(io, key_destination);
     const paths = try store_mod.Paths.init(allocator, directory);
+    defer paths.deinit(allocator);
     _ = try store_mod.readKey(io, paths.key);
     var source = try store_mod.Store.open(allocator, io, directory, false);
     defer source.close();
@@ -84,6 +87,7 @@ pub fn restore(
     try std.Io.Dir.cwd().createDir(io, directory, @fromBackingInt(@intCast(0o700)));
     errdefer std.Io.Dir.cwd().deleteTree(io, directory) catch {};
     const paths = try store_mod.Paths.init(allocator, directory);
+    defer paths.deinit(allocator);
     try createEmptyFile(io, paths.database);
     var target = try db_mod.Db.open(allocator, paths.database, true);
     defer target.close();
