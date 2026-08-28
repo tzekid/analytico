@@ -1,18 +1,14 @@
 [Unit]
-Description=Analytico embedded web analytics
-Documentation=https://github.com/tzekid/analytico
+Description=Analytico CLI-first analytics collector
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/.local/share/analytico
-ExecStartPre=%h/.local/opt/analytico/current/bin/analytico doctor %h/.local/share/analytico
-ExecStart=%h/.local/opt/analytico/current/bin/analytico serve --listen 127.0.0.1:4318 --meta %h/.local/share/analytico/meta.db --events %h/.local/share/analytico/events.duckdb --temp %h/.local/share/analytico/tmp --visitor-key-file %h/.local/share/analytico/visitor.key
+ExecStart=%h/.local/opt/analytico/current/bin/analytico serve --data %h/.local/share/analytico --listen 127.0.0.1:4318
 Restart=on-failure
 RestartSec=2s
 TimeoutStopSec=3s
-KillSignal=SIGTERM
 UMask=0077
 
 NoNewPrivileges=yes
@@ -27,9 +23,9 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictNamespaces=yes
 RestrictRealtime=yes
 LockPersonality=yes
-MemoryHigh=192M
-MemoryMax=256M
-TasksMax=64
+MemoryHigh=128M
+MemoryMax=192M
+TasksMax=32
 LimitNOFILE=1024
 CapabilityBoundingSet=
 AmbientCapabilities=

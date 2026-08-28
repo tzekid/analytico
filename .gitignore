@@ -4,8 +4,6 @@
 /data/
 /backups/
 /dist/
-/*.duckdb
-/*.duckdb.wal
 /*.db
 /*.db-shm
 /*.db-wal
