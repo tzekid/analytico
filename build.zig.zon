@@ -2,7 +2,7 @@
     .name = .analytico,
     .version = "1.0.0-dev",
     .fingerprint = 0xfec3bac728f22f9a,
-    .minimum_zig_version = "0.17.0-dev.1509+bb296ab9b",
+    .minimum_zig_version = "0.17.0-dev.1963+e00c6c439",
     .dependencies = .{},
     .paths = .{
         "build.zig",
