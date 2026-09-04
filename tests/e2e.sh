@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -eu
+set -euo pipefail
 
 app=$1
 journey_root=$(mktemp -d)
@@ -37,7 +37,8 @@ curl --fail --silent "http://127.0.0.1:$port/readyz" | grep -q ready
 snippet=$("$app" site snippet example "http://127.0.0.1:$port" --rum --data "$data_dir")
 asset_url=$(printf '%s\n' "$snippet" | sed -n 's/.*src="\([^"]*\)".*/\1/p')
 test -n "$asset_url"
-test "$(curl --fail --silent "$asset_url" | wc -c)" -gt 10000
+curl --fail --silent "$asset_url" > "$journey_root/tracker.js"
+node --check "$journey_root/tracker.js"
 
 now_ms=$(date +%s%3N)
 browser_body=$(printf '{"v":1,"site":"%s","sent_at_ms":%s,"records":[{"event_id":"550e8400-e29b-41d4-a716-446655440000","type":"page_view","page_id":"550e8400-e29b-41d4-a716-446655440001","session_id":"550e8400-e29b-41d4-a716-446655440002","occurred_at_ms":%s,"tracking_mode":"session","consent_mode":"analytics","tracker_version":"1","release_id":"test","internal":false,"path":"/landing","page_type":"landing","utm_source":"search","utm_campaign":"launch","utm_content":"hero","navigation_type":"navigate","viewport_class":"desktop","language":"en"},{"event_id":"550e8400-e29b-41d4-a716-446655440003","type":"event","page_id":"550e8400-e29b-41d4-a716-446655440001","session_id":"550e8400-e29b-41d4-a716-446655440002","occurred_at_ms":%s,"tracking_mode":"session","consent_mode":"analytics","tracker_version":"1","release_id":"test","internal":false,"name":"registration_started","path":"/register","properties":{"flow":"registration"}},{"event_id":"550e8400-e29b-41d4-a716-446655440006","type":"event","page_id":"550e8400-e29b-41d4-a716-446655440001","session_id":"550e8400-e29b-41d4-a716-446655440002","occurred_at_ms":%s,"tracking_mode":"session","consent_mode":"analytics","tracker_version":"1","release_id":"test","internal":false,"name":"flow_started","path":"/register","properties":{"flow":"registration","step":"start"}},{"event_id":"550e8400-e29b-41d4-a716-446655440004","type":"page_summary","page_id":"550e8400-e29b-41d4-a716-446655440001","session_id":"550e8400-e29b-41d4-a716-446655440002","occurred_at_ms":%s,"tracking_mode":"session","consent_mode":"analytics","tracker_version":"1","release_id":"test","internal":false,"visible_ms":12000,"active_ms":10000,"interaction_count":2,"max_scroll":75,"sections":["hero"],"last_section":"hero","selection_count":0,"copy_count":0,"outbound_clicks":0,"downloads":0,"form_attempts":1,"lcp_ms":500}]}' "$public_id" "$now_ms" "$now_ms" "$now_ms" "$now_ms" "$now_ms")
@@ -76,9 +77,7 @@ curl --fail --silent -o /dev/null -X POST "http://127.0.0.1:$port/i" \
 "$app" report flow example registration --days 7 --data "$data_dir" | grep -q flow_started
 "$app" funnel show example registration-to-paid --days 7 --data "$data_dir" | grep -q $'2\tevent\tpayment_confirmed\t1'
 "$app" report campaign-economics example --days 7 --data "$data_dir" | grep -q $'search\tlaunch\thero\t1000\tEUR\t1\t1\t1\t0\t1\t0\t0\t4900'
-for report in pages acquisition campaigns sections actions events recent coverage; do
-  "$app" report "$report" example --days 7 --data "$data_dir" >/dev/null
-done
+node tests/reports.mjs "$app" "$data_dir"
 "$app" stats --data "$data_dir" | grep -q $'duplicate_records\t4'
 "$app" backup "$data_dir" "$journey_root/backup.db"
 
@@ -90,4 +89,5 @@ grep -q serve_stopped "$journey_root/server.log"
 "$app" restore "$journey_root/backup.db" "$journey_root/restored"
 "$app" doctor --data "$journey_root/restored" | grep -q 'page_views=1 summaries=1 events=3'
 
+node tests/browser.mjs "$app"
 printf 'e2e ok\n'

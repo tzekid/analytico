@@ -27,6 +27,26 @@ zig build
 zig build -Doptimize=ReleaseSafe
 ```
 
+## Verification
+
+The focused checks need only Zig. The end-to-end journey also needs Bash,
+curl, OpenSSL, Node.js 22 or newer, and Chromium. Install the pinned test-only
+browser driver once with `npm ci`; no Node dependency is used by the product.
+Chromium defaults to `/usr/bin/chromium`; set `CHROMIUM_PATH` for another
+installed executable.
+
+```sh
+npm ci
+zig build test -Doptimize=ReleaseSafe
+zig build e2e -Doptimize=ReleaseSafe
+```
+
+The journey uses disposable SQLite data and loopback HTTP. It verifies report
+values, backup/restore, Lite tracking with browser storage disabled, Session
+identity across navigation, and an actual browser action. Regenerate tracker
+assets with `tools/build-trackers.sh`; commit generated changes only when the
+tracker source intentionally changes.
+
 ## First run
 
 ```sh

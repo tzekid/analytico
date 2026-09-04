@@ -7,6 +7,7 @@
     .paths = .{
         "build.zig",
         "build.zig.zon",
+        ".zigversion",
         "src",
         "assets",
         "vendor/sqlite/sqlite3.c",
@@ -19,6 +20,8 @@
         "AGENTS.md",
         "PRODUCT.md",
         "README.md",
+        "package.json",
+        "package-lock.json",
         "LICENSE",
     },
 }
