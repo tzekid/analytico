@@ -43,9 +43,10 @@ zig build e2e -Doptimize=ReleaseSafe
 
 The journey uses disposable SQLite data and loopback HTTP. It verifies report
 values, backup/restore, Lite tracking with browser storage disabled, Session
-identity across navigation, and an actual browser action. Regenerate tracker
-assets with `tools/build-trackers.sh`; commit generated changes only when the
-tracker source intentionally changes.
+identity across navigation, and an actual browser action. It also verifies
+recovery after stalled or trickled HTTP requests and graceful shutdown with
+an incomplete request. Regenerate tracker assets with `tools/build-trackers.sh`;
+commit generated changes only when the tracker source intentionally changes.
 
 ## First run
 

@@ -27,6 +27,85 @@ const Headers = struct {
     content_type: ?[]const u8 = null,
 };
 
+// One deadline covers all network I/O for a connection. Receiving another byte
+// must not let a stalled client keep the single collector indefinitely.
+// Database work stays synchronous and is never canceled by this deadline.
+const Connection = struct {
+    io: std.Io,
+    stream: std.Io.net.Stream,
+    deadline: std.Io.Clock.Timestamp,
+    reader: std.Io.Reader,
+    writer: std.Io.Writer,
+
+    fn init(io: std.Io, stream: std.Io.net.Stream, read_buffer: []u8, write_buffer: []u8) Connection {
+        return .{
+            .io = io,
+            .stream = stream,
+            .deadline = .fromNow(io, .{ .raw = .fromSeconds(2), .clock = .awake }),
+            .reader = .{ .vtable = &.{ .stream = read }, .buffer = read_buffer, .seek = 0, .end = 0 },
+            .writer = .{ .vtable = &.{ .drain = write }, .buffer = write_buffer },
+        };
+    }
+
+    fn wait(self: *Connection, events: i16) error{NetworkTimeout}!void {
+        var fds = [_]std.posix.pollfd{.{ .fd = self.stream.socket.handle, .events = events, .revents = 0 }};
+        while (true) {
+            const remaining = self.deadline.durationFromNow(self.io).raw.toMilliseconds();
+            if (remaining <= 0) return error.NetworkTimeout;
+            const rc = std.c.poll(&fds, fds.len, @intCast(remaining));
+            switch (std.posix.errno(rc)) {
+                .SUCCESS => if (rc > 0) return else return error.NetworkTimeout,
+                .INTR => continue,
+                else => return error.NetworkTimeout,
+            }
+        }
+    }
+
+    fn read(reader: *std.Io.Reader, writer: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
+        const self: *Connection = @alignCast(@fieldParentPtr("reader", reader));
+        const data = limit.slice(try writer.writableSliceGreedy(1));
+        while (true) {
+            self.wait(std.posix.POLL.IN) catch return error.ReadFailed;
+            const rc = std.c.recv(self.stream.socket.handle, data.ptr, data.len, std.posix.MSG.DONTWAIT);
+            switch (std.posix.errno(rc)) {
+                .SUCCESS => {
+                    if (rc == 0) return error.EndOfStream;
+                    const n: usize = @intCast(rc);
+                    writer.advance(n);
+                    return n;
+                },
+                .INTR, .AGAIN => continue,
+                else => return error.ReadFailed,
+            }
+        }
+    }
+
+    fn write(writer: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+        const self: *Connection = @alignCast(@fieldParentPtr("writer", writer));
+        const bytes = bytes: {
+            if (writer.end != 0) break :bytes writer.buffered();
+            for (data[0 .. data.len - @intFromBool(splat == 0)]) |part| {
+                if (part.len != 0) break :bytes part;
+            }
+            return 0;
+        };
+        while (true) {
+            self.wait(std.posix.POLL.OUT) catch return error.WriteFailed;
+            // Poll readiness alone cannot bound a blocking send. Keep the
+            // syscall nonblocking and recheck the same deadline on retry.
+            const rc = std.c.send(self.stream.socket.handle, bytes.ptr, bytes.len, std.posix.MSG.DONTWAIT | std.posix.MSG.NOSIGNAL);
+            switch (std.posix.errno(rc)) {
+                .SUCCESS => {
+                    if (rc == 0) return error.WriteFailed;
+                    return writer.consume(@intCast(rc));
+                },
+                .INTR, .AGAIN => continue,
+                else => return error.WriteFailed,
+            }
+        }
+    }
+};
+
 pub fn run(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
     if (!(std.mem.eql(u8, options.host, "127.0.0.1") or std.mem.eql(u8, options.host, "::1"))) {
         return error.ListenerMustBeLoopback;
@@ -75,9 +154,8 @@ fn serveConnection(
 ) !void {
     var read_buffer: [20 * 1024]u8 = undefined;
     var write_buffer: [16 * 1024]u8 = undefined;
-    var stream_reader = stream.reader(io, &read_buffer);
-    var stream_writer = stream.writer(io, &write_buffer);
-    var http_server = std.http.Server.init(&stream_reader.interface, &stream_writer.interface);
+    var connection = Connection.init(io, stream, &read_buffer, &write_buffer);
+    var http_server = std.http.Server.init(&connection.reader, &connection.writer);
     var request = http_server.receiveHead() catch return error.InvalidHttpRequest;
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();

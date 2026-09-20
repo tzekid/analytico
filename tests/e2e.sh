@@ -90,4 +90,5 @@ grep -q serve_stopped "$journey_root/server.log"
 "$app" doctor --data "$journey_root/restored" | grep -q 'page_views=1 summaries=1 events=3'
 
 node tests/browser.mjs "$app"
+node tests/http.mjs "$app"
 printf 'e2e ok\n'

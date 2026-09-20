@@ -43,3 +43,102 @@ Keep the existing product and storage model. Replace weak assertions with a smal
 - Review pass 2 verified the full ReleaseSafe test/E2E/build sequence, report values, browser outcomes, shell/JavaScript syntax, and byte-identical regeneration of all four assets. Injecting an `awk` failure returns its failing status and preserves the prior generated asset. No unresolved implementation blockers remained in this scope.
 - Delivery requires only committing/pushing these changes. No production restart or tracker-consumer update is needed because executable sources and generated trackers are unchanged.
 - Final adversarial check removed the tracker from fixture snippets: browser acceptance failed as expected and cleaned up its isolated files. The final packaging review also retained the documented `.zigversion` file in exported source packages. No new blockers were found.
+
+
+## Follow-up: 2026-09-20
+
+### Current facts and scope
+
+- Clean `master` and refreshed `origin/master` both start at `ad10716`;
+  GitHub's default is `master`, with no configured Actions workflows. The only
+  worktree is this retained repository. No obsolete checkout is recreated.
+- Pin: Zig `0.17.0-dev.2085+5e36170b5`; vendored SQLite, no package dependencies,
+  test-only Playwright `1.58.2`. Use the installed pinned compiler, not PATH Zig.
+- Production `current/REVISION` is `ad10716`; PID 3340661 matches the installed
+  executable SHA-256 `781ff4343e3d4c6e5168fbffbf44b5e914f62e1cba095f7f01797c7d40955cbb`.
+  Local health/readiness and read-only doctor pass, with zero service restarts.
+  The existing previous release is `1.0.0-f8f2252`.
+- Reproduced on an isolated database with the deployed binary: a partial POST
+  body blocks readiness beyond four seconds and TERM beyond two seconds. The
+  one-connection collector has no network deadline. Caddy's response-header
+  timeout does not establish a collector-side read deadline.
+- Fix this demonstrated availability/shutdown defect and its acceptance gap.
+  Preserve single-writer transactions, tracker bytes/hashes, privacy, CLI,
+  schema, and consumer pins. No concurrency framework or new configuration.
+
+### Acceptance and implementation
+
+1. Give each accepted connection a fixed two-second monotonic network deadline,
+   shared by request head, body, and response writes. Progress must not reset
+   the deadline. Keep transactions synchronous and finish/checkpoint them
+   normally; bound network waiting rather than canceling database operations.
+2. Extend real-process acceptance using disposable data: incomplete headers,
+   incomplete bodies, trickled input, subsequent readiness, and TERM during
+   a stalled request. Require clean exit/checkpoint within the service's
+   three-second shutdown window; cleanup must kill/reap only owned processes.
+   Keep existing browser, reports, authentication/origin, duplicate/conflict,
+   backup/restore, and generator-failure coverage.
+3. Verify pinned ReleaseSafe tests/E2E/build and exported source completeness;
+   inspect failure diagnostics for payload disclosure and ownership/lifetime.
+   Verify deterministic unchanged trackers and current consumer asset routes.
+4. Complete two consecutive clean implementation reviews from functional and
+   operational/failure perspectives. Commit only scoped changes, push master,
+   verify exact remote commit and any configured hosted checks.
+5. Use the established immutable release layout. Stop for verified database
+   plus key backup/restore qualification; retain data identity. Build the
+   committed source, record REVISION and executable digest, atomically promote,
+   start, compare running hash, local health/readiness, public route boundary,
+   served tracker bytes, database integrity and fresh logs. Retain the previous
+   current release as rollback; restore it if promotion fails. Synthetic requests
+   go only to disposable instances, never production.
+
+### Plan reviews
+
+- Pass 1, availability and failure semantics: an idle timeout would be extended
+  by trickled bytes, and canceling the whole request could interrupt a database
+  transaction. Resolved with one monotonic deadline on network I/O only. A
+  runtime change requires real deployment, replacing the historical test-only
+  delivery assumption. Clean-pass count reset to zero.
+- Pass 2, complete contract review: traced HTTP parsing, transactional ingestion,
+  immutable assets, reports and E2E against the plan. Fixed deadlines cover
+  incomplete heads/bodies and writes without changing schema or tracker assets;
+  existing product acceptance remains required. Zero findings; clean pass 1.
+- Pass 3, complete operational/adversarial review: checked pinned I/O APIs,
+  process cleanup, package paths, Caddy timeouts, systemd stop window, backup/key
+  restore, revision/hash promotion and rollback. Network-only cancellation
+  preserves synchronous SQLite ownership; tests and production are separated.
+  Zero findings; clean pass 2. Implementation may proceed.
+
+
+### Implementation reviews
+
+- Pass 1, full contract and failure review: the initial pinned-library timeout
+  waits for socket readiness but then performs a blocking send. That does not
+  fully bound response writes to a slow reader. Replaced network operations
+  with deadline-aware poll and nonblocking recv/send, retaining the existing
+  HTTP parser and synchronous database path. Clean-pass count reset to zero.
+  Initial ReleaseSafe product/browser journey and stalled-input acceptance
+  passed; the new acceptance fails against the original executable as expected.
+- Pass 2, complete functional/package review: pinned ReleaseSafe test/E2E and
+  the exported source package passed all 9 build steps and 3 focused tests,
+  including the real browser, reports, backup/restore and new socket journeys.
+  Fragmented valid requests succeed; incomplete heads/bodies and trickled input
+  expire; readiness recovers; TERM exits cleanly and doctor verifies the database.
+  A disposable 8 MiB tracker response with a non-reading peer forces send-buffer
+  backpressure: the deadline releases the collector and readiness/TERM pass.
+  No production asset was enlarged. Zero findings; clean pass 1.
+- Pass 3, complete ownership/security/operations review: checked the final diff
+  against the full acceptance plan, buffered partial-write accounting, absolute
+  deadline retries and EINTR handling, socket/arena cleanup, synchronous
+  commit/rollback/checkpoint, safe diagnostics and owned test-process cleanup.
+  Exported runtime/tests/pins match the working tree. All four regenerated
+  trackers match baseline bytes; injected awk failure returns 73 without
+  changing outputs. Public assets match those bytes and private routes remain
+  404. No new dependencies or configuration surface. Zero findings; clean pass 2.
+
+### Delivery
+
+The runtime fix requires a release. Deliver the reviewed commit through the
+existing immutable `~/.local/opt/analytico/releases` layout, retaining `ad10716`
+as rollback. Exact revision, backup/restore and live verification results are
+recorded in the task checkpoint and delivery evidence outside the source tree.

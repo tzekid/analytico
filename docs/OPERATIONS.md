@@ -27,6 +27,12 @@ restarts only after failure. Caddy exposes immutable `/t/*` assets and browser
 all other routes. Trusted applications send signed `/i` requests over
 loopback.
 
+Each accepted connection has a fixed two-second deadline for network reads
+and writes, including partial headers or bodies. Sending more bytes does not
+extend it. A stalled connection therefore cannot hold the single collector
+indefinitely or prevent shutdown within the unit's three-second stop window.
+Database transactions finish synchronously before graceful checkpointing.
+
 ## Administration
 
 Stop the service before changing sites, goals, funnels, spend, or data:
