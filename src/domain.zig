@@ -10,6 +10,12 @@ pub fn modeName(mode: Mode) []const u8 {
     return @tagName(mode);
 }
 
+/// Bounded UTF-8 without control characters.
+pub fn validateText(value: []const u8, maximum: usize, allow_empty: bool) !void {
+    if ((!allow_empty and value.len == 0) or value.len > maximum or !std.unicode.utf8ValidateSlice(value)) return error.InvalidText;
+    for (value) |byte| if (byte < 0x20 or byte == 0x7f) return error.InvalidText;
+}
+
 pub fn validateUuid(value: []const u8) !void {
     if (value.len != 36) return error.InvalidUuid;
     for (value, 0..) |byte, index| {

@@ -1,4 +1,5 @@
 const std = @import("std");
+const cli = @import("cli.zig");
 const db_mod = @import("db.zig");
 const domain = @import("domain.zig");
 const store_mod = @import("store.zig");
@@ -17,27 +18,27 @@ pub const Options = struct {
 
 pub fn resolveOptions(args: []const []const u8) !Options {
     const now = try domain.nowMilliseconds();
-    const days_text = option(args, "--days") orelse "7";
+    const days_text = cli.option(args, "--days") orelse "7";
     const days = std.fmt.parseInt(i64, days_text, 10) catch return error.InvalidDays;
     if (days < 1 or days > 3650) return error.InvalidDays;
     var start = now - days * 86_400_000;
     var end = now + 1;
-    if (option(args, "--from")) |value| start = try dateMilliseconds(value);
-    if (option(args, "--to")) |value| end = try dateMilliseconds(value) + 86_400_000;
+    if (cli.option(args, "--from")) |value| start = try dateMilliseconds(value);
+    if (cli.option(args, "--to")) |value| end = try dateMilliseconds(value) + 86_400_000;
     if (start >= end) return error.InvalidDateRange;
-    const limit = std.fmt.parseInt(i64, option(args, "--limit") orelse "100", 10) catch return error.InvalidLimit;
+    const limit = std.fmt.parseInt(i64, cli.option(args, "--limit") orelse "100", 10) catch return error.InvalidLimit;
     if (limit < 1 or limit > 1000) return error.InvalidLimit;
     var format: Format = .table;
-    if (flag(args, "--json")) format = .json;
-    if (flag(args, "--csv")) format = .csv;
-    const path = option(args, "--path") orelse "";
+    if (cli.flag(args, "--json")) format = .json;
+    if (cli.flag(args, "--csv")) format = .csv;
+    const path = cli.option(args, "--path") orelse "";
     if (path.len != 0) try domain.validatePath(path);
     return .{
         .start_ms = start,
         .end_ms = end,
         .limit = limit,
-        .release = option(args, "--release") orelse "",
-        .campaign = option(args, "--campaign") orelse "",
+        .release = cli.option(args, "--release") orelse "",
+        .campaign = cli.option(args, "--campaign") orelse "",
         .path = path,
         .format = format,
     };
@@ -45,13 +46,13 @@ pub fn resolveOptions(args: []const []const u8) !Options {
 
 pub fn resolveDaysOptions(args: []const []const u8) !Options {
     const now = try domain.nowMilliseconds();
-    const days = std.fmt.parseInt(i64, option(args, "--days") orelse "7", 10) catch return error.InvalidDays;
+    const days = std.fmt.parseInt(i64, cli.option(args, "--days") orelse "7", 10) catch return error.InvalidDays;
     if (days < 1 or days > 3650) return error.InvalidDays;
-    const limit = std.fmt.parseInt(i64, option(args, "--limit") orelse "100", 10) catch return error.InvalidLimit;
+    const limit = std.fmt.parseInt(i64, cli.option(args, "--limit") orelse "100", 10) catch return error.InvalidLimit;
     if (limit < 1 or limit > 1000) return error.InvalidLimit;
     var format: Format = .table;
-    if (flag(args, "--json")) format = .json;
-    if (flag(args, "--csv")) format = .csv;
+    if (cli.flag(args, "--json")) format = .json;
+    if (cli.flag(args, "--csv")) format = .csv;
     return .{ .start_ms = now - days * 86_400_000, .end_ms = now + 1, .limit = limit, .format = format };
 }
 
@@ -489,14 +490,4 @@ fn dateMilliseconds(value: []const u8) !i64 {
     }
     days += day - 1;
     return days * 86_400_000;
-}
-
-fn option(args: []const []const u8, name: []const u8) ?[]const u8 {
-    for (args, 0..) |arg, index| if (std.mem.eql(u8, arg, name) and index + 1 < args.len) return args[index + 1];
-    return null;
-}
-
-fn flag(args: []const []const u8, name: []const u8) bool {
-    for (args) |arg| if (std.mem.eql(u8, arg, name)) return true;
-    return false;
 }

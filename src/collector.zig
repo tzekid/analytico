@@ -406,9 +406,9 @@ fn validateRecord(
     try domain.validateUuid(record.event_id);
     try domain.validateName(record.type);
     if (!std.mem.eql(u8, record.tracking_mode, domain.modeName(mode))) return error.TrackingModeMismatch;
-    try validateText(record.consent_mode, 32, false);
-    try validateText(record.tracker_version, 32, false);
-    try validateText(record.release_id, 64, true);
+    try domain.validateText(record.consent_mode, 32, false);
+    try domain.validateText(record.tracker_version, 32, false);
+    try domain.validateText(record.release_id, 64, true);
     if (record.occurred_at_ms > received_at_ms + 5 * 60 * 1000 or
         record.occurred_at_ms < received_at_ms - 90 * 24 * 60 * 60 * 1000) return error.InvalidOccurredAt;
     if (mode == .session and source == .browser) {
@@ -497,7 +497,7 @@ fn canonicalProperties(allocator: std.mem.Allocator, optional: ?std.json.Value) 
         try domain.validateName(entry.key_ptr.*);
         switch (entry.value_ptr.*) {
             .null, .bool, .integer => {},
-            .string => |text| try validateText(text, 256, true),
+            .string => |text| try domain.validateText(text, 256, true),
             else => return error.InvalidPropertyValue,
         }
         try keys.append(allocator, entry.key_ptr.*);
@@ -535,17 +535,12 @@ fn incrementCounter(allocator: std.mem.Allocator, store: *store_mod.Store, name:
     _ = try statement.step();
 }
 
-fn validateText(value: []const u8, maximum: usize, allow_empty: bool) !void {
-    if ((!allow_empty and value.len == 0) or value.len > maximum or !std.unicode.utf8ValidateSlice(value)) return error.InvalidText;
-    for (value) |byte| if (byte < 0x20 or byte == 0x7f) return error.InvalidText;
-}
-
 fn validateOptionalText(value: ?[]const u8, maximum: usize) !void {
-    if (value) |text| try validateText(text, maximum, true);
+    if (value) |text| try domain.validateText(text, maximum, true);
 }
 
 fn validateReferrerHost(value: []const u8) !void {
-    try validateText(value, 253, false);
+    try domain.validateText(value, 253, false);
     if (std.mem.findAny(u8, value, "/?#@") != null) return error.InvalidReferrerHost;
 }
 

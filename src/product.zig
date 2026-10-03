@@ -179,9 +179,9 @@ pub fn spendAdd(
     currency: []const u8,
 ) !void {
     _ = try reports.resolveOptions(&.{ "spend", "--from", date, "--to", date });
-    try validateText(source, 128);
-    try validateText(campaign, 128);
-    try validateText(content, 128);
+    try domain.validateText(source, 128, false);
+    try domain.validateText(campaign, 128, false);
+    try domain.validateText(content, 128, false);
     if (currency.len != 3) return error.InvalidCurrency;
     for (currency) |byte| if (!std.ascii.isUpper(byte)) return error.InvalidCurrency;
     const amount = std.fmt.parseInt(i64, amount_text, 10) catch return error.InvalidAmount;
@@ -265,9 +265,4 @@ fn validateStep(kind: []const u8, value: []const u8) !void {
     if (std.mem.eql(u8, kind, "event")) return domain.validateName(value);
     if (std.mem.eql(u8, kind, "path")) return domain.validatePath(value);
     return error.InvalidGoalKind;
-}
-
-fn validateText(value: []const u8, maximum: usize) !void {
-    if (value.len == 0 or value.len > maximum or !std.unicode.utf8ValidateSlice(value)) return error.InvalidText;
-    for (value) |byte| if (byte < 0x20 or byte == 0x7f) return error.InvalidText;
 }

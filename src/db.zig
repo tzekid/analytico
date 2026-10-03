@@ -148,11 +148,6 @@ pub const Statement = struct {
         return @as([*]const u8, @ptrCast(ptr))[0..len];
     }
 
-    pub fn columnOptionalText(self: *Statement, index: usize) ?[]const u8 {
-        if (c.sqlite3_column_type(self.handle, @intCast(index)) == c.SQLITE_NULL) return null;
-        return self.columnText(index);
-    }
-
     pub fn columnFloat(self: *Statement, index: usize) f64 {
         return c.sqlite3_column_double(self.handle, @intCast(index));
     }
