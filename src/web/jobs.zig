@@ -13,6 +13,7 @@ const settings = @import("settings.zig");
 const server = @import("../server.zig");
 const store_mod = @import("../store.zig");
 const integrations = @import("integrations.zig");
+const push = @import("push.zig");
 
 const Shared = server.Shared;
 const tick_seconds = 30;
@@ -240,6 +241,7 @@ fn alerts(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, at: i64) !v
             log = result.log;
             const headline_text = try std.fmt.allocPrint(arena, "{s} · {s}: {f} yesterday ({d:.0} vs {d:.0})", .{ site.?.title(), alert.name, html.change(values[1], values[0]), values[1], values[0] });
             integrations.broadcast(arena, shared, db, try std.fmt.allocPrint(arena, "*Alert* {s}\n{s}", .{ headline_text, result.text }), .{ .kind = "alert", .site = site.?.slug, .text = headline_text, .at_ms = at }, false) catch |err| std.log.warn("alert_channels_failed id={d} code={s}", .{ alert.id, @errorName(err) });
+            push.send(arena, shared, db, .{ .kind = .alert, .site_id = site.?.id, .site = site.?.slug, .title = site.?.title(), .body = try std.fmt.allocPrint(arena, "{s}: {f} yesterday ({d:.0} vs {d:.0})", .{ alert.name, html.change(values[1], values[0]), values[1], values[0] }) }) catch |err| std.log.warn("alert_push_failed id={d} code={s}", .{ alert.id, @errorName(err) });
             if (alert.email) if (try mail.load(arena, db, shared.master_key)) |config| {
                 const recipients = try teamEmails(arena, db);
                 const link = try std.fmt.allocPrint(arena, "{s}/{s}/reports?tab=alerts", .{ try origin(arena, db), site.?.slug });
@@ -273,10 +275,15 @@ fn anomalies(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, at: i64)
     if (std.mem.eql(u8, (try data.setting(arena, db, .@"anomalies.day")) orelse "", &day)) return;
     for (try data.sites(arena, db)) |site| {
         const label = try anomaly(arena, db, site, day_start, at) orelse continue;
-        const write = shared.lockWrite();
-        defer shared.unlockWrite();
-        try write.run(arena, "INSERT INTO annotations(site_id,day,label,created_at_ms,draft) SELECT ?1,?2,?3,?4,1 WHERE NOT EXISTS (SELECT 1 FROM annotations WHERE site_id=?1 AND day=?2)", .{ site.id, &day, label, at });
+        const added = added: {
+            const write = shared.lockWrite();
+            defer shared.unlockWrite();
+            try write.run(arena, "INSERT INTO annotations(site_id,day,label,created_at_ms,draft) SELECT ?1,?2,?3,?4,1 WHERE NOT EXISTS (SELECT 1 FROM annotations WHERE site_id=?1 AND day=?2)", .{ site.id, &day, label, at });
+            break :added write.changes() != 0;
+        };
+        if (!added) continue;
         std.log.info("anomaly_noted site={s} day={s}", .{ site.slug, &day });
+        push.send(arena, shared, db, .{ .kind = .note, .site_id = site.id, .site = site.slug, .title = site.title(), .body = try std.fmt.allocPrint(arena, "Yesterday: {s}", .{label}) }) catch |err| std.log.warn("anomaly_push_failed site={s} code={s}", .{ site.slug, @errorName(err) });
     }
     const write = shared.lockWrite();
     defer shared.unlockWrite();

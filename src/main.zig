@@ -39,4 +39,5 @@ test {
     _ = @import("geo.zig");
     _ = @import("assets.zig");
     _ = @import("web/catalog.zig");
+    _ = @import("web/push.zig");
 }

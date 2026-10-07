@@ -16,10 +16,10 @@ const std = @import("std");
 const db_mod = @import("db.zig");
 
 const baseline_version: i64 = 6;
-pub const current_version: i64 = 10;
+pub const current_version: i64 = 11;
 
 /// Migrations after the baseline: index 0 takes schema 6 to 7.
-const migrations = [_][]const u8{ chatgpt_sql, draft_notes_sql, scale_sql, apps_sql };
+const migrations = [_][]const u8{ chatgpt_sql, draft_notes_sql, scale_sql, apps_sql, push_sql };
 
 /// 7: each person can run Analytico's AI on their own ChatGPT plan. The
 /// registration (issued client) outlives a sign-out; tokens are sealed;
@@ -96,6 +96,26 @@ const apps_sql =
     \\INSERT INTO oauth_clients(client_id,name,redirect_uris,created_at_ms) VALUES('analytico-apple','Analytico for Mac, iPhone and iPad','["analytico://oauth"]',unixepoch('subsec')*1000) ON CONFLICT DO NOTHING;
     \\INSERT INTO schema_migrations VALUES(10,'native-apps',unixepoch('subsec')*1000);
     \\PRAGMA user_version=10;
+    \\COMMIT;
+;
+
+const push_sql =
+    \\BEGIN IMMEDIATE;
+    \\CREATE TABLE devices (
+    \\  device_id TEXT PRIMARY KEY,
+    \\  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    \\  platform TEXT NOT NULL,
+    \\  environment TEXT NOT NULL,
+    \\  token TEXT NOT NULL,
+    \\  public_key TEXT NOT NULL,
+    \\  auth_secret TEXT NOT NULL,
+    \\  kinds TEXT NOT NULL,
+    \\  updated_at_ms INTEGER NOT NULL,
+    \\  last_sent_at_ms INTEGER,
+    \\  last_error TEXT NOT NULL DEFAULT ''
+    \\) STRICT;
+    \\INSERT INTO schema_migrations VALUES(11,'push',unixepoch('subsec')*1000);
+    \\PRAGMA user_version=11;
     \\COMMIT;
 ;
 

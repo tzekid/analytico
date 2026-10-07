@@ -9,6 +9,7 @@ const customers = @import("customers.zig");
 const data = @import("data.zig");
 const db_mod = @import("../db.zig");
 const mcp = @import("mcp.zig");
+const push = @import("push.zig");
 const geo = @import("../geo.zig");
 const html = @import("html.zig");
 const layout = @import("layout.zig");
@@ -360,6 +361,10 @@ fn api(ctx: *Ctx, parts: []const []const u8) !void {
         if (allowed) try visible.append(arena, site);
     }
     const w = ctx.w();
+    if (parts.len == 1 and is(parts[0], "device")) return switch (caller) {
+        .app => |grant| device(ctx, grant.device_id),
+        .key => apiError(ctx, .not_found, "unknown_endpoint"),
+    };
     if (parts.len == 1 and is(parts[0], "catalog")) {
         try w.writeAll("{\"reports\":[");
         for (catalog.reports, 0..) |report, index| {
@@ -466,6 +471,44 @@ fn notes(ctx: *Ctx, site: data.Site, rest: []const []const u8) !void {
     if (db.changes() == 0) return apiError(ctx, .not_found, "unknown_note");
     ctx.status = .no_content;
     return ctx.json();
+}
+
+/// The app's push registration: its token, the key notifications are
+/// encrypted to, and which kinds it wants. Signing out removes it.
+fn device(ctx: *Ctx, device_id: []const u8) !void {
+    const arena = ctx.arena;
+    if (ctx.method == .DELETE) {
+        const db = ctx.shared.lockWrite();
+        defer ctx.shared.unlockWrite();
+        try db.run(arena, "DELETE FROM devices WHERE device_id=?", .{device_id});
+        ctx.status = .no_content;
+        return ctx.json();
+    }
+    if (ctx.method != .POST) return apiError(ctx, .method_not_allowed, "method_not_allowed");
+    const environment = try ctx.field("environment");
+    const token = try ctx.field("token");
+    const public_key = try ctx.field("public_key");
+    const auth_secret = try ctx.field("auth_secret");
+    const kinds = try ctx.field("kinds");
+    if (!is(try ctx.field("platform"), "apns")) return apiError(ctx, .bad_request, "unknown_platform");
+    if (!is(environment, "production") and !is(environment, "development")) return apiError(ctx, .bad_request, "invalid_environment");
+    if (token.len == 0 or token.len > 200 or !allHex(token)) return apiError(ctx, .bad_request, "invalid_token");
+    if (!push.validKeys(public_key, auth_secret)) return apiError(ctx, .bad_request, "invalid_keys");
+    var parts = std.mem.splitScalar(u8, kinds, ',');
+    while (parts.next()) |kind| if (kind.len != 0 and std.meta.stringToEnum(push.Kind, kind) == null) return apiError(ctx, .bad_request, "invalid_kinds");
+    const db = ctx.shared.lockWrite();
+    defer ctx.shared.unlockWrite();
+    try db.run(arena,
+        \\INSERT INTO devices(device_id,user_id,platform,environment,token,public_key,auth_secret,kinds,updated_at_ms) VALUES(?,?,'apns',?,?,?,?,?,?)
+        \\ON CONFLICT(device_id) DO UPDATE SET environment=excluded.environment,token=excluded.token,public_key=excluded.public_key,auth_secret=excluded.auth_secret,kinds=excluded.kinds,updated_at_ms=excluded.updated_at_ms,last_error=''
+    , .{ device_id, ctx.user.?.id, environment, token, public_key, auth_secret, kinds, ctx.now() });
+    ctx.status = .no_content;
+    return ctx.json();
+}
+
+fn allHex(text: []const u8) bool {
+    for (text) |byte| if (!std.ascii.isHex(byte)) return false;
+    return true;
 }
 
 fn csv(w: *std.Io.Writer, value: []const u8) !void {

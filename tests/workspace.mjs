@@ -2,10 +2,11 @@
 // tracker, a browser with a virtual passkey authenticator, and stand-ins for
 // an OpenAI-compatible AI endpoint and an OpenID provider.
 import assert from "node:assert/strict";
-import { createHash, randomBytes } from "node:crypto";
+import { createDecipheriv, createECDH, createHash, hkdfSync, randomBytes } from "node:crypto";
 import { journey, signer } from "./harness.mjs";
 
 const aiRequests = [];
+const pushes = [];
 const google = signer();
 
 // A minimal chat-completions endpoint and OpenID provider: records what
@@ -13,6 +14,7 @@ const google = signer();
 let callback = "";
 const nonces = new Map();
 function fakeAi({ incoming, outgoing, url, base, body, json }) {
+  if (url.pathname === "/v1/apns") return pushes.push(JSON.parse(body)), json({});
   if (url.pathname === "/.well-known/openid-configuration") return json({ issuer: base, authorization_endpoint: `${base}/authorize`, token_endpoint: `${base}/token`, jwks_uri: `${base}/jwks` });
   if (url.pathname === "/jwks") return json(google.jwks);
   if (url.pathname === "/authorize") {
@@ -240,6 +242,36 @@ await journey("workspace", async (t) => {
   assert.equal((await exchange({ grant_type: "refresh_token", refresh_token: appTokens.refresh_token, client_id: "analytico-apple" })).error, "invalid_grant");
   appTokens.access_token = rotated.access_token;
   assert.equal((await app("/sites")).status, 200);
+  // Push: the app registers its key; a goal reaches the relay as ciphertext
+  // that only that key opens (RFC 8291, decrypted here independently).
+  const deviceKey = createECDH("prime256v1");
+  deviceKey.generateKeys();
+  const authSecret = randomBytes(16);
+  const register = (fields) => app("/device", { method: "POST", body: new URLSearchParams({ platform: "apns", environment: "development", token: "ab".repeat(32), public_key: deviceKey.getPublicKey().toString("base64url"), auth_secret: authSecret.toString("base64url"), kinds: "alert,goal,note", ...fields }) });
+  assert.equal((await register({ public_key: "AAAA" })).status, 400);
+  assert.equal((await register({ kinds: "alert,gossip" })).status, 400);
+  assert.equal((await register({})).status, 204);
+  const settingsDb = t.db("analytico.db", { readOnly: false });
+  settingsDb.prepare("INSERT OR REPLACE INTO settings(name,value) VALUES('push.relay',?)").run(aiBase);
+  settingsDb.prepare("INSERT INTO goals(site_id,name,kind,match_value,created_at_ms) SELECT id,'Signed up','event','signup',0 FROM sites WHERE slug='shop'").run();
+  settingsDb.close();
+  const signup = await (await t.context()).newPage();
+  await signup.goto(`${origin}/pricing`);
+  await signup.evaluate(() => analytico.track("signup"));
+  await signup.goto(`${origin}/checkout`);
+  const delivered = await t.until(() => pushes[0], "goal push", 45000);
+  await signup.close();
+  assert.deepEqual([delivered.token, delivered.environment], ["ab".repeat(32), "development"]);
+  const sealed = Buffer.from(delivered.payload, "base64");
+  const senderKey = sealed.subarray(21, 21 + sealed[20]);
+  const ikm = hkdfSync("sha256", deviceKey.computeSecret(senderKey), authSecret, Buffer.concat([Buffer.from("WebPush: info\0"), deviceKey.getPublicKey(), senderKey]), 32);
+  const contentKey = (info, length) => Buffer.from(hkdfSync("sha256", ikm, sealed.subarray(0, 16), Buffer.from(`Content-Encoding: ${info}\0`), length));
+  const decipher = createDecipheriv("aes-128-gcm", contentKey("aes128gcm", 16), contentKey("nonce", 12));
+  decipher.setAuthTag(sealed.subarray(-16));
+  const opened = Buffer.concat([decipher.update(sealed.subarray(21 + sealed[20], -16)), decipher.final()]);
+  assert.equal(opened.at(-1), 2);
+  assert.deepEqual(JSON.parse(opened.subarray(0, -1)), { title: shopSite.name, body: "Goal reached: Signed up", site: "shop", kind: "goal" });
+  assert.doesNotMatch(JSON.stringify(delivered), /Signed up|shop/);
   // The app is a device under Settings → Sign-in, not an AI connector; signing it out ends its access.
   await page.goto(`${origin}/settings/ai?site=shop`);
   assert.equal(await page.getByText("Analytico for Mac, iPhone and iPad").count(), 0);
@@ -250,6 +282,7 @@ await journey("workspace", async (t) => {
   await deviceRow.getByRole("button", { name: "Sign out" }).click();
   await page.locator(".toast", { hasText: "Signed out" }).waitFor();
   assert.equal((await app("/sites")).status, 401);
+  assert.equal(t.db().prepare("SELECT count(*) AS n FROM devices").get().n, 0);
 
   // Settings → Sign-in: the passkey is listed; set up Google and link it.
   await page.goto(`${origin}/settings/signin`);
@@ -306,5 +339,5 @@ await journey("workspace", async (t) => {
   await page.locator(".tabbar").getByRole("link", { name: "Pages" }).click();
   await page.waitForURL(/\/shop\/pages$/);
 
-  return "passkey first run, pages, goals, funnels, filters, alerts, notes, BYOK ask, MCP connector, app sign-in and API, Google linking and sign-in, teammate invite";
+  return "passkey first run, pages, goals, funnels, filters, alerts, notes, BYOK ask, MCP connector, app sign-in and API, encrypted push, Google linking and sign-in, teammate invite";
 });

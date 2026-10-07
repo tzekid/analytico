@@ -21,6 +21,7 @@ const html = @import("html.zig");
 const layout = @import("layout.zig");
 const ui = @import("ui.zig");
 const oidc = @import("oidc.zig");
+const push = @import("push.zig");
 const overview = @import("overview.zig");
 const secret = @import("secret.zig");
 const server = @import("../server.zig");
@@ -563,28 +564,48 @@ pub fn broadcast(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, slac
 
 /// Goal events since the last delivery go to webhooks, oldest first.
 pub fn deliverGoals(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, now_ms: i64) !void {
-    if (try db.scalar(arena, i64, "SELECT count(*) FROM channels WHERE kind='webhook'", .{}) == 0) return;
+    if (try db.scalar(arena, i64, "SELECT (SELECT count(*) FROM channels WHERE kind='webhook')+(SELECT count(*) FROM devices WHERE instr(','||kinds||',',',goal,')>0)", .{}) == 0) return;
     const cursor = std.fmt.parseInt(i64, (try data.setting(arena, db, .@"webhooks.cursor")) orelse "0", 10) catch 0;
     const since = if (cursor == 0) now_ms - 60_000 else cursor;
     var statement = try db.prepare(arena,
-        \\SELECT s.slug,e.name,e.value_minor,coalesce(e.currency,''),e.received_at_ms,g.name FROM events e JOIN goals g ON g.site_id=e.site_id AND g.kind='event' AND g.match_value=e.name
+        \\SELECT s.slug,e.name,e.value_minor,coalesce(e.currency,''),e.received_at_ms,g.name,s.id FROM events e JOIN goals g ON g.site_id=e.site_id AND g.kind='event' AND g.match_value=e.name
         \\JOIN sites s ON s.id=e.site_id WHERE e.received_at_ms>? AND e.internal=0 ORDER BY e.received_at_ms LIMIT 200
     );
     defer statement.deinit();
     try statement.bindInt(1, since);
     var latest = since;
-    const Item = struct { site: []const u8, event: []const u8, value: ?i64, currency: []const u8, at: i64, goal: []const u8 };
+    const Item = struct { site: []const u8, event: []const u8, value: ?i64, currency: []const u8, at: i64, goal: []const u8, site_id: i64 };
     var items: std.ArrayList(Item) = .empty;
     while (try statement.step() == .row) {
-        try items.append(arena, .{ .site = try arena.dupe(u8, statement.columnText(0)), .event = try arena.dupe(u8, statement.columnText(1)), .value = if (statement.columnType(2) == db_mod.sqlite.SQLITE_NULL) null else statement.columnInt(2), .currency = try arena.dupe(u8, statement.columnText(3)), .at = statement.columnInt(4), .goal = try arena.dupe(u8, statement.columnText(5)) });
+        try items.append(arena, .{ .site = try arena.dupe(u8, statement.columnText(0)), .event = try arena.dupe(u8, statement.columnText(1)), .value = if (statement.columnType(2) == db_mod.sqlite.SQLITE_NULL) null else statement.columnInt(2), .currency = try arena.dupe(u8, statement.columnText(3)), .at = statement.columnInt(4), .goal = try arena.dupe(u8, statement.columnText(5)), .site_id = statement.columnInt(6) });
     }
     for (items.items) |item| {
         latest = @max(latest, item.at);
         try broadcast(arena, shared, db, "", .{ .kind = "goal", .site = item.site, .text = try std.fmt.allocPrint(arena, "Goal reached: {s}", .{item.goal}), .event = item.event, .value_minor = item.value, .currency = item.currency, .at_ms = item.at }, true);
     }
+    try pushGoals(arena, shared, db, items.items);
     const write = shared.lockWrite();
     defer shared.unlockWrite();
     try data.putSetting(arena, write, .@"webhooks.cursor", try std.fmt.allocPrint(arena, "{d}", .{if (items.items.len == 0) @max(since, now_ms - 60_000) else latest}));
+}
+
+/// One notification per website per run, so a busy minute is one buzz:
+/// "Goal reached: Purchase" or "3 goals reached: Purchase, Sign-up".
+fn pushGoals(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, items: anytype) !void {
+    for (try data.sites(arena, db)) |site| {
+        var count: usize = 0;
+        var names: std.ArrayList([]const u8) = .empty;
+        for (items) |item| if (item.site_id == site.id) {
+            count += 1;
+            for (names.items) |name| {
+                if (std.mem.eql(u8, name, item.goal)) break;
+            } else if (names.items.len < 3) try names.append(arena, item.goal);
+        };
+        if (count == 0) continue;
+        const list = try std.mem.join(arena, ", ", names.items);
+        const body = if (count == 1) try std.fmt.allocPrint(arena, "Goal reached: {s}", .{list}) else try std.fmt.allocPrint(arena, "{d} goals reached: {s}", .{ count, list });
+        push.send(arena, shared, db, .{ .kind = .goal, .site_id = site.id, .site = site.slug, .title = site.title(), .body = body }) catch |err| std.log.warn("goal_push_failed site={s} code={s}", .{ site.slug, @errorName(err) });
+    }
 }
 
 // ---------------------------------------------------------------- syncs

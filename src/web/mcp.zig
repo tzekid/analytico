@@ -251,6 +251,7 @@ fn authorize(ctx: *Ctx) !void {
         const db = ctx.shared.lockWrite();
         defer ctx.shared.unlockWrite();
         try db.run(arena, "DELETE FROM oauth_grants WHERE expires_at_ms<?", .{ctx.now()});
+        try db.run(arena, "DELETE FROM devices WHERE device_id NOT IN (SELECT device_id FROM oauth_grants WHERE device_id IS NOT NULL)", .{});
         try db.run(arena, "INSERT INTO oauth_grants(token_hash,kind,client_id,user_id,sites,redirect_uri,code_challenge,expires_at_ms,created_at_ms,device_id,device_name) VALUES(?,'code',?,?,?,?,?,?,?,?,?)", .{ &hashed, client_id, user.id, allowed.items, redirect_uri, challenge, ctx.now() + code_ms, ctx.now(), if (app) @as(?[]const u8, &device_id) else null, if (app) @as(?[]const u8, deviceName(params)) else null });
         return ctx.redirectFmt("{s}{s}code={s}&state={f}", .{ redirect_uri, separator, &code, html.url(state) });
     }

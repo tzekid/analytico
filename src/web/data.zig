@@ -1118,6 +1118,7 @@ pub const Setting = enum {
     @"jobs.last_run",
     @"jobs.nightly_at",
     public_origin,
+    @"push.relay",
     @"replays.retention_days",
     @"retention.days",
     @"smtp.from",

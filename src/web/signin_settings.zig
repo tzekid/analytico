@@ -209,6 +209,7 @@ pub fn post(ctx: *Ctx, action: []const u8) !void {
     defer ctx.shared.unlockWrite();
     if (is(action, "sign-out-device")) {
         try db.run(arena, "DELETE FROM oauth_grants WHERE device_id=? AND user_id=?", .{ try ctx.field("device"), user.id });
+        try db.run(arena, "DELETE FROM devices WHERE device_id=? AND user_id=?", .{ try ctx.field("device"), user.id });
         try ctx.flash("Signed out. The app asks to sign in again.", "", "");
     } else if (is(action, "rename-passkey")) {
         const label = std.mem.trim(u8, try ctx.field("label"), " ");
