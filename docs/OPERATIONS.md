@@ -53,6 +53,7 @@ analytico migrate --data ~/.local/share/analytico-sqlite \
 systemctl --user start analytico.service
 ```
 
+Schema 11 adds the `devices` table for app notifications; it is instant.
 Schema 10 lets the Mac, iPhone and iPad apps sign in (a built-in OAuth
 client and a device name per sign-in); it is instant.
 Schema 9 stores each browser event's traffic class (filled from its page
@@ -133,6 +134,38 @@ through the instance's own sign-in page in a browser sheet and receive
 tokens for the read API only (never for `/mcp`). Each signed-in device is
 listed under Settings → Sign-in → Signed-in apps, where its owner can sign
 it out. Behind Caddy nothing changes: the apps use the public origin.
+
+Signed-in apps can ask for notifications: alerts, goals reached (one per
+website per minute, however many) and unusual days. The instance encrypts
+each one to the device's own key and sends it to the app publisher's relay,
+`https://push.analytico.plosca.ru` (setting `push.relay`), which passes it
+to Apple. The relay sees a push token and ciphertext, nothing else. Signing
+a device out, or its sign-in expiring, stops its notifications.
+
+### The push relay
+
+Only the app's publisher runs this. `zig build relay -Doptimize=ReleaseSafe`
+builds `zig-out/bin/analytico-relay`; it needs `curl` with HTTP/2 and an
+APNs key (`.p8`) from the Apple developer account.
+
+```sh
+install -Dm0755 zig-out/bin/analytico-relay ~/.local/opt/analytico-relay/bin/analytico-relay
+install -Dm0600 AuthKey_XXXXXXXXXX.p8 ~/.config/analytico-relay/AuthKey.p8
+printf 'KEY_ID=XXXXXXXXXX\nTEAM_ID=JVVN972Y79\n' > ~/.config/analytico-relay/env
+cp relay/analytico-relay.service ~/.config/systemd/user/
+systemctl --user enable --now analytico-relay.service
+```
+
+Caddy forwards the relay's host to it:
+
+```caddyfile
+push.analytico.plosca.ru {
+	reverse_proxy 127.0.0.1:4395
+}
+```
+
+`curl https://push.analytico.plosca.ru/healthz` answers `ok`. It logs
+only rejected pushes (a token prefix, Apple's status and reason).
 
 Email delivery (alerts, scheduled reports, invites) uses any SMTP server:
 STARTTLS on 587, TLS on 465, or a plain local relay. Configure it under

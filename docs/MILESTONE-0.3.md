@@ -1,6 +1,6 @@
 # Milestone 0.3: the web workspace on Mac, iPhone and iPad
 
-Status: in progress. Phase 1 (server and web) and phase 2 (the app) are built and tested; phase 3 (widgets, menu bar, Siri) is built and waiting for a device check; phases 4–5 are next.
+Status: in progress. Phase 1 (server and web) and phase 2 (the app) are built and tested; phase 3 (widgets, menu bar, Siri) is built and waiting for a device check; phase 4 (push) is built and tested up to Apple, waiting for the APNs key and a device check; phase 5 is next.
 
 Analytico gets native apps for macOS, iOS and iPadOS, next to the web
 workspace, and the server gains what native apps need: instance discovery,
@@ -141,22 +141,31 @@ refresh only the visible report on `stale`.
 Self-hosted instances cannot hold Apple's or Google's push credentials,
 so:
 
-- **`devices` table**: account, client, name, push token, push platform,
-  the device's P-256 public key and auth secret, last seen.
+- **`devices` table**: one row per signed-in app that asked for
+  notifications: account, push token and environment, the device's P-256
+  public key and auth secret, and the kinds it wants (alerts, goals,
+  unusual days). `POST`/`DELETE /api/v1/device` with the app's token.
+  Delivery requires a live sign-in, so signing out or expiry stops it.
 - **Encrypted payloads**: the instance encrypts each notification to the
   device's key with RFC 8291 (`aes128gcm`, as Web Push does), using the
   Zig standard library's P-256, HKDF and AES-GCM. Only the device can read
   it.
 - **`relay/`**: a small separate Zig service, run by the app publisher,
-  that forwards ciphertext to APNs (HTTP/2 with an ES256 token; needs a
-  minimal HTTP/2 client). It stores nothing and logs no payloads. Google,
+  that forwards ciphertext to APNs (HTTP/2 through the system `curl`, with
+  an ES256 provider token reused for 30 minutes). It stores nothing and
+  logs no payloads. Apple's "gone" answers reach the instance as 410, and
+  it forgets the device. Google,
   Microsoft and UnifiedPush routes come in 0.4.
-- Alerts, goal completions and anomaly notes get "push" as a channel next
-  to Slack and webhooks.
+- Alerts, goal completions and anomaly notes are pushed next to Slack and
+  webhooks. Goals reached in the same minute on one website are one
+  notification.
 
-Verification: a stand-in relay in the harness receives a payload that
-decrypts with the device's private key to the expected alert; revoking
-the device stops delivery.
+Verification: `tests/workspace.mjs` registers a device, fires a goal and
+decrypts what the stand-in relay receives with Node's own crypto; signing
+the device out removes it. `tests/relay.mjs` runs the relay against a
+stand-in APNs (HTTP/2): headers, a verified ES256 token, the ciphertext
+untouched, gone devices and input checks. The RFC 8291 example message is
+a unit test in Zig (encrypt) and Swift (decrypt).
 
 ---
 

@@ -1,0 +1,33 @@
+[Unit]
+Description=Analytico push relay (APNs)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/analytico-relay/env
+ExecStart=%h/.local/opt/analytico-relay/bin/analytico-relay --listen 127.0.0.1:4395 --key %h/.config/analytico-relay/AuthKey.p8 --key-id ${KEY_ID} --team ${TEAM_ID} --topic ru.plosca.analytico
+Restart=on-failure
+RestartSec=2s
+UMask=0077
+
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryMax=128M
+TasksMax=64
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=default.target
