@@ -714,31 +714,41 @@ const paths_sql =
     \\WHERE path=?4 AND next_path IS NOT NULL GROUP BY path,next_path ORDER BY transitions DESC,next_path LIMIT ?5
 ;
 const economics_sql =
-    \\WITH campaign_sessions AS (
-    \\ SELECT site_id,session_id,max(coalesce(utm_source,'')) source,max(coalesce(utm_campaign,'')) campaign,
-    \\ max(coalesce(utm_content,'')) content,count(*) landing_views
+    \\WITH cs AS MATERIALIZED (
+    \\ SELECT session_id,max(coalesce(utm_source,'')) source,max(coalesce(utm_campaign,'')) campaign,max(coalesce(utm_content,'')) content
     \\ FROM page_views WHERE internal=0 AND traffic_class IN ('human_like','unknown') AND site_id=?1 AND received_at_ms>=?2 AND received_at_ms<?3 AND session_id IS NOT NULL AND utm_campaign IS NOT NULL
-    \\ GROUP BY site_id,session_id
+    \\ GROUP BY session_id
+    \\), engaged AS (
+    \\ SELECT DISTINCT session_id FROM page_views WHERE site_id=?1 AND received_at_ms>=?2 AND received_at_ms<?3 AND session_id IN (SELECT session_id FROM cs)
+    \\ AND (active_ms>=10000 OR max_scroll>=50 OR interaction_count>0)
+    \\), starts AS (
+    \\ SELECT DISTINCT session_id FROM events WHERE internal=0 AND site_id=?1 AND name='registration_started' AND received_at_ms>=?2 AND received_at_ms<?3 AND session_id IN (SELECT session_id FROM cs)
+    \\), sessions AS (
+    \\ SELECT source,campaign,content,count(*) landing_sessions,sum(session_id IN (SELECT session_id FROM engaged)) engaged_sessions,
+    \\ sum(session_id IN (SELECT session_id FROM starts)) registration_starts FROM cs GROUP BY 1,2,3
+    \\), ev AS MATERIALIZED (
+    \\ SELECT name,source origin,coalesce(json_extract(properties_json,'$.source'),'') source,coalesce(json_extract(properties_json,'$.campaign'),'') campaign,
+    \\ coalesce(json_extract(properties_json,'$.content'),'') content,value_minor,currency
+    \\ FROM events WHERE internal=0 AND site_id=?1 AND received_at_ms>=?2 AND received_at_ms<?3 AND json_extract(properties_json,'$.campaign') IS NOT NULL
+    \\), outcomes AS (
+    \\ SELECT source,campaign,content,sum(name='registration_confirmed') registrations,sum(name='payment_confirmed') paid_registrations,
+    \\ sum(name IN ('payment_refunded','refund_confirmed')) refunds,sum(name='attendance_confirmed') attendees,
+    \\ coalesce(sum(CASE WHEN name='payment_confirmed' THEN value_minor END),0)-coalesce(sum(CASE WHEN name IN ('payment_refunded','refund_confirmed') THEN value_minor END),0) revenue_minor,
+    \\ max(currency) currency FROM ev GROUP BY 1,2,3
+    \\), spend AS (
+    \\ SELECT source,campaign,content,sum(amount_minor) spend_minor FROM campaign_spend WHERE site_id=?1 AND unixepoch(spend_date)*1000>=?2 AND unixepoch(spend_date)*1000<?3 GROUP BY 1,2,3
+    \\), spend_currency AS (
+    \\ SELECT source,campaign,content,max(currency) currency FROM campaign_spend WHERE site_id=?1 GROUP BY 1,2,3
     \\), keys AS (
-    \\ SELECT source,campaign,content FROM campaign_sessions UNION
-    \\ SELECT source,campaign,content FROM campaign_spend WHERE site_id=?1 AND unixepoch(spend_date)*1000>=?2 AND unixepoch(spend_date)*1000<?3 UNION
-    \\ SELECT coalesce(json_extract(properties_json,'$.source'),''),coalesce(json_extract(properties_json,'$.campaign'),''),coalesce(json_extract(properties_json,'$.content'),'')
-    \\ FROM events WHERE internal=0 AND site_id=?1 AND received_at_ms>=?2 AND received_at_ms<?3 AND source='server' AND json_extract(properties_json,'$.campaign') IS NOT NULL
+    \\ SELECT source,campaign,content FROM cs UNION SELECT source,campaign,content FROM spend UNION SELECT source,campaign,content FROM ev WHERE origin='server'
     \\), facts AS (
-    \\SELECT k.source,k.campaign,k.content,
-    \\ coalesce((SELECT sum(amount_minor) FROM campaign_spend s WHERE s.site_id=?1 AND s.source=k.source AND s.campaign=k.campaign AND s.content=k.content AND unixepoch(s.spend_date)*1000>=?2 AND unixepoch(s.spend_date)*1000<?3),0) spend_minor,
-    \\ coalesce((SELECT max(currency) FROM campaign_spend s WHERE s.site_id=?1 AND s.source=k.source AND s.campaign=k.campaign AND s.content=k.content),
-    \\ (SELECT max(e.currency) FROM events e WHERE e.internal=0 AND e.site_id=?1 AND e.received_at_ms>=?2 AND e.received_at_ms<?3 AND coalesce(json_extract(e.properties_json,'$.source'),'')=k.source AND coalesce(json_extract(e.properties_json,'$.campaign'),'')=k.campaign AND coalesce(json_extract(e.properties_json,'$.content'),'')=k.content),'') currency,
-    \\ (SELECT count(*) FROM campaign_sessions cs WHERE cs.source=k.source AND cs.campaign=k.campaign AND cs.content=k.content) landing_sessions,
-    \\ (SELECT count(DISTINCT cs.session_id) FROM campaign_sessions cs JOIN page_summaries ps ON ps.site_id=cs.site_id AND ps.session_id=cs.session_id WHERE cs.source=k.source AND cs.campaign=k.campaign AND cs.content=k.content AND (ps.active_ms>=10000 OR ps.max_scroll>=50 OR ps.interaction_count>0)) engaged_sessions,
-    \\ (SELECT count(DISTINCT e.session_id) FROM events e JOIN campaign_sessions cs ON cs.site_id=e.site_id AND cs.session_id=e.session_id WHERE e.internal=0 AND cs.source=k.source AND cs.campaign=k.campaign AND cs.content=k.content AND e.name='registration_started') registration_starts,
-    \\ (SELECT count(*) FROM events e WHERE e.internal=0 AND e.site_id=?1 AND e.name='registration_confirmed' AND e.received_at_ms>=?2 AND e.received_at_ms<?3 AND coalesce(json_extract(e.properties_json,'$.source'),'')=k.source AND coalesce(json_extract(e.properties_json,'$.campaign'),'')=k.campaign AND coalesce(json_extract(e.properties_json,'$.content'),'')=k.content) registrations,
-    \\ (SELECT count(*) FROM events e WHERE e.internal=0 AND e.site_id=?1 AND e.name='payment_confirmed' AND e.received_at_ms>=?2 AND e.received_at_ms<?3 AND coalesce(json_extract(e.properties_json,'$.source'),'')=k.source AND coalesce(json_extract(e.properties_json,'$.campaign'),'')=k.campaign AND coalesce(json_extract(e.properties_json,'$.content'),'')=k.content) paid_registrations,
-    \\ (SELECT count(*) FROM events e WHERE e.internal=0 AND e.site_id=?1 AND e.name IN ('payment_refunded','refund_confirmed') AND e.received_at_ms>=?2 AND e.received_at_ms<?3 AND coalesce(json_extract(e.properties_json,'$.source'),'')=k.source AND coalesce(json_extract(e.properties_json,'$.campaign'),'')=k.campaign AND coalesce(json_extract(e.properties_json,'$.content'),'')=k.content) refunds,
-    \\ (SELECT count(*) FROM events e WHERE e.internal=0 AND e.site_id=?1 AND e.name='attendance_confirmed' AND e.received_at_ms>=?2 AND e.received_at_ms<?3 AND coalesce(json_extract(e.properties_json,'$.source'),'')=k.source AND coalesce(json_extract(e.properties_json,'$.campaign'),'')=k.campaign AND coalesce(json_extract(e.properties_json,'$.content'),'')=k.content) attendees,
-    \\ coalesce((SELECT sum(e.value_minor) FROM events e WHERE e.internal=0 AND e.site_id=?1 AND e.name='payment_confirmed' AND e.received_at_ms>=?2 AND e.received_at_ms<?3 AND coalesce(json_extract(e.properties_json,'$.source'),'')=k.source AND coalesce(json_extract(e.properties_json,'$.campaign'),'')=k.campaign AND coalesce(json_extract(e.properties_json,'$.content'),'')=k.content),0)-
-    \\ coalesce((SELECT sum(e.value_minor) FROM events e WHERE e.internal=0 AND e.site_id=?1 AND e.name IN ('payment_refunded','refund_confirmed') AND e.received_at_ms>=?2 AND e.received_at_ms<?3 AND coalesce(json_extract(e.properties_json,'$.source'),'')=k.source AND coalesce(json_extract(e.properties_json,'$.campaign'),'')=k.campaign AND coalesce(json_extract(e.properties_json,'$.content'),'')=k.content),0) revenue_minor
-    \\FROM keys k WHERE k.campaign<>'' AND (?4='' OR k.campaign=?4)
+    \\SELECT k.source,k.campaign,k.content,coalesce(sp.spend_minor,0) spend_minor,coalesce(sc.currency,o.currency,'') currency,
+    \\ coalesce(se.landing_sessions,0) landing_sessions,coalesce(se.engaged_sessions,0) engaged_sessions,coalesce(se.registration_starts,0) registration_starts,
+    \\ coalesce(o.registrations,0) registrations,coalesce(o.paid_registrations,0) paid_registrations,coalesce(o.refunds,0) refunds,
+    \\ coalesce(o.attendees,0) attendees,coalesce(o.revenue_minor,0) revenue_minor
+    \\FROM keys k LEFT JOIN spend sp USING(source,campaign,content) LEFT JOIN spend_currency sc USING(source,campaign,content)
+    \\ LEFT JOIN sessions se USING(source,campaign,content) LEFT JOIN outcomes o USING(source,campaign,content)
+    \\WHERE k.campaign<>'' AND (?4='' OR k.campaign=?4)
     \\)
     \\SELECT *,
     \\ CASE WHEN registration_starts>0 THEN spend_minor/registration_starts END cost_per_start_minor,

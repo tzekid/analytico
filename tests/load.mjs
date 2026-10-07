@@ -2,8 +2,9 @@
 //   node tests/load.mjs zig-out/bin/analytico <work-dir> [page-views] [--reads-only]
 // 1. Ingest: concurrent browser batches through /e for 20 seconds.
 // 2. Reads: a month of page views seeded straight into SQLite (10 million by
-//    default), then the overview, breakdowns and series timed through the
-//    workspace and the read API. --reads-only times the reads again on a
+//    default), with remembered visitors, campaigns, Core Web Vitals, orders
+//    and errors, then every heavy page timed through the workspace and the
+//    read API. --reads-only times the reads again on a
 //    work dir seeded by an earlier run.
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
@@ -86,9 +87,13 @@ if (!readsOnly) {
   const countries = ["DE", "US", "FR", "GB", "NL", "ES", "IT", "PL", "SE", "US"];
   const devices = ["desktop", "mobile", "mobile", "tablet"];
   const insertView = db.prepare(`INSERT INTO page_views(site_id,event_id,page_id,session_id,occurred_at_ms,received_at_ms,received_date,visitor_day_id,tracking_mode,path,referrer_host,
-    viewport_class,language,tracker_version,consent_mode,internal,country,browser,operating_system,device,traffic_class,visitor_id,active_ms,max_scroll,interaction_count) VALUES(1,?,?,?,?,?,?,?,'full',?,?,'desktop','en','2',?,0,?,'chrome','linux',?,'human_like',?,?,?,?)`);
+    viewport_class,language,tracker_version,consent_mode,internal,country,browser,operating_system,device,traffic_class,visitor_id,active_ms,max_scroll,interaction_count,utm_source,utm_campaign) VALUES(1,?,?,?,?,?,?,?,'full',?,?,'desktop','en','2',?,0,?,'chrome','linux',?,'human_like',?,?,?,?,?,?)`);
   const insertSummary = db.prepare(`INSERT INTO page_summaries(site_id,event_id,page_id,session_id,occurred_at_ms,received_at_ms,tracking_mode,visible_ms,active_ms,interaction_count,max_scroll,sections_json,
-    selection_count,copy_count,outbound_clicks,downloads,form_attempts,tracker_version,consent_mode,internal) VALUES(1,?,?,?,?,?,'full',15000,9000,2,50,'[]',0,0,0,0,0,'2','granted',0)`);
+    selection_count,copy_count,outbound_clicks,downloads,form_attempts,tracker_version,consent_mode,internal,ttfb_ms,fcp_ms,lcp_ms,inp_ms,cls_milli) VALUES(1,?,?,?,?,?,'full',15000,9000,2,50,'[]',0,0,0,0,0,'2','granted',0,?,?,?,?,?)`);
+  const insertEvent = db.prepare(`INSERT INTO events(site_id,event_id,page_id,session_id,source,occurred_at_ms,received_at_ms,received_date,tracking_mode,name,path,release_id,tracker_version,consent_mode,internal,value_minor,currency,properties_json,visitor_id,order_id)
+    VALUES(1,?,?,?,'browser',?,?,?,'full',?,?,'','2','granted',0,?,?,'{}',?,?)`);
+  const insertError = db.prepare(`INSERT INTO errors(site_id,event_id,page_id,session_id,visitor_id,occurred_at_ms,received_at_ms,path,release_id,fingerprint,message,file,line,col,browser,internal)
+    VALUES(1,?,?,?,?,?,?,?,'',?,?,'https://load.example/app.js',?,1,'chrome',0)`);
   const seedStarted = performance.now();
   let id = 0;
   const uuid = () => { id++; const hex = id.toString(16).padStart(12, "0"); return `00000000-0000-4000-8000-${hex}`; };
@@ -100,11 +105,20 @@ if (!readsOnly) {
     const consented = visitor % 4 !== 0;
     const page = uuid();
     const session = consented ? `10000000-0000-4000-8000-${(visitor * 7 + Math.floor(at / 1_800_000) % 7).toString(16).padStart(12, "0")}` : null;
-    insertView.run(uuid(), page, session, at, at, day, (visitor % 1_000_000).toString(16).padStart(16, "0"), paths[index % paths.length] + (index % 50 ? "" : `/${index % 4000}`), sources[index % sources.length], consented ? "granted" : "pending", countries[visitor % countries.length], devices[index % devices.length], consented ? `20000000-0000-4000-8000-${visitor.toString(16).padStart(12, "0")}` : null, ...(index % 7 !== 0 ? [9000, 50, 2] : [null, null, null]));
-    if (index % 7 !== 0) insertSummary.run(uuid(), page, session, at, at);
+    const visitorId = consented ? `20000000-0000-4000-8000-${visitor.toString(16).padStart(12, "0")}` : null;
+    const path = paths[index % paths.length] + (index % 50 ? "" : `/${index % 4000}`);
+    const campaign = index % 20 === 0 ? ["google", ["spring", "autumn", "brand"][index % 3]] : [null, null];
+    insertView.run(uuid(), page, session, at, at, day, (visitor % 1_000_000).toString(16).padStart(16, "0"), path, sources[index % sources.length], consented ? "granted" : "pending", countries[visitor % countries.length], devices[index % devices.length], visitorId, ...(index % 7 !== 0 ? [9000, 50, 2] : [null, null, null]), ...campaign);
+    if (index % 7 !== 0) insertSummary.run(uuid(), page, session, at, at, ...(index % 3 === 0 ? [180 + index % 400, 900 + index % 900, 1400 + index % 2600, 80 + index % 300, index % 200] : [null, null, null, null, null]));
+    if (index % 100 === 0) insertEvent.run(uuid(), page, session, at, at, day, "purchase", path, 1500 + index % 9000, "EUR", visitorId, `L-${index}`);
+    if (index % 500 === 0) insertError.run(uuid(), page, session, visitorId, at, at, path, (index % 12).toString(16).padStart(16, "0"), `TypeError: load error ${index % 12}`, 10 + index % 12);
     if (index % 500_000 === 499_999) { db.exec("COMMIT"); db.exec("BEGIN"); }
   }
   db.exec("COMMIT");
+  db.exec(`INSERT INTO visitors(site_id,visitor_id,first_seen_ms,last_seen_ms,first_source,country)
+    SELECT 1,visitor_id,min(received_at_ms),max(received_at_ms),'direct',max(country) FROM page_views WHERE visitor_id IS NOT NULL GROUP BY visitor_id`);
+  const spend = db.prepare("INSERT INTO campaign_spend(site_id,spend_date,source,campaign,content,amount_minor,currency,created_at_ms) VALUES(1,?,'google',?,'',?,'EUR',?)");
+  for (let day = 0; day < 30; day++) for (const name of ["spring", "autumn", "brand"]) spend.run(new Date(now - day * 86_400_000).toISOString().slice(0, 10), name, 5000 + day * 37, now);
   db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
   db.close();
   console.log(`seeded ${seedViews.toLocaleString("en-US")} page views over 30 days in ${((performance.now() - seedStarted) / 1000).toFixed(0)} s`);
@@ -159,6 +173,14 @@ await timed("workspace overview, 7 days", "/load", cookie);
 await timed("workspace pages, 30 days", "/load/pages?range=30d", cookie);
 await timed("workspace audience, 30 days", "/load/audience?range=30d", cookie);
 await timed("workspace retention", "/load/retention", cookie);
+await timed("workspace people, 30 days", "/load/people?range=30d", cookie);
+await timed("workspace sessions, 7 days", "/load/sessions?range=7d", cookie);
+await timed("workspace paths, 30 days", "/load/sessions?tab=paths&range=30d", cookie);
+await timed("workspace revenue, 30 days", "/load/revenue?range=30d", cookie);
+await timed("workspace performance, 30 days", "/load/performance?range=30d", cookie);
+await timed("workspace errors, 30 days", "/load/errors?range=30d", cookie);
+await timed("workspace events, 30 days", "/load/events?range=30d", cookie);
+await timed("workspace campaigns, 30 days", "/load/acquisition?tab=campaigns&range=30d", cookie);
 await timed("API overview, 30 days", "/api/v1/sites/load/overview?range=30d", bearer);
 await timed("API breakdown by country, 30 days", "/api/v1/sites/load/breakdown?dimension=country&range=30d", bearer);
 await timed("API time series, 30 days", "/api/v1/sites/load/timeseries?metric=visitors&range=30d", bearer);

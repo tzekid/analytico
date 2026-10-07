@@ -4,6 +4,7 @@ const analyze = @import("analyze.zig");
 const chart = @import("chart.zig");
 const ctx_mod = @import("ctx.zig");
 const data = @import("data.zig");
+const db_mod = @import("../db.zig");
 const domain = @import("../domain.zig");
 const html = @import("html.zig");
 const layout = @import("layout.zig");
@@ -238,9 +239,12 @@ fn result(ctx: *Ctx, view: data.View, steps: []const Step, window_ms: i64) !void
             biggest_drop = (previous - value) / previous;
             biggest = index;
         }
+        // A bar too short to hold its share shows it just above instead.
+        const short = share < 18;
         try w.writeAll("<div class=\"funnel-col\"><div class=\"funnel-track\">");
-        if (index > 0 and previous > value) try render(w, "<span class=\"funnel-drop\" style=\"bottom:calc({share:.1}% + 10px)\">−{left} left</span>", .{ .share = share, .left = html.int(@intFromFloat(previous - value)) });
-        try render(w, "<div class=\"funnel-bar\" style=\"height:{height:.1}%;--w:{width:.1}%\">{share:.1}%</div></div><div><strong>{count}</strong><small title=\"{value}\">{label}</small>", .{ .height = @max(share, 1.5), .width = @max(share, 4), .share = share, .count = html.int(counts[index]), .value = step.value, .label = try stepLabel(ctx, view.site, step) });
+        if (index > 0 and previous > value) try render(w, "<span class=\"funnel-drop\" style=\"bottom:calc({share:.1}% + {lift}px)\">−{left} left</span>", .{ .share = share, .lift = @as(u32, if (short) 44 else 10), .left = html.int(@intFromFloat(previous - value)) });
+        if (short) try render(w, "<span class=\"funnel-value\" style=\"bottom:calc({share:.1}% + 6px)\">{share:.1}%</span>", .{ .share = share });
+        try render(w, "<div class=\"funnel-bar{!short}\" style=\"height:{height:.1}%;--w:{width:.1}%\">{share:.1}%</div></div><div><strong>{count}</strong><small title=\"{value}\">{label}</small>", .{ .short = if (short) " short" else "", .height = @max(share, 1.5), .width = @max(share, 4), .share = share, .count = html.int(counts[index]), .value = step.value, .label = try stepLabel(ctx, view.site, step) });
         if (index > 0) try render(w, "<small><b class=\"ink\">{rate:.1}%</b> from previous</small>", .{ .rate = if (previous == 0) 0 else value / previous * 100 });
         try w.writeAll("</div></div>");
     }
@@ -358,9 +362,9 @@ pub fn pathsTab(ctx: *Ctx, view: data.View, path: []const u8) !void {
     try w.writeAll("</datalist></form><div class=\"grid grid-3\"><section class=\"card\">");
     if (from.len != 0) try nextPagesFrom(ctx, view, from);
     try w.writeAll("</section><section class=\"card\"><div class=\"card-head\"><h2>Entry pages</h2></div><div class=\"rank\">");
-    for (entries.items, 0..) |row, index| try overview.pageRow(w, arena, index, row, entries.items[0].value, try view.href(arena, path, &.{ .{ "tab", "paths" }, .{ "from", row.key } }));
+    for (entries.items, 0..) |row, index| try overview.pageRow(w, arena, index, row, entries.items[0].value, overview.listGrowth(entries.items), try view.href(arena, path, &.{ .{ "tab", "paths" }, .{ "from", row.key } }));
     try w.writeAll("</div></section><section class=\"card\"><div class=\"card-head\"><h2>Exit pages</h2></div><div class=\"rank\">");
-    for (exits.items, 0..) |row, index| try overview.pageRow(w, arena, index, row, exits.items[0].value, try view.href(arena, path, &.{ .{ "tab", "paths" }, .{ "from", row.key } }));
+    for (exits.items, 0..) |row, index| try overview.pageRow(w, arena, index, row, exits.items[0].value, overview.listGrowth(exits.items), try view.href(arena, path, &.{ .{ "tab", "paths" }, .{ "from", row.key } }));
     try w.writeAll("</div></section></div>");
 }
 
@@ -474,8 +478,7 @@ pub fn audience(ctx: *Ctx, site: data.Site) !void {
     try columnBreakdown(ctx, view, "viewport", now_stats.views);
     try w.writeAll("</section><section class=\"card\"><div class=\"card-head\"><h2>Where they are</h2>");
     try w.writeAll("<span class=\"meta\">IP used once, never stored</span></div>");
-    const known_countries = try ctx.db.scalar(arena, i64, "SELECT EXISTS(SELECT 1 FROM rollups WHERE site_id=?1 AND dim='country' AND key<>'unknown') OR EXISTS(SELECT 1 FROM page_views WHERE site_id=?1 AND received_at_ms>=?2 AND country IS NOT NULL)", .{ site.id, ctx.now() - 2 * data.day_ms });
-    if (known_countries == 0) {
+    if (ctx.shared.geo == null) {
         try w.writeAll("<div class=\"callout\">");
         try icon(w, "lock");
         try w.writeAll("<span>No location yet. Install the free DB-IP Lite database with <code>analytico geo import</code> to see countries, regions and cities. The address is used for the lookup and then discarded.</span></div>");
@@ -542,10 +545,27 @@ fn columnBreakdown(ctx: *Ctx, view: data.View, dim: []const u8, total: i64) !voi
     for (sums) |entry| {
         const value = entry.sums.views;
         const share = if (total == 0) 0 else @as(f64, @floatFromInt(value)) / @as(f64, @floatFromInt(total)) * 100;
-        try render(w, "<div class=\"rank-row\"><span class=\"bar\" style=\"width:{width:.1}%\"></span><span class=\"rank-name\"><span>{name}</span></span><span class=\"rank-value rank-value-text\">{value} · {share:.1}%</span><span></span></div>", .{ .width = @max(share * 0.75, 4), .name = capitalized(ctx.arena, entry.key), .value = html.int(value), .share = share });
+        try render(w, "<div class=\"rank-row\"><span class=\"bar\" style=\"width:{width:.1}%\"></span><span class=\"rank-name\"><span>{name}</span></span><span class=\"rank-value rank-value-text\">{value} · {share:.1}%</span><span></span></div>", .{ .width = @max(share * 0.75, 4), .name = if (std.mem.eql(u8, dim, "language")) try languageName(ctx.arena, entry.key) else capitalized(ctx.arena, entry.key), .value = html.int(value), .share = share });
     }
     try w.writeAll("</div>");
     if (sums.len == 0) try w.writeAll("<p class=\"hint\">No visits in this period.</p>");
+}
+
+/// "de-AT" → "German (AT)"; codes without a name stay as they are.
+fn languageName(arena: std.mem.Allocator, code: []const u8) ![]const u8 {
+    const names = [_][2][]const u8{
+        .{ "en", "English" },   .{ "de", "German" },     .{ "fr", "French" },    .{ "es", "Spanish" },   .{ "it", "Italian" },
+        .{ "nl", "Dutch" },     .{ "pt", "Portuguese" }, .{ "sv", "Swedish" },   .{ "da", "Danish" },    .{ "nb", "Norwegian" },
+        .{ "no", "Norwegian" }, .{ "fi", "Finnish" },    .{ "pl", "Polish" },    .{ "cs", "Czech" },     .{ "ro", "Romanian" },
+        .{ "hu", "Hungarian" }, .{ "el", "Greek" },      .{ "tr", "Turkish" },   .{ "ru", "Russian" },   .{ "uk", "Ukrainian" },
+        .{ "ja", "Japanese" },  .{ "ko", "Korean" },     .{ "zh", "Chinese" },   .{ "ar", "Arabic" },    .{ "he", "Hebrew" },
+        .{ "hi", "Hindi" },     .{ "id", "Indonesian" }, .{ "vi", "Vietnamese" }, .{ "th", "Thai" },     .{ "bg", "Bulgarian" },
+    };
+    const dash = std.mem.findScalar(u8, code, '-') orelse code.len;
+    for (names) |pair| if (std.ascii.eqlIgnoreCase(code[0..dash], pair[0])) {
+        return if (dash == code.len) pair[1] else std.fmt.allocPrint(arena, "{s} ({s})", .{ pair[1], code[dash + 1 ..] });
+    };
+    return code;
 }
 
 fn capitalized(arena: std.mem.Allocator, value: []const u8) []const u8 {
@@ -591,7 +611,11 @@ pub fn distribution(ctx: *Ctx, view: data.View, vital: Vital, page_path: ?[]cons
     defer statement.deinit();
     var values: std.ArrayList(i64) = .empty;
     while (try statement.step() == .row) try values.append(ctx.arena, statement.columnInt(0));
-    const items = values.items;
+    return summarize(vital, values.items);
+}
+
+/// Percentiles and good/poor counts of sorted samples.
+fn summarize(vital: Vital, items: []const i64) Distribution {
     if (items.len == 0) return .{ .samples = 0, .p50 = 0, .p75 = 0, .p95 = 0, .good = 0, .poor = 0 };
     var good: usize = 0;
     var poor: usize = 0;
@@ -618,8 +642,33 @@ pub fn performance(ctx: *Ctx, site: data.Site) !void {
     const view = try analyze.start(ctx, site, .performance, "Performance");
     const w = ctx.w();
     const path = try std.fmt.allocPrint(arena, "/{s}/performance", .{site.slug});
+    // Every sample in the period in one pass: the vitals, then FCP for hints.
+    var all_sql = data.Sql.init(arena);
+    try all_sql.add("SELECT pv.path,ps.lcp_ms,ps.inp_ms,ps.cls_milli,ps.ttfb_ms,ps.fcp_ms FROM page_views pv JOIN page_summaries ps ON ps.site_id=pv.site_id AND ps.page_id=pv.page_id WHERE ");
+    try all_sql.pageViews(view, view.range.start_ms, view.range.end_ms);
+    try all_sql.add(" AND (ps.lcp_ms IS NOT NULL OR ps.inp_ms IS NOT NULL OR ps.cls_milli IS NOT NULL OR ps.ttfb_ms IS NOT NULL OR ps.fcp_ms IS NOT NULL)");
+    var all = try all_sql.prepare(ctx.db);
+    defer all.deinit();
+    const columns = vitals.len + 1;
+    var lists: [columns]std.ArrayList(i64) = @splat(.empty);
+    const PathSamples = struct { lists: [columns]std.ArrayList(i64) = @splat(.empty) };
+    var by_path: std.StringArrayHashMapUnmanaged(PathSamples) = .empty;
+    while (try all.step() == .row) {
+        const entry = try by_path.getOrPut(arena, all.columnText(0));
+        if (!entry.found_existing) {
+            entry.key_ptr.* = try arena.dupe(u8, all.columnText(0));
+            entry.value_ptr.* = .{};
+        }
+        for (0..columns) |column| {
+            if (all.columnType(@intCast(column + 1)) == db_mod.sqlite.SQLITE_NULL) continue;
+            const value = all.columnInt(@intCast(column + 1));
+            try lists[column].append(arena, value);
+            try entry.value_ptr.lists[column].append(arena, value);
+        }
+    }
+    for (&lists) |*list| std.mem.sort(i64, list.items, {}, std.sort.asc(i64));
     var results: [vitals.len]Distribution = undefined;
-    for (vitals, 0..) |vital, index| results[index] = try distribution(ctx, view, vital, null);
+    for (vitals, 0..) |vital, index| results[index] = summarize(vital, lists[index].items);
     try layout.head(ctx, .{ .title = "Performance", .subtitle = try std.fmt.allocPrint(arena, "Real-user measurements · {f} samples · p75", .{html.int(@intCast(results[0].samples))}), .view = view, .path = path, .compare = false });
     if (results[0].samples == 0 and results[3].samples == 0) {
         try w.writeAll("<div class=\"card\">");
@@ -654,26 +703,27 @@ pub fn performance(ctx: *Ctx, site: data.Site) !void {
     try w.writeAll("</div>");
     try distributionBar(w, chosen);
     try w.writeAll("</section>");
-    // Slowest pages by the selected vital.
-    var pages_sql = data.Sql.init(arena);
-    try pages_sql.add("SELECT pv.path,count(*) FROM page_views pv JOIN page_summaries ps ON ps.site_id=pv.site_id AND ps.page_id=pv.page_id WHERE ");
-    try pages_sql.pageViews(view, view.range.start_ms, view.range.end_ms);
-    try pages_sql.add(" AND ps.");
-    try pages_sql.add(vital.column);
-    try pages_sql.add(" IS NOT NULL GROUP BY pv.path HAVING count(*)>=3 ORDER BY count(*) DESC LIMIT 30");
-    var statement = try pages_sql.prepare(ctx.db);
-    defer statement.deinit();
-    const Slow = struct { path: []const u8, value: i64, ttfb: i64, fcp: i64 };
+    // Slowest pages by the selected vital, among the 30 with the most samples.
+    const fcp: Vital = .{ .key = "fcp", .column = "fcp_ms", .name = "", .good = 1800, .poor = 3000 };
+    const Slow = struct { path: []const u8, value: i64, ttfb: i64, fcp: i64, samples: usize };
     var slow: std.ArrayList(Slow) = .empty;
-    while (try statement.step() == .row) {
-        const page_path = try arena.dupe(u8, statement.columnText(0));
+    for (by_path.keys(), by_path.values()) |page_path, *samples| {
+        if (samples.lists[selected].items.len < 3) continue;
+        for (&samples.lists) |*list| std.mem.sort(i64, list.items, {}, std.sort.asc(i64));
         try slow.append(arena, .{
             .path = page_path,
-            .value = (try distribution(ctx, view, vital, page_path)).p75,
-            .ttfb = (try distribution(ctx, view, vitals[3], page_path)).p75,
-            .fcp = (try distribution(ctx, view, .{ .key = "fcp", .column = "fcp_ms", .name = "", .good = 1800, .poor = 3000 }, page_path)).p75,
+            .value = summarize(vital, samples.lists[selected].items).p75,
+            .ttfb = summarize(vitals[3], samples.lists[3].items).p75,
+            .fcp = summarize(fcp, samples.lists[vitals.len].items).p75,
+            .samples = samples.lists[selected].items.len,
         });
     }
+    std.mem.sort(Slow, slow.items, {}, struct {
+        fn more(_: void, a: Slow, b: Slow) bool {
+            return a.samples > b.samples;
+        }
+    }.more);
+    slow.shrinkRetainingCapacity(@min(slow.items.len, 30));
     std.mem.sort(Slow, slow.items, {}, struct {
         fn less(_: void, a: Slow, b: Slow) bool {
             return a.value > b.value;

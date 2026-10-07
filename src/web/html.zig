@@ -181,16 +181,24 @@ pub fn millis(ms: i64) Millis {
     return .{ .ms = ms };
 }
 
-/// Signed percentage change with one decimal: +12.4%, −2.1%.
+/// Signed percentage change with one decimal: +12.4%, −2.1%. From three
+/// times the previous value up it reads as a multiple: 6.0×, 22×.
 pub const Change = struct {
     value: f64,
 
     pub fn format(self: Change, w: *Writer) Writer.Error!void {
         if (std.math.isNan(self.value)) return w.writeAll("new");
+        const times = 1 + self.value / 100.0;
+        if (times >= 10) return w.print("{d:.0}×", .{times});
+        if (times >= 3) return w.print("{d:.1}×", .{times});
         const rounded = @round(self.value * 10.0) / 10.0;
         if (rounded > 0) return w.print("+{d:.1}%", .{rounded});
         if (rounded < 0) return w.print("−{d:.1}%", .{-rounded});
         return w.writeAll("0.0%");
+    }
+
+    pub fn isMultiple(self: Change) bool {
+        return !std.math.isNan(self.value) and 1 + self.value / 100.0 >= 3;
     }
 };
 

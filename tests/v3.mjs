@@ -172,7 +172,7 @@ await journey("v3", async (t) => {
   const visitorEU = await newContext();
   const eu = await visitorEU.newPage();
   const decision = (target) => target.waitForResponse((response) => response.url().endsWith("/e") && response.status() === 200);
-  let [response] = await Promise.all([decision(eu), eu.goto(`${originA}/home`)]);
+  let [response] = await Promise.all([decision(eu), eu.goto(`${originA}/home?utm_source=newsletter`)]);
   assert.equal((await response.json()).upgrade, "ask");
   // Nothing is stored before consent; the page view still counts as Lite.
   assert.equal(await eu.evaluate(() => Object.keys(localStorage).length), 0);
@@ -327,6 +327,8 @@ await journey("v3", async (t) => {
   await visit("/shop/revenue", "Orders");
   assert.equal((await page.locator(".metric", { hasText: "Orders" }).locator(".metric-value").textContent()).trim(), "1");
   assert.match(await page.locator(".metric", { hasText: "Revenue" }).locator(".metric-value").textContent(), /€49/);
+  // The server's copy of the order wins, but the visit, and so the source, come from the browser's.
+  assert.deepEqual(await page.locator(".source-money strong").allTextContents(), ["Newsletter"]);
   await page.locator("td", { hasText: "Garden guide" }).waitFor();
   await visit("/shop/retention", "Weekly cohorts");
   await visit("/shop/audience", "Where they are");

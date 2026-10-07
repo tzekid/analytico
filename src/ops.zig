@@ -11,6 +11,7 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, output: *std.Io.Writer, di
         else => return err,
     };
     if (std.Io.Dir.cwd().statFile(io, directory, .{})) |_| return error.DataDirectoryAlreadyExists else |_| {}
+    if (std.fs.path.dirname(directory)) |parent| try std.Io.Dir.cwd().createDirPath(io, parent);
     try std.Io.Dir.cwd().createDir(io, directory, @fromBackingInt(@intCast(0o700)));
     errdefer std.Io.Dir.cwd().deleteTree(io, directory) catch {};
     const paths = try store_mod.Paths.init(allocator, directory);
@@ -156,6 +157,7 @@ pub fn restore(
     const source_version = try schema.version(&source, allocator);
     if (source_version < 1) return error.MissingSchemaVersion;
     if (source_version > schema.current_version) return error.NewerDatabaseSchema;
+    if (std.fs.path.dirname(directory)) |parent| try std.Io.Dir.cwd().createDirPath(io, parent);
     try std.Io.Dir.cwd().createDir(io, directory, @fromBackingInt(@intCast(0o700)));
     errdefer std.Io.Dir.cwd().deleteTree(io, directory) catch {};
     const paths = try store_mod.Paths.init(allocator, directory);

@@ -25,11 +25,12 @@ pub const purchase_names = "('purchase','payment_confirmed')";
 pub const refund_names = "('refund','payment_refunded','refund_confirmed')";
 
 /// One row per order: an order ID seen from the server and the browser counts
-/// once, and the server's copy wins.
+/// once, and the server's copy wins. The visit comes from whichever copy
+/// knows it, usually the browser's.
 pub fn ordersCte(sql: *data.Sql, view: data.View, start: i64, end: i64) !void {
-    try sql.add("WITH o AS (SELECT * FROM (SELECT coalesce(e.order_id,e.event_id) k,e.source,e.value_minor v,e.currency c,e.received_at_ms t,e.session_id,e.page_id,e.visitor_id,e.user_hash,e.event_id,e.properties_json,row_number() OVER (PARTITION BY coalesce(e.order_id,e.event_id) ORDER BY e.source='server' DESC,e.received_at_ms) rn FROM events e WHERE ");
+    try sql.add("WITH o AS (SELECT * FROM (SELECT coalesce(e.order_id,e.event_id) k,e.source,e.value_minor v,e.currency c,e.received_at_ms t,coalesce(e.session_id,max(e.session_id) OVER w) session_id,coalesce(e.page_id,max(e.page_id) OVER w) page_id,coalesce(e.visitor_id,max(e.visitor_id) OVER w) visitor_id,coalesce(e.user_hash,max(e.user_hash) OVER w) user_hash,e.event_id,e.properties_json,row_number() OVER (w ORDER BY e.source='server' DESC,e.received_at_ms) rn FROM events e WHERE ");
     try sql.events(view, start, end);
-    try sql.add(" AND e.name IN " ++ purchase_names ++ " AND e.value_minor IS NOT NULL) WHERE rn=1)");
+    try sql.add(" AND e.name IN " ++ purchase_names ++ " AND e.value_minor IS NOT NULL WINDOW w AS (PARTITION BY coalesce(e.order_id,e.event_id))) WHERE rn=1)");
 }
 
 pub const Sales = struct { revenue: i64 = 0, orders: i64 = 0, refunds: i64 = 0 };
@@ -149,14 +150,24 @@ fn revenueChart(ctx: *Ctx, view: data.View) !void {
         .best = range.bucketLong(&label_buffer, best),
         .amount = html.money(confirmed[best] + browser[best], view.site.currency),
     });
+    // Long periods label every few days with just the day, naming the month
+    // where it starts or changes, so labels fit their narrow columns.
+    const every = if (range.buckets <= 14) 1 else @max(1, range.buckets / 10);
+    var last_month: u8 = 0;
     for (confirmed, browser, 0..) |a, b, index| {
         var short: [32]u8 = undefined;
+        var label: []const u8 = "";
+        if (index % every == 0) {
+            const date = data.civil(range.start_ms + @as(i64, @intCast(index)) * range.bucket_ms);
+            label = if (every == 1 or range.bucket_ms == data.hour_ms) range.bucketLabel(&short, index) else if (date.month != last_month) try std.fmt.bufPrint(&short, "{d} {s}", .{ date.day, data.month_names[date.month - 1] }) else try std.fmt.bufPrint(&short, "{d}", .{date.day});
+            last_month = date.month;
+        }
         try render(w, "<div class=\"barchart-col{!best}\" title=\"{amount}\"><div class=\"barchart-stack\"><span class=\"bar-browser\" style=\"height:{browser:.1}%\"></span><span class=\"bar-confirmed\" style=\"height:{confirmed:.1}%\"></span></div><small>{label}</small></div>", .{
             .best = if (index == best) " best" else "",
             .amount = html.money(a + b, view.site.currency),
             .browser = @as(f64, @floatFromInt(b)) / @as(f64, @floatFromInt(peak)) * 100,
             .confirmed = @as(f64, @floatFromInt(a)) / @as(f64, @floatFromInt(peak)) * 100,
-            .label = if (range.buckets <= 14 or index % @max(1, range.buckets / 10) == 0) range.bucketLabel(&short, index) else "",
+            .label = label,
         });
     }
     try w.writeAll("</div></section>");
@@ -253,19 +264,21 @@ fn bySource(ctx: *Ctx, view: data.View) !void {
     try w.writeAll("<section class=\"card\">");
     try ui.cardHead(w, "Revenue by source", "<span class=\"meta\">ROAS</span>");
     try w.writeAll("<div class=\"stack\">");
-    var top: i64 = 0;
-    var any = false;
-    while (try statement.step() == .row) {
-        any = true;
-        const value = statement.columnInt(1);
-        if (top == 0) top = @max(value, 1);
-        const spend = statement.columnInt(2);
-        try render(w, "<div class=\"source-money\"><div class=\"row-between\"><div><strong>{source}</strong><small>{revenue}</small></div>", .{ .source = try overview.sourceLabel(arena, statement.columnText(0)), .revenue = html.money(value, site.currency) });
-        if (spend > 0) {
-            const roas = @as(f64, @floatFromInt(value)) / @as(f64, @floatFromInt(spend));
+    const Money = struct { key: []const u8, value: i64, spend: i64 };
+    var rows: std.ArrayList(Money) = .empty;
+    while (try statement.step() == .row) try rows.append(arena, .{ .key = try arena.dupe(u8, statement.columnText(0)), .value = statement.columnInt(1), .spend = statement.columnInt(2) });
+    const keys = try arena.alloc([]const u8, rows.items.len);
+    for (rows.items, keys) |row, *key| key.* = row.key;
+    const labels = try overview.sourceLabels(arena, keys);
+    const any = rows.items.len != 0;
+    const top: i64 = if (any) @max(rows.items[0].value, 1) else 1;
+    for (rows.items, labels) |row, label| {
+        try render(w, "<div class=\"source-money\"><div class=\"row-between\"><div><strong>{source}</strong><small>{revenue}</small></div>", .{ .source = label, .revenue = html.money(row.value, site.currency) });
+        if (row.spend > 0) {
+            const roas = @as(f64, @floatFromInt(row.value)) / @as(f64, @floatFromInt(row.spend));
             try render(w, "<span class=\"{class}\">{roas:.1}×</span>", .{ .class = if (roas < 2) "warn" else "", .roas = roas });
         } else try w.writeAll("<span class=\"muted\">—</span>");
-        try render(w, "</div><div class=\"meter\"><i style=\"width:{width:.0}%\"></i></div></div>", .{ .width = @as(f64, @floatFromInt(value)) / @as(f64, @floatFromInt(top)) * 100 });
+        try render(w, "</div><div class=\"meter\"><i style=\"width:{width:.0}%\"></i></div></div>", .{ .width = @as(f64, @floatFromInt(row.value)) / @as(f64, @floatFromInt(top)) * 100 });
     }
     if (!any) try w.writeAll("<p class=\"hint\">No orders in this period.</p>");
     try w.writeAll("</div></section>");
@@ -422,7 +435,7 @@ pub fn retention(ctx: *Ctx, site: data.Site) !void {
                 try w.writeAll("<td><span class=\"cell zero\">0%</span></td>");
                 continue;
             }
-            try render(w, "<td><span class=\"cell\" style=\"background:rgba(0,87,174,{alpha:.2})\">{rate:.0}%</span></td>", .{ .alpha = @min(1.0, 0.18 + rate * 2.4), .rate = rate * 100 });
+            try render(w, "<td><span class=\"cell\" style=\"background:rgba(0,87,174,{alpha:.2})\">{rate:.0}%</span></td>", .{ .alpha = @min(0.5, 0.06 + rate * 1.2), .rate = rate * 100 });
         }
         try w.writeAll("</tr>");
     }
@@ -435,7 +448,6 @@ pub fn retention(ctx: *Ctx, site: data.Site) !void {
 const Segment = enum { everyone, customers, identified, new, at_risk };
 
 /// A person is an identified user (all their visitors) or one visitor.
-const person_key = "coalesce(v.user_hash,v.visitor_id)";
 
 pub fn people(ctx: *Ctx, site: data.Site) !void {
     const arena = ctx.arena;
@@ -467,59 +479,57 @@ pub fn people(ctx: *Ctx, site: data.Site) !void {
     });
     try w.writeAll("</form>");
 
+    // People active in the period, with every visitor that is the same person
+    // (by user ID); then each measure in one indexed join over those visitors.
     var sql = data.Sql.init(arena);
-    try sql.add("WITH p AS (SELECT " ++ person_key ++ " k,max(v.user_hash) u,min(v.first_seen_ms) f,max(v.last_seen_ms) l,count(*) devices,(SELECT x.first_source FROM visitors x WHERE x.site_id=v.site_id AND coalesce(x.user_hash,x.visitor_id)=" ++ person_key ++ " ORDER BY x.first_seen_ms LIMIT 1) src FROM visitors v WHERE v.site_id=");
+    try sql.add("WITH v AS MATERIALIZED (SELECT visitor_id,coalesce(user_hash,visitor_id) k,user_hash,first_seen_ms,last_seen_ms,first_source FROM visitors WHERE site_id=");
     try sql.int(site.id);
-    // Only people active in the period: their visitors' rows are grouped.
-    try sql.add(" AND " ++ person_key ++ " IN (SELECT coalesce(a.user_hash,a.visitor_id) FROM visitors a WHERE a.site_id=");
-    try sql.int(site.id);
-    try sql.add(" AND a.last_seen_ms>=");
+    try sql.add(" AND (last_seen_ms>=");
     try sql.int(range.start_ms);
-    try sql.add(" ORDER BY a.last_seen_ms DESC LIMIT 2000)");
+    try sql.add(" OR user_hash IN (SELECT user_hash FROM visitors WHERE site_id=");
+    try sql.int(site.id);
+    try sql.add(" AND last_seen_ms>=");
+    try sql.int(range.start_ms);
+    try sql.add(" AND user_hash IS NOT NULL))");
     if (query.len != 0) {
         // People are found by the ID from your app (hashed the same way) or a visitor ID.
         const hash = domain.userHash(ctx.shared.master_key, site.public_id, query);
-        try sql.add(" AND (v.user_hash=");
+        try sql.add(" AND (user_hash=");
         try sql.str(try arena.dupe(u8, &hash));
-        try sql.add(" OR v.visitor_id LIKE ");
+        try sql.add(" OR visitor_id LIKE ");
         try sql.str(try std.fmt.allocPrint(arena, "{s}%", .{query}));
         try sql.add(")");
     }
-    try sql.add(" GROUP BY k), q AS (SELECT p.*,(SELECT count(DISTINCT pv.session_id) FROM page_views pv WHERE pv.site_id=");
+    try sql.add("), p AS MATERIALIZED (SELECT k,max(user_hash) u,min(first_seen_ms) f,max(last_seen_ms) l,count(*) devices FROM v GROUP BY k ORDER BY l DESC LIMIT 2000)," ++
+        "pv AS MATERIALIZED (SELECT v.* FROM v WHERE v.k IN (SELECT k FROM p))," ++
+        "src AS (SELECT k,first_source FROM (SELECT k,first_source,row_number() OVER (PARTITION BY k ORDER BY first_seen_ms) rn FROM pv) WHERE rn=1)," ++
+        "s AS (SELECT x.k,count(DISTINCT w.session_id) sessions,group_concat(DISTINCT w.operating_system) systems FROM pv x JOIN page_views w ON w.site_id=");
     try sql.int(site.id);
-    try sql.add(" AND pv.visitor_id IN (SELECT visitor_id FROM visitors x WHERE x.site_id=");
+    // An order seen from both the browser and the server counts once.
+    try sql.add(" AND w.visitor_id=x.visitor_id GROUP BY x.k),r AS (SELECT k,sum(v) revenue FROM (SELECT k,o,max(v) v FROM (SELECT x.k,coalesce(e.order_id,e.event_id) o,e.value_minor v FROM pv x JOIN events e ON e.site_id=");
     try sql.int(site.id);
-    try sql.add(" AND coalesce(x.user_hash,x.visitor_id)=p.k)) sessions,(SELECT coalesce(sum(e.value_minor),0) FROM events e WHERE e.site_id=");
+    try sql.add(" AND e.visitor_id=x.visitor_id WHERE e.name IN " ++ purchase_names ++ " AND e.value_minor IS NOT NULL UNION ALL SELECT p.k,coalesce(e.order_id,e.event_id),e.value_minor FROM p JOIN events e ON e.site_id=");
     try sql.int(site.id);
-    try sql.add(" AND e.name IN " ++ purchase_names ++ " AND (e.user_hash=p.u OR e.visitor_id IN (SELECT visitor_id FROM visitors x WHERE x.site_id=");
+    try sql.add(" AND e.user_hash=p.u WHERE e.name IN " ++ purchase_names ++ " AND e.value_minor IS NOT NULL) GROUP BY k,o) GROUP BY k),er AS (SELECT x.k,count(*) n FROM errors e JOIN pv x ON x.visitor_id=e.visitor_id WHERE e.site_id=");
     try sql.int(site.id);
-    try sql.add(" AND coalesce(x.user_hash,x.visitor_id)=p.k))) revenue,(SELECT group_concat(DISTINCT pv.operating_system) FROM page_views pv WHERE pv.site_id=");
-    try sql.int(site.id);
-    try sql.add(" AND pv.visitor_id IN (SELECT visitor_id FROM visitors x WHERE x.site_id=");
-    try sql.int(site.id);
-    try sql.add(" AND coalesce(x.user_hash,x.visitor_id)=p.k)) systems,(SELECT count(*) FROM errors x WHERE x.site_id=");
-    try sql.int(site.id);
-    try sql.add(" AND x.visitor_id IN (SELECT visitor_id FROM visitors y WHERE y.site_id=");
-    try sql.int(site.id);
-    try sql.add(" AND coalesce(y.user_hash,y.visitor_id)=p.k) AND x.received_at_ms>=");
+    try sql.add(" AND e.received_at_ms>=");
     try sql.int(range.start_ms);
-    try sql.add(") recent_errors FROM p WHERE p.l>=");
+    try sql.add(" GROUP BY x.k) SELECT p.k,coalesce(p.u,''),p.f,p.l,p.devices,coalesce(src.first_source,'direct'),coalesce(s.sessions,0) sessions,coalesce(r.revenue,0) revenue,coalesce(s.systems,''),coalesce(er.n,0) FROM p LEFT JOIN src USING(k) LEFT JOIN s USING(k) LEFT JOIN r USING(k) LEFT JOIN er USING(k) WHERE p.l>=");
     try sql.int(range.start_ms);
-    try sql.add(") SELECT k,coalesce(u,''),f,l,devices,coalesce(src,'direct'),sessions,revenue,coalesce(systems,''),recent_errors FROM q WHERE 1");
     switch (segment) {
         .everyone => {},
         .customers => try sql.add(" AND revenue>0"),
-        .identified => try sql.add(" AND u IS NOT NULL"),
+        .identified => try sql.add(" AND p.u IS NOT NULL"),
         .new => {
-            try sql.add(" AND f>=");
+            try sql.add(" AND p.f>=");
             try sql.int(range.start_ms);
         },
         .at_risk => {
-            try sql.add(" AND sessions>=3 AND l<");
+            try sql.add(" AND sessions>=3 AND p.l<");
             try sql.int(ctx.now() - 14 * data.day_ms);
         },
     }
-    try sql.add(" ORDER BY l DESC LIMIT 100");
+    try sql.add(" ORDER BY p.l DESC LIMIT 100");
     var statement = try sql.prepare(ctx.db);
     defer statement.deinit();
     try w.writeAll("<section class=\"card card-flush\"><div class=\"table-wrap\"><table class=\"table\"><thead><tr><th>Person</th><th class=\"hide-m\">First seen</th><th>Last seen</th><th class=\"r\">Sessions</th><th class=\"r hide-m\">Devices</th><th class=\"r\">Revenue</th><th class=\"hide-m\">First source</th><th class=\"hide-m\">Signals</th></tr></thead><tbody>");
@@ -616,7 +626,8 @@ pub fn person(ctx: *Ctx, site: data.Site, key: []const u8) !void {
     defer totals.deinit();
     _ = try totals.step();
     var money_sql = data.Sql.init(arena);
-    try money_sql.add("SELECT coalesce(sum(value_minor),0),count(DISTINCT coalesce(order_id,event_id)) FROM events WHERE site_id=");
+    // An order seen from both the browser and the server counts once.
+    try money_sql.add("SELECT coalesce(sum(v),0),count(*) FROM (SELECT coalesce(order_id,event_id) o,max(value_minor) v FROM events WHERE site_id=");
     try money_sql.int(site.id);
     try money_sql.add(" AND name IN " ++ purchase_names ++ " AND (visitor_id IN ");
     try visitorList(&money_sql, found);
@@ -624,7 +635,7 @@ pub fn person(ctx: *Ctx, site: data.Site, key: []const u8) !void {
         try money_sql.add(" OR user_hash=");
         try money_sql.str(found.user_hash);
     }
-    try money_sql.add(")");
+    try money_sql.add(") GROUP BY o)");
     var money = try money_sql.prepare(ctx.db);
     defer money.deinit();
     _ = try money.step();
@@ -645,7 +656,7 @@ pub fn person(ctx: *Ctx, site: data.Site, key: []const u8) !void {
 
     // Journey: sessions across every device, newest first.
     var journey_sql = data.Sql.init(arena);
-    try journey_sql.add("SELECT pv.session_id,min(pv.received_at_ms),max(pv.received_at_ms),max(pv.device),max(pv.browser),max(pv.operating_system),(SELECT group_concat(p,' → ') FROM (SELECT x.path p FROM page_views x WHERE x.site_id=pv.site_id AND x.session_id=pv.session_id ORDER BY x.occurred_at_ms LIMIT 4)),(SELECT coalesce(nullif(x.utm_source,''),nullif(x.referrer_host,''),'direct') FROM page_views x WHERE x.site_id=pv.site_id AND x.session_id=pv.session_id ORDER BY x.occurred_at_ms LIMIT 1),(SELECT count(*) FROM events e WHERE e.site_id=pv.site_id AND e.session_id=pv.session_id AND e.name='rage_click'),(SELECT count(*) FROM errors x WHERE x.site_id=pv.site_id AND x.session_id=pv.session_id),(SELECT sum(e.value_minor) FROM events e WHERE e.site_id=pv.site_id AND e.session_id=pv.session_id AND e.name IN " ++ purchase_names ++ "),EXISTS(SELECT 1 FROM rp.replays r WHERE r.site_id=pv.site_id AND r.session_id=pv.session_id),(SELECT g.name FROM goals g JOIN events e ON e.site_id=g.site_id AND e.name=g.match_value AND g.kind='event' WHERE g.site_id=pv.site_id AND e.session_id=pv.session_id LIMIT 1) FROM page_views pv WHERE pv.site_id=");
+    try journey_sql.add("SELECT pv.session_id,min(pv.received_at_ms),max(pv.received_at_ms),max(pv.device),max(pv.browser),max(pv.operating_system),(SELECT group_concat(p,' → ') FROM (SELECT x.path p FROM page_views x WHERE x.site_id=pv.site_id AND x.session_id=pv.session_id ORDER BY x.occurred_at_ms LIMIT 4)),(SELECT coalesce(nullif(x.utm_source,''),nullif(x.referrer_host,''),'direct') FROM page_views x WHERE x.site_id=pv.site_id AND x.session_id=pv.session_id ORDER BY x.occurred_at_ms LIMIT 1),(SELECT count(*) FROM events e WHERE e.site_id=pv.site_id AND e.session_id=pv.session_id AND e.name='rage_click'),(SELECT count(*) FROM errors x WHERE x.site_id=pv.site_id AND x.session_id=pv.session_id),(SELECT sum(o.v) FROM (SELECT max(e.value_minor) v FROM events e WHERE e.site_id=pv.site_id AND e.session_id=pv.session_id AND e.name IN " ++ purchase_names ++ " GROUP BY coalesce(e.order_id,e.event_id)) o),EXISTS(SELECT 1 FROM rp.replays r WHERE r.site_id=pv.site_id AND r.session_id=pv.session_id),(SELECT g.name FROM goals g JOIN events e ON e.site_id=g.site_id AND e.name=g.match_value AND g.kind='event' WHERE g.site_id=pv.site_id AND e.session_id=pv.session_id LIMIT 1) FROM page_views pv WHERE pv.site_id=");
     try journey_sql.int(site.id);
     try journey_sql.add(" AND pv.visitor_id IN ");
     try visitorList(&journey_sql, found);

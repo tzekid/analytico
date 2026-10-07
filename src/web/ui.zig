@@ -70,7 +70,7 @@ pub const tones = [_]Tone{
     .{ .color = "#0057AE", .wash = "#E6EEF7" },
     .{ .color = "#644A9B", .wash = "#EFEBF5" },
     .{ .color = "#1F8A87", .wash = "#E5F2F1" },
-    .{ .color = "#C77D12", .wash = "#F8EEDF" },
+    .{ .color = "#9A5B08", .wash = "#F8EEDF" },
 };
 
 /// A card's title row; `aside` is HTML (a meta note or a link).

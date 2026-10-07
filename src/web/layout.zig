@@ -156,7 +156,7 @@ pub fn end(ctx: *Ctx) !void {
         , .{ .slug = site.slug });
         try icon(w, "search");
         try w.writeAll(
-            \\<input type="text" placeholder="Search pages, sources, settings — or ask a question" autocomplete="off" spellcheck="false" aria-label="Search or ask"><kbd>esc</kbd></div><div class="palette-list" role="listbox"></div>
+            \\<input type="text" placeholder="Search pages, sources, settings — or ask a question" autocomplete="off" spellcheck="false" aria-label="Search or ask"><kbd>esc</kbd></div><div class="palette-list" role="listbox" aria-label="Results"></div>
             \\<div class="palette-foot">↑↓ to move · ↵ to open · questions go to your AI provider</div></dialog>
         );
     }
@@ -226,7 +226,7 @@ fn controls(ctx: *Ctx, view: data.View, options: Head) !void {
         \\<button class="btn btn-primary">Apply range</button></form></div>
     , .{ .from = &data.dateText(view.range.start_ms), .to = &data.dateText(view.range.end_ms - 1) });
     if (options.compare) {
-        try render(w, "<a class=\"btn\" href=\"{href}\" aria-pressed=\"{pressed}\">", .{ .href = try view.href(arena, options.path, &.{.{ "cmp", if (view.compare) "0" else "" }}), .pressed = if (view.compare) "true" else "false" });
+        try render(w, "<a class=\"btn\" href=\"{href}\" role=\"button\" aria-label=\"Compare\" aria-pressed=\"{pressed}\">", .{ .href = try view.href(arena, options.path, &.{.{ "cmp", if (view.compare) "0" else "" }}), .pressed = if (view.compare) "true" else "false" });
         try icon(w, "compare");
         try w.writeAll("<span class=\"btn-label\">Compare</span></a>");
     }
@@ -248,7 +248,7 @@ pub fn hiddenState(ctx: *Ctx, view: data.View, skip: []const []const u8) !void {
 
 fn filterPopover(ctx: *Ctx, view: data.View, path: []const u8) !void {
     const w = ctx.w();
-    try render(w, "<button class=\"btn\" type=\"button\" popovertarget=\"filter-pop\"{!pressed}>", .{ .pressed = if (view.filters.len != 0) " aria-pressed=\"true\"" else "" });
+    try render(w, "<button class=\"btn\" type=\"button\" popovertarget=\"filter-pop\" aria-label=\"Filter\"{!pressed}>", .{ .pressed = if (view.filters.len != 0) " aria-pressed=\"true\"" else "" });
     try icon(w, "filter");
     try render(w,
         \\<span class="btn-label">Filter</span></button><div id="filter-pop" popover class="pop pop-wide" data-anchor="[popovertarget=filter-pop]"><form method="get" action="{path}" data-filter-form data-match="/{slug}/match.json">
@@ -290,10 +290,10 @@ fn segmentLinks(ctx: *Ctx, view: data.View, path: []const u8) !void {
 }
 
 pub fn conditionRow(w: *std.Io.Writer, filter: data.Filter) !void {
-    try w.writeAll("<div class=\"cond\" data-condition><select class=\"input\" data-dim>");
+    try w.writeAll("<div class=\"cond\" data-condition><select class=\"input\" data-dim aria-label=\"Dimension\">");
     for (std.enums.values(data.Dim)) |dim| try render(w, "<option value=\"{value}\"{!selected}>{label}</option>", .{ .value = dim, .selected = if (dim == filter.dim) " selected" else "", .label = dim.label() });
     try render(w,
-        \\</select><div class="row nowrap"><select class="input input-op" data-op><option value=""{!is}>is</option><option value="!"{!not}>is not</option></select>
+        \\</select><div class="row nowrap"><select class="input input-op" data-op aria-label="Comparison"><option value=""{!is}>is</option><option value="!"{!not}>is not</option></select>
         \\<input class="input" data-value list="filter-values" value="{value}" placeholder="Value" autocomplete="off"></div>
         \\<button type="button" class="btn btn-quiet btn-icon" data-remove-condition aria-label="Remove condition">
     , .{ .is = if (!filter.negate) " selected" else "", .not = if (filter.negate) " selected" else "", .value = filter.value });

@@ -129,7 +129,7 @@ fn sharePage(ctx: *Ctx, token: []const u8) !void {
     const previous = try data.totals(arena, ctx.db, view, range.prev_start_ms, range.prev_end_ms);
     const now_sales = try customers.sales(ctx.arena, ctx.db, view, range.start_ms, range.end_ms);
     const before_sales = try customers.sales(ctx.arena, ctx.db, view, range.prev_start_ms, range.prev_end_ms);
-    try tile(ctx, view, 0, "audience", "Visitors / day", try std.fmt.allocPrint(arena, "{d:.0}", .{current.metric(.visitors, range)}), current.metric(.visitors, range), previous.metric(.visitors, range), try data.series(arena, ctx.db, view, .visitors, range.start_ms));
+    try tile(ctx, view, 0, "audience", "Visitors / day", try std.fmt.allocPrint(arena, "{f}", .{html.int(@intFromFloat(@round(current.metric(.visitors, range))))}), current.metric(.visitors, range), previous.metric(.visitors, range), try data.series(arena, ctx.db, view, .visitors, range.start_ms));
     try tile(ctx, view, 1, "pages", "Page views", try std.fmt.allocPrint(arena, "{f}", .{html.int(current.views)}), @floatFromInt(current.views), @floatFromInt(previous.views), try data.series(arena, ctx.db, view, .views, range.start_ms));
     if (now_sales.orders > 0 or before_sales.orders > 0) {
         try tile(ctx, view, 2, "revenue", "Revenue", try std.fmt.allocPrint(arena, "{f}", .{html.money(now_sales.revenue, site.currency)}), @floatFromInt(now_sales.revenue), @floatFromInt(before_sales.revenue), null);
@@ -222,10 +222,14 @@ fn rankCard(ctx: *Ctx, view: data.View, dim: data.Dim, title: []const u8, total:
     try w.writeAll("<section class=\"card\">");
     try ui.cardHead(w, title, "");
     try w.writeAll("<div class=\"rank\">");
-    for (try data.top(ctx.arena, ctx.db, view, dim, 6)) |row| try ui.rankRow(w, ctx.arena, .{
+    const rows = try data.top(ctx.arena, ctx.db, view, dim, 6);
+    const keys = try ctx.arena.alloc([]const u8, rows.len);
+    for (rows, keys) |row, *key| key.* = row.key;
+    const labels = if (dim == .source) try overview.sourceLabels(ctx.arena, keys) else keys;
+    for (rows, labels) |row, label| try ui.rankRow(w, ctx.arena, .{
         .width = @as(f64, @floatFromInt(row.value)) / @as(f64, @floatFromInt(@max(total, 1))) * 80 + 6,
         .bar = "var(--brand-wash)",
-        .name = if (dim == .source) try overview.sourceLabel(ctx.arena, row.key) else row.key,
+        .name = label,
         .value = try std.fmt.allocPrint(ctx.arena, "{f}", .{html.int(row.value)}),
         .pct = try std.fmt.allocPrint(ctx.arena, "{f}", .{html.share(row.value, total)}),
     });

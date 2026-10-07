@@ -3,6 +3,7 @@ const std = @import("std");
 const app = @import("app.zig");
 const chart = @import("chart.zig");
 const ctx_mod = @import("ctx.zig");
+const customers = @import("customers.zig");
 const data = @import("data.zig");
 const domain = @import("../domain.zig");
 const html = @import("html.zig");
@@ -366,18 +367,18 @@ fn sources(ctx: *Ctx, view: data.View) !void {
     try w.writeAll("<section class=\"card card-flush\"><div class=\"table-wrap\"><table class=\"table\"><thead><tr><th>Source</th><th class=\"r\">Page views</th><th class=\"r\">Visitors</th><th class=\"r hide-m\">Engaged</th><th class=\"r hide-m\">Change</th><th class=\"bar-cell hide-m\"></th></tr></thead><tbody>");
     var largest: i64 = 0;
     var any = false;
-    for (current_sums) |entry| {
+    const keys = try arena.alloc([]const u8, current_sums.len);
+    for (current_sums, keys) |entry, *key| key.* = entry.key;
+    const labels = try overview.sourceLabels(arena, keys);
+    for (current_sums, labels) |entry, label| {
         any = true;
         const key = entry.key;
         const views = entry.sums.views;
         if (largest == 0) largest = views;
-        const label = try overview.sourceLabel(arena, key);
-        const tone = overview.toneFor(key);
         const href = try view.href(arena, base, &.{.{ "f+", try std.fmt.allocPrint(arena, "source:{s}", .{key}) }});
-        try render(w, "<tr data-href=\"{href}\"><td class=\"strong\"><a href=\"{href}\" class=\"row nowrap\"><span class=\"avatar\" style=\"background:{color}\">{initial}</span>{label}</a></td><td class=\"r\">{views}</td><td class=\"r\">{visitors}</td><td class=\"r hide-m\">{engaged}</td><td class=\"r hide-m\">", .{
-            .href = href,
-            .color = if (std.mem.eql(u8, key, "direct")) "#A0948E" else tone.color,
-            .initial = &[_]u8{if (label.len == 0) '?' else std.ascii.toUpper(label[0])},
+        try render(w, "<tr data-href=\"{href}\"><td class=\"strong\"><a href=\"{href}\" class=\"row nowrap\">", .{ .href = href });
+        try overview.sourceAvatar(w, key, label);
+        try render(w, "{label}</a></td><td class=\"r\">{views}</td><td class=\"r\">{visitors}</td><td class=\"r hide-m\">{engaged}</td><td class=\"r hide-m\">", .{
             .label = label,
             .views = html.int(views),
             .visitors = html.int(entry.sums.visitors),
@@ -393,16 +394,21 @@ fn sources(ctx: *Ctx, view: data.View) !void {
 
 fn channelOf(key: []const u8, medium: []const u8) []const u8 {
     if (std.mem.eql(u8, key, "direct")) return "Direct";
-    const lower_medium = medium;
-    if (std.mem.indexOf(u8, lower_medium, "email") != null or std.mem.indexOf(u8, lower_medium, "newsletter") != null) return "Email";
-    if (std.mem.indexOf(u8, lower_medium, "cpc") != null or std.mem.indexOf(u8, lower_medium, "paid") != null or std.mem.indexOf(u8, lower_medium, "ads") != null) return "Paid";
-    const search = [_][]const u8{ "google", "bing", "duckduckgo", "ecosia", "yandex", "baidu", "search", "qwant", "startpage", "kagi" };
-    for (search) |name| if (std.mem.indexOf(u8, key, name) != null) return "Search";
-    const social = [_][]const u8{ "facebook", "instagram", "t.co", "twitter", "x.com", "linkedin", "lnkd", "reddit", "ycombinator", "mastodon", "bsky", "youtube", "tiktok", "pinterest", "threads" };
-    for (social) |name| if (std.mem.indexOf(u8, key, name) != null) return "Social";
-    const ai_names = [_][]const u8{ "chatgpt", "openai", "perplexity", "claude", "gemini", "copilot" };
-    for (ai_names) |name| if (std.mem.indexOf(u8, key, name) != null) return "AI assistants";
-    if (std.mem.indexOf(u8, key, "mail") != null or std.mem.indexOf(u8, key, "newsletter") != null) return "Email";
+    if (std.mem.eql(u8, key, overview.self_referrer)) return "Within the site";
+    if (std.mem.indexOf(u8, medium, "email") != null or std.mem.indexOf(u8, medium, "newsletter") != null) return "Email";
+    if (std.mem.indexOf(u8, medium, "cpc") != null or std.mem.indexOf(u8, medium, "paid") != null or std.mem.indexOf(u8, medium, "ads") != null) return "Paid";
+    // Whole labels of the host ("chatgpt" in chatgpt.com, never "t.co" inside it).
+    const has = struct {
+        fn label(host: []const u8, names: []const []const u8) bool {
+            var parts = std.mem.splitScalar(u8, host, '.');
+            while (parts.next()) |part| for (names) |name| if (std.mem.eql(u8, part, name)) return true;
+            return false;
+        }
+    };
+    if (has.label(key, &.{ "chatgpt", "openai", "perplexity", "claude", "gemini", "copilot" })) return "AI assistants";
+    if (has.label(key, &.{ "google", "bing", "duckduckgo", "ecosia", "yandex", "baidu", "search", "qwant", "startpage", "kagi" })) return "Search";
+    if (std.mem.eql(u8, key, "t.co") or std.mem.eql(u8, key, "x.com") or has.label(key, &.{ "facebook", "instagram", "twitter", "linkedin", "lnkd", "reddit", "ycombinator", "mastodon", "bsky", "youtube", "tiktok", "pinterest", "threads" })) return "Social";
+    if (has.label(key, &.{ "mail", "newsletter" })) return "Email";
     return "Referral";
 }
 
@@ -417,7 +423,7 @@ fn channels(ctx: *Ctx, view: data.View) !void {
     try sql.add(" GROUP BY 1,2");
     var statement = try sql.prepare(ctx.db);
     defer statement.deinit();
-    const names = [_][]const u8{ "Direct", "Search", "Social", "Email", "Paid", "AI assistants", "Referral" };
+    const names = [_][]const u8{ "Direct", "Search", "Social", "Email", "Paid", "AI assistants", "Referral", "Within the site" };
     var views: [names.len]i64 = @splat(0);
     var visitors: [names.len]i64 = @splat(0);
     var total: i64 = 0;
@@ -429,7 +435,7 @@ fn channels(ctx: *Ctx, view: data.View) !void {
         };
         total += statement.columnInt(2);
     }
-    const colors = [_][]const u8{ "#A0948E", "#0057AE", "#644A9B", "#D64937", "#C77D12", "#1F8A87", "#6F625D" };
+    const colors = [_][]const u8{ "#A0948E", "#0057AE", "#644A9B", "#D64937", "#C77D12", "#1F8A87", "#6F625D", "#D9D2CE" };
     try w.writeAll("<div class=\"grid grid-2\"><section class=\"card\">");
     try ui.cardHead(w, "Channel mix", "<span class=\"meta\">Share of page views</span>");
     try w.writeAll("<div class=\"share-bar mb-16\">");
@@ -441,7 +447,7 @@ fn channels(ctx: *Ctx, view: data.View) !void {
         if (views[index] == 0) continue;
         try render(w, "<div class=\"rank-row\"><span class=\"rank-name\"><span class=\"avatar avatar-dot\" style=\"background:{color}\"></span><span>{name}</span></span><span class=\"rank-value\">{views}</span><span class=\"rank-pct\">{share}</span></div>", .{ .color = colors[index], .name = name, .views = html.int(views[index]), .share = html.share(views[index], total) });
     }
-    try w.writeAll("</div></section><section class=\"card\"><div class=\"card-head\"><h2>How channels are grouped</h2></div><p class=\"hint hint-13\">Search, social and AI assistants are recognised by referrer. Email and paid traffic come from <code>utm_medium</code> (email, newsletter, cpc, paid). Everything else with a referrer is Referral; no referrer is Direct.</p></section></div>");
+    try w.writeAll("</div></section><section class=\"card\"><div class=\"card-head\"><h2>How channels are grouped</h2></div><p class=\"hint hint-13\">Search, social and AI assistants are recognised by referrer. Email and paid traffic come from <code>utm_medium</code> (email, newsletter, cpc, paid). Everything else with a referrer is Referral; no referrer is Direct. Pages reached from the site itself carry the visit's source; in Lite mode, which keeps nothing between pages, they show as Within the site.</p></section></div>");
     if (total == 0) try ui.empty(w, "No visits in this period", "Channels appear as soon as visitors arrive.", "");
 }
 
@@ -454,9 +460,11 @@ fn campaigns(ctx: *Ctx, view: data.View, path: []const u8) !void {
     const from = data.dateText(view.range.start_ms);
     const to = data.dateText(view.range.end_ms - 1);
     var sql = data.Sql.init(arena);
-    try sql.add("WITH cv AS (SELECT pv.utm_campaign c,pv.session_id,pv.page_id,pv.visitor_day_id FROM page_views pv WHERE ");
+    // Each set once, then joined by campaign. Revenue is orders (one per order
+    // ID, whether seen from the browser, the server or both) minus refunds.
+    try sql.add("WITH cv AS MATERIALIZED (SELECT pv.utm_campaign c,pv.session_id,pv.page_id,pv.visitor_day_id FROM page_views pv WHERE ");
     try sql.pageViews(view, view.range.start_ms, view.range.end_ms);
-    try sql.add(" AND coalesce(pv.utm_campaign,'')<>''), cs AS (SELECT c,session_id FROM cv WHERE session_id IS NOT NULL GROUP BY session_id), ev AS (SELECT coalesce(json_extract(e.properties_json,'$.campaign'),(SELECT c FROM cs WHERE cs.session_id=e.session_id),(SELECT c FROM cv WHERE cv.page_id=e.page_id)) c,e.name,e.value_minor,e.currency FROM events e WHERE ");
+    try sql.add(" AND coalesce(pv.utm_campaign,'')<>''), cs AS MATERIALIZED (SELECT session_id,max(c) c FROM cv WHERE session_id IS NOT NULL GROUP BY session_id), ev AS MATERIALIZED (SELECT coalesce(json_extract(e.properties_json,'$.campaign'),cs.c,cv.c) c,e.name,e.value_minor,e.currency,coalesce(e.order_id,e.event_id) o FROM events e LEFT JOIN cs ON cs.session_id=e.session_id LEFT JOIN cv ON cv.page_id=e.page_id WHERE ");
     try sql.events(view, view.range.start_ms, view.range.end_ms);
     try sql.add("), sp AS (SELECT campaign c,sum(amount_minor) a,max(currency) cur FROM campaign_spend WHERE site_id=");
     try sql.int(site.id);
@@ -464,9 +472,9 @@ fn campaigns(ctx: *Ctx, view: data.View, path: []const u8) !void {
     try sql.str(&from);
     try sql.add(" AND spend_date<=");
     try sql.str(&to);
-    try sql.add(" GROUP BY campaign), k AS (SELECT c FROM cv UNION SELECT c FROM sp) SELECT k.c,(SELECT count(DISTINCT visitor_day_id) FROM cv WHERE cv.c=k.c),(SELECT count(*) FROM ev WHERE ev.c=k.c AND ev.name IN (SELECT match_value FROM goals WHERE kind='event' AND site_id=");
+    try sql.add(" GROUP BY campaign), k AS (SELECT c FROM cv UNION SELECT c FROM sp), vis AS (SELECT c,count(DISTINCT visitor_day_id) n FROM cv GROUP BY c), conv AS (SELECT c,sum(name IN (SELECT match_value FROM goals WHERE kind='event' AND site_id=");
     try sql.int(site.id);
-    try sql.add(")),(SELECT coalesce(sum(CASE WHEN instr(ev.name,'refund')>0 THEN -abs(value_minor) ELSE value_minor END),0) FROM ev WHERE ev.c=k.c AND value_minor IS NOT NULL),coalesce((SELECT a FROM sp WHERE sp.c=k.c),0),coalesce((SELECT cur FROM sp WHERE sp.c=k.c),(SELECT max(currency) FROM ev WHERE ev.c=k.c),'') FROM k ORDER BY 4 DESC,2 DESC LIMIT 100");
+    try sql.add(")) n,max(currency) cur FROM ev GROUP BY c), orders AS (SELECT c,sum(v) v FROM (SELECT c,o,max(value_minor) v FROM ev WHERE name IN " ++ customers.purchase_names ++ " AND value_minor IS NOT NULL GROUP BY c,o) GROUP BY c), refunds AS (SELECT c,sum(abs(value_minor)) v FROM ev WHERE name IN " ++ customers.refund_names ++ " AND value_minor IS NOT NULL GROUP BY c) SELECT k.c,coalesce(vis.n,0),coalesce(conv.n,0),coalesce(orders.v,0)-coalesce(refunds.v,0),coalesce(sp.a,0),coalesce(sp.cur,conv.cur,'') FROM k LEFT JOIN vis ON vis.c=k.c LEFT JOIN conv ON conv.c=k.c LEFT JOIN orders ON orders.c=k.c LEFT JOIN refunds ON refunds.c=k.c LEFT JOIN sp ON sp.c=k.c ORDER BY 4 DESC,2 DESC LIMIT 100");
     var statement = try sql.prepare(ctx.db);
     defer statement.deinit();
     var rows: std.ArrayList(Campaign) = .empty;
@@ -622,7 +630,11 @@ pub fn events(ctx: *Ctx, site: data.Site) !void {
     const path = try sitePath(arena, site, "/events");
     const tab = ctx.param("tab") orelse "events";
     const goal_count = try ctx.db.scalar(arena, i64, "SELECT count(*) FROM goals WHERE site_id=?", .{site.id});
-    try layout.head(ctx, .{ .title = "Events & goals", .subtitle = try std.fmt.allocPrint(arena, "{f} · {s} mode", .{ view.range, if (site.mode == .lite) "Lite" else "Session" }), .view = view, .path = path });
+    try layout.head(ctx, .{ .title = "Events & goals", .subtitle = try std.fmt.allocPrint(arena, "{f} · {s} mode", .{ view.range, switch (site.mode) {
+        .lite => "Lite",
+        .session => "Session",
+        .full => "Full",
+    } }), .view = view, .path = path });
     try ui.tabs(ctx.w(), ctx.arena, view, path, "tab", &.{ .{ "events", "Events" }, .{ "goals", try std.fmt.allocPrint(arena, "Goals · {d}", .{goal_count}) }, .{ "experiments", "Experiments" } }, tab);
     if (std.mem.eql(u8, tab, "goals")) try goals(ctx, view) else if (std.mem.eql(u8, tab, "experiments")) try experiments(ctx, view, path) else try eventTable(ctx, view);
     try goalDialog(ctx, site, ctx.param("goal") orelse "");

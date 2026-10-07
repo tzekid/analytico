@@ -161,13 +161,18 @@ pub fn trend(arena: std.mem.Allocator, w: *Writer, chart: Trend) !void {
     }
     try w.writeAll("</svg>");
     const denominator: f64 = @floatFromInt(@max(chart.current.len, 2) - 1);
+    // Marks close to the previous one take turns on a raised row.
+    var previous_left: f64 = -100;
+    var raised = false;
     for (chart.marks) |mark| {
         const left = @as(f64, @floatFromInt(mark.index)) / denominator * 100.0;
+        raised = left - previous_left < 20 and !raised;
+        previous_left = left;
         // Labels near an edge grow inwards instead of overflowing the card.
         const shift: []const u8 = if (left > 85) "-100%" else if (left < 15) "0%" else "-50%";
-        try w.print("<div class=\"chart-mark\" style=\"left:{d:.2}%;--shift:{s}\"><span>", .{ left, shift });
+        try w.print("<div class=\"chart-mark{s}\" style=\"left:{d:.2}%;--shift:{s}\"><span title=\"{f}\">", .{ if (raised) " raised" else "", left, shift, html.esc(mark.label) });
         try layout.icon(w, "pin");
-        try w.print("{f}</span></div>", .{html.esc(mark.label)});
+        try w.print("<b>{f}</b></span></div>", .{html.esc(mark.label)});
     }
     try w.writeAll("<div class=\"chart-hover\"></div><div class=\"chart-dot\"></div><div class=\"chart-tip\" role=\"status\"></div>");
     if (chart.why.len != 0) {

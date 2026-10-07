@@ -606,6 +606,8 @@
     }
     status.hidden = true;
     section.classList.add("loaded");
+    const player = $("iframe", stage);
+    if (player) player.title = "Session replay";
     const total = replayer.getMetaData().totalTime;
     const fit = () => {
       const iframe = $("iframe", stage);

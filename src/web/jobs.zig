@@ -169,7 +169,7 @@ pub fn renderReport(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, s
         const change = html.changeValue(tile[1], tile[2]);
         try w.print("<td width=\"33%\" style=\"padding:10px 12px;border:1px solid #E9E4E1;border-radius:10px\"><div style=\"font-size:12px;color:#6F625D\">{s}</div><div style=\"font:400 22px/30px Georgia,serif\">", .{tile[0]});
         if (tile[3]) try w.print("{f}", .{html.duration(@intFromFloat(tile[1]))}) else try w.print("{f}", .{html.int(@intFromFloat(tile[1]))});
-        try w.print("</div><div style=\"font-size:12px;font-weight:600;color:{s}\">{f}</div></td>", .{ if (std.math.isNan(change) or change >= 0) "#2F8F5B" else "#9F1D20", html.change(tile[1], tile[2]) });
+        try w.print("</div><div style=\"font-size:12px;font-weight:600;color:{s}\">{f}</div></td>", .{ if (std.math.isNan(change) or change >= 0) "#22704A" else "#9F1D20", html.change(tile[1], tile[2]) });
         if (tile[3]) try t.print("{s}: {f} ({f})\n", .{ tile[0], html.duration(@intFromFloat(tile[1])), html.change(tile[1], tile[2]) }) else try t.print("{s}: {f} ({f})\n", .{ tile[0], html.int(@intFromFloat(tile[1])), html.change(tile[1], tile[2]) });
     }
     try w.writeAll("</tr></table></td></tr>");
@@ -184,11 +184,11 @@ pub fn renderReport(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, s
             try w.print("<tr><td style=\"padding:3px 0;font-size:13px\"><div style=\"background:#FBEDEA;border-radius:6px;width:{d}%;padding:6px 8px;white-space:nowrap\">{f}</div></td><td align=\"right\" style=\"font:14px Georgia,serif;padding-left:12px;width:70px\">{f}</td></tr>", .{ @max(width, 12), esc(label), html.int(row.value) });
             try t.print("  {s}: {d}\n", .{ label, row.value });
         }
-        if (rows.len == 0) try w.writeAll("<tr><td style=\"font-size:13px;color:#A0948E\">No data in this period.</td></tr>");
+        if (rows.len == 0) try w.writeAll("<tr><td style=\"font-size:13px;color:#766A64\">No data in this period.</td></tr>");
         try w.writeAll("</table></td></tr>");
     }
     const link = try std.fmt.allocPrint(arena, "{s}{s}", .{ base, view_path });
-    try w.print("<tr><td style=\"padding:20px 28px 26px\"><a href=\"{f}\" style=\"display:inline-block;background:#D64937;color:#fff;text-decoration:none;font-weight:600;font-size:14px;padding:10px 18px;border-radius:8px\">Open in Analytico</a></td></tr></table><div style=\"font-size:11px;color:#A0948E;margin-top:12px\">Sent by Analytico · change or stop this email under Reports &amp; alerts</div></td></tr></table></body></html>", .{esc(link)});
+    try w.print("<tr><td style=\"padding:20px 28px 26px\"><a href=\"{f}\" style=\"display:inline-block;background:#B53A2B;color:#fff;text-decoration:none;font-weight:600;font-size:14px;padding:10px 18px;border-radius:8px\">Open in Analytico</a></td></tr></table><div style=\"font-size:11px;color:#A0948E;margin-top:12px\">Sent by Analytico · change or stop this email under Reports &amp; alerts</div></td></tr></table></body></html>", .{esc(link)});
     try t.print("\nOpen in Analytico: {s}\n", .{link});
     return .{ .subject = try std.fmt.allocPrint(arena, "{s} · {s}", .{ name, try std.fmt.allocPrint(arena, "{f}", .{view.range}) }), .html = out.written(), .text = text.written(), .log = if (summary) |value| value.log else null };
 }
@@ -297,7 +297,14 @@ pub fn anomaly(arena: std.mem.Allocator, db: *db_mod.Db, site: data.Site, day_st
     // Against the same weekday a week before.
     const result = try ai.drivers(arena, db, view, day_start, day_start + data.day_ms, day_start - 7 * data.day_ms, day_start - 6 * data.day_ms);
     if (result.list.len != 0) {
-        const top = result.list[0];
+        // A source or page says more than "mobile visitors", which moves with
+        // almost any spike; use it when it explains much of the change.
+        const change = result.current - result.previous;
+        var top = result.list[0];
+        for (result.list) |driver| if (driver.dim != .device and @abs(driver.delta) * 10 >= @abs(change) * 4) {
+            top = driver;
+            break;
+        };
         const label = try ai.driverLabel(arena, top);
         try w.print(", {s} {s}", .{ switch (top.dim) {
             .source => if (ratio >= 2) "mostly from" else "mostly fewer from",

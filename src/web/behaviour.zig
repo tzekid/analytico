@@ -2,6 +2,7 @@
 const std = @import("std");
 const analyze = @import("analyze.zig");
 const ctx_mod = @import("ctx.zig");
+const customers = @import("customers.zig");
 const data = @import("data.zig");
 const db_mod = @import("../db.zig");
 const html = @import("html.zig");
@@ -50,15 +51,13 @@ pub fn sessions(ctx: *Ctx, site: data.Site) !void {
     const tab = ctx.param("tab") orelse "sessions";
     var counts_sql = data.Sql.init(arena);
     try sessionsCte(&counts_sql, view);
-    try counts_sql.add(" SELECT count(*),coalesce(sum(EXISTS(SELECT 1 FROM rp.replays r WHERE r.site_id=");
-    try counts_sql.int(site.id);
-    try counts_sql.add(" AND r.session_id=s.sid)),0),coalesce(sum(EXISTS(SELECT 1 FROM events e WHERE e.site_id=");
-    try counts_sql.int(site.id);
-    try counts_sql.add(" AND e.session_id=s.sid AND e.name='rage_click')),0),coalesce(sum(EXISTS(SELECT 1 FROM errors x WHERE x.site_id=");
-    try counts_sql.int(site.id);
-    try counts_sql.add(" AND x.session_id=s.sid)),0),coalesce(sum(EXISTS(SELECT 1 FROM events e JOIN goals g ON g.site_id=e.site_id AND g.kind='event' AND g.match_value=e.name WHERE e.site_id=");
-    try counts_sql.int(site.id);
-    try counts_sql.add(" AND e.session_id=s.sid)),0) FROM s");
+    try counts_sql.add(" SELECT count(*)");
+    for ([_]Signal{ .recorded, .rage, .errors, .goal }) |signal| {
+        try counts_sql.add(",coalesce(sum(s.sid IN ");
+        try signalSet(&counts_sql, view, signal);
+        try counts_sql.add("),0)");
+    }
+    try counts_sql.add(" FROM s");
     var counts = try counts_sql.prepare(ctx.db);
     defer counts.deinit();
     _ = try counts.step();
@@ -105,6 +104,40 @@ fn sessionsCte(sql: *data.Sql, view: data.View) !void {
     try sql.add(" AND pv.session_id IS NOT NULL GROUP BY pv.session_id)");
 }
 
+/// The sessions in the period that have a signal, computed once as a set.
+fn signalSet(sql: *data.Sql, view: data.View, signal: Signal) !void {
+    const id = view.site.id;
+    switch (signal) {
+        .recorded => {
+            try sql.add("(SELECT r.session_id FROM rp.replays r WHERE r.site_id=");
+            try sql.int(id);
+            try sql.add(")");
+            return;
+        },
+        .rage => {
+            try sql.add("(SELECT e.session_id FROM events e WHERE e.site_id=");
+            try sql.int(id);
+            try sql.add(" AND e.name='rage_click'");
+        },
+        .errors => {
+            try sql.add("(SELECT e.session_id FROM errors e WHERE e.site_id=");
+            try sql.int(id);
+        },
+        .goal => {
+            try sql.add("(SELECT e.session_id FROM events e WHERE e.site_id=");
+            try sql.int(id);
+            try sql.add(" AND e.name IN (SELECT g.match_value FROM goals g WHERE g.site_id=");
+            try sql.int(id);
+            try sql.add(" AND g.kind='event')");
+        },
+    }
+    try sql.add(" AND e.received_at_ms>=");
+    try sql.int(view.range.start_ms);
+    try sql.add(" AND e.received_at_ms<");
+    try sql.int(view.range.end_ms);
+    try sql.add(" AND e.session_id IS NOT NULL)");
+}
+
 fn sessionTable(ctx: *Ctx, view: data.View, signal: ?Signal) !void {
     const arena = ctx.arena;
     const w = ctx.w();
@@ -112,47 +145,12 @@ fn sessionTable(ctx: *Ctx, view: data.View, signal: ?Signal) !void {
     const id = site.id;
     var sql = data.Sql.init(arena);
     try sessionsCte(&sql, view);
-    try sql.add(" SELECT s.sid,s.started,max(s.ended,coalesce((SELECT max(e.received_at_ms) FROM events e WHERE e.site_id=");
-    try sql.int(id);
-    try sql.add(" AND e.session_id=s.sid),0)),s.pages,coalesce(s.visitor,''),(SELECT group_concat(p,' → ') FROM (SELECT x.path p FROM page_views x WHERE x.site_id=");
-    try sql.int(id);
-    try sql.add(" AND x.session_id=s.sid ORDER BY x.occurred_at_ms LIMIT 3)),(SELECT count(*) FROM events e WHERE e.site_id=");
-    try sql.int(id);
-    try sql.add(" AND e.session_id=s.sid AND e.name='rage_click'),(SELECT count(*) FROM errors x WHERE x.site_id=");
-    try sql.int(id);
-    try sql.add(" AND x.session_id=s.sid),(SELECT g.name FROM goals g JOIN events e ON e.site_id=g.site_id AND e.name=g.match_value AND g.kind='event' WHERE g.site_id=");
-    try sql.int(id);
-    try sql.add(" AND e.session_id=s.sid LIMIT 1),(SELECT sum(e.value_minor) FROM events e WHERE e.site_id=");
-    try sql.int(id);
-    try sql.add(" AND e.session_id=s.sid AND e.name='purchase'),(SELECT max(e.currency) FROM events e WHERE e.site_id=");
-    try sql.int(id);
-    try sql.add(" AND e.session_id=s.sid AND e.name='purchase'),(SELECT r.last_at_ms-r.started_at_ms FROM rp.replays r WHERE r.site_id=");
-    try sql.int(id);
-    try sql.add(" AND r.session_id=s.sid),coalesce((SELECT v.user_hash FROM visitors v WHERE v.site_id=");
-    try sql.int(id);
-    try sql.add(" AND v.visitor_id=s.visitor),'') FROM s WHERE 1");
-    if (signal) |value| switch (value) {
-        .recorded => {
-            try sql.add(" AND EXISTS(SELECT 1 FROM rp.replays r WHERE r.site_id=");
-            try sql.int(id);
-            try sql.add(" AND r.session_id=s.sid)");
-        },
-        .rage => {
-            try sql.add(" AND EXISTS(SELECT 1 FROM events e WHERE e.site_id=");
-            try sql.int(id);
-            try sql.add(" AND e.session_id=s.sid AND e.name='rage_click')");
-        },
-        .errors => {
-            try sql.add(" AND EXISTS(SELECT 1 FROM errors x WHERE x.site_id=");
-            try sql.int(id);
-            try sql.add(" AND x.session_id=s.sid)");
-        },
-        .goal => {
-            try sql.add(" AND EXISTS(SELECT 1 FROM events e JOIN goals g ON g.site_id=e.site_id AND g.kind='event' AND g.match_value=e.name WHERE e.site_id=");
-            try sql.int(id);
-            try sql.add(" AND e.session_id=s.sid)");
-        },
-    };
+    // The 100 sessions first; their details only after.
+    try sql.add(",t AS MATERIALIZED (SELECT * FROM s WHERE 1");
+    if (signal) |value| {
+        try sql.add(" AND s.sid IN ");
+        try signalSet(&sql, view, value);
+    }
     if (ctx.param("event")) |name| {
         try sql.add(" AND EXISTS(SELECT 1 FROM events e WHERE e.site_id=");
         try sql.int(id);
@@ -161,13 +159,31 @@ fn sessionTable(ctx: *Ctx, view: data.View, signal: ?Signal) !void {
         try sql.add(")");
     }
     if (ctx.param("error")) |fingerprint| {
-        try sql.add(" AND EXISTS(SELECT 1 FROM errors x WHERE x.site_id=");
+        try sql.add(" AND s.sid IN (SELECT x.session_id FROM errors x WHERE x.site_id=");
         try sql.int(id);
-        try sql.add(" AND x.session_id=s.sid AND x.fingerprint=");
+        try sql.add(" AND x.fingerprint=");
         try sql.str(fingerprint);
         try sql.add(")");
     }
-    try sql.add(" ORDER BY s.started DESC LIMIT 100");
+    try sql.add(" ORDER BY s.started DESC LIMIT 100) SELECT t.sid,t.started,max(t.ended,coalesce((SELECT max(e.received_at_ms) FROM events e WHERE e.site_id=");
+    try sql.int(id);
+    try sql.add(" AND e.session_id=t.sid),0)),t.pages,coalesce(t.visitor,''),(SELECT group_concat(p,' → ') FROM (SELECT x.path p FROM page_views x WHERE x.site_id=");
+    try sql.int(id);
+    try sql.add(" AND x.session_id=t.sid ORDER BY x.occurred_at_ms LIMIT 3)),(SELECT count(*) FROM events e WHERE e.site_id=");
+    try sql.int(id);
+    try sql.add(" AND e.session_id=t.sid AND e.name='rage_click'),(SELECT count(*) FROM errors x WHERE x.site_id=");
+    try sql.int(id);
+    try sql.add(" AND x.session_id=t.sid),(SELECT g.name FROM goals g JOIN events e ON e.site_id=g.site_id AND e.name=g.match_value AND g.kind='event' WHERE g.site_id=");
+    try sql.int(id);
+    try sql.add(" AND e.session_id=t.sid LIMIT 1),(SELECT sum(o.v) FROM (SELECT max(e.value_minor) v FROM events e WHERE e.site_id=");
+    try sql.int(id);
+    try sql.add(" AND e.session_id=t.sid AND e.name IN " ++ customers.purchase_names ++ " GROUP BY coalesce(e.order_id,e.event_id)) o),(SELECT max(e.currency) FROM events e WHERE e.site_id=");
+    try sql.int(id);
+    try sql.add(" AND e.session_id=t.sid AND e.name IN " ++ customers.purchase_names ++ "),(SELECT r.last_at_ms-r.started_at_ms FROM rp.replays r WHERE r.site_id=");
+    try sql.int(id);
+    try sql.add(" AND r.session_id=t.sid),coalesce((SELECT v.user_hash FROM visitors v WHERE v.site_id=");
+    try sql.int(id);
+    try sql.add(" AND v.visitor_id=t.visitor),'') FROM t ORDER BY t.started DESC");
     var statement = try sql.prepare(ctx.db);
     defer statement.deinit();
     try w.writeAll("<section class=\"card card-flush\"><div class=\"table-wrap\"><table class=\"table\"><thead><tr><th>When</th><th class=\"hide-m\">Visitor</th><th>Journey</th><th class=\"r hide-m\">Pages</th><th class=\"r hide-m\">Length</th><th class=\"hide-m\">Signals</th>");
@@ -363,6 +379,17 @@ pub fn errorScope(sql: *data.Sql, view: data.View, start: i64, end: i64) !void {
     }
 }
 
+/// New in the period, quiet for a week (probably fixed), or still happening.
+fn errorStatus(arena: std.mem.Allocator, row: ErrorRow, range: data.Range, now_ms: i64, long: bool) ![]const u8 {
+    if (row.first >= range.start_ms) {
+        if (!long) return "New";
+        return if (row.release.len != 0) try std.fmt.allocPrint(arena, "New since release {s}", .{row.release}) else "New this period";
+    }
+    const quiet_days = @divFloor(now_ms - row.last, data.day_ms);
+    if (quiet_days >= 7) return try std.fmt.allocPrint(arena, "Not seen for {d} days", .{quiet_days});
+    return "Ongoing";
+}
+
 const ErrorRow = struct { fingerprint: []const u8, message: []const u8, file: []const u8, line: i64, path: []const u8, count: i64, visits: i64, first: i64, last: i64, browsers: []const u8, release: []const u8 };
 
 pub fn errors(ctx: *Ctx, site: data.Site) !void {
@@ -440,7 +467,7 @@ pub fn errors(ctx: *Ctx, site: data.Site) !void {
     for (rows.items) |row| {
         const href = try view.href(arena, path, &.{.{ "error", row.fingerprint }});
         const is_new = row.first >= range.start_ms;
-        try render(w, "<tr data-href=\"{href}\"{!selected}><td><a href=\"{href}\" class=\"block medium {class}\">{message}</a><span class=\"mono secondary\">{file}{line} · {path}</span></td><td class=\"r\">{visits}</td><td class=\"hide-m\">", .{
+        try render(w, "<tr data-href=\"{href}\"{!selected}><td class=\"wrap\"><a href=\"{href}\" class=\"block medium {class}\">{message}</a><span class=\"mono secondary\">{file}{line} · {path}</span></td><td class=\"r\">{visits}</td><td class=\"hide-m\">", .{
             .href = href,
             .selected = if (std.mem.eql(u8, row.fingerprint, selected.fingerprint)) " aria-selected=\"true\"" else "",
             .class = if (is_new) "bad" else "",
@@ -451,16 +478,13 @@ pub fn errors(ctx: *Ctx, site: data.Site) !void {
             .visits = html.int(row.visits),
         });
         try errorBars(ctx, view, row.fingerprint);
-        try render(w, "</td><td class=\"hide-m\"><span class=\"status-dot {class}\"></span>{status}</td></tr>", .{ .class = if (is_new) "bad" else "", .status = if (is_new) "New" else "Ongoing" });
+        try render(w, "</td><td class=\"hide-m\"><span class=\"status-dot {class}\"></span>{status}</td></tr>", .{ .class = if (is_new) "bad" else "", .status = try errorStatus(arena, row, range, ctx.now(), false) });
     }
     try w.writeAll("</tbody></table></div></section>");
 
     // Detail of the selected error.
-    try render(w, "<aside class=\"card error-detail\"><div class=\"overline\">{status}</div><h2 class=\"bad error-title\">{message}</h2><dl class=\"kv\">", .{ .status = if (selected.first >= range.start_ms) (if (selected.release.len != 0) try std.fmt.allocPrint(arena, "New since release {s}", .{selected.release}) else "New this period") else "Ongoing", .message = selected.message });
-    const first_date = data.civil(selected.first);
-    try render(w, "<dt>First seen</dt><dd>{day} {month}, {first}</dd><dt>Last seen</dt><dd>{last}</dd><dt>{unit}</dt><dd>{visits} · {count} errors</dd><dt>Browsers</dt><dd>{browsers}</dd><dt>Where</dt><dd class=\"mono\">{path}</dd><dt>Location</dt><dd class=\"mono\">{file}{line}</dd></dl>", .{
-        .day = first_date.day,
-        .month = data.month_names[first_date.month - 1],
+    try render(w, "<aside class=\"card error-detail\"><div class=\"overline\">{status}</div><h2 class=\"bad error-title\">{message}</h2><dl class=\"kv\">", .{ .status = try errorStatus(arena, selected, range, ctx.now(), true), .message = selected.message });
+    try render(w, "<dt>First seen</dt><dd>{first}</dd><dt>Last seen</dt><dd>{last}</dd><dt>{unit}</dt><dd>{visits} · {count} errors</dd><dt>Browsers</dt><dd>{browsers}</dd><dt>Where</dt><dd class=\"mono\">{path}</dd><dt>Location</dt><dd class=\"mono\">{file}{line}</dd></dl>", .{
         .first = data.clock(selected.first, ctx.now()),
         .last = data.ago(selected.last, ctx.now()),
         .unit = if (site.linked()) "Sessions" else "Views",

@@ -14,6 +14,8 @@ const domain = @import("../domain.zig");
 const Ctx = ctx_mod.Ctx;
 const esc = html.esc;
 const icon = layout.icon;
+/// Page views reached from the site itself with no arrival kept.
+pub const self_referrer = @import("../collector.zig").self_referrer;
 const render = html.render;
 
 pub const Tone = ui.Tone;
@@ -22,6 +24,7 @@ const tones = ui.tones;
 /// Friendly names for common referrers; everything else shows its host.
 pub fn sourceLabel(arena: std.mem.Allocator, key: []const u8) ![]const u8 {
     if (std.mem.eql(u8, key, "direct")) return "Direct / no referrer";
+    if (std.mem.eql(u8, key, self_referrer)) return "Within the site";
     // Keys come from visitors (utm_source); a bare "www." must still label something.
     const host = if (std.mem.startsWith(u8, key, "www.") and key.len > 4) key[4..] else key;
     const known = [_][2][]const u8{
@@ -33,18 +36,33 @@ pub fn sourceLabel(arena: std.mem.Allocator, key: []const u8) ![]const u8 {
         .{ "news.ycombinator.com", "Hacker News" }, .{ "github.com", "GitHub" },         .{ "youtube.com", "YouTube" },
         .{ "chatgpt.com", "ChatGPT" },              .{ "perplexity.ai", "Perplexity" },  .{ "yandex.ru", "Yandex" },
         .{ "ecosia.org", "Ecosia" },                .{ "mastodon.social", "Mastodon" },  .{ "bsky.app", "Bluesky" },
+        .{ "pinterest.", "Pinterest" },             .{ "threads.net", "Threads" },       .{ "tiktok.com", "TikTok" },
     };
     for (known) |pair| {
         if (pair[0][pair[0].len - 1] == '.') {
             if (std.mem.startsWith(u8, host, pair[0])) return pair[1];
         } else if (std.mem.eql(u8, host, pair[0])) return pair[1];
     }
-    if (std.mem.findScalar(u8, host, '.') == null and host.len != 0) {
-        const out = try arena.dupe(u8, host);
-        out[0] = std.ascii.toUpper(out[0]);
-        return out;
+    // Always a copy: callers pass database column text that the next row reuses.
+    const out = try arena.dupe(u8, host);
+    if (std.mem.findScalar(u8, host, '.') == null and host.len != 0) out[0] = std.ascii.toUpper(out[0]);
+    return out;
+}
+
+/// Labels for a list of source keys; two keys with the same label (a referrer
+/// and a tagged campaign source, say) show their key too.
+pub fn sourceLabels(arena: std.mem.Allocator, keys: []const []const u8) ![]const []const u8 {
+    const plain = try arena.alloc([]const u8, keys.len);
+    for (keys, plain) |key, *label| label.* = try sourceLabel(arena, key);
+    const out = try arena.alloc([]const u8, keys.len);
+    for (plain, keys, out, 0..) |label, key, *result, index| {
+        var shared = false;
+        for (plain, 0..) |other, at| {
+            if (at != index and std.mem.eql(u8, other, label)) shared = true;
+        }
+        result.* = if (shared) try std.fmt.allocPrint(arena, "{s} · {s}", .{ label, key }) else label;
     }
-    return host;
+    return out;
 }
 
 pub fn toneFor(key: []const u8) Tone {
@@ -54,17 +72,13 @@ pub fn toneFor(key: []const u8) Tone {
     return tones[@intCast(std.hash.Wyhash.hash(7, key) % tones.len)];
 }
 
-pub fn sourceRow(ctx: *Ctx, w: *std.Io.Writer, key: []const u8, value: i64, total: i64, largest: i64, href: []const u8) !void {
+pub fn sourceRow(ctx: *Ctx, w: *std.Io.Writer, key: []const u8, label: []const u8, value: i64, total: i64, largest: i64, href: []const u8) !void {
     const arena = ctx.arena;
-    const label = try sourceLabel(arena, key);
     const direct = std.mem.eql(u8, key, "direct");
-    const tone = if (direct) Tone{ .color = "#6F625D", .wash = "#F3EFED" } else toneFor(key);
+    const within = std.mem.eql(u8, key, self_referrer);
+    const tone = if (direct or within) Tone{ .color = "#6F625D", .wash = "#F3EFED" } else toneFor(key);
     var avatar: std.Io.Writer.Allocating = .init(arena);
-    if (direct) {
-        try avatar.writer.writeAll("<span class=\"avatar avatar-direct\">");
-        try icon(&avatar.writer, "arrow-up-right");
-        try avatar.writer.writeAll("</span>");
-    } else try render(&avatar.writer, "<span class=\"avatar\" style=\"background:{color}\">{initial}</span>", .{ .color = tone.color, .initial = &[_]u8{if (label.len == 0) '?' else std.ascii.toUpper(label[0])} });
+    try sourceAvatar(&avatar.writer, key, label);
     try ui.rankRow(w, arena, .{
         .href = href,
         .title = try std.fmt.allocPrint(arena, "Filter by {s}", .{label}),
@@ -78,15 +92,42 @@ pub fn sourceRow(ctx: *Ctx, w: *std.Io.Writer, key: []const u8, value: i64, tota
     });
 }
 
-pub fn pageRow(w: *std.Io.Writer, arena: std.mem.Allocator, index: usize, row: data.Row, largest: i64, href: []const u8) !void {
+/// A source's mark: its initial on its colour, or an icon for Direct and
+/// Within the site.
+pub fn sourceAvatar(w: *std.Io.Writer, key: []const u8, label: []const u8) !void {
+    const within = std.mem.eql(u8, key, self_referrer);
+    if (within or std.mem.eql(u8, key, "direct")) {
+        try w.writeAll("<span class=\"avatar avatar-direct\">");
+        try icon(w, if (within) "pages" else "arrow-up-right");
+        return w.writeAll("</span>");
+    }
+    try render(w, "<span class=\"avatar\" style=\"background:{color}\">{initial}</span>", .{ .color = toneFor(key).color, .initial = &[_]u8{if (label.len == 0) '?' else std.ascii.toUpper(label[0])} });
+}
+
+/// How much a list grew overall, so one row can stand out from it; null
+/// when there is nothing to compare with.
+pub fn listGrowth(rows: []const data.Row) ?f64 {
+    var now: i64 = 0;
+    var before: i64 = 0;
+    for (rows) |row| {
+        now += row.value;
+        before += row.previous;
+    }
+    if (before == 0) return null;
+    return html.changeValue(@floatFromInt(now), @floatFromInt(before));
+}
+
+pub fn pageRow(w: *std.Io.Writer, arena: std.mem.Allocator, index: usize, row: data.Row, largest: i64, growth: ?f64, href: []const u8) !void {
     const change = html.changeValue(@floatFromInt(row.value), @floatFromInt(row.previous));
+    // Rising: well ahead of the list as a whole, not just riding its growth.
+    const rising = if (growth) |overall| row.value >= 10 and (row.previous == 0 or change >= overall + 50) else false;
     try ui.rankRow(w, arena, .{
         .href = href,
         .width = if (largest == 0) 0 else @as(f64, @floatFromInt(row.value)) / @as(f64, @floatFromInt(largest)) * 80.0 + 8.0,
         .lead = index == 0,
         .before = try std.fmt.allocPrint(arena, "<span class=\"n\">{d}</span>", .{index + 1}),
         .name = row.key,
-        .after = if (row.value >= 10 and (std.math.isNan(change) or change >= 50)) "<i class=\"pill pill-brand\">Rising</i>" else "",
+        .after = if (rising) "<i class=\"pill pill-brand\">Rising</i>" else "",
         .value = try std.fmt.allocPrint(arena, "{f}", .{html.int(row.value)}),
     });
 }
@@ -147,9 +188,12 @@ pub fn page(ctx: *Ctx, site: data.Site) !void {
 /// join the chart; dismissed, they go.
 fn draftNotes(ctx: *Ctx, site: data.Site) !void {
     const drafts = try ctx.db.all(ctx.arena, struct { id: i64, day: []const u8, label: []const u8 }, "SELECT id,day,label FROM annotations WHERE site_id=? AND draft=1 ORDER BY day DESC LIMIT 3", .{site.id});
-    for (drafts) |note| try render(ctx.w(),
-        \\<div class="callout mb-14" data-draft-note><span class="grow">Noticed on {day}: <strong>{label}</strong></span><form method="post" action="/{slug}/annotations/{id}/keep"><button class="btn">Keep as a note</button></form><form method="post" action="/{slug}/annotations/{id}/delete"><button class="btn btn-quiet">Dismiss</button></form></div>
-    , .{ .day = note.day, .label = note.label, .slug = site.slug, .id = note.id });
+    for (drafts) |note| {
+        const date = data.civil(try data.parseDate(note.day));
+        try render(ctx.w(),
+            \\<div class="callout mb-14" data-draft-note><span class="grow">Noticed on {day} {month}: <strong>{label}</strong></span><form method="post" action="/{slug}/annotations/{id}/keep"><button class="btn">Keep as a note</button></form><form method="post" action="/{slug}/annotations/{id}/delete"><button class="btn btn-quiet">Dismiss</button></form></div>
+        , .{ .day = date.day, .month = data.month_names[date.month - 1], .label = note.label, .slug = site.slug, .id = note.id });
+    }
 }
 
 /// The independent queries the overview makes, run ahead in parallel.
@@ -268,7 +312,9 @@ pub fn placesCard(ctx: *Ctx, view: data.View, base: []const u8, total_views: i64
             .pct = try std.fmt.allocPrint(arena, "{f}", .{html.share(row.value, total_views)}),
         });
         if (devices.len == 0) try w.writeAll("<p class=\"hint\">No page views match this view.</p>");
-        try w.writeAll("</div><p class=\"hint mt-12\">Countries appear once a location database is installed (<code>analytico geo import</code>).</p></section>");
+        if (ctx.shared.geo == null) {
+            try w.writeAll("</div><p class=\"hint mt-12\">Countries appear once a location database is installed (<code>analytico geo import</code>).</p></section>");
+        } else try w.writeAll("</div><p class=\"hint mt-12\">None of these page views has a known country yet.</p></section>");
         return;
     }
     try w.writeAll("<section class=\"card\">");
@@ -312,7 +358,7 @@ pub fn pagesCard(ctx: *Ctx, view: data.View) !void {
     try w.writeAll("<section class=\"card\">");
     try ui.cardHead(w, "Top pages", try html.print(arena, "<a class=\"link\" href=\"{href}\">View all →</a>", .{ .href = try view.href(arena, pages_path, &.{}) }));
     try w.writeAll("<div class=\"rank\">");
-    for (pages, 0..) |row, index| try pageRow(w, arena, index, row, pages[0].value, try view.href(arena, pages_path, &.{.{ "page", row.key }}));
+    for (pages, 0..) |row, index| try pageRow(w, arena, index, row, pages[0].value, listGrowth(pages), try view.href(arena, pages_path, &.{.{ "page", row.key }}));
     if (pages.len == 0) try w.writeAll("<p class=\"hint\">No page views match this view.</p>");
     try w.writeAll("</div></section>");
 }
@@ -324,7 +370,10 @@ pub fn sourcesCard(ctx: *Ctx, view: data.View, base: []const u8, total_views: i6
     try w.writeAll("<section class=\"card\">");
     try ui.cardHead(w, "Where visitors come from", "<span class=\"meta\">Page views</span>");
     try w.writeAll("<div class=\"rank\">");
-    for (sources) |row| try sourceRow(ctx, w, row.key, row.value, total_views, sources[0].value, try view.href(arena, base, &.{.{ "f+", try std.fmt.allocPrint(arena, "source:{s}", .{row.key}) }}));
+    const keys = try arena.alloc([]const u8, sources.len);
+    for (sources, keys) |row, *key| key.* = row.key;
+    const names = try sourceLabels(arena, keys);
+    for (sources, names) |row, label| try sourceRow(ctx, w, row.key, label, row.value, total_views, sources[0].value, try view.href(arena, base, &.{.{ "f+", try std.fmt.allocPrint(arena, "source:{s}", .{row.key}) }}));
     if (sources.len == 0) try w.writeAll("<p class=\"hint\">No sources match this view.</p>");
     try w.writeAll("</div></section>");
 }
@@ -394,7 +443,10 @@ pub fn trendCard(ctx: *Ctx, view: data.View, base: []const u8) !void {
             try w.print(", {s} “{f}”", .{ if (mark.index == best) "the day of" else "one day after", esc(mark.label) });
             break;
         };
-        if (previous) |prev| if (prev[best] > 0 and @abs(html.changeValue(current[best], prev[best])) >= 1) try w.print(" ({f} vs the same {s} before)", .{ html.change(current[best], prev[best]), if (range.bucket_ms == data.hour_ms) "hour" else "day" });
+        if (previous) |prev| if (prev[best] > 0 and @abs(html.changeValue(current[best], prev[best])) >= 1) {
+            const change = html.change(current[best], prev[best]);
+            try w.print(" ({f}{s} the same {s} before)", .{ change, if (change.isMultiple()) "" else " vs", if (range.bucket_ms == data.hour_ms) "hour" else "day" });
+        };
         try w.writeAll(".</p>");
     }
     try w.writeAll("</div><div class=\"legend\"><span class=\"this\">This period</span>");
@@ -426,8 +478,9 @@ fn insights(ctx: *Ctx, view: data.View, current: data.Totals, previous: data.Tot
     const sources = try data.top(arena, ctx.db, view, .source, 12);
     var best_source: ?data.Row = null;
     var best_change: f64 = 15;
+    // Against an empty previous period every source is "new"; say nothing.
     for (sources) |row| {
-        if (row.value < 5) continue;
+        if (previous.views == 0 or row.value < 5 or std.mem.eql(u8, row.key, self_referrer)) continue;
         const change = if (row.previous == 0) 999 else html.changeValue(@floatFromInt(row.value), @floatFromInt(row.previous));
         if (change > best_change) {
             best_change = change;
@@ -487,8 +540,10 @@ fn insights(ctx: *Ctx, view: data.View, current: data.Totals, previous: data.Tot
                 .icon = "audience",
                 .big = try std.fmt.allocPrint(arena, "{d:.0}%", .{mobile * 100}),
                 .what = "of visits are on mobile",
-                .text = if (previous.views > 0)
-                    try std.fmt.allocPrint(arena, "{s} from {d:.0}% the period before.", .{ if (mobile >= before) "Up" else "Down", before * 100 })
+                .text = if (previous.views > 0 and @round(mobile * 100) == @round(before * 100))
+                    "The same share as the period before."
+                else if (previous.views > 0)
+                    try std.fmt.allocPrint(arena, "{s} from {d:.0}% the period before.", .{ if (mobile > before) "Up" else "Down", before * 100 })
                 else
                     "Phones and tablets combined.",
                 .link = "Check performance →",
