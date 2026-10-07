@@ -10,7 +10,7 @@ a person would, and records what it saw.
 node tests/tour.mjs zig-out/bin/analytico ../tour dbip-city-lite-2026-10.csv.gz
 ```
 
-The first run seeds `../tour/pristine` (about 20 minutes on 8 cores); every
+The first run seeds `../tour/pristine` (about 25 minutes on 8 cores); every
 run starts from a copy of it, so a re-run after a fix takes about 8 minutes.
 It needs Linux, Chromium (`CHROMIUM_PATH`, default `/usr/bin/chromium`),
 `npm ci`, and the free [DB-IP City Lite](https://db-ip.com/db/download/ip-to-city-lite)
@@ -26,9 +26,9 @@ with consent asked in the EU, UK and Switzerland.
   collector over HTTP. Each visit has a source, campaign, country, device,
   scroll depth and engagement, and some have search terms, outbound clicks,
   downloads, errors, rage clicks, Web Vitals, carts and orders.
-- The shop's own server confirms 844 orders and some refunds over
-  `/i`, the way a real backend would. Some orders are reported by both the
-  browser and the server; they must count once.
+- 844 orders. Most are confirmed by the shop's own server over `/i`, the
+  way a real backend would, along with some refunds; many are also
+  reported by the browser, and must count once.
 - Two traffic spikes (a Hacker News post, a Reddit thread), a newsletter
   every Thursday, Google and Instagram ad campaigns with daily spend.
 - The last morning is 96 real Chromium visits through the real tracker:
@@ -56,9 +56,9 @@ run a recorded page's scripts inside the player's sandboxed frame, which
 is what the sandbox is for. The median page took 29 ms on the server; the
 slowest was Paths through the site, 955 ms.
 
-axe-core flagged 8 elements on 4 screens, down from 1,424 on the run before the
-contrast fixes: a teal that was 4.2:1 instead of 4.5:1, and two selects in the alert
-dialog without a name. Both are fixed since.
+axe-core flagged 8 elements on 4 screens, down from 1,424 on the run
+before the contrast fixes: a teal that was 4.2:1 instead of 4.5:1, and two
+selects in the alert dialog without a name. Both are fixed since.
 
 | Section | Steps | Passed | Slowest page (server) |
 |---|---|---|---|
@@ -76,7 +76,7 @@ dialog without a name. Both are fixed since.
 
 ## What it found
 
-The first run found the following. Every journey in
+The runs on 7 October found the following. Every journey in
 `zig build e2e` was green at the time. All of it is fixed.
 
 **Pages that were too slow** at 66,000 page views a month (server time):
@@ -119,9 +119,9 @@ The first run found the following. Every journey in
 - The error panel showed the date twice, called a fixed error "Ongoing",
   wrapped its labels and let a long file location run out of the panel.
 - Chart notes on nearby days covered each other.
-- The funnel hid the percentage on short bars.
+- The funnel hid the percentage on short bars and said "−4,805 left".
 - The revenue chart clipped its day labels, then widened the bars that had
-  one.
+  one, then ended them at different heights.
 - The public page showed "1263" instead of "1,263".
 - Tables were cut off on a phone.
 - The consent banner covered the heatmap overlay.
@@ -141,6 +141,9 @@ they were gzipped. It is now about 12% smaller.
 
 - Stopping the server waits for a running query to finish.
 - The People list shows up to 2,000 people on one page, without paging.
+- On a busy page the click heatmap saturates: overlapping cells add up, so
+  every popular element is equally red. It needs counts accumulated first
+  and coloured relative to the busiest spot.
 
 ## Screens
 
