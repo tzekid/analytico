@@ -1,4 +1,5 @@
 import AnalyticoKit
+import AppIntents
 import SwiftUI
 
 @main
@@ -21,8 +22,57 @@ struct AnalyticoApp: App {
             }
         }
         #endif
+        #if os(macOS)
+        MenuBarExtra {
+            MenuBarContent().environment(model)
+        } label: {
+            Label(model.online.map { "\($0)" } ?? "", systemImage: "chart.bar.fill")
+                .labelStyle(.titleAndIcon)
+        }
+        #endif
     }
 }
+
+/// "How many visitors today on shop?" from Siri, Spotlight and Shortcuts.
+struct AnalyticoShortcuts: AppShortcutsProvider {
+    static var appShortcuts: [AppShortcut] {
+        AppShortcut(intent: VisitorsTodayIntent(), phrases: [
+            "Visitors today in \(.applicationName)",
+            "How many visitors on \(\.$site) in \(.applicationName)",
+        ], shortTitle: "Visitors today", systemImageName: "chart.bar")
+    }
+}
+
+#if os(macOS)
+/// The menu bar: people online now on the open site, and its siblings.
+struct MenuBarContent: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        if model.client == nil {
+            Text("Not signed in")
+        } else {
+            if let slug = model.selectedSite, let site = model.sites.first(where: { $0.slug == slug }) {
+                Text("\(model.online ?? 0) online now on \(site.name)")
+                Text("\(Format.count(site.today.visitors)) visitors today")
+                Divider()
+            }
+            ForEach(model.sites) { site in
+                Button {
+                    model.selectedSite = site.slug
+                } label: {
+                    Text(site.name + (site.slug == model.selectedSite ? " ✓" : ""))
+                }
+            }
+        }
+        Divider()
+        Button("Open Analytico") { NSApp.activate() }
+            .keyboardShortcut("o")
+        Button("Quit") { NSApp.terminate(nil) }
+            .keyboardShortcut("q")
+    }
+}
+#endif
 
 struct RootView: View {
     @Environment(AppModel.self) private var model

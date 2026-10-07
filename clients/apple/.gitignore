@@ -4,3 +4,5 @@ App/Analytico.entitlements
 Packages/AnalyticoKit/.build/
 Packages/AnalyticoKit/.swiftpm/
 build/
+Widgets/Info.plist
+Widgets/AnalyticoWidgets.entitlements

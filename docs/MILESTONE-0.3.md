@@ -1,6 +1,6 @@
 # Milestone 0.3: the web workspace on Mac, iPhone and iPad
 
-Status: in progress. Phase 1 (server and web) is built and tested; phases 2–5 are next.
+Status: in progress. Phase 1 (server and web) and phase 2 (the app) are built and tested; phase 3 (widgets, menu bar, Siri) is built and waiting for a device check; phases 4–5 are next.
 
 Analytico gets native apps for macOS, iOS and iPadOS, next to the web
 workspace, and the server gains what native apps need: instance discovery,
@@ -196,8 +196,9 @@ the device stops delivery.
 - WidgetKit: today's visitors and a 7-day sparkline, small and medium,
   lock screen on iPhone, desktop on macOS; refreshed from the cache and
   on push.
-- App Intents: "Visitors today on {site}", "Open {report} for {site}",
-  usable from Siri, Shortcuts and Spotlight.
+- App Intents: "Visitors today on {site}", usable from Siri, Shortcuts and
+  Spotlight. ("Open {report}" was dropped: a widget tap or one tap in the
+  app does the same.)
 - Notifications through the relay; the Notification Service Extension
   decrypts the payload with the device key held in the Keychain.
 
