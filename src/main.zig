@@ -5,6 +5,7 @@ pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
     const args = try init.minimal.args.toSlice(allocator);
     @import("net.zig").init(init.gpa, init.io);
+    defer @import("net.zig").deinit();
     var buffer: [16 * 1024]u8 = undefined;
     var stdout = std.Io.File.stdout().writer(init.io, &buffer);
     defer stdout.interface.flush() catch {};

@@ -330,8 +330,8 @@ test "money" {
 test "escaping and formatting" {
     var buffer: [128]u8 = undefined;
     var w: Writer = .fixed(&buffer);
-    try w.print("{f}|{f}|{f}|{f}", .{ esc("<a href=\"x\">&'"), int(18420), duration(102_000), change(110, 100) });
-    try std.testing.expectEqualStrings("&lt;a href=&quot;x&quot;&gt;&amp;&#39;|18,420|1m 42s|+10.0%", w.buffered());
+    try w.print("{f}|{f}|{f}|{f}|{f}|{f}", .{ esc("<a href=\"x\">&'"), int(18420), duration(102_000), change(110, 100), change(640, 100), change(2246, 100) });
+    try std.testing.expectEqualStrings("&lt;a href=&quot;x&quot;&gt;&amp;&#39;|18,420|1m 42s|+10.0%|6.4×|22×", w.buffered());
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const params = try Params.parse(arena.allocator(), "f=source%3Agoogle&range=7d&f=page%3A%2Fa+b");

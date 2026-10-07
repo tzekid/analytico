@@ -10,6 +10,11 @@ pub fn init(gpa: std.mem.Allocator, io: std.Io) void {
     client = .{ .allocator = gpa, .io = io };
 }
 
+/// Closes pooled connections; called once every request has finished.
+pub fn deinit() void {
+    client.deinit();
+}
+
 pub const Request = struct {
     method: std.http.Method = .GET,
     body: ?[]const u8 = null,

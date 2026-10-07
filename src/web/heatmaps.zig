@@ -40,6 +40,14 @@ pub const Cache = struct {
         gpa.free(slot.body);
         slot.* = .{ .site_id = site_id, .key = owned_key, .body = owned_body, .at_ms = now_ms };
     }
+
+    pub fn deinit(self: *Cache, gpa: std.mem.Allocator) void {
+        for (&self.entries) |*entry| {
+            gpa.free(entry.key);
+            gpa.free(entry.body);
+            entry.* = .{};
+        }
+    }
 };
 
 /// The overlay's data, from the cache when it was warmed in the last minute.

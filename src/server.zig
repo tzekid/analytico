@@ -271,6 +271,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
     // their transactions finish before the joins return.
     stopAll();
     for (threads[0..started]) |thread| thread.join();
+    shared.heat_cache.deinit(allocator);
     try store.checkpoint();
     std.log.info("serve_stopped", .{});
 }

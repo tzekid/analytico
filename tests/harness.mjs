@@ -187,4 +187,7 @@ export async function journey(name, story) {
     for (const close of closers.reverse()) await close().catch((error) => console.error(`cleanup: ${error.message}`));
     await rm(temporary, { recursive: true, force: true });
   }
+  // ReleaseSafe reports memory still allocated when the server stops.
+  const leaked = t.log.indexOf("leaked [");
+  assert.equal(leaked, -1, `${name}: memory leaked on shutdown\n${t.log.slice(leaked, leaked + 3000)}`);
 }
