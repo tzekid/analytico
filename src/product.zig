@@ -1,6 +1,6 @@
 const std = @import("std");
 const domain = @import("domain.zig");
-const reports = @import("reports.zig");
+const catalog = @import("web/catalog.zig");
 const store_mod = @import("store.zig");
 
 pub fn goalAdd(
@@ -20,7 +20,7 @@ pub fn goalAdd(
     try statement.bindText(2, name);
     try statement.bindText(3, kind);
     try statement.bindText(4, match_value);
-    try statement.bindInt(5, try domain.nowMilliseconds());
+    try statement.bindInt(5, domain.nowMs());
     _ = try statement.step();
     try output.print("goal added name={s} kind={s} match={s}\n", .{ name, kind, match_value });
 }
@@ -29,7 +29,7 @@ pub fn goalList(allocator: std.mem.Allocator, output: *std.Io.Writer, store: *st
     var statement = try store.database.prepare(allocator, "SELECT name,kind,match_value FROM goals WHERE site_id=? ORDER BY name");
     defer statement.deinit();
     try statement.bindInt(1, site_id);
-    try reports.writeRows(output, &statement, .table);
+    try catalog.render(output, try catalog.sqlTable(allocator, &statement), .table);
 }
 
 pub fn funnelAdd(
@@ -42,7 +42,7 @@ pub fn funnelAdd(
 ) !void {
     try domain.validateName(name);
     if (raw_steps.len < 2 or raw_steps.len > 16) return error.InvalidFunnelStepCount;
-    const now = try domain.nowMilliseconds();
+    const now = domain.nowMs();
     try store.database.exec("BEGIN IMMEDIATE");
     errdefer store.database.exec("ROLLBACK") catch {};
     var insert = try store.database.prepare(allocator, "INSERT INTO funnels(site_id,name,created_at_ms) VALUES(?,?,?)");
@@ -71,99 +71,7 @@ pub fn funnelList(allocator: std.mem.Allocator, output: *std.Io.Writer, store: *
     var statement = try store.database.prepare(allocator, "SELECT f.name,count(s.step_index) steps,f.window_ms FROM funnels f JOIN funnel_steps s ON s.funnel_id=f.id WHERE f.site_id=? GROUP BY f.id ORDER BY f.name");
     defer statement.deinit();
     try statement.bindInt(1, site_id);
-    try reports.writeRows(output, &statement, .table);
-}
-
-const Step = struct { kind: []u8, value: []u8 };
-const Progress = struct { next_step: usize, started_at_ms: i64 };
-
-pub fn funnelShow(
-    allocator: std.mem.Allocator,
-    output: *std.Io.Writer,
-    store: *store_mod.Store,
-    site_id: i64,
-    name: []const u8,
-    options_value: reports.Options,
-) !void {
-    try domain.validateName(name);
-    var funnel = try store.database.prepare(allocator, "SELECT id,window_ms FROM funnels WHERE site_id=? AND name=?");
-    defer funnel.deinit();
-    try funnel.bindInt(1, site_id);
-    try funnel.bindText(2, name);
-    if (try funnel.step() != .row) return error.UnknownFunnel;
-    const funnel_id = funnel.columnInt(0);
-    const window_ms = funnel.columnInt(1);
-    var step_query = try store.database.prepare(allocator, "SELECT kind,match_value FROM funnel_steps WHERE funnel_id=? ORDER BY step_index");
-    defer step_query.deinit();
-    try step_query.bindInt(1, funnel_id);
-    var steps: std.ArrayList(Step) = .empty;
-    while (try step_query.step() == .row) try steps.append(allocator, .{
-        .kind = try allocator.dupe(u8, step_query.columnText(0)),
-        .value = try allocator.dupe(u8, step_query.columnText(1)),
-    });
-    if (steps.items.len < 2) return error.CorruptFunnel;
-    const counts = try allocator.alloc(i64, steps.items.len);
-    @memset(counts, 0);
-    var progress = std.StringHashMap(Progress).init(allocator);
-    var timeline = try store.database.prepare(allocator,
-        \\SELECT session_id,occurred_at_ms,kind,value FROM (
-        \\ SELECT session_id,occurred_at_ms,'path' kind,path value FROM page_views
-        \\ WHERE internal=0 AND traffic_class IN ('human_like','unknown') AND site_id=?1 AND received_at_ms>=?2 AND received_at_ms<?3 AND session_id IS NOT NULL
-        \\ UNION ALL SELECT session_id,occurred_at_ms,'event',name FROM events
-        \\ WHERE internal=0 AND site_id=?1 AND received_at_ms>=?2 AND received_at_ms<?3 AND session_id IS NOT NULL
-        \\ AND (source='server' OR EXISTS(SELECT 1 FROM page_views p WHERE p.site_id=events.site_id AND p.page_id=events.page_id AND p.traffic_class IN ('human_like','unknown')))
-        \\) ORDER BY session_id,occurred_at_ms
-    );
-    defer timeline.deinit();
-    try timeline.bindInt(1, site_id);
-    try timeline.bindInt(2, options_value.start_ms);
-    try timeline.bindInt(3, options_value.end_ms);
-    while (try timeline.step() == .row) {
-        const session = timeline.columnText(0);
-        const occurred = timeline.columnInt(1);
-        const kind = timeline.columnText(2);
-        const value = timeline.columnText(3);
-        if (progress.getPtr(session)) |state| {
-            if (state.next_step >= steps.items.len or occurred - state.started_at_ms > window_ms) continue;
-            const expected = steps.items[state.next_step];
-            if (std.mem.eql(u8, kind, expected.kind) and std.mem.eql(u8, value, expected.value)) {
-                counts[state.next_step] += 1;
-                state.next_step += 1;
-            }
-        } else {
-            const first = steps.items[0];
-            if (std.mem.eql(u8, kind, first.kind) and std.mem.eql(u8, value, first.value)) {
-                counts[0] += 1;
-                try progress.put(try allocator.dupe(u8, session), .{ .next_step = 1, .started_at_ms = occurred });
-            }
-        }
-    }
-    switch (options_value.format) {
-        .table, .csv => {
-            const sep: u8 = if (options_value.format == .csv) ',' else '\t';
-            try output.print("step{c}kind{c}match{c}sessions{c}step_conversion_percent{c}overall_conversion_percent\n", .{ sep, sep, sep, sep, sep });
-            for (steps.items, 0..) |step, index| {
-                const prior = if (index == 0) counts[0] else counts[index - 1];
-                const step_percent = if (prior == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(counts[index])) / @as(f64, @floatFromInt(prior));
-                const overall = if (counts[0] == 0) 0.0 else 100.0 * @as(f64, @floatFromInt(counts[index])) / @as(f64, @floatFromInt(counts[0]));
-                try output.print("{d}{c}{s}{c}{s}{c}{d}{c}{d:.1}{c}{d:.1}\n", .{
-                    index + 1, sep, step.kind, sep, step.value, sep, counts[index], sep, step_percent, sep, overall,
-                });
-            }
-        },
-        .json => {
-            try output.writeByte('[');
-            for (steps.items, 0..) |step, index| {
-                if (index != 0) try output.writeByte(',');
-                try output.print("{{\"step\":{d},\"kind\":", .{index + 1});
-                try std.json.Stringify.value(step.kind, .{}, output);
-                try output.writeAll(",\"match\":");
-                try std.json.Stringify.value(step.value, .{}, output);
-                try output.print(",\"sessions\":{d}}}", .{counts[index]});
-            }
-            try output.writeAll("]\n");
-        },
-    }
+    try catalog.render(output, try catalog.sqlTable(allocator, &statement), .table);
 }
 
 pub fn spendAdd(
@@ -178,7 +86,7 @@ pub fn spendAdd(
     amount_text: []const u8,
     currency: []const u8,
 ) !void {
-    _ = try reports.resolveOptions(&.{ "spend", "--from", date, "--to", date });
+    _ = try @import("web/data.zig").parseDate(date);
     try domain.validateText(source, 128, false);
     try domain.validateText(campaign, 128, false);
     try domain.validateText(content, 128, false);
@@ -199,7 +107,7 @@ pub fn spendAdd(
     try statement.bindText(5, content);
     try statement.bindInt(6, amount);
     try statement.bindText(7, currency);
-    try statement.bindInt(8, try domain.nowMilliseconds());
+    try statement.bindInt(8, domain.nowMs());
     _ = try statement.step();
     try output.print("campaign spend added campaign={s} amount_minor={d} currency={s}\n", .{ campaign, amount, currency });
 }

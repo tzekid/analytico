@@ -1,6 +1,13 @@
 const std = @import("std");
 
-pub const Mode = enum { lite, session };
+pub const Mode = enum { lite, session, full };
+
+/// Full mode asks before anything beyond Lite is stored.
+pub const ConsentPolicy = enum { regional, everyone, none };
+
+pub fn parseConsentPolicy(value: []const u8) !ConsentPolicy {
+    return std.meta.stringToEnum(ConsentPolicy, value) orelse error.InvalidConsentPolicy;
+}
 
 pub fn parseMode(value: []const u8) !Mode {
     return std.meta.stringToEnum(Mode, value) orelse error.InvalidTrackingMode;
@@ -96,17 +103,11 @@ pub fn normalizeOrigin(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
         std.fmt.allocPrint(allocator, "{s}://{s}", .{ uri.scheme, lower });
 }
 
-pub fn nowSeconds() !i64 {
+/// Wall-clock milliseconds since the epoch.
+pub fn nowMs() i64 {
     var ts: std.os.linux.timespec = undefined;
     const rc = std.os.linux.clock_gettime(.REALTIME, &ts);
-    if (std.os.linux.errno(rc) != .SUCCESS or ts.sec < 0) return error.ClockUnavailable;
-    return @intCast(ts.sec);
-}
-
-pub fn nowMilliseconds() !i64 {
-    var ts: std.os.linux.timespec = undefined;
-    const rc = std.os.linux.clock_gettime(.REALTIME, &ts);
-    if (std.os.linux.errno(rc) != .SUCCESS or ts.sec < 0) return error.ClockUnavailable;
+    if (std.os.linux.errno(rc) != .SUCCESS or ts.sec < 0) @panic("clock unavailable");
     return @as(i64, @intCast(ts.sec)) * 1000 + @divFloor(@as(i64, @intCast(ts.nsec)), 1_000_000);
 }
 
@@ -139,6 +140,53 @@ pub fn visitorDayId(
     return std.fmt.bytesToHex(mac[0..8].*, .lower);
 }
 
+/// Identified users are stored only as a keyed hash of the operator's own ID.
+pub fn userHash(key: [32]u8, site_public_id: []const u8, user_id: []const u8) [32]u8 {
+    var mac: [32]u8 = undefined;
+    var hmac = std.crypto.auth.hmac.sha2.HmacSha256.init(&key);
+    hmac.update("analytico/user/v1\x00");
+    hmac.update(site_public_id);
+    hmac.update("\x00");
+    hmac.update(user_id);
+    hmac.final(&mac);
+    return std.fmt.bytesToHex(mac[0..16].*, .lower);
+}
+
+/// Short-lived signed tokens: "<payload>.<expires_ms>.<hex hmac>". The payload
+/// must not contain dots. Used for cross-domain links and heatmap overlays.
+pub fn signToken(buffer: []u8, key: [32]u8, purpose: []const u8, payload: []const u8, expires_ms: i64) ![]const u8 {
+    var body_buffer: [256]u8 = undefined;
+    const body = try std.fmt.bufPrint(&body_buffer, "{s}.{d}", .{ payload, expires_ms });
+    var mac: [32]u8 = undefined;
+    var hmac = std.crypto.auth.hmac.sha2.HmacSha256.init(&key);
+    hmac.update(purpose);
+    hmac.update("\x00");
+    hmac.update(body);
+    hmac.final(&mac);
+    const hex = std.fmt.bytesToHex(mac[0..16].*, .lower);
+    return std.fmt.bufPrint(buffer, "{s}.{s}", .{ body, &hex });
+}
+
+/// Returns the payload of a valid, unexpired token.
+pub fn verifyToken(key: [32]u8, purpose: []const u8, token: []const u8, now_ms: i64) ?[]const u8 {
+    if (token.len < 40 or token.len > 300) return null;
+    const sig_dot = std.mem.lastIndexOfScalar(u8, token, '.') orelse return null;
+    const body = token[0..sig_dot];
+    const exp_dot = std.mem.lastIndexOfScalar(u8, body, '.') orelse return null;
+    const expires = std.fmt.parseInt(i64, body[exp_dot + 1 ..], 10) catch return null;
+    if (expires < now_ms) return null;
+    var mac: [32]u8 = undefined;
+    var hmac = std.crypto.auth.hmac.sha2.HmacSha256.init(&key);
+    hmac.update(purpose);
+    hmac.update("\x00");
+    hmac.update(body);
+    hmac.final(&mac);
+    const expected = std.fmt.bytesToHex(mac[0..16].*, .lower);
+    if (token.len - sig_dot - 1 != 32) return null;
+    if (!std.crypto.timing_safe.eql([32]u8, expected, token[sig_dot + 1 ..][0..32].*)) return null;
+    return body[0..exp_dot];
+}
+
 pub fn payloadHash(body: []const u8) [64]u8 {
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(body, &digest, .{});
@@ -152,4 +200,13 @@ test "canonical identifiers" {
     try validateUuid("550e8400-e29b-41d4-a716-446655440000");
     try validatePath("/events/frankfurt");
     try std.testing.expectError(error.InvalidPath, validatePath("/x?secret=y"));
+}
+
+test "signed tokens" {
+    const key: [32]u8 = @splat(7);
+    var buffer: [256]u8 = undefined;
+    const token = try signToken(&buffer, key, "link", "abc", 1000);
+    try std.testing.expectEqualStrings("abc", verifyToken(key, "link", token, 999).?);
+    try std.testing.expect(verifyToken(key, "link", token, 1001) == null);
+    try std.testing.expect(verifyToken(key, "overlay", token, 999) == null);
 }
