@@ -482,6 +482,13 @@ fn runGroup(shared: *Shared, group: ?*IngestJob) void {
     };
 }
 
+/// "https://shop.example:8443" → "shop.example".
+fn originHost(origin: []const u8) []const u8 {
+    const start = if (std.mem.find(u8, origin, "://")) |index| index + 3 else 0;
+    const rest = origin[start..];
+    return rest[0 .. std.mem.findScalar(u8, rest, ':') orelse rest.len];
+}
+
 /// Validates and stores one batch inside the group transaction. Rejections
 /// are counted after rolling the batch's own changes back.
 fn ingestBatch(job: *IngestJob) !Outcome {
@@ -531,6 +538,7 @@ fn ingestBatch(job: *IngestJob) !Outcome {
         },
         .user_agent = headers.user_agent,
         .gpc = headers.gpc,
+        .page_host = originHost(domain.normalizeOrigin(arena, headers.origin orelse "") catch ""),
     } else .{ .peer_ip = "", .user_agent = "" };
     // The address is used for the place and the day pseudonym, then dropped.
     if (source == .browser) if (shared.geo) |geo| {

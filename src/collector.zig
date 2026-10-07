@@ -109,11 +109,16 @@ pub const Record = struct {
     column: ?i64 = null,
 };
 
+/// The referrer stored for a page reached from the site itself.
+pub const self_referrer = "(self)";
+
 pub const Client = struct {
     peer_ip: []const u8,
     user_agent: []const u8,
     /// `Sec-GPC: 1`: the visitor stays in Lite whatever the tracker says.
     gpc: bool = false,
+    /// Host of the page that sent the batch, from its validated Origin.
+    page_host: []const u8 = "",
     place: ?geo.Place = null,
 };
 
@@ -456,7 +461,11 @@ pub fn classify(user_agent: []const u8) Dimensions {
 
 fn insertPageView(c: Context, record: Record) !void {
     const allocator = c.allocator;
-    const referrer_host = if (record.referrer_host) |host| try lowercaseAscii(allocator, host) else null;
+    // A page reached from the site itself, with no arrival kept, is internal.
+    const referrer_host = if (record.referrer_host) |host| blk: {
+        const lower = try lowercaseAscii(allocator, host);
+        break :blk if (c.client.page_host.len != 0 and std.ascii.eqlIgnoreCase(lower, c.client.page_host)) self_referrer else lower;
+    } else null;
     const search_term = if (record.search_term) |term| try lowercaseAscii(allocator, std.mem.trim(u8, term, " ")) else null;
     const place = c.client.place;
     var statement = try c.store.database.prepare(allocator,

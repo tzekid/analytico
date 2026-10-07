@@ -140,6 +140,70 @@
     }
   }
 
+  // Where this visit came from: the landing page's referrer and campaign,
+  // kept for the rest of the visit so every page view carries it. A page
+  // reached from the site itself with nothing kept (Lite, or Full before
+  // consent) names the site as its referrer; the server files it as internal.
+  var arrivalKeys = ["referrer_host", "utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term"];
+  var arrival = null;
+
+  function cleanArrival(object) {
+    var out = {};
+    arrivalKeys.forEach(function (key) {
+      var value = object && typeof object[key] === "string" ? clean(object[key], key === "referrer_host" ? 253 : 128) : "";
+      if (value) out[key] = value;
+    });
+    return out;
+  }
+
+  function cameFromSite() {
+    try {
+      return !!document.referrer && new URL(document.referrer).hostname.toLowerCase() === location.hostname.toLowerCase();
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function visitSource() {
+    if (spaNavigation && arrival) return arrival;
+    var fields = campaign();
+    var host = referrerHost();
+    if (host) fields.referrer_host = host;
+    if (!cameFromSite() || Object.keys(fields).length) {
+      arrival = fields;
+      remember(arrival);
+    } else {
+      arrival = recalled() || { referrer_host: clean(location.hostname.toLowerCase(), 253) };
+    }
+    return arrival;
+  }
+
+  function remember(fields) {
+    /* @sessiononly-begin */
+    try { sessionStorage.setItem("analytico:" + site + ":arrival", JSON.stringify(fields)); } catch (_) {}
+    /* @sessiononly-end */
+    /* @full-begin */
+    if (visitorId && sessionId) save("arrival", sessionId + " " + JSON.stringify(fields));
+    /* @full-end */
+  }
+
+  function recalled() {
+    /* @sessiononly-begin */
+    try {
+      var kept = JSON.parse(sessionStorage.getItem("analytico:" + site + ":arrival") || "null");
+      if (kept && typeof kept === "object") return cleanArrival(kept);
+    } catch (_) {}
+    /* @sessiononly-end */
+    /* @full-begin */
+    var saved = load("arrival") || "";
+    var space = saved.indexOf(" ");
+    if (visitorId && sessionId && space > 0 && saved.slice(0, space) === sessionId) {
+      try { return cleanArrival(JSON.parse(saved.slice(space + 1))); } catch (_) {}
+    }
+    /* @full-end */
+    return null;
+  }
+
   function navigationType() {
     try {
       var entry = performance.getEntriesByType("navigation")[0];
@@ -246,11 +310,10 @@
   }
 
   function pageView() {
-    var record = Object.assign(base(uuid(), "page_view"), campaign(), {
+    var record = Object.assign(base(uuid(), "page_view"), visitSource(), {
       path: currentPath,
       page_type: pageType,
       content_id: contentId,
-      referrer_host: referrerHost(),
       navigation_type: spaNavigation ? "spa" : navigationType(),
       viewport_class: viewportClass(),
       language: clean(navigator.language || "", 32) || null
@@ -873,6 +936,7 @@
     consent = state;
     save("consent", state === "granted" ? "granted" : "auto");
     if (arrivedClickId) save("click", arrivedClickId + "." + sessionId);
+    if (arrival) remember(arrival);
   }
 
   function clearIdentity(state) {
@@ -882,6 +946,7 @@
     save("visitor", null);
     save("session", null);
     save("click", null);
+    save("arrival", null);
     save("replay", null);
     save("consent", state === "denied" ? "denied" : null);
     consent = state;
@@ -978,6 +1043,8 @@
 
   // The built-in banner: one sentence, two equal buttons, no dark patterns.
   function showBanner(config) {
+    // The operator looking at the heatmap overlay is not a visitor to ask.
+    if (overlay) return;
     if (bannerHost || !document.body) return;
     bannerHost = document.createElement("div");
     var root = bannerHost.attachShadow ? bannerHost.attachShadow({ mode: "open" }) : bannerHost;
