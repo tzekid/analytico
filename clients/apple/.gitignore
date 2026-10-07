@@ -1,0 +1,6 @@
+Analytico.xcodeproj/
+App/Info.plist
+App/Analytico.entitlements
+Packages/AnalyticoKit/.build/
+Packages/AnalyticoKit/.swiftpm/
+build/

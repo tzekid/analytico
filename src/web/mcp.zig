@@ -263,14 +263,19 @@ fn authorize(ctx: *Ctx) !void {
     const w = ctx.w();
     const is_claude = std.ascii.findIgnoreCase(client.name, "claude") != null;
     const is_chatgpt = std.ascii.findIgnoreCase(client.name, "chatgpt") != null or std.ascii.findIgnoreCase(client.name, "openai") != null;
-    // Anyone can register an app under any name; where it returns is the tell.
-    try render(w,
-        \\<main class="login"><div class="login-card login-card-wide"><div class="row gap-12"><span class="mark" style="background:{color}">{letter}
-    , .{ .color = if (app) "#D64937" else if (is_claude) "#C96442" else if (is_chatgpt) "#000" else "#6F625D", .letter = if (app) "A" else if (is_claude) "C" else if (is_chatgpt) "" else "A" });
-    if (is_chatgpt) try layout.icon(w, "chatgpt");
-    try render(w,
-        \\</span><span class="muted">→</span><img src="{logo}" width="36" height="36" alt=""></div>
-    , .{ .logo = assets.path("favicon.svg") });
+    // Anyone can register an app under any name; where it returns is the
+    // tell. The native app is Analytico itself, so it shows just the logo.
+    if (app) {
+        try render(w, "<main class=\"login\"><div class=\"login-card login-card-wide\"><div class=\"row gap-12\"><img src=\"{logo}\" width=\"36\" height=\"36\" alt=\"\"></div>", .{ .logo = assets.path("favicon.svg") });
+    } else {
+        try render(w,
+            \\<main class="login"><div class="login-card login-card-wide"><div class="row gap-12"><span class="mark" style="background:{color}">{letter}
+        , .{ .color = if (is_claude) "#C96442" else if (is_chatgpt) "#000" else "#6F625D", .letter = if (is_claude) "C" else if (is_chatgpt) "" else "A" });
+        if (is_chatgpt) try layout.icon(w, "chatgpt");
+        try render(w,
+            \\</span><span class="muted">→</span><img src="{logo}" width="36" height="36" alt=""></div>
+        , .{ .logo = assets.path("favicon.svg") });
+    }
     if (app) {
         try render(w,
             \\<h1>Sign in to the Analytico app on {device}</h1><p class="secondary">Signed in as {email}. The app shows the reports you see here and can add chart notes. It can’t change settings.</p><p class="hint">After you allow it, you go back to the app. Sign it out any time in Settings → Sign-in.</p><form method="post" action="/oauth/authorize" class="form-grid mt-20" data-native>

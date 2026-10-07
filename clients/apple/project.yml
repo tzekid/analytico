@@ -1,0 +1,60 @@
+name: Analytico
+options:
+  bundleIdPrefix: ru.plosca
+  deploymentTarget:
+    iOS: "26.0"
+    macOS: "26.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    DEVELOPMENT_TEAM: JVVN972Y79
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    MARKETING_VERSION: "0.3.0"
+    CURRENT_PROJECT_VERSION: "1"
+packages:
+  AnalyticoKit:
+    path: Packages/AnalyticoKit
+targets:
+  Analytico:
+    type: application
+    supportedDestinations: [iOS, macOS]
+    sources:
+      - path: App
+    dependencies:
+      - package: AnalyticoKit
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: Analytico
+        CFBundleURLTypes:
+          - CFBundleURLName: ru.plosca.analytico
+            CFBundleURLSchemes: [analytico]
+        UIAppFonts: [Quando-Regular.ttf]
+        ATSApplicationFontsPath: .
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        UISupportedInterfaceOrientations~ipad: [UIInterfaceOrientationPortrait, UIInterfaceOrientationPortraitUpsideDown, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        LSApplicationCategoryType: public.app-category.business
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+    entitlements:
+      path: App/Analytico.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.network.client: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ru.plosca.analytico
+        PRODUCT_NAME: Analytico
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ENABLE_HARDENED_RUNTIME: YES
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+schemes:
+  Analytico:
+    build:
+      targets:
+        Analytico: all
+    test:
+      targets: []
