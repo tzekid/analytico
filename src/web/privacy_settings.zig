@@ -193,7 +193,7 @@ pub fn recordingSection(ctx: *Ctx, maybe_site: ?data.Site) !void {
         \\<section class="card"><h2 class="card-title">Storage</h2><div class="metric-value mt-6">{megabytes:.1} MB</div><p class="hint">{count} recording{plural} in <code>replays.db</code>, separate from your analytics, with its own backups and retention.</p>
         \\<form class="mt-12" method="post" action="/settings/recording/delete-all" data-confirm="Delete every recording of this website? This cannot be undone."><input type="hidden" name="site" value="{slug}"><button class="btn btn-quiet bad">Delete all recordings…</button></form></section>
         \\<section class="card"><h2 class="card-title">How it loads</h2><p class="hint mt-6">The recorder (rrweb, open source) loads only for consented sessions that record. Everyone else downloads nothing extra.</p>
-        \\<dl class="kv mt-10"><dt>Core tracker · everyone</dt><dd>{core} KB</dd><dt>Recorder · recorded sessions only</dt><dd>+{recorder} KB</dd></dl></section></div></div>
+        \\<dl class="kv mt-10"><dt>Core tracker · everyone</dt><dd>{core} KB</dd><dt>Recorder · recorded sessions only</dt><dd>+{recorder} KB</dd></dl><p class="hint mt-6">Sizes before compression; served gzipped they are about a third.</p></section></div></div>
     , .{
         .megabytes = @as(f64, @floatFromInt(stats.bytes)) / 1_048_576.0,
         .count = html.int(stats.count),

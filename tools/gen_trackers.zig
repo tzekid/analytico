@@ -19,7 +19,7 @@ pub fn main(init: std.process.Init) !void {
     }.file;
     const source = try read(arena, io, args[1]);
     const recorder = try read(arena, io, args[2]);
-    const overlay = try read(arena, io, args[3]);
+    const overlay = try squeeze(arena, try read(arena, io, args[3]));
     const rrweb = try read(arena, io, args[4]);
     var out = try cwd.openDir(io, args[5], .{});
     defer out.close(io);
@@ -101,7 +101,7 @@ pub fn main(init: std.process.Init) !void {
             try result.appendSlice(arena, text);
             try result.append(arena, '\n');
         }
-        try out.writeFile(io, .{ .sub_path = variant[0], .data = result.items });
+        try out.writeFile(io, .{ .sub_path = variant[0], .data = try squeeze(arena, result.items) });
     }
 
     // Content hashes, so served paths are constants and nothing is hashed at runtime.
@@ -113,6 +113,33 @@ pub fn main(init: std.process.Init) !void {
         try hashes.print(arena, "pub const {s} = \"{s}\";\n", .{ identifier, shortHash(bytes) });
     }
     try out.writeFile(io, .{ .sub_path = "hashes.zig", .data = hashes.items });
+}
+
+/// Drops whole-line comments, blank lines and indentation; code inside a
+/// line is never touched and line breaks stay, so automatic semicolons
+/// behave as in the source. (The sources use no template literals.)
+fn squeeze(arena: std.mem.Allocator, text: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var in_comment = false;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (in_comment) {
+            if (std.mem.find(u8, line, "*/") != null) in_comment = false;
+            continue;
+        }
+        if (line.len == 0 or std.mem.startsWith(u8, line, "//")) continue;
+        if (std.mem.startsWith(u8, line, "/*")) {
+            if (std.mem.find(u8, line, "*/") == null) in_comment = true else if (!std.mem.endsWith(u8, line, "*/")) {
+                try out.appendSlice(arena, line);
+                try out.append(arena, '\n');
+            }
+            continue;
+        }
+        try out.appendSlice(arena, line);
+        try out.append(arena, '\n');
+    }
+    return out.items;
 }
 
 fn marker(line: []const u8, name: []const u8) bool {
