@@ -48,9 +48,17 @@ fn tick(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db) !void {
     anomalies(arena, shared, db, at) catch |err| std.log.warn("jobs_anomalies_failed code={s}", .{@errorName(err)});
     integrations.deliverGoals(arena, shared, db, at) catch |err| std.log.warn("jobs_webhooks_failed code={s}", .{@errorName(err)});
     @import("rollups.zig").run(arena, shared, db, at, 10_000) catch |err| std.log.warn("jobs_rollups_failed code={s}", .{@errorName(err)});
+    retentionReports(arena, shared, db, at) catch |err| std.log.warn("jobs_retention_failed code={s}", .{@errorName(err)});
     const write = shared.lockWrite();
     defer shared.unlockWrite();
     try data.putSetting(arena, write, .@"jobs.last_run", try std.fmt.allocPrint(arena, "{d}", .{at}));
+}
+
+/// Each Full site's retention report for the new day, so nobody waits for it.
+fn retentionReports(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, at: i64) !void {
+    for (try data.sites(arena, db)) |site| {
+        if (site.mode == .full and site.enabled) _ = try @import("customers.zig").retentionReport(arena, shared, db, site.id, at);
+    }
 }
 
 fn origin(arena: std.mem.Allocator, db: *db_mod.Db) ![]const u8 {

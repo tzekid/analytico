@@ -108,8 +108,10 @@ retention and restores.
 ```
 
 - **One process owns writes.** Batches that arrive together are committed
-  together, so concurrent visitors share one disk sync; a bad batch rolls
-  back alone. Reads use their own connections.
+  together in one transaction; a bad batch rolls back alone. SQLite runs
+  in WAL mode with `synchronous=NORMAL`: a crash of the process loses
+  nothing, a power cut at most the last moments of visits. Reads use their
+  own connections and memory-mapped pages.
 - **Rollups, not sampling.** Each closed day is summarised once per
   dimension; today is summarised up to a cut 30 seconds behind the clock,
   and reports read the summaries plus the raw rows after the cut. Raw
@@ -138,9 +140,9 @@ SSD), ReleaseSafe build, 7 October 2026:
 
 | | |
 |---|---|
-| Ingest | 290–450 batches a second from 32 concurrent clients, p50 57–100 ms; bound by the disk sync, which other services on this machine share |
+| Ingest | 1,400–1,700 batches a second from 32 concurrent clients, p50 17–21 ms |
 | Workspace, 66,000 page views a month | median page 29 ms on the server; slowest, Paths, 955 ms |
-| Workspace, 2.5 million page views a month | Pages, Audience, People, Events and the read API under 450 ms; Overview 0.9 s; Campaigns 2.8 s; Sessions 3 s; Retention 11 s; Revenue 16 s; Errors and Paths about 28 s; Performance over 30 s |
+| Workspace, 2.5 million page views a month | every page but three under 400 ms (Performance, Errors and Retention under 60 ms); Sessions 0.5 s, Revenue 1.2 s, Campaigns 2 s |
 | Tracker, gzipped | Lite 5.2 KB · Session 5.9 KB · Full 10.4 KB (+0.4 KB with Web Vitals); the replay recorder, 25 KB, loads only for sessions that record |
 | Executable | 27 MB, SQLite compiled in |
 
@@ -148,10 +150,9 @@ SSD), ReleaseSafe build, 7 October 2026:
 
 - **It runs on Linux only**, as one process on one machine. There is no
   cluster mode and no hosted version.
-- **Big sites are slow in places.** Several reports still count raw page
-  views: above a few hundred thousand page views a month, Paths, Errors,
-  Revenue, Retention and Performance take seconds, and at 2.5 million some
-  take half a minute (see [Numbers](#numbers)).
+- **Big sites are slower in places.** At 2.5 million page views a month,
+  Campaigns and Revenue take a second or two, and Retention is refreshed
+  once a day (see [Numbers](#numbers)).
 - **It is young.** Built in 2026 by one person, used on a handful of
   sites. Upgrades migrate the database after a backup, but there is no
   long-term support release.

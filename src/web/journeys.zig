@@ -340,10 +340,18 @@ pub fn deleteFunnel(ctx: *Ctx, site: data.Site, id: i64) !void {
 pub fn pathsTab(ctx: *Ctx, view: data.View, path: []const u8) !void {
     const arena = ctx.arena;
     const w = ctx.w();
+    // Visits split at midnight in the summaries, so they cover whole days only.
+    const split = try pathsSplit(ctx, view);
     var landing_sql = data.Sql.init(arena);
-    try landing_sql.add("WITH f AS (SELECT pv.session_id,pv.path,row_number() OVER(PARTITION BY pv.session_id ORDER BY pv.occurred_at_ms) rn,count(*) OVER(PARTITION BY pv.session_id) n,row_number() OVER(PARTITION BY pv.session_id ORDER BY pv.occurred_at_ms DESC) rl FROM page_views pv WHERE ");
-    try landing_sql.pageViews(view, view.range.start_ms, view.range.end_ms);
-    try landing_sql.add(" AND pv.session_id IS NOT NULL) SELECT 'entry',path,count(*) FROM f WHERE rn=1 GROUP BY path UNION ALL SELECT 'exit',path,count(*) FROM f WHERE rl=1 GROUP BY path ORDER BY 1,3 DESC");
+    try landing_sql.add("WITH f AS (SELECT pv.path,row_number() OVER(PARTITION BY pv.session_id ORDER BY pv.occurred_at_ms,pv.received_at_ms) rn,row_number() OVER(PARTITION BY pv.session_id ORDER BY pv.occurred_at_ms DESC,pv.received_at_ms DESC) rl FROM page_views pv WHERE ");
+    try landing_sql.pageViews(view, split, view.range.end_ms);
+    try landing_sql.add(" AND pv.session_id IS NOT NULL), r AS (SELECT 'entry' kind,path,count(*) n FROM f WHERE rn=1 GROUP BY path UNION ALL SELECT 'exit',path,count(*) FROM f WHERE rl=1 GROUP BY path");
+    for ([_][]const u8{ "entry", "exit" }) |dim| if (split > view.range.start_ms) {
+        try landing_sql.add(" UNION ALL SELECT dim,key,sum(views)");
+        try data.rollupWhere(&landing_sql, view.site.id, .{ .dim = dim, .key = null }, view.range.start_ms, split);
+        try landing_sql.add(" GROUP BY key");
+    };
+    try landing_sql.add(") SELECT kind,path,sum(n) FROM r GROUP BY 1,2 ORDER BY 1,3 DESC,2");
     var statement = try landing_sql.prepare(ctx.db);
     defer statement.deinit();
     var entries: std.ArrayList(data.Row) = .empty;
@@ -368,25 +376,85 @@ pub fn pathsTab(ctx: *Ctx, view: data.View, path: []const u8) !void {
     try w.writeAll("</div></section></div>");
 }
 
-fn nextPagesFrom(ctx: *Ctx, view: data.View, from: []const u8) !void {
-    const w = ctx.w();
+/// Raw rows from here on; whole days before it come from the summaries.
+fn pathsSplit(ctx: *Ctx, view: data.View) !i64 {
+    if (view.filters.len != 0) return view.range.start_ms;
+    const split = try data.rollupSplit(ctx.arena, ctx.db, view, view.range.start_ms, view.range.end_ms);
+    return @max(view.range.start_ms, split - @mod(split, data.day_ms));
+}
+
+pub const PathStep = struct { path: []const u8, count: i64 };
+
+/// Where visits went right after `from` ("" where they ended), most first,
+/// and how many steps left `from` in all.
+pub fn nextSteps(ctx: *Ctx, view: data.View, from: []const u8, limit: i64) !struct { steps: []PathStep, total: i64 } {
+    const split = try pathsSplit(ctx, view);
     var sql = data.Sql.init(ctx.arena);
     try sql.add("WITH o AS (SELECT pv.path,lead(pv.path) OVER(PARTITION BY pv.session_id ORDER BY pv.occurred_at_ms,pv.received_at_ms) nxt FROM page_views pv WHERE ");
-    try sql.pageViews(view, view.range.start_ms, view.range.end_ms);
-    try sql.add(" AND pv.session_id IS NOT NULL) SELECT coalesce(nxt,''),count(*),sum(count(*)) OVER() FROM o WHERE path=");
+    try sql.pageViews(view, split, view.range.end_ms);
+    try sql.add(" AND pv.session_id IS NOT NULL), r AS (SELECT coalesce(nxt,'') k,count(*) n FROM o WHERE path=");
     try sql.str(from);
-    try sql.add(" GROUP BY 1 ORDER BY 2 DESC LIMIT 8");
+    try sql.add(" GROUP BY 1");
+    if (split > view.range.start_ms) {
+        try sql.add(" UNION ALL SELECT substr(key,length(");
+        try sql.str(from);
+        try sql.add(")+2),sum(views)");
+        try data.rollupWhere(&sql, view.site.id, .{ .dim = "next", .key = null }, view.range.start_ms, split);
+        try sql.add(" AND key>=");
+        try sql.str(try std.fmt.allocPrint(ctx.arena, "{s}\x1f", .{from}));
+        try sql.add(" AND key<");
+        try sql.str(try std.fmt.allocPrint(ctx.arena, "{s}\x20", .{from}));
+        try sql.add(" GROUP BY key");
+    }
+    try sql.add(") SELECT k,sum(n),sum(sum(n)) OVER() FROM r GROUP BY k ORDER BY 2 DESC,1 LIMIT ");
+    try sql.int(limit);
     var statement = try sql.prepare(ctx.db);
     defer statement.deinit();
-    try render(w, "<div class=\"card-head\"><h2>Next from <span class=\"mono\">{from}</span></h2></div><div class=\"rank\">", .{ .from = from });
-    var any = false;
+    var steps: std.ArrayList(PathStep) = .empty;
+    var total: i64 = 0;
     while (try statement.step() == .row) {
-        any = true;
-        const next = statement.columnText(0);
-        const share = @as(f64, @floatFromInt(statement.columnInt(1))) / @as(f64, @floatFromInt(@max(1, statement.columnInt(2)))) * 100;
-        try ui.rankRow(w, ctx.arena, .{ .width = @max(share * 0.85, 6), .bar = if (next.len == 0) "var(--subtle)" else "var(--brand-wash)", .name = if (next.len == 0) "Left the site" else next, .value = try std.fmt.allocPrint(ctx.arena, "{f}", .{html.int(statement.columnInt(1))}), .pct = try std.fmt.allocPrint(ctx.arena, "{d:.0}%", .{share}) });
+        try steps.append(ctx.arena, .{ .path = try ctx.arena.dupe(u8, statement.columnText(0)), .count = statement.columnInt(1) });
+        total = statement.columnInt(2);
     }
-    if (!any) try w.writeAll("<p class=\"hint\">Nobody visited this page in this period.</p>");
+    return .{ .steps = steps.items, .total = total };
+}
+
+/// Where visits were right before `to` ("" where they entered), most first.
+pub fn previousSteps(ctx: *Ctx, view: data.View, to: []const u8, limit: i64) ![]PathStep {
+    const split = try pathsSplit(ctx, view);
+    var sql = data.Sql.init(ctx.arena);
+    try sql.add("WITH o AS (SELECT pv.path,lag(pv.path) OVER(PARTITION BY pv.session_id ORDER BY pv.occurred_at_ms,pv.received_at_ms) prv FROM page_views pv WHERE ");
+    try sql.pageViews(view, split, view.range.end_ms);
+    try sql.add(" AND pv.session_id IS NOT NULL), r AS (SELECT coalesce(prv,'') k,count(*) n FROM o WHERE path=");
+    try sql.str(to);
+    try sql.add(" GROUP BY 1");
+    if (split > view.range.start_ms) {
+        try sql.add(" UNION ALL SELECT '',sum(views)");
+        try data.rollupWhere(&sql, view.site.id, .{ .dim = "entry", .key = to }, view.range.start_ms, split);
+        try sql.add(" UNION ALL SELECT substr(key,1,instr(key,char(31))-1),sum(views)");
+        try data.rollupWhere(&sql, view.site.id, .{ .dim = "next", .key = null }, view.range.start_ms, split);
+        try sql.add(" AND substr(key,instr(key,char(31))+1)=");
+        try sql.str(to);
+        try sql.add(" GROUP BY key");
+    }
+    try sql.add(") SELECT k,sum(n) FROM r GROUP BY k HAVING sum(n)>0 ORDER BY 2 DESC,1 LIMIT ");
+    try sql.int(limit);
+    var statement = try sql.prepare(ctx.db);
+    defer statement.deinit();
+    var steps: std.ArrayList(PathStep) = .empty;
+    while (try statement.step() == .row) try steps.append(ctx.arena, .{ .path = try ctx.arena.dupe(u8, statement.columnText(0)), .count = statement.columnInt(1) });
+    return steps.items;
+}
+
+fn nextPagesFrom(ctx: *Ctx, view: data.View, from: []const u8) !void {
+    const w = ctx.w();
+    const next = try nextSteps(ctx, view, from, 8);
+    try render(w, "<div class=\"card-head\"><h2>Next from <span class=\"mono\">{from}</span></h2></div><div class=\"rank\">", .{ .from = from });
+    for (next.steps) |step| {
+        const share = @as(f64, @floatFromInt(step.count)) / @as(f64, @floatFromInt(@max(1, next.total))) * 100;
+        try ui.rankRow(w, ctx.arena, .{ .width = @max(share * 0.85, 6), .bar = if (step.path.len == 0) "var(--subtle)" else "var(--brand-wash)", .name = if (step.path.len == 0) "Left the site" else step.path, .value = try std.fmt.allocPrint(ctx.arena, "{f}", .{html.int(step.count)}), .pct = try std.fmt.allocPrint(ctx.arena, "{d:.0}%", .{share}) });
+    }
+    if (next.steps.len == 0) try w.writeAll("<p class=\"hint\">Nobody visited this page in this period.</p>");
     try w.writeAll("</div>");
 }
 
@@ -594,41 +662,93 @@ pub const VitalValue = struct {
 
 pub const Distribution = struct { samples: usize, p50: i64, p75: i64, p95: i64, good: usize, poor: usize };
 
-pub fn distribution(ctx: *Ctx, view: data.View, vital: Vital, page_path: ?[]const u8) !Distribution {
-    var sql = data.Sql.init(ctx.arena);
-    try sql.add("SELECT ps.");
-    try sql.add(vital.column);
-    try sql.add(" FROM page_views pv JOIN page_summaries ps ON ps.site_id=pv.site_id AND ps.page_id=pv.page_id WHERE ");
-    try sql.pageViews(view, view.range.start_ms, view.range.end_ms);
-    if (page_path) |value| {
-        try sql.add(" AND pv.path=");
-        try sql.str(value);
+pub const Sample = struct { value: i64, count: i64 };
+
+/// The vitals, then FCP for the slow-page hints.
+const columns = vitals.len + 1;
+const fcp: Vital = .{ .key = "fcp", .column = "fcp_ms", .name = "", .good = 1800, .poor = 3000 };
+
+pub const Samples = struct {
+    all: [columns]std.ArrayList(Sample) = @splat(.empty),
+    by_path: std.StringArrayHashMapUnmanaged([columns]std.ArrayList(Sample)) = .empty,
+
+    fn add(self: *Samples, arena: std.mem.Allocator, path: []const u8, column: usize, value: i64, count: i64) !void {
+        try self.all[column].append(arena, .{ .value = value, .count = count });
+        const entry = try self.by_path.getOrPut(arena, path);
+        if (!entry.found_existing) {
+            entry.key_ptr.* = try arena.dupe(u8, path);
+            entry.value_ptr.* = @splat(.empty);
+        }
+        try entry.value_ptr[column].append(arena, .{ .value = value, .count = count });
     }
-    try sql.add(" AND ps.");
-    try sql.add(vital.column);
-    try sql.add(" IS NOT NULL ORDER BY 1");
-    var statement = try sql.prepare(ctx.db);
+};
+
+/// Every vital sample of the view's range, overall and per page, sorted by
+/// value: the daily summaries (rounded up to two significant figures) where
+/// they cover an unfiltered view, raw rows for the rest.
+pub fn loadSamples(ctx: *Ctx, view: data.View) !Samples {
+    const arena = ctx.arena;
+    const range = view.range;
+    var out: Samples = .{};
+    const split = if (view.filters.len == 0) try data.rollupSplit(arena, ctx.db, view, range.start_ms, range.end_ms) else range.start_ms;
+    if (split > range.start_ms) {
+        var rolled = try ctx.db.prepare(arena, "SELECT path,metric,value,sum(samples) FROM vitals_daily WHERE site_id=? AND metric IN ('lcp','inp','cls','ttfb','fcp') AND day>=? AND day<=? GROUP BY metric,path,value");
+        defer rolled.deinit();
+        const first = data.dateText(range.start_ms);
+        const last = data.dateText(split - 1);
+        try rolled.bindAll(.{ view.site.id, &first, &last });
+        while (try rolled.step() == .row) {
+            const metric = rolled.columnText(1);
+            const column = for (vitals, 0..) |vital, index| {
+                if (std.mem.eql(u8, vital.key, metric)) break index;
+            } else vitals.len;
+            try out.add(arena, rolled.columnText(0), column, rolled.columnInt(2), rolled.columnInt(3));
+        }
+    }
+    var raw = data.Sql.init(arena);
+    try raw.add("SELECT pv.path,ps.lcp_ms,ps.inp_ms,ps.cls_milli,ps.ttfb_ms,ps.fcp_ms FROM page_views pv JOIN page_summaries ps ON ps.site_id=pv.site_id AND ps.page_id=pv.page_id WHERE ");
+    try raw.pageViews(view, split, range.end_ms);
+    try raw.add(" AND (ps.lcp_ms IS NOT NULL OR ps.inp_ms IS NOT NULL OR ps.cls_milli IS NOT NULL OR ps.ttfb_ms IS NOT NULL OR ps.fcp_ms IS NOT NULL)");
+    var statement = try raw.prepare(ctx.db);
     defer statement.deinit();
-    var values: std.ArrayList(i64) = .empty;
-    while (try statement.step() == .row) try values.append(ctx.arena, statement.columnInt(0));
-    return summarize(vital, values.items);
+    while (try statement.step() == .row) {
+        for (0..columns) |column| {
+            if (statement.columnType(@intCast(column + 1)) == db_mod.sqlite.SQLITE_NULL) continue;
+            try out.add(arena, statement.columnText(0), column, statement.columnInt(@intCast(column + 1)), 1);
+        }
+    }
+    const byValue = struct {
+        fn less(_: void, a: Sample, b: Sample) bool {
+            return a.value < b.value;
+        }
+    }.less;
+    for (&out.all) |*list| std.mem.sort(Sample, list.items, {}, byValue);
+    for (out.by_path.values()) |*lists| for (lists) |*list| std.mem.sort(Sample, list.items, {}, byValue);
+    return out;
 }
 
-/// Percentiles and good/poor counts of sorted samples.
-fn summarize(vital: Vital, items: []const i64) Distribution {
-    if (items.len == 0) return .{ .samples = 0, .p50 = 0, .p75 = 0, .p95 = 0, .good = 0, .poor = 0 };
-    var good: usize = 0;
-    var poor: usize = 0;
-    for (items) |value| {
-        if (value <= vital.good) good += 1 else if (value > vital.poor) poor += 1;
+/// Percentiles and good/poor counts of samples sorted by value.
+pub fn summarize(vital: Vital, items: []const Sample) Distribution {
+    var total: i64 = 0;
+    var good: i64 = 0;
+    var poor: i64 = 0;
+    for (items) |item| {
+        total += item.count;
+        if (item.value <= vital.good) good += item.count else if (item.value > vital.poor) poor += item.count;
     }
+    if (total == 0) return .{ .samples = 0, .p50 = 0, .p75 = 0, .p95 = 0, .good = 0, .poor = 0 };
     const at = struct {
-        fn p(list: []const i64, percent: usize) i64 {
-            const index = (list.len * percent + 99) / 100;
-            return list[@min(list.len - 1, @max(index, 1) - 1)];
+        fn p(list: []const Sample, count: i64, percent: i64) i64 {
+            const rank = @max(1, @divFloor(count * percent + 99, 100));
+            var seen: i64 = 0;
+            for (list) |item| {
+                seen += item.count;
+                if (seen >= rank) return item.value;
+            }
+            return list[list.len - 1].value;
         }
     };
-    return .{ .samples = items.len, .p50 = at.p(items, 50), .p75 = at.p(items, 75), .p95 = at.p(items, 95), .good = good, .poor = poor };
+    return .{ .samples = @intCast(total), .p50 = at.p(items, total, 50), .p75 = at.p(items, total, 75), .p95 = at.p(items, total, 95), .good = @intCast(good), .poor = @intCast(poor) };
 }
 
 fn rating(vital: Vital, value: i64) struct { []const u8, []const u8 } {
@@ -642,33 +762,9 @@ pub fn performance(ctx: *Ctx, site: data.Site) !void {
     const view = try analyze.start(ctx, site, .performance, "Performance");
     const w = ctx.w();
     const path = try std.fmt.allocPrint(arena, "/{s}/performance", .{site.slug});
-    // Every sample in the period in one pass: the vitals, then FCP for hints.
-    var all_sql = data.Sql.init(arena);
-    try all_sql.add("SELECT pv.path,ps.lcp_ms,ps.inp_ms,ps.cls_milli,ps.ttfb_ms,ps.fcp_ms FROM page_views pv JOIN page_summaries ps ON ps.site_id=pv.site_id AND ps.page_id=pv.page_id WHERE ");
-    try all_sql.pageViews(view, view.range.start_ms, view.range.end_ms);
-    try all_sql.add(" AND (ps.lcp_ms IS NOT NULL OR ps.inp_ms IS NOT NULL OR ps.cls_milli IS NOT NULL OR ps.ttfb_ms IS NOT NULL OR ps.fcp_ms IS NOT NULL)");
-    var all = try all_sql.prepare(ctx.db);
-    defer all.deinit();
-    const columns = vitals.len + 1;
-    var lists: [columns]std.ArrayList(i64) = @splat(.empty);
-    const PathSamples = struct { lists: [columns]std.ArrayList(i64) = @splat(.empty) };
-    var by_path: std.StringArrayHashMapUnmanaged(PathSamples) = .empty;
-    while (try all.step() == .row) {
-        const entry = try by_path.getOrPut(arena, all.columnText(0));
-        if (!entry.found_existing) {
-            entry.key_ptr.* = try arena.dupe(u8, all.columnText(0));
-            entry.value_ptr.* = .{};
-        }
-        for (0..columns) |column| {
-            if (all.columnType(@intCast(column + 1)) == db_mod.sqlite.SQLITE_NULL) continue;
-            const value = all.columnInt(@intCast(column + 1));
-            try lists[column].append(arena, value);
-            try entry.value_ptr.lists[column].append(arena, value);
-        }
-    }
-    for (&lists) |*list| std.mem.sort(i64, list.items, {}, std.sort.asc(i64));
+    const loaded = try loadSamples(ctx, view);
     var results: [vitals.len]Distribution = undefined;
-    for (vitals, 0..) |vital, index| results[index] = summarize(vital, lists[index].items);
+    for (vitals, 0..) |vital, index| results[index] = summarize(vital, loaded.all[index].items);
     try layout.head(ctx, .{ .title = "Performance", .subtitle = try std.fmt.allocPrint(arena, "Real-user measurements · {f} samples · p75", .{html.int(@intCast(results[0].samples))}), .view = view, .path = path, .compare = false });
     if (results[0].samples == 0 and results[3].samples == 0) {
         try w.writeAll("<div class=\"card\">");
@@ -704,18 +800,17 @@ pub fn performance(ctx: *Ctx, site: data.Site) !void {
     try distributionBar(w, chosen);
     try w.writeAll("</section>");
     // Slowest pages by the selected vital, among the 30 with the most samples.
-    const fcp: Vital = .{ .key = "fcp", .column = "fcp_ms", .name = "", .good = 1800, .poor = 3000 };
     const Slow = struct { path: []const u8, value: i64, ttfb: i64, fcp: i64, samples: usize };
     var slow: std.ArrayList(Slow) = .empty;
-    for (by_path.keys(), by_path.values()) |page_path, *samples| {
-        if (samples.lists[selected].items.len < 3) continue;
-        for (&samples.lists) |*list| std.mem.sort(i64, list.items, {}, std.sort.asc(i64));
+    for (loaded.by_path.keys(), loaded.by_path.values()) |page_path, *lists| {
+        const page = summarize(vital, lists[selected].items);
+        if (page.samples < 3) continue;
         try slow.append(arena, .{
             .path = page_path,
-            .value = summarize(vital, samples.lists[selected].items).p75,
-            .ttfb = summarize(vitals[3], samples.lists[3].items).p75,
-            .fcp = summarize(fcp, samples.lists[vitals.len].items).p75,
-            .samples = samples.lists[selected].items.len,
+            .value = page.p75,
+            .ttfb = summarize(vitals[3], lists[3].items).p75,
+            .fcp = summarize(fcp, lists[vitals.len].items).p75,
+            .samples = page.samples,
         });
     }
     std.mem.sort(Slow, slow.items, {}, struct {

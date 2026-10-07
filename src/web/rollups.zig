@@ -97,6 +97,49 @@ fn summarise(arena: std.mem.Allocator, shared: *server.Shared, db: *db_mod.Db, s
             try rows.append(arena, .{ .dim = dim[0], .row = row });
         }
     }
+    // Paths: each visit's first and last page and every step between pages
+    // within the day ("next" keys are the page, char 31, the next page or
+    // nothing when the visit ended there).
+    var paths = try db.prepare(arena,
+        \\WITH f AS (SELECT path,lead(path) OVER w nxt,row_number() OVER w rn FROM temp.rollup_day WHERE session_id IS NOT NULL
+        \\ WINDOW w AS (PARTITION BY session_id ORDER BY occurred_at_ms,received_at_ms))
+        \\SELECT 'entry',path,count(*) FROM f WHERE rn=1 GROUP BY path
+        \\UNION ALL SELECT 'exit',path,count(*) FROM f WHERE nxt IS NULL GROUP BY path
+        \\UNION ALL SELECT 'next',path||char(31)||coalesce(nxt,''),count(*) FROM f GROUP BY 2
+    );
+    defer paths.deinit();
+    while (try paths.step() == .row) {
+        var row: Row = .{ .key = try arena.dupe(u8, paths.columnText(1)), .values = @splat(0) };
+        row.values[0] = paths.columnInt(2);
+        try rows.append(arena, .{ .dim = if (std.mem.eql(u8, paths.columnText(0), "entry")) "entry" else if (std.mem.eql(u8, paths.columnText(0), "exit")) "exit" else "next", .row = row });
+    }
+    // Sections each page's readers reached ("section" keys are the page,
+    // char 31, the section; with no section, all of the page's summaries).
+    var sections = try db.prepare(arena,
+        \\WITH s AS MATERIALIZED (SELECT pv.path,ps.sections_json FROM temp.rollup_day pv JOIN page_summaries ps ON ps.site_id=pv.site_id AND ps.page_id=pv.page_id)
+        \\SELECT path||char(31),count(*) FROM s GROUP BY path
+        \\UNION ALL SELECT s.path||char(31)||j.value,count(*) FROM s, json_each(s.sections_json) j GROUP BY 1
+    );
+    defer sections.deinit();
+    while (try sections.step() == .row) {
+        var row: Row = .{ .key = try arena.dupe(u8, sections.columnText(0)), .values = @splat(0) };
+        row.values[0] = sections.columnInt(1);
+        try rows.append(arena, .{ .dim = "section", .row = row });
+    }
+    // Web Vitals per page as counts of values rounded up to two significant
+    // figures: percentiles stay within a step, and the good and poor
+    // thresholds (all multiples of a step) still sort every sample exactly.
+    const Vital = struct { metric: []const u8, path: []const u8, value: i64, samples: i64 };
+    var vitals: std.ArrayList(Vital) = .empty;
+    var vital_rows = try db.prepare(arena, comptime "WITH s AS MATERIALIZED (SELECT pv.path,ps.lcp_ms lcp,ps.inp_ms inp,ps.cls_milli cls,ps.ttfb_ms ttfb,ps.fcp_ms fcp FROM temp.rollup_day pv JOIN page_summaries ps ON ps.site_id=pv.site_id AND ps.page_id=pv.page_id) " ++
+        vitalSelect("lcp") ++ " UNION ALL " ++ vitalSelect("inp") ++ " UNION ALL " ++ vitalSelect("cls") ++ " UNION ALL " ++ vitalSelect("ttfb") ++ " UNION ALL " ++ vitalSelect("fcp"));
+    defer vital_rows.deinit();
+    while (try vital_rows.step() == .row) try vitals.append(arena, .{
+        .metric = try arena.dupe(u8, vital_rows.columnText(0)),
+        .path = try arena.dupe(u8, vital_rows.columnText(1)),
+        .value = vital_rows.columnInt(2),
+        .samples = vital_rows.columnInt(3),
+    });
     const day = data.dateText(day_ms);
     const write = shared.lockWrite();
     defer shared.unlockWrite();
@@ -123,8 +166,22 @@ fn summarise(arena: std.mem.Allocator, shared: *server.Shared, db: *db_mod.Db, s
         try week_insert.bindText(3, visitor_id);
         _ = try week_insert.step();
     }
+    try write.run(arena, "DELETE FROM vitals_daily WHERE site_id=? AND day=?", .{ site_id, &day });
+    var vital_insert = try write.prepare(arena, "INSERT INTO vitals_daily(site_id,day,metric,path,value,samples) VALUES(?,?,?,?,?,?)");
+    defer vital_insert.deinit();
+    for (vitals.items) |vital| {
+        try vital_insert.reset();
+        try vital_insert.bindAll(.{ site_id, &day, vital.metric, vital.path, vital.value, vital.samples });
+        _ = try vital_insert.step();
+    }
     try write.run(arena, "INSERT INTO rollup_days(site_id,day,until_ms) VALUES(?,?,?) ON CONFLICT DO UPDATE SET until_ms=excluded.until_ms", .{ site_id, &day, until_ms });
     try write.exec("COMMIT");
+}
+
+fn vitalSelect(comptime metric: []const u8) []const u8 {
+    const v = metric;
+    return "SELECT '" ++ metric ++ "',path,CASE WHEN " ++ v ++ "<100 THEN " ++ v ++ " WHEN " ++ v ++ "<1000 THEN (" ++ v ++ "+9)/10*10 WHEN " ++ v ++ "<10000 THEN (" ++ v ++ "+99)/100*100 WHEN " ++ v ++
+        "<100000 THEN (" ++ v ++ "+999)/1000*1000 ELSE (" ++ v ++ "+9999)/10000*10000 END r,count(*) FROM s WHERE " ++ v ++ " IS NOT NULL GROUP BY path,r";
 }
 
 /// Monday-based week number since the epoch (1970-01-01 was a Thursday).

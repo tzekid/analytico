@@ -15,6 +15,7 @@ const ui = @import("ui.zig");
 const overview = @import("overview.zig");
 const replay = @import("../replay.zig");
 const rollups = @import("rollups.zig");
+const server = @import("../server.zig");
 
 const Ctx = ctx_mod.Ctx;
 const esc = html.esc;
@@ -47,14 +48,9 @@ pub fn sales(arena: std.mem.Allocator, db: *db_mod.Db, view: data.View, start: i
     return .{ .revenue = statement.columnInt(0) - statement.columnInt(2), .orders = statement.columnInt(1), .refunds = statement.columnInt(2) };
 }
 
-pub fn visitorCount(ctx: *Ctx, view: data.View, start: i64, end: i64) !i64 {
-    var sql = data.Sql.init(ctx.arena);
-    try sql.add("SELECT count(DISTINCT coalesce(pv.visitor_id,pv.visitor_day_id)) FROM page_views pv WHERE ");
-    try sql.pageViews(view, start, end);
-    var statement = try sql.prepare(ctx.db);
-    defer statement.deinit();
-    _ = try statement.step();
-    return statement.columnInt(0);
+fn conversionBase(ctx: *Ctx, view: data.View, start: i64, end: i64) !i64 {
+    if (view.site.linked()) return data.visits(ctx.arena, ctx.db, view, start, end);
+    return (try data.totals(ctx.arena, ctx.db, view, start, end)).visitor_days;
 }
 
 fn metricTile(w: *std.Io.Writer, arena: std.mem.Allocator, index: usize, icon_name: []const u8, label: []const u8, value: []const u8, current: f64, previous: f64, compare: bool, suffix: []const u8, points: bool) !void {
@@ -88,8 +84,9 @@ pub fn revenue(ctx: *Ctx, site: data.Site) !void {
         try w.writeAll("</div>");
         return layout.end(ctx);
     }
-    const visitors_now = try visitorCount(ctx, view, range.start_ms, range.end_ms);
-    const visitors_before = try visitorCount(ctx, view, range.prev_start_ms, range.prev_end_ms);
+    // Orders per visit; Lite has no visits, so per visitor there.
+    const visits_now = try conversionBase(ctx, view, range.start_ms, range.end_ms);
+    const visits_before = try conversionBase(ctx, view, range.prev_start_ms, range.prev_end_ms);
     const ratio = struct {
         fn of(a: i64, b: i64) f64 {
             return if (b == 0) 0 else @as(f64, @floatFromInt(a)) / @as(f64, @floatFromInt(b));
@@ -102,8 +99,8 @@ pub fn revenue(ctx: *Ctx, site: data.Site) !void {
     const aov_now = if (now.orders == 0) 0 else @divTrunc(now.revenue + now.refunds, now.orders);
     const aov_before = if (before.orders == 0) 0 else @divTrunc(before.revenue + before.refunds, before.orders);
     try metricTile(w, arena, 2, "events", "Average order", try std.fmt.allocPrint(arena, "{f}", .{html.money(aov_now, site.currency)}), @floatFromInt(aov_now), @floatFromInt(aov_before), view.compare, suffix, false);
-    const rate_now = ratio.of(now.orders, visitors_now) * 100;
-    try metricTile(w, arena, 3, "funnels", "Conversion rate", try std.fmt.allocPrint(arena, "{d:.1}%", .{rate_now}), rate_now, ratio.of(before.orders, visitors_before) * 100, view.compare, suffix, true);
+    const rate_now = ratio.of(now.orders, visits_now) * 100;
+    try metricTile(w, arena, 3, "funnels", "Conversion rate", try std.fmt.allocPrint(arena, "{d:.1}%", .{rate_now}), rate_now, ratio.of(before.orders, visits_before) * 100, view.compare, suffix, true);
     try w.writeAll("</div>");
 
     try w.writeAll("<div class=\"grid split-main mt-16\">");
@@ -306,7 +303,7 @@ pub fn retention(ctx: *Ctx, site: data.Site) !void {
     const view = try analyze.start(ctx, site, .retention, "Retention");
     const w = ctx.w();
     const path = try std.fmt.allocPrint(arena, "/{s}/retention", .{site.slug});
-    try layout.head(ctx, .{ .title = "Retention", .subtitle = "Who comes back, and what brought them · last 8 weeks", .view = view, .path = path, .compare = false, .filter = false });
+    try layout.head(ctx, .{ .title = "Retention", .subtitle = "Who comes back, and what brought them · last 8 weeks, updated daily", .view = view, .path = path, .compare = false, .filter = false });
     if (site.mode != .full) {
         try fullModeNotice(ctx, site, "Returning visitors and cohorts");
         return layout.end(ctx);
@@ -321,16 +318,37 @@ pub fn retention(ctx: *Ctx, site: data.Site) !void {
     if (ctx.can(.admin)) try render(w, "<a class=\"link ml-auto nobreak\" href=\"/settings/sites?site={slug}\">Consent settings →</a>", .{ .slug = site.slug });
     try w.writeAll("</div>");
 
+    try w.writeAll(try retentionReport(arena, ctx.shared, ctx.db, site.id, now));
+    return layout.end(ctx);
+}
+
+/// The charts and cohorts below, computed once a day: counting every
+/// remembered visitor's weeks takes seconds on a big site, and the weeks
+/// change slowly. The first view of the day, or the background job just
+/// after midnight, computes them.
+pub fn retentionReport(arena: std.mem.Allocator, shared: *server.Shared, db: *db_mod.Db, site_id: i64, now: i64) ![]const u8 {
+    const day = data.dateText(now);
+    if (try db.scalar(arena, ?[]const u8, "SELECT value FROM cache WHERE site_id=? AND name='retention' AND day=?", .{ site_id, &day })) |cached| return cached;
+    var out: std.Io.Writer.Allocating = .init(arena);
+    try retentionBody(arena, db, site_id, now, &out.writer);
+    const write = shared.lockWrite();
+    defer shared.unlockWrite();
+    try write.run(arena, "INSERT INTO cache(site_id,name,day,value) VALUES(?,'retention',?,?) ON CONFLICT DO UPDATE SET day=excluded.day,value=excluded.value", .{ site_id, &day, out.written() });
+    return out.written();
+}
+
+fn retentionBody(arena: std.mem.Allocator, db: *db_mod.Db, site_id: i64, now: i64, w: *std.Io.Writer) !void {
+    const origin = weekStart(now) - 7 * week_ms;
     // Active visitors per week, split into new and returning: summarised
     // weeks plus the raw rows of days not summarised yet.
     const origin_week = rollups.weekIndex(origin);
-    const rolled = try data.rolledUntil(arena, ctx.db, site.id);
+    const rolled = try data.rolledUntil(arena, db, site_id);
     const weeks_cte = "WITH w AS (SELECT week,visitor_id FROM visitor_weeks WHERE site_id=?1 AND week>=?3 UNION SELECT (received_at_ms/86400000+3)/7,visitor_id FROM page_views WHERE site_id=?1 AND received_at_ms>=max(?2,?4) AND visitor_id IS NOT NULL AND internal=0)";
-    var weekly = try ctx.db.prepare(arena, weeks_cte ++
+    var weekly = try db.prepare(arena, weeks_cte ++
         \\ SELECT w.week-?3,count(*),sum(v.first_seen_ms<(w.week*7-3)*86400000) FROM w JOIN visitors v ON v.site_id=?1 AND v.visitor_id=w.visitor_id GROUP BY w.week
     );
     defer weekly.deinit();
-    try weekly.bindInt(1, site.id);
+    try weekly.bindInt(1, site_id);
     try weekly.bindInt(2, origin);
     try weekly.bindInt(3, origin_week);
     try weekly.bindInt(4, rolled);
@@ -364,12 +382,12 @@ pub fn retention(ctx: *Ctx, site: data.Site) !void {
 
     // Who comes back: visitors first seen 4 to 8 weeks ago (so each had the
     // full 4 weeks to return), by first source, merged by display name.
-    var sources = try ctx.db.prepare(arena,
+    var sources = try db.prepare(arena,
         \\SELECT v.first_source,count(*),sum(EXISTS(SELECT 1 FROM visitor_weeks x WHERE x.site_id=v.site_id AND x.visitor_id=v.visitor_id AND x.week>(v.first_seen_ms/86400000+3)/7 AND x.week<=(v.first_seen_ms/86400000+3)/7+4))
         \\FROM visitors v WHERE v.site_id=? AND v.first_seen_ms>=? AND v.first_seen_ms<? GROUP BY 1
     );
     defer sources.deinit();
-    try sources.bindInt(1, site.id);
+    try sources.bindInt(1, site_id);
     try sources.bindInt(2, origin);
     try sources.bindInt(3, now - 4 * week_ms);
     const Back = struct { label: []const u8, total: i64, back: i64 };
@@ -399,12 +417,12 @@ pub fn retention(ctx: *Ctx, site: data.Site) !void {
     try w.writeAll("</div></section></div>");
 
     // Weekly cohorts.
-    var cohorts = try ctx.db.prepare(arena, weeks_cte ++
+    var cohorts = try db.prepare(arena, weeks_cte ++
         \\, v AS (SELECT visitor_id,(first_seen_ms/86400000+3)/7-?3 cw FROM visitors WHERE site_id=?1 AND first_seen_ms>=?2)
         \\SELECT v.cw,w.week-?3-v.cw,count(*) FROM v JOIN w ON w.visitor_id=v.visitor_id WHERE w.week-?3>=v.cw GROUP BY 1,2
     );
     defer cohorts.deinit();
-    try cohorts.bindInt(1, site.id);
+    try cohorts.bindInt(1, site_id);
     try cohorts.bindInt(2, origin);
     try cohorts.bindInt(3, origin_week);
     try cohorts.bindInt(4, rolled);
@@ -440,7 +458,6 @@ pub fn retention(ctx: *Ctx, site: data.Site) !void {
         try w.writeAll("</tr>");
     }
     try w.writeAll("</tbody></table></div></section>");
-    return layout.end(ctx);
 }
 
 // ---------------------------------------------------------------- People

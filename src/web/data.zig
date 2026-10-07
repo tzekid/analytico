@@ -1,6 +1,6 @@
 //! Sites, view state (range, comparison, filters) and the shared report queries.
-//! Queries read raw rows: the data is small and SQLite is fast enough that
-//! rollups would only add a second source of truth.
+//! Queries read the daily rollups where they answer a view, and raw rows for
+//! the rest (see rollups.zig).
 const std = @import("std");
 const db_mod = @import("../db.zig");
 const domain = @import("../domain.zig");
@@ -618,7 +618,7 @@ pub const Sql = struct {
         try self.add(" AND e.received_at_ms<");
         try self.int(end);
         if (view.filters.len == 0) {
-            try self.add(" AND (e.source='server' OR EXISTS(SELECT 1 FROM page_views pv WHERE pv.site_id=e.site_id AND pv.page_id=e.page_id AND pv.traffic_class IN ('human_like','unknown')))");
+            try self.add(" AND (e.source='server' OR e.traffic_class IN ('human_like','unknown'))");
         } else {
             try self.add(" AND EXISTS(SELECT 1 FROM page_views pv WHERE pv.site_id=e.site_id AND pv.page_id=e.page_id AND pv.traffic_class IN ('human_like','unknown')");
             try self.filters(view.filters, view.any);
@@ -997,6 +997,8 @@ pub const rollup_dims = [_][2][]const u8{
     .{ "language", "coalesce(nullif(pv.language,''),'unknown')" },
     .{ "viewport", "coalesce(nullif(pv.viewport_class,''),'unknown')" },
     .{ "consent", "pv.consent_mode" },
+    // Page views outside any visit (Lite, or before consent), for counting visits.
+    .{ "session", "CASE WHEN pv.session_id IS NULL THEN 'none' ELSE 'some' END" },
     // Remembered visitors first seen before the day are returning.
     .{ "visitor_type", "CASE WHEN pv.visitor_id IS NULL THEN 'lite' WHEN (SELECT v.first_seen_ms FROM visitors v WHERE v.site_id=pv.site_id AND v.visitor_id=pv.visitor_id)<pv.received_at_ms-pv.received_at_ms%86400000 THEN 'returning' ELSE 'new' END" },
 };
@@ -1043,6 +1045,13 @@ pub fn keySums(arena: std.mem.Allocator, db: *db_mod.Db, view: View, dim: []cons
         .scroll_sum = statement.columnInt(7),
     } });
     return out.items;
+}
+
+/// Visits: sessions, plus each page view outside a session (all of them in
+/// Lite) as a visit of its own.
+pub fn visits(arena: std.mem.Allocator, db: *db_mod.Db, view: View, start: i64, end: i64) !i64 {
+    const sessions = (try totals(arena, db, view, start, end)).sessions;
+    return sessions + keySum(try keySums(arena, db, view, "session", start, end, 2), "none").views;
 }
 
 pub fn keySum(sums: []const KeySum, key: []const u8) RollupSums {

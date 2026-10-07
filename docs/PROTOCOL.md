@@ -48,7 +48,9 @@ integer `value_minor` plus three-letter currency.
 
 Each `(site,event_id)` is idempotent. Reusing an event ID with the same
 canonical payload is a duplicate and succeeds. Reusing it with different
-content is a 409 conflict. A 204 means the whole batch committed durably.
+content is a 409 conflict. A 204 means the whole batch committed: it survives a crash or restart of
+the server; a power cut or kernel crash can lose the last moments of
+commits (SQLite WAL, `synchronous=NORMAL`).
 
 ## Consent in Full mode
 

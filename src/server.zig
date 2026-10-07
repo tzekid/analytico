@@ -30,7 +30,7 @@ pub const worker_count = 12;
 
 /// Extra read connections for running one page's independent queries in
 /// parallel; see `data.prefetch`.
-pub const pool_size = 4;
+pub const pool_size = 8;
 
 pub const ReadPool = struct {
     mutex: std.Io.Mutex = .init,

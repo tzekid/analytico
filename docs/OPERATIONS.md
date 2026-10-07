@@ -53,6 +53,12 @@ analytico migrate --data ~/.local/share/analytico-sqlite \
 systemctl --user start analytico.service
 ```
 
+Schema 9 stores each browser event's traffic class (filled from its page
+view in one pass; quick), adds per-day summaries of visit paths, page
+sections and Web Vitals, and a small cache for Retention. It then has the background job
+summarise every stored day again, 10 seconds of work every 30: a month of
+80,000 page views a day takes about 11 minutes. Until it catches up,
+reports read raw rows and are slower.
 Schema 8 marks chart notes as drafts; it is instant. Schema 7 adds the table
 for ChatGPT plan sign-ins; it is instant. Schema 6
 adds engagement columns to page views and fills them from the

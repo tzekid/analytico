@@ -30,7 +30,14 @@ pub const Db = struct {
         _ = c.sqlite3_extended_result_codes(out.handle, 1);
         _ = c.sqlite3_busy_timeout(out.handle, 2_000);
         try out.exec("PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF;");
-        if (write) try out.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;");
+        // Reads come straight from the memory-mapped file, which the OS
+        // caches once for every connection; sorts and temporary tables stay
+        // in memory.
+        try out.exec("PRAGMA mmap_size=17179869184; PRAGMA cache_size=-32768; PRAGMA temp_store=MEMORY;");
+        // In WAL mode NORMAL syncs at checkpoints, not at every commit: a
+        // crash of the process loses nothing, a power cut at most the last
+        // moments of writes, and the database stays consistent either way.
+        if (write) try out.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
         return out;
     }
 

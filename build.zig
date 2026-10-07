@@ -35,6 +35,8 @@ pub fn build(b: *std.Build) void {
             "-DSQLITE_DEFAULT_FOREIGN_KEYS=1",
             "-DSQLITE_DQS=0",
             "-DSQLITE_OMIT_LOAD_EXTENSION",
+            // Memory-mapped reads may cover a database of up to 16 GB.
+            "-DSQLITE_MAX_MMAP_SIZE=17179869184",
         },
     });
     // The collector's scripts are cut from one source at build time.

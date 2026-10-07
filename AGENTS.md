@@ -68,8 +68,9 @@ workspace.
   are mandatory.
 - Tracker batches commit in groups: whichever batch arrives while no commit
   runs takes every waiting batch, runs each in its own savepoint and commits
-  once, so concurrent batches share one disk sync. A lone batch never waits.
-  Durability stays `synchronous=FULL`; a failed batch rolls back alone.
+  once. A lone batch never waits; a failed batch rolls back alone. WAL with
+  `synchronous=NORMAL`: no sync per commit, consistent after any crash,
+  only a power cut can lose the last moments of writes.
 - A page's independent report queries may run in parallel (`data.prefetch`)
   on a small pool of extra read connections, each task with its own arena;
   rendering then reads the results from a request-scoped memo. Pages list
@@ -98,6 +99,16 @@ workspace.
   lookup), so totals stay exact. Views with more than one filter read raw
   rows. Raw events stay the source of truth; rollups are rebuilt from them
   and pruned with them.
+- Each summarised day also keeps its visits' entry, exit and next pages
+  and the sections each page's readers reached (as rollup dimensions), and
+  each page's Web Vitals as counts of values
+  rounded up to two significant figures (`vitals_daily`; rounding up keeps
+  every good and poor threshold exact). Paths reads whole days of them,
+  since visits are split at midnight; Performance reads them up to the cut.
+  Retention (the last eight weeks, 11 s at 2.5 million page views a month)
+  is computed once a day into `cache`; nothing else is cached.
+- Browser events store their page view's traffic class when they arrive,
+  so leaving out bots never looks up each event's page view in a report.
 - Page views, summaries and events are clustered by `(site_id,
   received_at_ms, event_id)`, not by their random event ids: a time range
   must be one contiguous read. Keyed by event id, each row of "today" cost a

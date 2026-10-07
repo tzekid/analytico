@@ -49,15 +49,34 @@ pub fn sessions(ctx: *Ctx, site: data.Site) !void {
         return layout.end(ctx);
     }
     const tab = ctx.param("tab") orelse "sessions";
+    // Without filters the total comes from the daily summaries and each
+    // signal from its own small table; filters need the sessions themselves.
     var counts_sql = data.Sql.init(arena);
-    try sessionsCte(&counts_sql, view);
-    try counts_sql.add(" SELECT count(*)");
-    for ([_]Signal{ .recorded, .rage, .errors, .goal }) |signal| {
-        try counts_sql.add(",coalesce(sum(s.sid IN ");
-        try signalSet(&counts_sql, view, signal);
-        try counts_sql.add("),0)");
+    if (view.filters.len == 0) {
+        try counts_sql.add("SELECT ");
+        try counts_sql.int((try data.totals(arena, ctx.db, view, view.range.start_ms, view.range.end_ms)).sessions);
+        try counts_sql.add(",(SELECT count(*) FROM rp.replays r WHERE r.site_id=");
+        try counts_sql.int(site.id);
+        try counts_sql.add(" AND r.started_at_ms>=");
+        try counts_sql.int(view.range.start_ms);
+        try counts_sql.add(" AND r.started_at_ms<");
+        try counts_sql.int(view.range.end_ms);
+        try counts_sql.add(")");
+        for ([_]Signal{ .rage, .errors, .goal }) |signal| {
+            try counts_sql.add(",(SELECT count(DISTINCT session_id) FROM ");
+            try signalSet(&counts_sql, view, signal);
+            try counts_sql.add(")");
+        }
+    } else {
+        try sessionsCte(&counts_sql, view);
+        try counts_sql.add(" SELECT count(*)");
+        for ([_]Signal{ .recorded, .rage, .errors, .goal }) |signal| {
+            try counts_sql.add(",coalesce(sum(s.sid IN ");
+            try signalSet(&counts_sql, view, signal);
+            try counts_sql.add("),0)");
+        }
+        try counts_sql.add(" FROM s");
     }
-    try counts_sql.add(" FROM s");
     var counts = try counts_sql.prepare(ctx.db);
     defer counts.deinit();
     _ = try counts.step();
@@ -138,86 +157,156 @@ fn signalSet(sql: *data.Sql, view: data.View, signal: Signal) !void {
     try sql.add(" AND e.session_id IS NOT NULL)");
 }
 
+const SessionRow = struct {
+    sid: []const u8,
+    started: i64,
+    ended: i64,
+    pages: i64,
+    visitor: []const u8,
+    journey: []const u8,
+    rage: i64,
+    errors: i64,
+    goal: []const u8,
+    purchase: ?i64,
+    currency: []const u8,
+    replay_ms: ?i64,
+    user_hash: []const u8,
+};
+
+/// Sessions that may be among the last 100 started. A signal, event or error
+/// narrows them to its own (small) set; otherwise they are the sessions of the
+/// `window` most recent page views.
+fn sessionCandidates(ctx: *Ctx, sql: *data.Sql, view: data.View, signal: ?Signal, window: i64) !bool {
+    const id = view.site.id;
+    var narrowed = false;
+    if (signal) |value| {
+        try sql.add("SELECT session_id FROM ");
+        try signalSet(sql, view, value);
+        narrowed = true;
+    }
+    if (ctx.param("event")) |name| {
+        try sql.add(if (narrowed) " INTERSECT " else "");
+        try sql.add("SELECT e.session_id FROM events e WHERE e.site_id=");
+        try sql.int(id);
+        try sql.add(" AND e.name=");
+        try sql.str(name);
+        try sql.add(" AND e.session_id IS NOT NULL");
+        narrowed = true;
+    }
+    if (ctx.param("error")) |fingerprint| {
+        try sql.add(if (narrowed) " INTERSECT " else "");
+        try sql.add("SELECT x.session_id FROM errors x WHERE x.site_id=");
+        try sql.int(id);
+        try sql.add(" AND x.fingerprint=");
+        try sql.str(fingerprint);
+        try sql.add(" AND x.session_id IS NOT NULL");
+        narrowed = true;
+    }
+    if (narrowed) return true;
+    try sql.add("SELECT DISTINCT session_id FROM (SELECT pv.session_id FROM page_views pv WHERE ");
+    try sql.pageViews(view, view.range.start_ms, view.range.end_ms);
+    try sql.add(" AND pv.session_id IS NOT NULL ORDER BY pv.received_at_ms DESC LIMIT ");
+    try sql.int(window);
+    try sql.add(")");
+    return false;
+}
+
 fn sessionTable(ctx: *Ctx, view: data.View, signal: ?Signal) !void {
     const arena = ctx.arena;
     const w = ctx.w();
     const site = view.site;
     const id = site.id;
-    var sql = data.Sql.init(arena);
-    try sessionsCte(&sql, view);
-    // The 100 sessions first; their details only after.
-    try sql.add(",t AS MATERIALIZED (SELECT * FROM s WHERE 1");
-    if (signal) |value| {
-        try sql.add(" AND s.sid IN ");
-        try signalSet(&sql, view, value);
-    }
-    if (ctx.param("event")) |name| {
-        try sql.add(" AND EXISTS(SELECT 1 FROM events e WHERE e.site_id=");
+    // The 100 sessions that started last, without summarising every session
+    // of the period: candidates first, then their pages through the session
+    // index. Candidates from recent page views are exact once the 100th
+    // session started after the oldest page view looked at; until then the
+    // window grows.
+    var rows: std.ArrayList(SessionRow) = .empty;
+    var window: i64 = 4000;
+    while (true) {
+        rows.clearRetainingCapacity();
+        var sql = data.Sql.init(arena);
+        try sql.add("WITH c(sid) AS MATERIALIZED (");
+        const narrowed = try sessionCandidates(ctx, &sql, view, signal, window);
+        try sql.add("),s AS (SELECT pv.session_id sid,min(pv.received_at_ms) started,max(pv.received_at_ms) ended,count(*) pages,max(pv.visitor_id) visitor FROM c CROSS JOIN page_views pv ON pv.site_id=");
         try sql.int(id);
-        try sql.add(" AND e.session_id=s.sid AND e.name=");
-        try sql.str(name);
-        try sql.add(")");
-    }
-    if (ctx.param("error")) |fingerprint| {
-        try sql.add(" AND s.sid IN (SELECT x.session_id FROM errors x WHERE x.site_id=");
+        try sql.add(" AND pv.session_id=c.sid WHERE ");
+        try sql.pageViews(view, view.range.start_ms, view.range.end_ms);
+        try sql.add(" AND pv.session_id IS NOT NULL GROUP BY pv.session_id),t AS MATERIALIZED (SELECT * FROM s ORDER BY s.started DESC LIMIT 100) SELECT t.sid,t.started,max(t.ended,coalesce((SELECT max(e.received_at_ms) FROM events e WHERE e.site_id=");
         try sql.int(id);
-        try sql.add(" AND x.fingerprint=");
-        try sql.str(fingerprint);
-        try sql.add(")");
+        try sql.add(" AND e.session_id=t.sid),0)),t.pages,coalesce(t.visitor,''),(SELECT group_concat(p,' → ') FROM (SELECT x.path p FROM page_views x WHERE x.site_id=");
+        try sql.int(id);
+        try sql.add(" AND x.session_id=t.sid ORDER BY x.occurred_at_ms LIMIT 3)),(SELECT count(*) FROM events e WHERE e.site_id=");
+        try sql.int(id);
+        try sql.add(" AND e.session_id=t.sid AND e.name='rage_click'),(SELECT count(*) FROM errors x WHERE x.site_id=");
+        try sql.int(id);
+        try sql.add(" AND x.session_id=t.sid),(SELECT g.name FROM goals g JOIN events e ON e.site_id=g.site_id AND e.name=g.match_value AND g.kind='event' WHERE g.site_id=");
+        try sql.int(id);
+        try sql.add(" AND e.session_id=t.sid LIMIT 1),(SELECT sum(o.v) FROM (SELECT max(e.value_minor) v FROM events e WHERE e.site_id=");
+        try sql.int(id);
+        try sql.add(" AND e.session_id=t.sid AND e.name IN " ++ customers.purchase_names ++ " GROUP BY coalesce(e.order_id,e.event_id)) o),(SELECT max(e.currency) FROM events e WHERE e.site_id=");
+        try sql.int(id);
+        try sql.add(" AND e.session_id=t.sid AND e.name IN " ++ customers.purchase_names ++ "),(SELECT r.last_at_ms-r.started_at_ms FROM rp.replays r WHERE r.site_id=");
+        try sql.int(id);
+        try sql.add(" AND r.session_id=t.sid),coalesce((SELECT v.user_hash FROM visitors v WHERE v.site_id=");
+        try sql.int(id);
+        try sql.add(" AND v.visitor_id=t.visitor),''),(SELECT pv.received_at_ms FROM page_views pv WHERE ");
+        try sql.pageViews(view, view.range.start_ms, view.range.end_ms);
+        try sql.add(" AND pv.session_id IS NOT NULL ORDER BY pv.received_at_ms DESC LIMIT 1 OFFSET ");
+        try sql.int(window - 1);
+        try sql.add(") FROM t ORDER BY t.started DESC");
+        var statement = try sql.prepare(ctx.db);
+        defer statement.deinit();
+        var oldest: ?i64 = null;
+        while (try statement.step() == .row) {
+            try rows.append(arena, .{
+                .sid = try arena.dupe(u8, statement.columnText(0)),
+                .started = statement.columnInt(1),
+                .ended = statement.columnInt(2),
+                .pages = statement.columnInt(3),
+                .visitor = try arena.dupe(u8, statement.columnText(4)),
+                .journey = try arena.dupe(u8, statement.columnText(5)),
+                .rage = statement.columnInt(6),
+                .errors = statement.columnInt(7),
+                .goal = try arena.dupe(u8, statement.columnText(8)),
+                .purchase = if (statement.columnType(9) == db_mod.sqlite.SQLITE_NULL) null else statement.columnInt(9),
+                .currency = try arena.dupe(u8, statement.columnText(10)),
+                .replay_ms = if (statement.columnType(11) == db_mod.sqlite.SQLITE_NULL) null else statement.columnInt(11),
+                .user_hash = try arena.dupe(u8, statement.columnText(12)),
+            });
+            if (statement.columnType(13) != db_mod.sqlite.SQLITE_NULL) oldest = statement.columnInt(13);
+        }
+        // Exact when every page view of the period was looked at, or when
+        // the 100th session started after the oldest one that was.
+        if (narrowed or oldest == null or (rows.items.len == 100 and rows.items[99].started >= oldest.?)) break;
+        window *= 4;
     }
-    try sql.add(" ORDER BY s.started DESC LIMIT 100) SELECT t.sid,t.started,max(t.ended,coalesce((SELECT max(e.received_at_ms) FROM events e WHERE e.site_id=");
-    try sql.int(id);
-    try sql.add(" AND e.session_id=t.sid),0)),t.pages,coalesce(t.visitor,''),(SELECT group_concat(p,' → ') FROM (SELECT x.path p FROM page_views x WHERE x.site_id=");
-    try sql.int(id);
-    try sql.add(" AND x.session_id=t.sid ORDER BY x.occurred_at_ms LIMIT 3)),(SELECT count(*) FROM events e WHERE e.site_id=");
-    try sql.int(id);
-    try sql.add(" AND e.session_id=t.sid AND e.name='rage_click'),(SELECT count(*) FROM errors x WHERE x.site_id=");
-    try sql.int(id);
-    try sql.add(" AND x.session_id=t.sid),(SELECT g.name FROM goals g JOIN events e ON e.site_id=g.site_id AND e.name=g.match_value AND g.kind='event' WHERE g.site_id=");
-    try sql.int(id);
-    try sql.add(" AND e.session_id=t.sid LIMIT 1),(SELECT sum(o.v) FROM (SELECT max(e.value_minor) v FROM events e WHERE e.site_id=");
-    try sql.int(id);
-    try sql.add(" AND e.session_id=t.sid AND e.name IN " ++ customers.purchase_names ++ " GROUP BY coalesce(e.order_id,e.event_id)) o),(SELECT max(e.currency) FROM events e WHERE e.site_id=");
-    try sql.int(id);
-    try sql.add(" AND e.session_id=t.sid AND e.name IN " ++ customers.purchase_names ++ "),(SELECT r.last_at_ms-r.started_at_ms FROM rp.replays r WHERE r.site_id=");
-    try sql.int(id);
-    try sql.add(" AND r.session_id=t.sid),coalesce((SELECT v.user_hash FROM visitors v WHERE v.site_id=");
-    try sql.int(id);
-    try sql.add(" AND v.visitor_id=t.visitor),'') FROM t ORDER BY t.started DESC");
-    var statement = try sql.prepare(ctx.db);
-    defer statement.deinit();
     try w.writeAll("<section class=\"card card-flush\"><div class=\"table-wrap\"><table class=\"table\"><thead><tr><th>When</th><th class=\"hide-m\">Visitor</th><th>Journey</th><th class=\"r hide-m\">Pages</th><th class=\"r hide-m\">Length</th><th class=\"hide-m\">Signals</th>");
     if (site.mode == .full) try w.writeAll("<th>Replay</th>");
     try w.writeAll("</tr></thead><tbody>");
-    var any = false;
-    while (try statement.step() == .row) {
-        any = true;
-        const sid = statement.columnText(0);
-        const started = statement.columnInt(1);
-        const ended = statement.columnInt(2);
-        const visitor = statement.columnText(4);
-        const href = try std.fmt.allocPrint(arena, "/{s}/replays/{s}", .{ site.slug, sid });
-        const label = if (site.mode == .full) try personLabel(arena, visitor, statement.columnText(12)) else try std.fmt.allocPrint(arena, "Session {s}", .{sid[0..4]});
+    for (rows.items) |row| {
+        const href = try std.fmt.allocPrint(arena, "/{s}/replays/{s}", .{ site.slug, row.sid });
+        const label = if (site.mode == .full) try personLabel(arena, row.visitor, row.user_hash) else try std.fmt.allocPrint(arena, "Session {s}", .{row.sid[0..4]});
         try render(w, "<tr data-href=\"{href}\"><td class=\"secondary\">{when}</td><td class=\"hide-m {class}\">{visitor}</td><td class=\"strong journey\"><a href=\"{href}\">{journey}</a></td><td class=\"r hide-m\">{pages}</td><td class=\"r hide-m\">{length}</td><td class=\"hide-m\"><span class=\"row gap-6\">", .{
-            .href = href, .when = data.clock(started, ctx.now()), .class = if (statement.columnText(12).len != 0) "strong" else "secondary", .visitor = label, .journey = statement.columnText(5), .pages = statement.columnInt(3), .length = html.duration(ended - started),
+            .href = href, .when = data.clock(row.started, ctx.now()), .class = if (row.user_hash.len != 0) "strong" else "secondary", .visitor = label, .journey = row.journey, .pages = row.pages, .length = html.duration(row.ended - row.started),
         });
-        if (statement.columnInt(6) > 0) try w.writeAll("<span class=\"pill pill-brand\">Rage click</span>");
-        if (statement.columnInt(7) > 0) try w.writeAll("<span class=\"pill pill-bad\">JS error</span>");
-        if (statement.columnType(9) != db_mod.sqlite.SQLITE_NULL) {
-            try w.print("<span class=\"pill pill-good\">Purchased {f}</span>", .{html.money(statement.columnInt(9), statement.columnText(10))});
-        } else if (statement.columnText(8).len != 0) try w.print("<span class=\"pill pill-good\">Goal: {f}</span>", .{esc(statement.columnText(8))});
+        if (row.rage > 0) try w.writeAll("<span class=\"pill pill-brand\">Rage click</span>");
+        if (row.errors > 0) try w.writeAll("<span class=\"pill pill-bad\">JS error</span>");
+        if (row.purchase) |amount| {
+            try w.print("<span class=\"pill pill-good\">Purchased {f}</span>", .{html.money(amount, row.currency)});
+        } else if (row.goal.len != 0) try w.print("<span class=\"pill pill-good\">Goal: {f}</span>", .{esc(row.goal)});
         try w.writeAll("</span></td>");
         if (site.mode == .full) {
-            if (statement.columnType(11) != db_mod.sqlite.SQLITE_NULL) {
+            if (row.replay_ms) |length| {
                 try w.print("<td><a class=\"btn btn-replay\" href=\"{f}\">", .{esc(href)});
                 try icon(w, "play");
-                try w.print("{f}</a></td>", .{Offset{ .ms = statement.columnInt(11) }});
-            } else try w.print("<td class=\"hint\">{s}</td>", .{if (visitor.len == 0) "Lite — no replay" else "Not recorded"});
+                try w.print("{f}</a></td>", .{Offset{ .ms = length }});
+            } else try w.print("<td class=\"hint\">{s}</td>", .{if (row.visitor.len == 0) "Lite — no replay" else "Not recorded"});
         }
         try w.writeAll("</tr>");
     }
     try w.writeAll("</tbody></table></div>");
-    if (!any) try ui.empty(w, "No sessions match", "Sessions appear as soon as visitors arrive. Try another signal or a longer period.", "");
+    if (rows.items.len == 0) try ui.empty(w, "No sessions match", "Sessions appear as soon as visitors arrive. Try another signal or a longer period.", "");
     try w.writeAll("<div class=\"card-foot\"><span>Most recent 100 sessions</span>");
     if (site.mode == .full) {
         if (site.recording()) {
@@ -426,13 +515,7 @@ pub fn errors(ctx: *Ctx, site: data.Site) !void {
     });
 
     // Headline: share of visits with an error, distinct errors, new ones.
-    var visits_sql = data.Sql.init(arena);
-    try visits_sql.add(if (site.linked()) "SELECT count(DISTINCT coalesce(pv.session_id,pv.page_id)) FROM page_views pv WHERE " else "SELECT count(*) FROM page_views pv WHERE ");
-    try visits_sql.pageViews(view, range.start_ms, range.end_ms);
-    var visits_statement = try visits_sql.prepare(ctx.db);
-    defer visits_statement.deinit();
-    _ = try visits_statement.step();
-    const visits = visits_statement.columnInt(0);
+    const visits = try data.visits(arena, ctx.db, view, range.start_ms, range.end_ms);
     var hit_sql = data.Sql.init(arena);
     try hit_sql.add("SELECT count(DISTINCT ");
     try hit_sql.add(unit);

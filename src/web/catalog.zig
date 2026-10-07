@@ -403,7 +403,7 @@ fn funnelReport(input: Input) !Table {
     \\ WHERE internal=0 AND traffic_class IN ('human_like','unknown') AND site_id=?1 AND received_at_ms>=?2 AND received_at_ms<?3 AND session_id IS NOT NULL
     \\ UNION ALL SELECT session_id,occurred_at_ms,'event',name FROM events
     \\ WHERE internal=0 AND site_id=?1 AND received_at_ms>=?2 AND received_at_ms<?3 AND session_id IS NOT NULL
-    \\ AND (source='server' OR EXISTS(SELECT 1 FROM page_views p WHERE p.site_id=events.site_id AND p.page_id=events.page_id AND p.traffic_class IN ('human_like','unknown')))
+    \\ AND (source='server' OR traffic_class IN ('human_like','unknown'))
     \\) ORDER BY session_id,occurred_at_ms
     );
     defer timeline.deinit();
@@ -589,14 +589,14 @@ const sections_sql =
 ;
 const actions_sql =
     \\SELECT e.name,coalesce(json_extract(e.properties_json,'$.action'),'') AS action,count(*) AS occurrences
-    \\FROM events e WHERE e.internal=0 AND e.site_id=? AND e.received_at_ms>=? AND e.received_at_ms<? AND (e.source='server' OR EXISTS(SELECT 1 FROM page_views p WHERE p.site_id=e.site_id AND p.page_id=e.page_id AND p.traffic_class IN ('human_like','unknown')))
+    \\FROM events e WHERE e.internal=0 AND e.site_id=? AND e.received_at_ms>=? AND e.received_at_ms<? AND (e.source='server' OR e.traffic_class IN ('human_like','unknown'))
     \\AND (?='' OR coalesce(e.release_id,'')=?) AND (?='' OR coalesce(json_extract(e.properties_json,'$.campaign'),'')=?) AND (?='' OR coalesce(e.path,'')=?)
     \\AND (e.name LIKE 'action_%' OR e.name='rage_click') GROUP BY e.name,action ORDER BY occurrences DESC LIMIT ?
 ;
 const events_sql =
     \\SELECT e.name,e.source,count(*) AS occurrences,count(DISTINCT e.session_id) AS sessions,
     \\ coalesce(sum(e.value_minor),0) AS value_minor,max(coalesce(e.currency,'')) AS currency
-    \\FROM events e WHERE e.internal=0 AND e.site_id=? AND e.received_at_ms>=? AND e.received_at_ms<? AND (e.source='server' OR EXISTS(SELECT 1 FROM page_views p WHERE p.site_id=e.site_id AND p.page_id=e.page_id AND p.traffic_class IN ('human_like','unknown')))
+    \\FROM events e WHERE e.internal=0 AND e.site_id=? AND e.received_at_ms>=? AND e.received_at_ms<? AND (e.source='server' OR e.traffic_class IN ('human_like','unknown'))
     \\AND (?='' OR coalesce(e.release_id,'')=?) AND (?='' OR coalesce(json_extract(e.properties_json,'$.campaign'),'')=?) AND (?='' OR coalesce(e.path,'')=?)
     \\GROUP BY e.name,e.source ORDER BY occurrences DESC,e.name LIMIT ?
 ;
@@ -605,7 +605,7 @@ const recent_sql =
     \\ SELECT pv.received_at_ms,'page_view' AS kind,'page_view' AS name,pv.path,'browser' AS source,pv.session_id,pv.release_id,pv.utm_campaign
     \\ FROM page_views pv WHERE pv.internal=0 AND pv.traffic_class IN ('human_like','unknown') AND pv.site_id=?1 AND pv.received_at_ms>=?2 AND pv.received_at_ms<?3
     \\ UNION ALL SELECT e.received_at_ms,'event',e.name,coalesce(e.path,''),e.source,e.session_id,e.release_id,json_extract(e.properties_json,'$.campaign')
-    \\ FROM events e WHERE e.internal=0 AND e.site_id=?1 AND e.received_at_ms>=?2 AND e.received_at_ms<?3 AND (e.source='server' OR EXISTS(SELECT 1 FROM page_views p WHERE p.site_id=e.site_id AND p.page_id=e.page_id AND p.traffic_class IN ('human_like','unknown')))
+    \\ FROM events e WHERE e.internal=0 AND e.site_id=?1 AND e.received_at_ms>=?2 AND e.received_at_ms<?3 AND (e.source='server' OR e.traffic_class IN ('human_like','unknown'))
     \\) WHERE (?4='' OR coalesce(release_id,'')=?5) AND (?6='' OR coalesce(utm_campaign,'')=?7) AND (?8='' OR path=?9)
     \\ORDER BY received_at_ms DESC LIMIT ?10
 ;
@@ -668,12 +668,12 @@ const session_sql =
     \\ SELECT occurred_at_ms,received_at_ms,'page_view' kind,'page_view' name,path,'{}' properties_json
     \\ FROM page_views WHERE internal=0 AND traffic_class IN ('human_like','unknown') AND site_id=?1 AND session_id=?2
     \\ UNION ALL SELECT occurred_at_ms,received_at_ms,'event',name,coalesce(path,''),properties_json
-    \\ FROM events e WHERE e.internal=0 AND e.site_id=?1 AND e.session_id=?2 AND (e.source='server' OR EXISTS(SELECT 1 FROM page_views p WHERE p.site_id=e.site_id AND p.page_id=e.page_id AND p.traffic_class IN ('human_like','unknown')))
+    \\ FROM events e WHERE e.internal=0 AND e.site_id=?1 AND e.session_id=?2 AND (e.source='server' OR e.traffic_class IN ('human_like','unknown'))
     \\) ORDER BY occurred_at_ms,received_at_ms LIMIT 1000
 ;
 const flow_sql =
     \\WITH matched AS (
-    \\ SELECT e.* FROM events e WHERE e.internal=0 AND e.site_id=?1 AND e.received_at_ms>=?2 AND e.received_at_ms<?3 AND (e.source='server' OR EXISTS(SELECT 1 FROM page_views p WHERE p.site_id=e.site_id AND p.page_id=e.page_id AND p.traffic_class IN ('human_like','unknown')))
+    \\ SELECT e.* FROM events e WHERE e.internal=0 AND e.site_id=?1 AND e.received_at_ms>=?2 AND e.received_at_ms<?3 AND (e.source='server' OR e.traffic_class IN ('human_like','unknown'))
     \\ AND json_extract(e.properties_json,'$.flow')=?4 AND e.name LIKE 'flow_%'
     \\), actual AS (
     \\ SELECT name,coalesce(json_extract(properties_json,'$.step'),'') step,count(*) occurrences,
@@ -681,7 +681,7 @@ const flow_sql =
     \\), session_last AS (
     \\ SELECT session_id,max(received_at_ms) last_at FROM (
     \\  SELECT session_id,received_at_ms FROM page_views WHERE internal=0 AND traffic_class IN ('human_like','unknown') AND site_id=?1 AND received_at_ms>=?2 AND received_at_ms<?3 AND session_id IS NOT NULL
-    \\  UNION ALL SELECT e.session_id,e.received_at_ms FROM events e WHERE e.internal=0 AND e.site_id=?1 AND e.received_at_ms>=?2 AND e.received_at_ms<?3 AND e.session_id IS NOT NULL AND (e.source='server' OR EXISTS(SELECT 1 FROM page_views p WHERE p.site_id=e.site_id AND p.page_id=e.page_id AND p.traffic_class IN ('human_like','unknown')))
+    \\  UNION ALL SELECT e.session_id,e.received_at_ms FROM events e WHERE e.internal=0 AND e.site_id=?1 AND e.received_at_ms>=?2 AND e.received_at_ms<?3 AND e.session_id IS NOT NULL AND (e.source='server' OR e.traffic_class IN ('human_like','unknown'))
     \\ ) GROUP BY session_id
     \\), abandoned AS (
     \\ SELECT 'flow_abandoned' name,'' step,count(*) occurrences,count(*) sessions,9223372036854775807 first_at
@@ -700,7 +700,7 @@ const friction_sql =
     \\ coalesce(json_extract(e.properties_json,'$.dwell_bucket'),'') AS dwell_bucket,
     \\ coalesce(json_extract(e.properties_json,'$.click_bucket'),'') AS click_bucket,count(*) AS occurrences,
     \\ count(DISTINCT e.session_id) AS sessions
-    \\FROM events e WHERE e.internal=0 AND e.site_id=?1 AND e.received_at_ms>=?2 AND e.received_at_ms<?3 AND (e.source='server' OR EXISTS(SELECT 1 FROM page_views p WHERE p.site_id=e.site_id AND p.page_id=e.page_id AND p.traffic_class IN ('human_like','unknown')))
+    \\FROM events e WHERE e.internal=0 AND e.site_id=?1 AND e.received_at_ms>=?2 AND e.received_at_ms<?3 AND (e.source='server' OR e.traffic_class IN ('human_like','unknown'))
     \\AND (?4='' OR json_extract(e.properties_json,'$.flow')=?4)
     \\AND e.name IN ('flow_step_failed','flow_backtracked','action_failed','action_unresponsive','rage_click')
     \\GROUP BY e.name,step,action,error_code,attempt_bucket,dwell_bucket,click_bucket ORDER BY occurrences DESC LIMIT ?5

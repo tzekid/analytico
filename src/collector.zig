@@ -671,8 +671,9 @@ fn insertEvent(c: Context, record: Record) !void {
     if (record.user_id) |user_id| user_hash = domain.userHash(c.master_key, c.site.public_id, user_id);
     var statement = try c.store.database.prepare(allocator,
         \\INSERT INTO events(site_id,event_id,page_id,session_id,source,occurred_at_ms,received_at_ms,received_date,tracking_mode,
-        \\ name,path,release_id,tracker_version,consent_mode,internal,value_minor,currency,properties_json,visitor_id,user_hash,order_id)
-        \\VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        \\ name,path,release_id,tracker_version,consent_mode,internal,value_minor,currency,properties_json,visitor_id,user_hash,order_id,traffic_class)
+        \\VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,
+        \\ CASE WHEN ?5<>'server' THEN coalesce((SELECT pv.traffic_class FROM page_views pv WHERE pv.site_id=?1 AND pv.page_id=?3),?22) END)
     );
     defer statement.deinit();
     try statement.bindInt(1, c.site.id);
@@ -696,6 +697,10 @@ fn insertEvent(c: Context, record: Record) !void {
     try statement.bindOptionalText(19, record.visitor_id);
     if (user_hash) |*hash| try statement.bindText(20, hash) else try statement.bindNull(20);
     try statement.bindOptionalText(21, record.order_id);
+    // Browser events carry their page view's traffic class (their own
+    // sender's without one), so reports can leave out bots without looking
+    // up each event's page view.
+    if (c.source == .server) try statement.bindNull(22) else try statement.bindText(22, if (record.internal) "internal" else c.dimensions.traffic_class);
     _ = try statement.step();
     if (record.items) |items| {
         var insert = try c.store.database.prepare(allocator, "INSERT INTO event_items(site_id,event_id,position,item_id,name,category,price_minor,quantity) VALUES(?,?,?,?,?,?,?,?)");

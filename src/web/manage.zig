@@ -751,8 +751,9 @@ fn renderWidget(ctx: *Ctx, view: data.View, base: []const u8, key: []const u8, t
         try w.writeAll("<section class=\"card\">");
         try ui.cardHead(w, "Web vitals · p75", "");
         try w.writeAll("<dl class=\"kv\">");
-        for (journeys.vitals) |vital| {
-            const result = try journeys.distribution(ctx, view, vital, null);
+        const loaded = try journeys.loadSamples(ctx, view);
+        for (journeys.vitals, 0..) |vital, index| {
+            const result = journeys.summarize(vital, loaded.all[index].items);
             if (result.samples == 0) {
                 try render(w, "<dt>{name}</dt><dd class=\"muted\">—</dd>", .{ .name = vital.name });
             } else try render(w, "<dt>{name}</dt><dd class=\"{class}\">{value}</dd>", .{ .name = vital.name, .class = if (result.p75 <= vital.good) "good" else if (result.p75 <= vital.poor) "warn" else "bad", .value = journeys.VitalValue{ .vital = vital, .value = result.p75 } });

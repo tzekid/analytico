@@ -16,10 +16,10 @@ const std = @import("std");
 const db_mod = @import("db.zig");
 
 const baseline_version: i64 = 6;
-pub const current_version: i64 = 8;
+pub const current_version: i64 = 9;
 
 /// Migrations after the baseline: index 0 takes schema 6 to 7.
-const migrations = [_][]const u8{ chatgpt_sql, draft_notes_sql };
+const migrations = [_][]const u8{ chatgpt_sql, draft_notes_sql, scale_sql };
 
 /// 7: each person can run Analytico's AI on their own ChatGPT plan. The
 /// registration (issued client) outlives a sign-out; tokens are sealed;
@@ -51,6 +51,38 @@ const draft_notes_sql =
     \\ALTER TABLE annotations ADD COLUMN draft INTEGER NOT NULL DEFAULT 0 CHECK(draft IN (0,1));
     \\INSERT INTO schema_migrations VALUES(8,'draft-notes',unixepoch('subsec')*1000);
     \\PRAGMA user_version=8;
+    \\COMMIT;
+;
+
+/// 9: summaries that keep reports fast on large sites. Events carry the
+/// traffic class of the browser that sent them (instead of a lookup of their
+/// page view per event); Web Vitals are summarised per day and page; a small
+/// cache holds results computed once a day. Clearing `rollup_days` makes the
+/// background job summarise every day again with the new dimensions; until it
+/// catches up, reports read raw rows.
+const scale_sql =
+    \\BEGIN IMMEDIATE;
+    \\ALTER TABLE events ADD COLUMN traffic_class TEXT;
+    \\UPDATE events SET traffic_class=CASE WHEN internal=1 THEN 'internal' ELSE (SELECT pv.traffic_class FROM page_views pv WHERE pv.site_id=events.site_id AND pv.page_id=events.page_id) END WHERE source<>'server';
+    \\CREATE TABLE vitals_daily (
+    \\  site_id INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+    \\  day TEXT NOT NULL CHECK(length(day)=10),
+    \\  metric TEXT NOT NULL,
+    \\  path TEXT NOT NULL,
+    \\  value INTEGER NOT NULL,
+    \\  samples INTEGER NOT NULL,
+    \\  PRIMARY KEY(site_id,metric,day,path,value)
+    \\) STRICT, WITHOUT ROWID;
+    \\CREATE TABLE cache (
+    \\  site_id INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+    \\  name TEXT NOT NULL,
+    \\  day TEXT NOT NULL CHECK(length(day)=10),
+    \\  value TEXT NOT NULL,
+    \\  PRIMARY KEY(site_id,name)
+    \\) STRICT, WITHOUT ROWID;
+    \\DELETE FROM rollup_days;
+    \\INSERT INTO schema_migrations VALUES(9,'summaries-for-scale',unixepoch('subsec')*1000);
+    \\PRAGMA user_version=9;
     \\COMMIT;
 ;
 

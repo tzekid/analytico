@@ -329,8 +329,12 @@ await journey("v3", async (t) => {
   assert.match(await page.locator(".metric", { hasText: "Revenue" }).locator(".metric-value").textContent(), /€49/);
   // The server's copy of the order wins, but the visit, and so the source, come from the browser's.
   assert.deepEqual(await page.locator(".source-money strong").allTextContents(), ["Newsletter"]);
+  // Browser events carry their sender's traffic class; server events none.
+  assert.deepEqual(rows("SELECT DISTINCT source,traffic_class FROM events WHERE site_id=1 AND name IN ('purchase','payment_confirmed') ORDER BY 1").map((entry) => ({ ...entry })), [{ source: "browser", traffic_class: "human_like" }, { source: "server", traffic_class: null }]);
   await page.locator("td", { hasText: "Garden guide" }).waitFor();
   await visit("/shop/retention", "Weekly cohorts");
+  // Computed once a day, then served from the cache.
+  assert.equal(row("SELECT day FROM cache WHERE site_id=1 AND name='retention'").day, new Date().toISOString().slice(0, 10));
   await visit("/shop/audience", "Where they are");
   await page.locator(".country-row", { hasText: "Germany" }).first().waitFor();
   await visit("/shop/pages?tab=outbound", "partner.example");
@@ -525,12 +529,47 @@ await journey("v3", async (t) => {
   const writer = t.db("analytico.db", {});
   const yesterdayAt = Date.now() - Date.now() % 86400000 - 86400000 + 3600000;
   const yesterday = new Date(yesterdayAt).toISOString().slice(0, 10);
-  const insert = writer.prepare(`INSERT INTO page_views(site_id,event_id,page_id,occurred_at_ms,received_at_ms,received_date,visitor_day_id,tracking_mode,path,tracker_version,consent_mode,internal,country,browser,operating_system,device,traffic_class)
-    VALUES(1,?,?,?,?,?,?,'full','/archive','2','pending',0,'NL','chrome','linux','desktop','human_like')`);
-  for (let index = 0; index < 25; index++) insert.run(randomUUID(), randomUUID(), yesterdayAt + index, yesterdayAt + index, yesterday, (index % 10).toString(16).padStart(16, "0"));
+  // Five visits of five pages each, with Web Vitals, for Paths and Performance.
+  const insert = writer.prepare(`INSERT INTO page_views(site_id,event_id,page_id,session_id,occurred_at_ms,received_at_ms,received_date,visitor_day_id,tracking_mode,path,tracker_version,consent_mode,internal,country,browser,operating_system,device,traffic_class)
+    VALUES(1,?,?,?,?,?,?,?,'full',?,'2','pending',0,'NL','chrome','linux','desktop','human_like')`);
+  const summary = writer.prepare(`INSERT INTO page_summaries(site_id,event_id,page_id,session_id,occurred_at_ms,received_at_ms,tracking_mode,visible_ms,active_ms,interaction_count,max_scroll,sections_json,selection_count,copy_count,outbound_clicks,downloads,form_attempts,ttfb_ms,inp_ms,tracker_version,consent_mode,internal)
+    VALUES(1,?,?,?,?,?,'full',1000,1000,1,50,'["intro"]',0,0,0,0,0,200,?,'2','pending',0)`);
+  const archivePaths = ["/archive", "/archive/a", "/archive/b", "/archive/a", "/archive"];
+  for (let index = 0; index < 25; index++) {
+    const page = randomUUID();
+    const session = `archive-visit-${Math.floor(index / 5)}`;
+    insert.run(randomUUID(), page, session, yesterdayAt + index, yesterdayAt + index, yesterday, (index % 10).toString(16).padStart(16, "0"), archivePaths[index % 5]);
+    // Multiples of 10 below 1000 are already rounded the way the summaries round.
+    summary.run(randomUUID(), page, session, yesterdayAt + index, yesterdayAt + index, 40 + index * 30);
+  }
   writer.close();
   await t.until(() => row("SELECT count(*) n FROM rollup_days WHERE day=?", yesterday).n === 1, "yesterday summarised", 90000);
   assert.deepEqual({ ...row("SELECT views,visitors FROM rollups WHERE day=? AND dim='country' AND key='NL'", yesterday) }, { views: 25, visitors: 10 });
+  // Paths, Performance and Errors read the summary and the raw rows after it
+  // exactly like raw rows alone.
+  const human = "site_id=1 AND internal=0 AND traffic_class IN ('human_like','unknown') AND received_at_ms>=?";
+  const weekFrom = Date.now() - Date.now() % 86400000 - 6 * 86400000;
+  const rankValue = async (card, name) => Number((await page.locator("section.card", { has: page.locator("h2", { hasText: card }) })
+    .locator(".rank-row", { has: page.locator(".rank-name span", { hasText: new RegExp(`^${name}$`) }) }).locator(".rank-value").textContent()).replace(/,/g, ""));
+  await page.goto(`${originA}/shop/sessions?tab=paths&range=7d&from=${encodeURIComponent("/archive/a")}`);
+  const ordered = `WITH f AS (SELECT path,lead(path) OVER w nxt,row_number() OVER w rn FROM page_views WHERE ${human} AND session_id IS NOT NULL WINDOW w AS (PARTITION BY session_id ORDER BY occurred_at_ms,received_at_ms))`;
+  assert.equal(await rankValue("Entry pages", "/archive"), row(`${ordered} SELECT count(*) n FROM f WHERE rn=1 AND path='/archive'`, weekFrom).n);
+  assert.equal(await rankValue("Exit pages", "/archive"), row(`${ordered} SELECT count(*) n FROM f WHERE nxt IS NULL AND path='/archive'`, weekFrom).n);
+  assert.equal(await rankValue("Next from", "/archive/b"), 5);
+  assert.equal(await rankValue("Next from", "/archive"), 5);
+  await page.goto(`${originA}/shop/performance?range=7d&vital=inp`);
+  const inp = rows(`SELECT ps.inp_ms v FROM page_views pv JOIN page_summaries ps ON ps.site_id=pv.site_id AND ps.page_id=pv.page_id WHERE pv.${human.replaceAll(" AND ", " AND pv.")} AND ps.inp_ms IS NOT NULL ORDER BY 1`, weekFrom).map((sample) => sample.v);
+  // Summarised samples are rounded up to two significant figures: between the exact and the rounded p75.
+  const p75 = (list) => list.toSorted((a, b) => a - b)[Math.max(Math.ceil(list.length * 0.75), 1) - 1];
+  const roundedUp = (v) => v < 100 ? v : v < 1000 ? Math.ceil(v / 10) * 10 : Math.ceil(v / 100) * 100;
+  const shownInp = Number.parseInt(await page.locator("section.card", { hasText: "Interaction to Next Paint" }).locator(".metric-value-l").nth(1).textContent(), 10);
+  assert.ok(shownInp >= p75(inp) && shownInp <= p75(inp.map(roundedUp)), `INP p75 ${shownInp} ms, raw samples ${inp}`);
+  await page.goto(`${originA}/shop/pages?range=7d&page=${encodeURIComponent("/archive")}`);
+  assert.equal((await page.locator(".mini", { hasText: "Views" }).locator("strong").textContent()).trim(), String(row(`SELECT count(*) n FROM page_views WHERE ${human} AND path='/archive'`, weekFrom).n));
+  assert.equal((await page.locator(".row", { hasText: "intro" }).locator(".reach-pct").textContent()).trim(), "100%");
+  await page.goto(`${originA}/shop/errors?range=7d`);
+  const visits = row(`SELECT count(DISTINCT coalesce(session_id,page_id)) n FROM page_views WHERE ${human}`, weekFrom).n;
+  assert.match(await page.locator(".card", { hasText: "Sessions with an error" }).textContent(), new RegExp(` of ${visits.toLocaleString("en-US")}`));
   const rolledCountries = await (await api("/sites/shop/breakdown?dimension=country&range=7d")).json();
   const netherlands = rolledCountries.rows.find((entry) => entry.value === "NL");
   assert.deepEqual([netherlands.page_views, netherlands.visitor_days], [25, 10]);

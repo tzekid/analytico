@@ -192,23 +192,13 @@ fn pageSheet(ctx: *Ctx, base_view: data.View, path: []const u8, page_path: []con
         try pagePaths(ctx, base_view, page_path);
     } else {
         // Overview: four mini metrics with change, trend, next pages, sections.
-        var sql = data.Sql.init(arena);
-        try sql.add("SELECT count(*),count(DISTINCT pv.visitor_day_id),coalesce(avg(pv.active_ms),0),coalesce(avg(pv.max_scroll),0) FROM page_views pv WHERE ");
-        try sql.pageViews(view, view.range.start_ms, view.range.end_ms);
-        var now_values = try sql.prepare(ctx.db);
-        defer now_values.deinit();
-        _ = try now_values.step();
-        var prev_sql = data.Sql.init(arena);
-        try prev_sql.add("SELECT count(*),count(DISTINCT pv.visitor_day_id),coalesce(avg(pv.active_ms),0),coalesce(avg(pv.max_scroll),0) FROM page_views pv WHERE ");
-        try prev_sql.pageViews(view, view.range.prev_start_ms, view.range.prev_end_ms);
-        var prev_values = try prev_sql.prepare(ctx.db);
-        defer prev_values.deinit();
-        _ = try prev_values.step();
+        const now_values = try pageFigures(ctx, view, view.range.start_ms, view.range.end_ms);
+        const prev_values = try pageFigures(ctx, view, view.range.prev_start_ms, view.range.prev_end_ms);
         try w.writeAll("<div class=\"mini-metrics\">");
         const labels = [_][]const u8{ "Views", "Visitors", "Avg. time", "Scroll depth" };
         for (labels, 0..) |label, index| {
-            const current = now_values.columnFloat(index);
-            const previous = prev_values.columnFloat(index);
+            const current = now_values[index];
+            const previous = prev_values[index];
             try render(w, "<div class=\"mini\"><small>{label}</small><div class=\"row-between\"><strong>{value}</strong>", .{ .label = label, .value = switch (index) {
                 0, 1 => try std.fmt.allocPrint(arena, "{f}", .{html.int(@intFromFloat(current))}),
                 2 => try std.fmt.allocPrint(arena, "{f}", .{html.duration(@intFromFloat(current))}),
@@ -234,12 +224,58 @@ fn pageSheet(ctx: *Ctx, base_view: data.View, path: []const u8, page_path: []con
     try w.writeAll("</div></dialog>");
 }
 
+/// Views, visitors, average active time and average scroll of a page's
+/// view: the daily summaries up to their cut, raw rows after it.
+fn pageFigures(ctx: *Ctx, view: data.View, from: i64, to: i64) ![4]f64 {
+    const split = try data.rollupSplit(ctx.arena, ctx.db, view, from, to);
+    var sql = data.Sql.init(ctx.arena);
+    try sql.add("SELECT count(*),");
+    try sql.distinctAfter(view, "visitor_day_id", "''", from, split);
+    try sql.add(",count(pv.active_ms),coalesce(sum(pv.active_ms),0),coalesce(sum(pv.max_scroll),0) FROM page_views pv WHERE ");
+    try sql.pageViews(view, split, to);
+    var statement = try sql.prepare(ctx.db);
+    defer statement.deinit();
+    _ = try statement.step();
+    var sums: data.RollupSums = .{ .views = statement.columnInt(0), .visitors = statement.columnInt(1), .summaries = statement.columnInt(2), .active_ms = statement.columnInt(3), .scroll_sum = statement.columnInt(4) };
+    if (split > from) {
+        const rolled = try data.rollupSums(ctx.arena, ctx.db, view, from, split);
+        sums.views += rolled.views;
+        sums.visitors += rolled.visitors;
+        sums.summaries += rolled.summaries;
+        sums.active_ms += rolled.active_ms;
+        sums.scroll_sum += rolled.scroll_sum;
+    }
+    // Active time and scroll come together from a page's summary.
+    const measured: f64 = @floatFromInt(@max(1, sums.summaries));
+    return .{ @floatFromInt(sums.views), @floatFromInt(sums.visitors), @as(f64, @floatFromInt(sums.active_ms)) / measured, @as(f64, @floatFromInt(sums.scroll_sum)) / measured };
+}
+
+/// How many of a page's summaries reached each section: the daily summaries
+/// for a page on its own, raw rows for the rest.
 fn sectionsList(ctx: *Ctx, view: data.View, limit: i64) !void {
     const w = ctx.w();
-    var sql = data.Sql.init(ctx.arena);
+    const arena = ctx.arena;
+    const range = view.range;
+    const scope = data.rollupScope(view);
+    const page: ?[]const u8 = if (scope != null and std.mem.eql(u8, scope.?.dim, "page")) scope.?.key else null;
+    const split = if (page != null) try data.rollupSplit(arena, ctx.db, view, range.start_ms, range.end_ms) else range.start_ms;
+    var sql = data.Sql.init(arena);
     try sql.add("WITH s AS (SELECT ps.sections_json FROM page_views pv JOIN page_summaries ps ON ps.site_id=pv.site_id AND ps.page_id=pv.page_id WHERE ");
-    try sql.pageViews(view, view.range.start_ms, view.range.end_ms);
-    try sql.add(") SELECT j.value,count(*),(SELECT count(*) FROM s) FROM s, json_each(s.sections_json) j GROUP BY j.value ORDER BY 2 DESC LIMIT ");
+    try sql.pageViews(view, split, range.end_ms);
+    try sql.add("), r AS (SELECT j.value k,count(*) n FROM s, json_each(s.sections_json) j GROUP BY 1");
+    if (split > range.start_ms) {
+        try sql.add(" UNION ALL SELECT substr(key,length(");
+        try sql.str(page.?);
+        try sql.add(")+2),sum(views)");
+        try data.rollupWhere(&sql, view.site.id, .{ .dim = "section", .key = null }, range.start_ms, split);
+        try sql.add(" AND key>=");
+        try sql.str(try std.fmt.allocPrint(arena, "{s}\x1f", .{page.?}));
+        try sql.add(" AND key<");
+        try sql.str(try std.fmt.allocPrint(arena, "{s}\x20", .{page.?}));
+        try sql.add(" GROUP BY key");
+    }
+    // Out of every summary of the page, summarised ones under the empty key.
+    try sql.add(") SELECT k,sum(n),(SELECT count(*) FROM s)+(SELECT coalesce(sum(n),0) FROM r WHERE k='') FROM r WHERE k<>'' GROUP BY k ORDER BY 2 DESC,1 LIMIT ");
     try sql.int(limit);
     var statement = try sql.prepare(ctx.db);
     defer statement.deinit();
@@ -256,28 +292,15 @@ fn sectionsList(ctx: *Ctx, view: data.View, limit: i64) !void {
 
 fn nextPages(ctx: *Ctx, view: data.View, page_path: []const u8, limit: i64) !void {
     const w = ctx.w();
-    var sql = data.Sql.init(ctx.arena);
-    try sql.add("WITH o AS (SELECT pv.path,lead(pv.path) OVER(PARTITION BY pv.session_id ORDER BY pv.occurred_at_ms,pv.received_at_ms) nxt FROM page_views pv WHERE ");
-    try sql.pageViews(view, view.range.start_ms, view.range.end_ms);
-    try sql.add(" AND pv.session_id IS NOT NULL) SELECT coalesce(nxt,''),count(*),(SELECT count(*) FROM o WHERE path=");
-    try sql.str(page_path);
-    try sql.add(") FROM o WHERE path=");
-    try sql.str(page_path);
-    try sql.add(" GROUP BY 1 ORDER BY 2 DESC LIMIT ");
-    try sql.int(limit);
-    var statement = try sql.prepare(ctx.db);
-    defer statement.deinit();
+    const next = try journeys.nextSteps(ctx, view, page_path, limit);
     try w.writeAll("<div>");
     try subhead(w, "Where visitors go next");
     try w.writeAll("<div class=\"rank\">");
-    var any = false;
-    while (try statement.step() == .row) {
-        any = true;
-        const next = statement.columnText(0);
-        const share = @as(f64, @floatFromInt(statement.columnInt(1))) / @as(f64, @floatFromInt(@max(1, statement.columnInt(2)))) * 100;
-        try render(w, "<div class=\"rank-row\"><span class=\"bar\" style=\"width:{width:.0}%;background:{bar}\"></span><span class=\"rank-name\"><span>{name}</span></span><span></span><span class=\"rank-pct strong-pct\">{share:.0}%</span></div>", .{ .width = @max(share * 0.8, 8), .bar = if (next.len == 0) "var(--subtle)" else "var(--brand-wash)", .name = if (next.len == 0) "Left the site" else next, .share = share });
+    for (next.steps) |step| {
+        const share = @as(f64, @floatFromInt(step.count)) / @as(f64, @floatFromInt(@max(1, next.total))) * 100;
+        try render(w, "<div class=\"rank-row\"><span class=\"bar\" style=\"width:{width:.0}%;background:{bar}\"></span><span class=\"rank-name\"><span>{name}</span></span><span></span><span class=\"rank-pct strong-pct\">{share:.0}%</span></div>", .{ .width = @max(share * 0.8, 8), .bar = if (step.path.len == 0) "var(--subtle)" else "var(--brand-wash)", .name = if (step.path.len == 0) "Left the site" else step.path, .share = share });
     }
-    if (!any) try w.writeAll("<p class=\"hint\">Not enough sessions yet.</p>");
+    if (next.steps.len == 0) try w.writeAll("<p class=\"hint\">Not enough sessions yet.</p>");
     try w.writeAll("</div></div>");
 }
 
@@ -290,20 +313,11 @@ fn pagePaths(ctx: *Ctx, view: data.View, page_path: []const u8) !void {
         return;
     }
     try nextPages(ctx, view, page_path, 8);
-    var sql = data.Sql.init(ctx.arena);
-    try sql.add("WITH o AS (SELECT pv.path,lag(pv.path) OVER(PARTITION BY pv.session_id ORDER BY pv.occurred_at_ms,pv.received_at_ms) prv FROM page_views pv WHERE ");
-    try sql.pageViews(view, view.range.start_ms, view.range.end_ms);
-    try sql.add(" AND pv.session_id IS NOT NULL) SELECT coalesce(prv,''),count(*) FROM o WHERE path=");
-    try sql.str(page_path);
-    try sql.add(" GROUP BY 1 ORDER BY 2 DESC LIMIT 8");
-    var statement = try sql.prepare(ctx.db);
-    defer statement.deinit();
     try w.writeAll("<div>");
     try subhead(w, "Where visitors came from");
     try w.writeAll("<dl class=\"kv\">");
-    while (try statement.step() == .row) {
-        const previous = statement.columnText(0);
-        try render(w, "<dt>{name}</dt><dd>{count}</dd>", .{ .name = if (previous.len == 0) "Entered here" else previous, .count = html.int(statement.columnInt(1)) });
+    for (try journeys.previousSteps(ctx, view, page_path, 8)) |step| {
+        try render(w, "<dt>{name}</dt><dd>{count}</dd>", .{ .name = if (step.path.len == 0) "Entered here" else step.path, .count = html.int(step.count) });
     }
     try w.writeAll("</dl></div>");
 }
@@ -464,7 +478,7 @@ fn campaigns(ctx: *Ctx, view: data.View, path: []const u8) !void {
     // ID, whether seen from the browser, the server or both) minus refunds.
     try sql.add("WITH cv AS MATERIALIZED (SELECT pv.utm_campaign c,pv.session_id,pv.page_id,pv.visitor_day_id FROM page_views pv WHERE ");
     try sql.pageViews(view, view.range.start_ms, view.range.end_ms);
-    try sql.add(" AND coalesce(pv.utm_campaign,'')<>''), cs AS MATERIALIZED (SELECT session_id,max(c) c FROM cv WHERE session_id IS NOT NULL GROUP BY session_id), ev AS MATERIALIZED (SELECT coalesce(json_extract(e.properties_json,'$.campaign'),cs.c,cv.c) c,e.name,e.value_minor,e.currency,coalesce(e.order_id,e.event_id) o FROM events e LEFT JOIN cs ON cs.session_id=e.session_id LEFT JOIN cv ON cv.page_id=e.page_id WHERE ");
+    try sql.add(" AND pv.utm_campaign>''), cs AS MATERIALIZED (SELECT session_id,max(c) c FROM cv WHERE session_id IS NOT NULL GROUP BY session_id), ev AS MATERIALIZED (SELECT coalesce(json_extract(e.properties_json,'$.campaign'),cs.c,cv.c) c,e.name,e.value_minor,e.currency,coalesce(e.order_id,e.event_id) o FROM events e LEFT JOIN cs ON cs.session_id=e.session_id LEFT JOIN cv ON cv.page_id=e.page_id WHERE ");
     try sql.events(view, view.range.start_ms, view.range.end_ms);
     try sql.add("), sp AS (SELECT campaign c,sum(amount_minor) a,max(currency) cur FROM campaign_spend WHERE site_id=");
     try sql.int(site.id);

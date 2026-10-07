@@ -175,6 +175,8 @@ console.log("reads at that size:");
 await timed("workspace overview, 30 days", "/load?range=30d", cookie);
 await timed("workspace overview, 7 days", "/load", cookie);
 await timed("workspace pages, 30 days", "/load/pages?range=30d", cookie);
+await timed("workspace page sheet, 30 days", "/load/pages?range=30d&page=%2Fpricing", cookie);
+await timed("workspace page sheet paths, 30 days", "/load/pages?range=30d&page=%2Fpricing&pt=paths", cookie);
 await timed("workspace audience, 30 days", "/load/audience?range=30d", cookie);
 await timed("workspace retention", "/load/retention", cookie);
 await timed("workspace people, 30 days", "/load/people?range=30d", cookie);
