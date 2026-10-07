@@ -82,10 +82,19 @@ pub fn build(b: *std.Build) void {
     b.step("run", "Run Analytico").dependOn(&run.step);
 
     const tests = b.addTest(.{ .root_module = module });
-    b.step("test", "Run focused unit checks").dependOn(&b.addRunArtifact(tests).step);
+    const test_step = b.step("test", "Run focused unit checks");
+    test_step.dependOn(&b.addRunArtifact(tests).step);
+
+    // The push relay is a separate program, run by the app publisher.
+    const relay_module = b.createModule(.{ .root_source_file = b.path("relay/main.zig"), .target = target, .optimize = optimize });
+    const relay = b.addExecutable(.{ .name = "analytico-relay", .root_module = relay_module });
+    const install_relay = b.addInstallArtifact(relay, .{});
+    b.step("relay", "Build the push relay").dependOn(&install_relay.step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = relay_module })).step);
 
     const e2e = b.addSystemCommand(&.{ "node", "tests/e2e.mjs" });
     e2e.addArtifactArg(app);
     e2e.step.dependOn(b.getInstallStep());
+    e2e.step.dependOn(&install_relay.step);
     b.step("e2e", "Run the real SQLite and loopback HTTP journey").dependOn(&e2e.step);
 }
