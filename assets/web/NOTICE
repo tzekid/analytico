@@ -1,0 +1,29 @@
+Third-party assets embedded in the workspace
+
+fonts/roboto.woff2      Roboto, Copyright 2011 The Roboto Project Authors.
+                        SIL Open Font License 1.1. Latin subset.
+fonts/quando.woff2      Quando, Copyright 2011 Joana Correia (joana@joanacorreia.com).
+                        SIL Open Font License 1.1. Latin subset.
+fonts/quicksand.woff2   Quicksand, Copyright 2011 The Quicksand Project Authors.
+                        SIL Open Font License 1.1. Latin subset.
+icons.svg               Icons from Lucide (https://lucide.dev), ISC License,
+                        Copyright (c) for portions of Lucide are held by
+                        Cole Bemis 2013-2022 as part of Feather (MIT); all other
+                        copyright (c) for Lucide are held by Lucide Contributors.
+
+player.js, player.css    rrweb 2.1.7 replay player, MIT License, Copyright (c) 2018
+                        Contributors (https://github.com/rrweb-io/rrweb/graphs/contributors)
+                        and SmartX Inc. The recorder served to visitors (replay.js)
+                        is the same project's recorder. See vendor/rrweb/LICENSE.
+
+Location data, when installed by the operator with `analytico geo import`:
+IP to City Lite by DB-IP (https://db-ip.com), Creative Commons Attribution 4.0.
+
+Vendored Zig libraries (see vendor/):
+passcay                 WebAuthn verification, MIT License, Copyright (c) 2025 U-Zyn Chua.
+zbor                    CBOR, MIT License, Copyright (c) 2022 David P. Sugar.
+
+The SIL Open Font License 1.1 is available at https://openfontlicense.org.
+The ISC License permits use, copying, modification and distribution with or
+without fee, provided the copyright notice and permission notice appear in
+all copies.
