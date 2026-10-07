@@ -12,6 +12,11 @@ pub fn build(b: *std.Build) void {
     sqlite_translate.addIncludePath(b.path("vendor/sqlite"));
     const sqlite_module = sqlite_translate.createModule();
 
+    // Passkey verification: pure-Zig WebAuthn (passcay) and CBOR (zbor), vendored.
+    const zbor_module = b.createModule(.{ .root_source_file = b.path("vendor/zbor/src/main.zig"), .target = target, .optimize = optimize });
+    const passcay_module = b.createModule(.{ .root_source_file = b.path("vendor/passcay/src/public.zig"), .target = target, .optimize = optimize });
+    passcay_module.addImport("zbor", zbor_module);
+
     const module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -20,6 +25,8 @@ pub fn build(b: *std.Build) void {
     });
     module.addIncludePath(b.path("vendor/sqlite"));
     module.addImport("sqlite_c", sqlite_module);
+    module.addImport("passcay", passcay_module);
+    module.addImport("zbor", zbor_module);
     module.addCSourceFile(.{
         .file = b.path("vendor/sqlite/sqlite3.c"),
         .flags = &.{
@@ -30,11 +37,38 @@ pub fn build(b: *std.Build) void {
             "-DSQLITE_OMIT_LOAD_EXTENSION",
         },
     });
+    // The collector's scripts are cut from one source at build time.
+    const generator = b.addExecutable(.{ .name = "gen-trackers", .root_module = b.createModule(.{
+        .root_source_file = b.path("tools/gen_trackers.zig"),
+        .target = b.graph.host,
+    }) });
+    const generate = b.addRunArtifact(generator);
+    generate.addFileArg(b.path("assets/tracker-source.js"));
+    generate.addFileArg(b.path("assets/replay-recorder.js"));
+    generate.addFileArg(b.path("assets/overlay.js"));
+    generate.addFileArg(b.path("vendor/rrweb/record.min.js"));
+    const generated = generate.addOutputDirectoryArg("trackers");
     inline for (.{
-        .{ "tracker_lite", "assets/generated/tracker-lite.js" },
-        .{ "tracker_lite_rum", "assets/generated/tracker-lite-rum.js" },
-        .{ "tracker_session", "assets/generated/tracker-session.js" },
-        .{ "tracker_session_rum", "assets/generated/tracker-session-rum.js" },
+        .{ "tracker_lite", "tracker-lite.js" },
+        .{ "tracker_lite_rum", "tracker-lite-rum.js" },
+        .{ "tracker_session", "tracker-session.js" },
+        .{ "tracker_session_rum", "tracker-session-rum.js" },
+        .{ "tracker_full", "tracker-full.js" },
+        .{ "tracker_full_rum", "tracker-full-rum.js" },
+        .{ "tracker_replay", "replay.js" },
+        .{ "tracker_overlay", "overlay.js" },
+        .{ "tracker_hashes", "hashes.zig" },
+    }) |asset| module.addAnonymousImport(asset[0], .{ .root_source_file = generated.path(b, asset[1]) });
+    inline for (.{
+        .{ "web_player_js", "vendor/rrweb/replay.min.js" },
+        .{ "web_player_css", "vendor/rrweb/replay.min.css" },
+        .{ "web_css", "assets/web/app.css" },
+        .{ "web_js", "assets/web/app.js" },
+        .{ "web_icons", "assets/web/icons.svg" },
+        .{ "web_favicon", "assets/web/favicon.svg" },
+        .{ "font_roboto", "assets/web/fonts/roboto.woff2" },
+        .{ "font_quando", "assets/web/fonts/quando.woff2" },
+        .{ "font_quicksand", "assets/web/fonts/quicksand.woff2" },
     }) |asset| module.addAnonymousImport(asset[0], .{ .root_source_file = b.path(asset[1]) });
 
     const app = b.addExecutable(.{ .name = "analytico", .root_module = module });
@@ -48,7 +82,7 @@ pub fn build(b: *std.Build) void {
     const tests = b.addTest(.{ .root_module = module });
     b.step("test", "Run focused unit checks").dependOn(&b.addRunArtifact(tests).step);
 
-    const e2e = b.addSystemCommand(&.{ "bash", "tests/e2e.sh" });
+    const e2e = b.addSystemCommand(&.{ "node", "tests/e2e.mjs" });
     e2e.addArtifactArg(app);
     e2e.step.dependOn(b.getInstallStep());
     b.step("e2e", "Run the real SQLite and loopback HTTP journey").dependOn(&e2e.step);

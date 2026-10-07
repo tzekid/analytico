@@ -13,6 +13,8 @@
         "vendor/sqlite/sqlite3.c",
         "vendor/sqlite/sqlite3.h",
         "vendor/sqlite/README.md",
+        "vendor/passcay",
+        "vendor/zbor",
         "tests",
         "tools",
         "deploy",
