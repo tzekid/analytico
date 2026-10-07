@@ -397,6 +397,12 @@ fn api(ctx: *Ctx, parts: []const []const u8) !void {
     };
     const chosen = site orelse return apiError(ctx, .not_found, "unknown_site");
     if (is(parts[2], "notes")) return notes(ctx, chosen, parts[3..]);
+    if (parts.len == 3 and is(parts[2], "retention") and ctx.method == .GET) {
+        // Remembered visitors exist in Full mode only.
+        if (chosen.mode != .full) return apiError(ctx, .conflict, "full_mode_required");
+        try std.json.Stringify.value(try customers.retentionData(arena, ctx.shared, ctx.db, chosen.id, ctx.now()), .{}, w);
+        return ctx.json();
+    }
     if (parts.len == 3 and is(parts[2], "live") and ctx.method == .GET) {
         // The connection is handed to the live broadcaster, as for the workspace.
         ctx.live_site = chosen.id;

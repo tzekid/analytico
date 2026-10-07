@@ -412,6 +412,11 @@ await journey("v3", async (t) => {
   await page.getByRole("button", { name: "Create key" }).click();
   const key = await page.getByLabel("New API key").inputValue();
   const api = (path) => fetch(`${originA}/api/v1${path}`, { headers: { authorization: `Bearer ${key}` } });
+  // The apps read the same cached retention numbers as the workspace.
+  const retention = await (await api("/sites/shop/retention")).json();
+  assert.match(retention.first_week, /^\d{4}-\d{2}-\d{2}$/);
+  assert.deepEqual([retention.active.length, retention.cohorts.length, retention.cohorts[0].length], [8, 8, 8]);
+  assert.equal(JSON.parse(row("SELECT value FROM cache WHERE site_id=1 AND name='retention'").value).first_week, retention.first_week);
   assert.deepEqual((await (await api("/sites")).json()).sites.map((site) => site.slug).sort(), ["blog", "shop"]);
   const breakdown = await (await api("/sites/shop/breakdown?dimension=country&range=7d")).json();
   assert.ok(breakdown.rows.some((entry) => entry.value === "US"));

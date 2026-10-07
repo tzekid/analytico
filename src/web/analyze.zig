@@ -292,7 +292,7 @@ fn sectionsList(ctx: *Ctx, view: data.View, limit: i64) !void {
 
 fn nextPages(ctx: *Ctx, view: data.View, page_path: []const u8, limit: i64) !void {
     const w = ctx.w();
-    const next = try journeys.nextSteps(ctx, view, page_path, limit);
+    const next = try journeys.nextSteps(ctx.arena, ctx.db, view, page_path, limit);
     try w.writeAll("<div>");
     try subhead(w, "Where visitors go next");
     try w.writeAll("<div class=\"rank\">");
@@ -316,7 +316,7 @@ fn pagePaths(ctx: *Ctx, view: data.View, page_path: []const u8) !void {
     try w.writeAll("<div>");
     try subhead(w, "Where visitors came from");
     try w.writeAll("<dl class=\"kv\">");
-    for (try journeys.previousSteps(ctx, view, page_path, 8)) |step| {
+    for (try journeys.previousSteps(ctx.arena, ctx.db, view, page_path, 8)) |step| {
         try render(w, "<dt>{name}</dt><dd>{count}</dd>", .{ .name = if (step.path.len == 0) "Entered here" else step.path, .count = html.int(step.count) });
     }
     try w.writeAll("</dl></div>");

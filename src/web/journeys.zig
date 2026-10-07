@@ -341,7 +341,7 @@ pub fn pathsTab(ctx: *Ctx, view: data.View, path: []const u8) !void {
     const arena = ctx.arena;
     const w = ctx.w();
     // Visits split at midnight in the summaries, so they cover whole days only.
-    const split = try pathsSplit(ctx, view);
+    const split = try pathsSplit(arena, ctx.db, view);
     var landing_sql = data.Sql.init(arena);
     try landing_sql.add("WITH f AS (SELECT pv.path,row_number() OVER(PARTITION BY pv.session_id ORDER BY pv.occurred_at_ms,pv.received_at_ms) rn,row_number() OVER(PARTITION BY pv.session_id ORDER BY pv.occurred_at_ms DESC,pv.received_at_ms DESC) rl FROM page_views pv WHERE ");
     try landing_sql.pageViews(view, split, view.range.end_ms);
@@ -377,9 +377,9 @@ pub fn pathsTab(ctx: *Ctx, view: data.View, path: []const u8) !void {
 }
 
 /// Raw rows from here on; whole days before it come from the summaries.
-fn pathsSplit(ctx: *Ctx, view: data.View) !i64 {
+fn pathsSplit(arena: std.mem.Allocator, db: *db_mod.Db, view: data.View) !i64 {
     if (view.filters.len != 0) return view.range.start_ms;
-    const split = try data.rollupSplit(ctx.arena, ctx.db, view, view.range.start_ms, view.range.end_ms);
+    const split = try data.rollupSplit(arena, db, view, view.range.start_ms, view.range.end_ms);
     return @max(view.range.start_ms, split - @mod(split, data.day_ms));
 }
 
@@ -387,9 +387,9 @@ pub const PathStep = struct { path: []const u8, count: i64 };
 
 /// Where visits went right after `from` ("" where they ended), most first,
 /// and how many steps left `from` in all.
-pub fn nextSteps(ctx: *Ctx, view: data.View, from: []const u8, limit: i64) !struct { steps: []PathStep, total: i64 } {
-    const split = try pathsSplit(ctx, view);
-    var sql = data.Sql.init(ctx.arena);
+pub fn nextSteps(arena: std.mem.Allocator, db: *db_mod.Db, view: data.View, from: []const u8, limit: i64) !struct { steps: []PathStep, total: i64 } {
+    const split = try pathsSplit(arena, db, view);
+    var sql = data.Sql.init(arena);
     try sql.add("WITH o AS (SELECT pv.path,lead(pv.path) OVER(PARTITION BY pv.session_id ORDER BY pv.occurred_at_ms,pv.received_at_ms) nxt FROM page_views pv WHERE ");
     try sql.pageViews(view, split, view.range.end_ms);
     try sql.add(" AND pv.session_id IS NOT NULL), r AS (SELECT coalesce(nxt,'') k,count(*) n FROM o WHERE path=");
@@ -401,28 +401,28 @@ pub fn nextSteps(ctx: *Ctx, view: data.View, from: []const u8, limit: i64) !stru
         try sql.add(")+2),sum(views)");
         try data.rollupWhere(&sql, view.site.id, .{ .dim = "next", .key = null }, view.range.start_ms, split);
         try sql.add(" AND key>=");
-        try sql.str(try std.fmt.allocPrint(ctx.arena, "{s}\x1f", .{from}));
+        try sql.str(try std.fmt.allocPrint(arena, "{s}\x1f", .{from}));
         try sql.add(" AND key<");
-        try sql.str(try std.fmt.allocPrint(ctx.arena, "{s}\x20", .{from}));
+        try sql.str(try std.fmt.allocPrint(arena, "{s}\x20", .{from}));
         try sql.add(" GROUP BY key");
     }
     try sql.add(") SELECT k,sum(n),sum(sum(n)) OVER() FROM r GROUP BY k ORDER BY 2 DESC,1 LIMIT ");
     try sql.int(limit);
-    var statement = try sql.prepare(ctx.db);
+    var statement = try sql.prepare(db);
     defer statement.deinit();
     var steps: std.ArrayList(PathStep) = .empty;
     var total: i64 = 0;
     while (try statement.step() == .row) {
-        try steps.append(ctx.arena, .{ .path = try ctx.arena.dupe(u8, statement.columnText(0)), .count = statement.columnInt(1) });
+        try steps.append(arena, .{ .path = try arena.dupe(u8, statement.columnText(0)), .count = statement.columnInt(1) });
         total = statement.columnInt(2);
     }
     return .{ .steps = steps.items, .total = total };
 }
 
 /// Where visits were right before `to` ("" where they entered), most first.
-pub fn previousSteps(ctx: *Ctx, view: data.View, to: []const u8, limit: i64) ![]PathStep {
-    const split = try pathsSplit(ctx, view);
-    var sql = data.Sql.init(ctx.arena);
+pub fn previousSteps(arena: std.mem.Allocator, db: *db_mod.Db, view: data.View, to: []const u8, limit: i64) ![]PathStep {
+    const split = try pathsSplit(arena, db, view);
+    var sql = data.Sql.init(arena);
     try sql.add("WITH o AS (SELECT pv.path,lag(pv.path) OVER(PARTITION BY pv.session_id ORDER BY pv.occurred_at_ms,pv.received_at_ms) prv FROM page_views pv WHERE ");
     try sql.pageViews(view, split, view.range.end_ms);
     try sql.add(" AND pv.session_id IS NOT NULL), r AS (SELECT coalesce(prv,'') k,count(*) n FROM o WHERE path=");
@@ -439,16 +439,16 @@ pub fn previousSteps(ctx: *Ctx, view: data.View, to: []const u8, limit: i64) ![]
     }
     try sql.add(") SELECT k,sum(n) FROM r GROUP BY k HAVING sum(n)>0 ORDER BY 2 DESC,1 LIMIT ");
     try sql.int(limit);
-    var statement = try sql.prepare(ctx.db);
+    var statement = try sql.prepare(db);
     defer statement.deinit();
     var steps: std.ArrayList(PathStep) = .empty;
-    while (try statement.step() == .row) try steps.append(ctx.arena, .{ .path = try ctx.arena.dupe(u8, statement.columnText(0)), .count = statement.columnInt(1) });
+    while (try statement.step() == .row) try steps.append(arena, .{ .path = try arena.dupe(u8, statement.columnText(0)), .count = statement.columnInt(1) });
     return steps.items;
 }
 
 fn nextPagesFrom(ctx: *Ctx, view: data.View, from: []const u8) !void {
     const w = ctx.w();
-    const next = try nextSteps(ctx, view, from, 8);
+    const next = try nextSteps(ctx.arena, ctx.db, view, from, 8);
     try render(w, "<div class=\"card-head\"><h2>Next from <span class=\"mono\">{from}</span></h2></div><div class=\"rank\">", .{ .from = from });
     for (next.steps) |step| {
         const share = @as(f64, @floatFromInt(step.count)) / @as(f64, @floatFromInt(@max(1, next.total))) * 100;

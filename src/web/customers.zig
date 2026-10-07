@@ -318,27 +318,44 @@ pub fn retention(ctx: *Ctx, site: data.Site) !void {
     if (ctx.can(.admin)) try render(w, "<a class=\"link ml-auto nobreak\" href=\"/settings/sites?site={slug}\">Consent settings →</a>", .{ .slug = site.slug });
     try w.writeAll("</div>");
 
-    try w.writeAll(try retentionReport(arena, ctx.shared, ctx.db, site.id, now));
+    try retentionBody(arena, try retentionData(arena, ctx.shared, ctx.db, site.id, now), w);
     return layout.end(ctx);
 }
 
-/// The charts and cohorts below, computed once a day: counting every
-/// remembered visitor's weeks takes seconds on a big site, and the weeks
-/// change slowly. The first view of the day, or the background job just
-/// after midnight, computes them.
-pub fn retentionReport(arena: std.mem.Allocator, shared: *server.Shared, db: *db_mod.Db, site_id: i64, now: i64) ![]const u8 {
+/// The last eight weeks of remembered visitors: active and returning per
+/// week, who comes back by first source, and weekly cohorts. Computed once a
+/// day: counting every remembered visitor's weeks takes seconds on a big
+/// site, and the weeks change slowly. The workspace and the apps read the
+/// same cached numbers; the background job computes them just after
+/// midnight, or the first view of the day does.
+pub const Retention = struct {
+    pub const Back = struct { label: []const u8, total: i64, back: i64 };
+    /// The first week's Monday, "2026-08-17".
+    first_week: []const u8,
+    active: [8]i64,
+    returning: [8]i64,
+    sources: []const Back,
+    /// cohorts[c][o]: of week c's new visitors, how many were active o weeks later.
+    cohorts: [8][8]i64,
+};
+
+pub fn retentionData(arena: std.mem.Allocator, shared: *server.Shared, db: *db_mod.Db, site_id: i64, now: i64) !Retention {
     const day = data.dateText(now);
-    if (try db.scalar(arena, ?[]const u8, "SELECT value FROM cache WHERE site_id=? AND name='retention' AND day=?", .{ site_id, &day })) |cached| return cached;
+    if (try db.scalar(arena, ?[]const u8, "SELECT value FROM cache WHERE site_id=? AND name='retention' AND day=?", .{ site_id, &day })) |cached| {
+        if (std.json.parseFromSliceLeaky(Retention, arena, cached, .{})) |value| return value else |_| {}
+    }
+    const value = try computeRetention(arena, db, site_id, now);
     var out: std.Io.Writer.Allocating = .init(arena);
-    try retentionBody(arena, db, site_id, now, &out.writer);
+    try std.json.Stringify.value(value, .{}, &out.writer);
     const write = shared.lockWrite();
     defer shared.unlockWrite();
     try write.run(arena, "INSERT INTO cache(site_id,name,day,value) VALUES(?,'retention',?,?) ON CONFLICT DO UPDATE SET day=excluded.day,value=excluded.value", .{ site_id, &day, out.written() });
-    return out.written();
+    return value;
 }
 
-fn retentionBody(arena: std.mem.Allocator, db: *db_mod.Db, site_id: i64, now: i64, w: *std.Io.Writer) !void {
+fn computeRetention(arena: std.mem.Allocator, db: *db_mod.Db, site_id: i64, now: i64) !Retention {
     const origin = weekStart(now) - 7 * week_ms;
+    var out: Retention = .{ .first_week = try arena.dupe(u8, &data.dateText(origin)), .active = @splat(0), .returning = @splat(0), .sources = &.{}, .cohorts = @splat(@splat(0)) };
     // Active visitors per week, split into new and returning: summarised
     // weeks plus the raw rows of days not summarised yet.
     const origin_week = rollups.weekIndex(origin);
@@ -348,18 +365,61 @@ fn retentionBody(arena: std.mem.Allocator, db: *db_mod.Db, site_id: i64, now: i6
         \\ SELECT w.week-?3,count(*),sum(v.first_seen_ms<(w.week*7-3)*86400000) FROM w JOIN visitors v ON v.site_id=?1 AND v.visitor_id=w.visitor_id GROUP BY w.week
     );
     defer weekly.deinit();
-    try weekly.bindInt(1, site_id);
-    try weekly.bindInt(2, origin);
-    try weekly.bindInt(3, origin_week);
-    try weekly.bindInt(4, rolled);
-    var active: [8]i64 = @splat(0);
-    var returning: [8]i64 = @splat(0);
+    try weekly.bindAll(.{ site_id, origin, origin_week, rolled });
     while (try weekly.step() == .row) {
         const index = weekly.columnInt(0);
         if (index < 0 or index >= 8) continue;
-        active[@intCast(index)] = weekly.columnInt(1);
-        returning[@intCast(index)] = weekly.columnInt(2);
+        out.active[@intCast(index)] = weekly.columnInt(1);
+        out.returning[@intCast(index)] = weekly.columnInt(2);
     }
+
+    // Who comes back: visitors first seen 4 to 8 weeks ago (so each had the
+    // full 4 weeks to return), by first source, merged by display name.
+    var sources = try db.prepare(arena,
+        \\SELECT v.first_source,count(*),sum(EXISTS(SELECT 1 FROM visitor_weeks x WHERE x.site_id=v.site_id AND x.visitor_id=v.visitor_id AND x.week>(v.first_seen_ms/86400000+3)/7 AND x.week<=(v.first_seen_ms/86400000+3)/7+4))
+        \\FROM visitors v WHERE v.site_id=? AND v.first_seen_ms>=? AND v.first_seen_ms<? GROUP BY 1
+    );
+    defer sources.deinit();
+    try sources.bindAll(.{ site_id, origin, now - 4 * week_ms });
+    var backs: std.ArrayList(Retention.Back) = .empty;
+    collect: while (try sources.step() == .row) {
+        const label = try overview.sourceLabel(arena, sources.columnText(0));
+        for (backs.items) |*entry| if (std.mem.eql(u8, entry.label, label)) {
+            entry.total += sources.columnInt(1);
+            entry.back += sources.columnInt(2);
+            continue :collect;
+        };
+        try backs.append(arena, .{ .label = label, .total = sources.columnInt(1), .back = sources.columnInt(2) });
+    }
+    const byRate = struct {
+        fn less(_: void, a: Retention.Back, b: Retention.Back) bool {
+            if (a.back * b.total != b.back * a.total) return a.back * b.total > b.back * a.total;
+            return a.total > b.total;
+        }
+    }.less;
+    std.mem.sort(Retention.Back, backs.items, {}, byRate);
+    out.sources = backs.items[0..@min(6, backs.items.len)];
+
+    // Weekly cohorts.
+    var cohorts = try db.prepare(arena, weeks_cte ++
+        \\, v AS (SELECT visitor_id,(first_seen_ms/86400000+3)/7-?3 cw FROM visitors WHERE site_id=?1 AND first_seen_ms>=?2)
+        \\SELECT v.cw,w.week-?3-v.cw,count(*) FROM v JOIN w ON w.visitor_id=v.visitor_id WHERE w.week-?3>=v.cw GROUP BY 1,2
+    );
+    defer cohorts.deinit();
+    try cohorts.bindAll(.{ site_id, origin, origin_week, rolled });
+    while (try cohorts.step() == .row) {
+        const cohort = cohorts.columnInt(0);
+        const offset = cohorts.columnInt(1);
+        if (cohort < 0 or cohort >= 8 or offset < 0 or offset >= 8) continue;
+        out.cohorts[@intCast(cohort)][@intCast(offset)] = cohorts.columnInt(2);
+    }
+    return out;
+}
+
+fn retentionBody(arena: std.mem.Allocator, numbers: Retention, w: *std.Io.Writer) !void {
+    const origin = try data.parseDate(numbers.first_week);
+    const active = numbers.active;
+    const returning = numbers.returning;
     var peak: i64 = 1;
     for (active) |value| peak = @max(peak, value);
     const last_share = if (active[7] == 0) 0 else @as(f64, @floatFromInt(returning[7])) / @as(f64, @floatFromInt(active[7])) * 100;
@@ -379,64 +439,17 @@ fn retentionBody(arena: std.mem.Allocator, db: *db_mod.Db, site_id: i64, now: i6
         });
     }
     try w.writeAll("</div></section>");
-
-    // Who comes back: visitors first seen 4 to 8 weeks ago (so each had the
-    // full 4 weeks to return), by first source, merged by display name.
-    var sources = try db.prepare(arena,
-        \\SELECT v.first_source,count(*),sum(EXISTS(SELECT 1 FROM visitor_weeks x WHERE x.site_id=v.site_id AND x.visitor_id=v.visitor_id AND x.week>(v.first_seen_ms/86400000+3)/7 AND x.week<=(v.first_seen_ms/86400000+3)/7+4))
-        \\FROM visitors v WHERE v.site_id=? AND v.first_seen_ms>=? AND v.first_seen_ms<? GROUP BY 1
-    );
-    defer sources.deinit();
-    try sources.bindInt(1, site_id);
-    try sources.bindInt(2, origin);
-    try sources.bindInt(3, now - 4 * week_ms);
-    const Back = struct { label: []const u8, total: i64, back: i64 };
-    var backs: std.ArrayList(Back) = .empty;
-    collect: while (try sources.step() == .row) {
-        const label = try overview.sourceLabel(arena, sources.columnText(0));
-        for (backs.items) |*entry| if (std.mem.eql(u8, entry.label, label)) {
-            entry.total += sources.columnInt(1);
-            entry.back += sources.columnInt(2);
-            continue :collect;
-        };
-        try backs.append(arena, .{ .label = label, .total = sources.columnInt(1), .back = sources.columnInt(2) });
-    }
-    const byRate = struct {
-        fn less(_: void, a: Back, b: Back) bool {
-            if (a.back * b.total != b.back * a.total) return a.back * b.total > b.back * a.total;
-            return a.total > b.total;
-        }
-    }.less;
-    std.mem.sort(Back, backs.items, {}, byRate);
     try w.writeAll("<section class=\"card\"><div class=\"card-head\"><div><h2>Who comes back</h2><p class=\"hint\">Came back within 4 weeks of their first visit, by first source</p></div></div><div class=\"stack\">");
-    for (backs.items[0..@min(6, backs.items.len)]) |entry| {
+    for (numbers.sources) |entry| {
         const rate = @as(f64, @floatFromInt(entry.back)) / @as(f64, @floatFromInt(@max(1, entry.total))) * 100;
         try render(w, "<div class=\"source-money\"><div class=\"row-between\"><strong>{label}</strong><span>{rate:.0}% <span class=\"hint\">of {total}</span></span></div><div class=\"meter blue\"><i style=\"width:{rate:.0}%\"></i></div></div>", .{ .label = entry.label, .rate = rate, .total = html.int(entry.total) });
     }
-    if (backs.items.len == 0) try w.writeAll("<p class=\"hint\">Shows once visitors first seen at least 4 weeks ago have had time to come back.</p>");
+    if (numbers.sources.len == 0) try w.writeAll("<p class=\"hint\">Shows once visitors first seen at least 4 weeks ago have had time to come back.</p>");
     try w.writeAll("</div></section></div>");
-
-    // Weekly cohorts.
-    var cohorts = try db.prepare(arena, weeks_cte ++
-        \\, v AS (SELECT visitor_id,(first_seen_ms/86400000+3)/7-?3 cw FROM visitors WHERE site_id=?1 AND first_seen_ms>=?2)
-        \\SELECT v.cw,w.week-?3-v.cw,count(*) FROM v JOIN w ON w.visitor_id=v.visitor_id WHERE w.week-?3>=v.cw GROUP BY 1,2
-    );
-    defer cohorts.deinit();
-    try cohorts.bindInt(1, site_id);
-    try cohorts.bindInt(2, origin);
-    try cohorts.bindInt(3, origin_week);
-    try cohorts.bindInt(4, rolled);
-    var grid: [8][8]i64 = @splat(@splat(0));
-    while (try cohorts.step() == .row) {
-        const cohort = cohorts.columnInt(0);
-        const offset = cohorts.columnInt(1);
-        if (cohort < 0 or cohort >= 8 or offset < 0 or offset >= 8) continue;
-        grid[@intCast(cohort)][@intCast(offset)] = cohorts.columnInt(2);
-    }
     try w.writeAll("<section class=\"card mt-16\"><div class=\"card-head\"><div><h2>Weekly cohorts</h2><p class=\"hint\">Share of each week’s new visitors who came back in the weeks after</p></div></div><div class=\"table-wrap\"><table class=\"cohorts\"><thead><tr><th>Week</th><th class=\"r\">New visitors</th>");
     for (0..8) |index| try render(w, "<th>Week {n}</th>", .{ .n = index });
     try w.writeAll("</tr></thead><tbody>");
-    for (grid, 0..) |row, cohort| {
+    for (numbers.cohorts, 0..) |row, cohort| {
         const date = data.civil(origin + @as(i64, @intCast(cohort)) * week_ms);
         try render(w, "<tr><td>{day} {month}</td><td class=\"r\">{new}</td>", .{ .day = date.day, .month = data.month_names[date.month - 1], .new = html.int(row[0]) });
         for (row, 0..) |value, offset| {

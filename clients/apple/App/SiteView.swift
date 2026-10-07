@@ -3,7 +3,7 @@ import SwiftUI
 
 /// What a screen in the sidebar shows.
 enum Screen: String, CaseIterable, Identifiable, Hashable {
-    case overview, live, pages, sources, campaigns, search, countries, devices, events, goals, errors, performance, revenue
+    case overview, live, pages, paths, sources, campaigns, search, countries, devices, events, goals, errors, performance, revenue, retention
 
     var id: String { rawValue }
 
@@ -12,6 +12,8 @@ enum Screen: String, CaseIterable, Identifiable, Hashable {
         case .overview: "Overview"
         case .live: "Live"
         case .pages: "Pages"
+        case .paths: "Paths"
+        case .retention: "Retention"
         case .sources: "Sources"
         case .campaigns: "Campaigns"
         case .search: "Site search"
@@ -30,6 +32,8 @@ enum Screen: String, CaseIterable, Identifiable, Hashable {
         case .overview: "square.grid.2x2"
         case .live: "dot.radiowaves.left.and.right"
         case .pages: "doc.text"
+        case .paths: "point.topleft.down.to.point.bottomright.curvepath"
+        case .retention: "arrow.uturn.backward.circle"
         case .sources: "arrow.triangle.branch"
         case .campaigns: "megaphone"
         case .search: "magnifyingglass"
@@ -49,6 +53,8 @@ enum Screen: String, CaseIterable, Identifiable, Hashable {
         case .overview: nil
         case .live: "sessions"
         case .pages, .search: "pages"
+        case .paths: "sessions"
+        case .retention: "retention"
         case .sources, .campaigns: "acquisition"
         case .countries, .devices: "audience"
         case .events, .goals: "events"
@@ -60,10 +66,10 @@ enum Screen: String, CaseIterable, Identifiable, Hashable {
 
     static let groups: [(String, [Screen])] = [
         ("", [.overview, .live]),
-        ("Traffic", [.pages, .sources, .campaigns, .search]),
+        ("Traffic", [.pages, .paths, .sources, .campaigns, .search]),
         ("Audience", [.countries, .devices]),
         ("Behaviour", [.events, .goals, .errors, .performance]),
-        ("Customers", [.revenue]),
+        ("Customers", [.revenue, .retention]),
     ]
 }
 
@@ -191,6 +197,8 @@ struct SiteView: View {
         switch screen ?? .overview {
         case .overview: OverviewView(client: client, site: site, view: $view)
         case .live: LiveView(client: client, site: site)
+        case .paths: PathsView(client: client, site: site, view: $view)
+        case .retention: RetentionView(client: client, site: site)
         case let report: ReportScreen(client: client, site: site, screen: report, view: $view)
         }
     }

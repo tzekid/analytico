@@ -530,10 +530,14 @@ fn frictionReport(input: Input) !Table {
 fn pathsReport(input: Input) !Table {
     const from_path = input.get("from_path").?;
     try domain.validatePath(from_path);
-    var statement = try input.db.prepare(input.arena, paths_sql);
-    defer statement.deinit();
-    try statement.bindAll(.{ input.view.site.id, input.view.range.start_ms, input.view.range.end_ms, from_path, input.int("limit", 100, 1, 1000) });
-    return sqlTable(input.arena, &statement);
+    // Whole days come from the daily summaries, like the workspace's paths.
+    const next = try @import("journeys.zig").nextSteps(input.arena, input.db, input.view, from_path, input.int("limit", 100, 1, 1000) + 1);
+    var table: TableBuilder = .{ .arena = input.arena, .columns = &.{ "from_path", "next_path", "transitions" } };
+    for (next.steps) |step| {
+        // The catalog has always listed only steps to another page.
+        if (step.path.len != 0) try table.add(.{ from_path, step.path, step.count });
+    }
+    return table.done();
 }
 
 fn economicsReport(input: Input) !Table {
@@ -704,14 +708,6 @@ const friction_sql =
     \\AND (?4='' OR json_extract(e.properties_json,'$.flow')=?4)
     \\AND e.name IN ('flow_step_failed','flow_backtracked','action_failed','action_unresponsive','rage_click')
     \\GROUP BY e.name,step,action,error_code,attempt_bucket,dwell_bucket,click_bucket ORDER BY occurrences DESC LIMIT ?5
-;
-const paths_sql =
-    \\WITH ordered AS (
-    \\ SELECT session_id,path,lead(path) OVER(PARTITION BY session_id ORDER BY occurred_at_ms,received_at_ms) next_path
-    \\ FROM page_views WHERE internal=0 AND traffic_class IN ('human_like','unknown') AND site_id=?1 AND received_at_ms>=?2 AND received_at_ms<?3 AND session_id IS NOT NULL
-    \\)
-    \\SELECT path AS from_path,next_path,count(*) AS transitions FROM ordered
-    \\WHERE path=?4 AND next_path IS NOT NULL GROUP BY path,next_path ORDER BY transitions DESC,next_path LIMIT ?5
 ;
 const economics_sql =
     \\WITH cs AS MATERIALIZED (

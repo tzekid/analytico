@@ -45,7 +45,7 @@ struct ReportSpec {
             ReportSpec(report: "performance", label: "metric", detail: "page_type", columns: [.init(key: "p75", title: "p75", kind: .vital), .init(key: "samples", title: "Samples", kind: .count)], empty: "No Web Vitals yet. Use the RUM tracker to measure them.")
         case .revenue:
             ReportSpec(report: "revenue", label: "product", columns: [.init(key: "orders", title: "Orders", kind: .count), .init(key: "revenue_minor", title: "Revenue", kind: .money), .init(key: "add_to_carts", title: "Carts", kind: .count)], empty: "No orders in this period.")
-        case .overview, .live:
+        case .overview, .live, .paths, .retention:
             fatalError("\(screen) has its own screen")
         }
     }

@@ -84,6 +84,28 @@ public struct Report: Codable, Sendable {
     public var rows: [Row]
 }
 
+/// Eight weeks of remembered visitors (Full mode), computed once a day.
+public struct Retention: Codable, Sendable {
+    public struct Source: Codable, Sendable, Hashable {
+        public var label: String
+        public var total: Int
+        public var back: Int
+    }
+
+    /// The first week's Monday, "2026-08-17".
+    public var firstWeek: String
+    public var active: [Int]
+    public var returning: [Int]
+    public var sources: [Source]
+    /// cohorts[c][o]: of week c's new visitors, how many were active o weeks later.
+    public var cohorts: [[Int]]
+
+    enum CodingKeys: String, CodingKey {
+        case firstWeek = "first_week"
+        case active, returning, sources, cohorts
+    }
+}
+
 /// What the live stream reports every few seconds.
 public struct LiveUpdate: Codable, Sendable, Equatable {
     public var online: Int
@@ -122,6 +144,11 @@ public actor Client {
     /// A catalog report for a site and view, plus report-specific parameters.
     public func report(_ name: String, site: String, view: ViewState, parameters: [String: String] = [:]) async throws -> Report {
         try await get(Report.self, "sites/\(site)/\(name)", query: view.queryItems + parameters.sorted { $0.key < $1.key }.map { URLQueryItem(name: $0.key, value: $0.value) })
+    }
+
+    /// Retention for a Full-mode site; `ClientError.server(409, "full_mode_required")` otherwise.
+    public func retention(site: String) async throws -> Retention {
+        try await get(Retention.self, "sites/\(site)/retention")
     }
 
     public func notes(site: String, view: ViewState) async throws -> [Note] {

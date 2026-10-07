@@ -57,7 +57,7 @@ fn tick(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db) !void {
 /// Each Full site's retention report for the new day, so nobody waits for it.
 fn retentionReports(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, at: i64) !void {
     for (try data.sites(arena, db)) |site| {
-        if (site.mode == .full and site.enabled) _ = try @import("customers.zig").retentionReport(arena, shared, db, site.id, at);
+        if (site.mode == .full and site.enabled) _ = try @import("customers.zig").retentionData(arena, shared, db, site.id, at);
     }
 }
 
