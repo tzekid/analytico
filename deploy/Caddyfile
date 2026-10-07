@@ -7,10 +7,6 @@ analytics.example.com {
 		-Server
 	}
 
-	request_body {
-		max_size 8KiB
-	}
-
 	@tracker path /t/*
 	handle @tracker {
 		reverse_proxy 127.0.0.1:4318 {
@@ -26,6 +22,9 @@ analytics.example.com {
 
 	@events path /e
 	handle @events {
+		request_body {
+			max_size 8KiB
+		}
 		reverse_proxy 127.0.0.1:4318 {
 			header_up X-Forwarded-For {http.request.remote.host}
 			header_up -CF-IPCountry
@@ -37,7 +36,42 @@ analytics.example.com {
 		}
 	}
 
-	handle {
+	# Session replay chunks (gzip, at most 256 KiB) and heatmap overlay data.
+	@replay path /r /h
+	handle @replay {
+		request_body {
+			max_size 256KiB
+		}
+		reverse_proxy 127.0.0.1:4318 {
+			header_up X-Forwarded-For {http.request.remote.host}
+			header_up -CF-IPCountry
+
+			transport http {
+				dial_timeout 2s
+				response_header_timeout 5s
+			}
+		}
+	}
+
+	# Signed server ingestion and probes stay on loopback.
+	@private path /i /healthz /readyz
+	handle @private {
 		respond "not found" 404
+	}
+
+	# The workspace, its assets, OAuth and MCP.
+	handle {
+		request_body {
+			max_size 2MiB
+		}
+		reverse_proxy 127.0.0.1:4318 {
+			header_up X-Forwarded-For {http.request.remote.host}
+			header_up -CF-IPCountry
+
+			transport http {
+				dial_timeout 2s
+				response_header_timeout 120s
+			}
+		}
 	}
 }

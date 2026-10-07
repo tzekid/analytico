@@ -1,5 +1,5 @@
 [Unit]
-Description=Analytico CLI-first analytics collector
+Description=Analytico analytics collector and workspace
 Documentation=https://github.com/tzekid/analytico
 After=network-online.target
 Wants=network-online.target
@@ -11,7 +11,7 @@ ExecStartPre=%h/.local/opt/analytico/current/bin/analytico doctor --data %h/.loc
 ExecStart=%h/.local/opt/analytico/current/bin/analytico serve --data %h/.local/share/analytico-sqlite --listen 127.0.0.1:4318
 Restart=on-failure
 RestartSec=2s
-TimeoutStopSec=3s
+TimeoutStopSec=10s
 KillSignal=SIGTERM
 UMask=0077
 
@@ -27,9 +27,9 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictNamespaces=yes
 RestrictRealtime=yes
 LockPersonality=yes
-MemoryHigh=128M
-MemoryMax=192M
-TasksMax=32
+MemoryHigh=256M
+MemoryMax=384M
+TasksMax=64
 LimitNOFILE=1024
 CapabilityBoundingSet=
 AmbientCapabilities=
