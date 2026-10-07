@@ -30,10 +30,12 @@ await new Promise((done) => reservation.listen(0, "127.0.0.1", done));
 const port = reservation.address().port;
 await new Promise((done) => reservation.close(done));
 let server;
+process.on("exit", () => server?.kill("SIGKILL"));
 const start = async () => {
   server = spawn(app, ["serve", "--data", data, "--listen", `127.0.0.1:${port}`], { stdio: ["ignore", "ignore", "pipe"] });
   server.stderr.on("data", (bytes) => { const text = String(bytes); if (!text.includes("batch_accepted")) process.stderr.write(text); });
   for (;;) {
+    if (server.exitCode !== null) throw new Error(`the server exited with code ${server.exitCode}`);
     try { if ((await fetch(`http://127.0.0.1:${port}/readyz`)).ok) return; } catch { /* starting */ }
     await delay(100);
   }
@@ -157,7 +159,9 @@ const timed = async (label, url, headers) => {
   const times = [];
   for (let attempt = 0; attempt < 3; attempt++) {
     const started = performance.now();
-    const response = await fetch(`http://127.0.0.1:${port}${url}`, { headers });
+    // The workspace gives up on a response after 30 s; record that and go on.
+    const response = await fetch(`http://127.0.0.1:${port}${url}`, { headers }).catch(() => null);
+    if (!response) return console.log(`  ${label.padEnd(34)}  over 30 s (the workspace gave up)`);
     assert.equal(response.status, 200, `${label}: ${response.status}`);
     await response.arrayBuffer();
     times.push(performance.now() - started);

@@ -481,16 +481,32 @@ pub fn people(ctx: *Ctx, site: data.Site) !void {
 
     // People active in the period, with every visitor that is the same person
     // (by user ID); then each measure in one indexed join over those visitors.
+    // CROSS JOIN keeps those visitors outermost: with the site bound as a
+    // parameter, SQLite would otherwise scan every page view and event.
+    // Without a search, the 2,000 visitors seen last (and their other devices)
+    // are enough for the list, straight from the last-seen index.
     var sql = data.Sql.init(arena);
-    try sql.add("WITH v AS MATERIALIZED (SELECT visitor_id,coalesce(user_hash,visitor_id) k,user_hash,first_seen_ms,last_seen_ms,first_source FROM visitors WHERE site_id=");
-    try sql.int(site.id);
-    try sql.add(" AND (last_seen_ms>=");
-    try sql.int(range.start_ms);
-    try sql.add(" OR user_hash IN (SELECT user_hash FROM visitors WHERE site_id=");
-    try sql.int(site.id);
-    try sql.add(" AND last_seen_ms>=");
-    try sql.int(range.start_ms);
-    try sql.add(" AND user_hash IS NOT NULL))");
+    if (query.len == 0) {
+        try sql.add("WITH recent AS MATERIALIZED (SELECT visitor_id,user_hash FROM visitors WHERE site_id=");
+        try sql.int(site.id);
+        try sql.add(" AND last_seen_ms>=");
+        try sql.int(range.start_ms);
+        try sql.add(" ORDER BY last_seen_ms DESC LIMIT 2000),v AS MATERIALIZED (SELECT visitor_id,coalesce(user_hash,visitor_id) k,user_hash,first_seen_ms,last_seen_ms,first_source FROM visitors WHERE site_id=");
+        try sql.int(site.id);
+        try sql.add(" AND visitor_id IN (SELECT visitor_id FROM recent) UNION SELECT visitor_id,user_hash,user_hash,first_seen_ms,last_seen_ms,first_source FROM visitors WHERE site_id=");
+        try sql.int(site.id);
+        try sql.add(" AND user_hash IN (SELECT user_hash FROM recent WHERE user_hash IS NOT NULL)");
+    } else {
+        try sql.add("WITH v AS MATERIALIZED (SELECT visitor_id,coalesce(user_hash,visitor_id) k,user_hash,first_seen_ms,last_seen_ms,first_source FROM visitors WHERE site_id=");
+        try sql.int(site.id);
+        try sql.add(" AND (last_seen_ms>=");
+        try sql.int(range.start_ms);
+        try sql.add(" OR user_hash IN (SELECT user_hash FROM visitors WHERE site_id=");
+        try sql.int(site.id);
+        try sql.add(" AND last_seen_ms>=");
+        try sql.int(range.start_ms);
+        try sql.add(" AND user_hash IS NOT NULL))");
+    }
     if (query.len != 0) {
         // People are found by the ID from your app (hashed the same way) or a visitor ID.
         const hash = domain.userHash(ctx.shared.master_key, site.public_id, query);
@@ -503,14 +519,14 @@ pub fn people(ctx: *Ctx, site: data.Site) !void {
     try sql.add("), p AS MATERIALIZED (SELECT k,max(user_hash) u,min(first_seen_ms) f,max(last_seen_ms) l,count(*) devices FROM v GROUP BY k ORDER BY l DESC LIMIT 2000)," ++
         "pv AS MATERIALIZED (SELECT v.* FROM v WHERE v.k IN (SELECT k FROM p))," ++
         "src AS (SELECT k,first_source FROM (SELECT k,first_source,row_number() OVER (PARTITION BY k ORDER BY first_seen_ms) rn FROM pv) WHERE rn=1)," ++
-        "s AS (SELECT x.k,count(DISTINCT w.session_id) sessions,group_concat(DISTINCT w.operating_system) systems FROM pv x JOIN page_views w ON w.site_id=");
+        "s AS (SELECT x.k,count(DISTINCT w.session_id) sessions,group_concat(DISTINCT w.operating_system) systems FROM pv x CROSS JOIN page_views w ON w.site_id=");
     try sql.int(site.id);
     // An order seen from both the browser and the server counts once.
-    try sql.add(" AND w.visitor_id=x.visitor_id GROUP BY x.k),r AS (SELECT k,sum(v) revenue FROM (SELECT k,o,max(v) v FROM (SELECT x.k,coalesce(e.order_id,e.event_id) o,e.value_minor v FROM pv x JOIN events e ON e.site_id=");
+    try sql.add(" AND w.visitor_id=x.visitor_id GROUP BY x.k),r AS (SELECT k,sum(v) revenue FROM (SELECT k,o,max(v) v FROM (SELECT x.k,coalesce(e.order_id,e.event_id) o,e.value_minor v FROM pv x CROSS JOIN events e ON e.site_id=");
     try sql.int(site.id);
-    try sql.add(" AND e.visitor_id=x.visitor_id WHERE e.name IN " ++ purchase_names ++ " AND e.value_minor IS NOT NULL UNION ALL SELECT p.k,coalesce(e.order_id,e.event_id),e.value_minor FROM p JOIN events e ON e.site_id=");
+    try sql.add(" AND e.visitor_id=x.visitor_id WHERE e.name IN " ++ purchase_names ++ " AND e.value_minor IS NOT NULL UNION ALL SELECT p.k,coalesce(e.order_id,e.event_id),e.value_minor FROM p CROSS JOIN events e ON e.site_id=");
     try sql.int(site.id);
-    try sql.add(" AND e.user_hash=p.u WHERE e.name IN " ++ purchase_names ++ " AND e.value_minor IS NOT NULL) GROUP BY k,o) GROUP BY k),er AS (SELECT x.k,count(*) n FROM errors e JOIN pv x ON x.visitor_id=e.visitor_id WHERE e.site_id=");
+    try sql.add(" AND e.user_hash=p.u WHERE p.u IS NOT NULL AND e.user_hash IS NOT NULL AND e.name IN " ++ purchase_names ++ " AND e.value_minor IS NOT NULL) GROUP BY k,o) GROUP BY k),er AS (SELECT x.k,count(*) n FROM errors e JOIN pv x ON x.visitor_id=e.visitor_id WHERE e.site_id=");
     try sql.int(site.id);
     try sql.add(" AND e.received_at_ms>=");
     try sql.int(range.start_ms);
