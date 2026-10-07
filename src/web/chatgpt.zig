@@ -255,14 +255,22 @@ fn hasScope(granted: []const u8, wanted: []const u8) bool {
     return false;
 }
 
+/// The plan's catalog treats a request without a client version as an old
+/// Codex and leaves newer models out (GPT-6.1-Sol and GPT-6-Luna, Oct 2026).
+/// Analytico drives no Codex features, so it asks with no version limit and
+/// keeps the models the Responses API supports instead.
+const catalog_client_version = "99.0.0";
+
 /// The plan's models, as "slug<TAB>name" lines.
 fn listModels(arena: std.mem.Allocator, api: []const u8, access: []const u8) ![]const u8 {
-    const response = try net.send(arena, try std.fmt.allocPrint(arena, "{s}/models", .{api}), .{ .headers = &.{.{ .name = "authorization", .value = try std.fmt.allocPrint(arena, "Bearer {s}", .{access}) }} });
+    const response = try net.send(arena, try std.fmt.allocPrint(arena, "{s}/models?client_version={s}", .{ api, catalog_client_version }), .{ .headers = &.{.{ .name = "authorization", .value = try std.fmt.allocPrint(arena, "Bearer {s}", .{access}) }} });
     if (response.status != .ok) return error.Rejected;
     const body = net.parseObject(arena, response.body) orelse return error.Rejected;
     var out: std.Io.Writer.Allocating = .init(arena);
     for (net.array(body, "models")) |item| {
         if (item != .object or !std.mem.eql(u8, net.string(item.object, "visibility"), "list")) continue;
+        const in_api = item.object.get("supported_in_api") orelse continue;
+        if (in_api != .bool or !in_api.bool) continue;
         const slug = net.string(item.object, "slug");
         const name = net.string(item.object, "display_name");
         if (slug.len == 0 or std.mem.findAny(u8, slug, "\t\n") != null or std.mem.findAny(u8, name, "\t\n") != null) continue;
@@ -382,9 +390,19 @@ fn serveLoopback(shared: *Shared, listener_value: std.Io.net.Server) void {
         }
         if (ready <= 0) continue;
         const stream = listener.accept(io) catch continue;
-        defer stream.close(io);
-        callback(shared, stream) catch |err| std.log.warn("chatgpt_callback_failed code={s}", .{@errorName(err)});
+        // Each on its own thread: a browser's idle preconnection must not
+        // hold up the callback behind it.
+        const thread = std.Thread.spawn(.{}, serveCallback, .{ shared, stream }) catch {
+            stream.close(io);
+            continue;
+        };
+        thread.detach();
     }
+}
+
+fn serveCallback(shared: *Shared, stream: std.Io.net.Stream) void {
+    defer stream.close(shared.io);
+    callback(shared, stream) catch |err| std.log.warn("chatgpt_callback_failed code={s}", .{@errorName(err)});
 }
 
 fn callback(shared: *Shared, stream: std.Io.net.Stream) !void {
@@ -396,7 +414,8 @@ fn callback(shared: *Shared, stream: std.Io.net.Stream) !void {
     var connection = server.Connection.init(shared.io, stream, &read_buffer, &write_buffer);
     connection.deadline = .fromNow(shared.io, .{ .raw = .fromSeconds(30), .clock = .awake });
     var http = std.http.Server.init(&connection.reader, &connection.writer);
-    var request = try http.receiveHead();
+    // A connection the browser opened ahead and never used is no failure.
+    var request = http.receiveHead() catch return;
     const target = try arena.dupe(u8, request.head.target);
     const query_start = std.mem.findScalar(u8, target, '?') orelse target.len;
     if (request.head.method != .GET or !std.mem.eql(u8, target[0..query_start], "/auth/callback")) {

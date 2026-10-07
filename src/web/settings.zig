@@ -481,13 +481,17 @@ fn aiSection(ctx: *Ctx, site: ?data.Site) !void {
     const connections = try db.all(arena, Connection, "SELECT c.name,max(coalesce(g.last_used_at_ms,g.created_at_ms)),(SELECT count(*) FROM ai_log l WHERE l.origin=c.name AND l.at_ms>=?) FROM oauth_grants g JOIN oauth_clients c ON c.client_id=g.client_id WHERE g.kind='refresh' AND g.expires_at_ms>? GROUP BY c.name", .{ ctx.now() - 7 * data.day_ms, ctx.now() });
     const providers = [_]struct { []const u8, []const u8, []const u8, []const u8, ai.Provider, []const u8 }{
         .{ "Claude", "by Anthropic", "#C96442", "C", .anthropic, "claude" },
-        .{ "ChatGPT", "by OpenAI", "#282421", "G", .openai, "chatgpt" },
+        .{ "ChatGPT", "by OpenAI", "#000", "", .openai, "chatgpt" },
     };
     try w.writeAll("<div class=\"grid grid-2\">");
     for (providers) |provider| {
         try render(w,
-            \\<section class="card provider-card"><div class="row provider-title"><span class="mark" style="background:{color}">{letter}</span><div><strong class="t-15">{name}</strong><div class="hint">{by}</div></div></div><div class="provider">
-        , .{ .color = provider[2], .letter = provider[3], .name = provider[0], .by = provider[1] });
+            \\<section class="card provider-card"><div class="row provider-title"><span class="mark" style="background:{color}">{letter}
+        , .{ .color = provider[2], .letter = provider[3] });
+        if (provider[4] == .openai) try icon(w, "chatgpt");
+        try render(w,
+            \\</span><div><strong class="t-15">{name}</strong><div class="hint">{by}</div></div></div><div class="provider">
+        , .{ .name = provider[0], .by = provider[1] });
         var connected: ?Connection = null;
         for (connections) |item| if (std.ascii.findIgnoreCase(item.name, provider[5]) != null or (provider[4] == .openai and std.ascii.findIgnoreCase(item.name, "openai") != null)) {
             connected = item;

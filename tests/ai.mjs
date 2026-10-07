@@ -64,7 +64,13 @@ function stand({ incoming, outgoing, url, base, body, json }) {
       return json({});
     case "/v1/models":
       assert.ok(live.has(incoming.headers.authorization.slice(7)), incoming.headers.authorization);
-      return json({ models: [{ slug: "gpt-test", display_name: "GPT Test", visibility: "list" }, { slug: "gpt-hidden", display_name: "Hidden", visibility: "hide" }] });
+      // Without a client version the catalog leaves newer models out.
+      assert.equal(url.searchParams.get("client_version"), "99.0.0");
+      return json({ models: [
+        { slug: "gpt-test", display_name: "GPT Test", visibility: "list", supported_in_api: true },
+        { slug: "gpt-hidden", display_name: "Hidden", visibility: "hide", supported_in_api: true },
+        { slug: "gpt-codex-only", display_name: "Codex only", visibility: "list", supported_in_api: false },
+      ] });
     case "/v1/responses": {
       const request = JSON.parse(body);
       seen.responses.push({ authorization: incoming.headers.authorization, request });

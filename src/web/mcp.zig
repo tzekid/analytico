@@ -217,9 +217,13 @@ fn authorize(ctx: *Ctx) !void {
     const is_chatgpt = std.ascii.findIgnoreCase(client.name, "chatgpt") != null or std.ascii.findIgnoreCase(client.name, "openai") != null;
     // Anyone can register an app under any name; where it returns is the tell.
     try render(w,
-        \\<main class="login"><div class="login-card login-card-wide"><div class="row gap-12"><span class="mark" style="background:{color}">{letter}</span><span class="muted">→</span><img src="{logo}" width="36" height="36" alt=""></div>
+        \\<main class="login"><div class="login-card login-card-wide"><div class="row gap-12"><span class="mark" style="background:{color}">{letter}
+    , .{ .color = if (is_claude) "#C96442" else if (is_chatgpt) "#000" else "#6F625D", .letter = if (is_claude) "C" else if (is_chatgpt) "" else "A" });
+    if (is_chatgpt) try layout.icon(w, "chatgpt");
+    try render(w,
+        \\</span><span class="muted">→</span><img src="{logo}" width="36" height="36" alt=""></div>
         \\<h1>{client} wants to read your analytics</h1><p class="secondary">Signed in as {email}. Read-only — it can’t change settings or see visitors.</p><p class="hint">After you allow it, you go back to <strong>{host}</strong>.</p><form method="post" action="/oauth/authorize" class="form-grid mt-20" data-native>
-    , .{ .color = if (is_claude) "#C96442" else if (is_chatgpt) "#282421" else "#6F625D", .letter = if (is_claude) "C" else if (is_chatgpt) "G" else "A", .logo = assets.path("favicon.svg"), .client = client.name, .email = user.email, .host = host });
+    , .{ .logo = assets.path("favicon.svg"), .client = client.name, .email = user.email, .host = host });
     const keep = [_][]const u8{ "client_id", "redirect_uri", "state", "code_challenge", "code_challenge_method", "response_type", "scope", "resource" };
     for (keep) |key| if (params.get(key)) |value| try render(w, "<input type=\"hidden\" name=\"{key}\" value=\"{value}\">", .{ .key = key, .value = value });
     try w.writeAll("<div class=\"card consent-sites\"><div class=\"menu-label flush-left\">Websites it can read</div><label class=\"check consent-all\"><input type=\"checkbox\" name=\"all\" value=\"1\" checked><span><strong class=\"strong\">All websites</strong> <span class=\"hint\">including ones you add later</span></span></label><div class=\"consent-picks\">");
