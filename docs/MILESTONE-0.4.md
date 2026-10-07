@@ -147,7 +147,24 @@ gate fails after two weeks, fall back to W1, keeping the same
 
 ---
 
-## Part E — Push beyond Apple
+## Part E — Push
+
+### E1. Turning on Apple push (from 0.3)
+
+0.3 ships the code: device keys, RFC 8291 encryption, the relay and the
+notification extension, each tested against stand-ins. What is left needs
+an active developer membership (the renewal of 8 October 2026 was still
+processing):
+
+- Automatic signing enables Push Notifications on `ru.plosca.analytico`
+  (Xcode refuses it while the membership reads as expired).
+- An APNs key (`AuthKey_<KEYID>.p8`) installed on plosca; the relay runs as
+  `analytico-relay.service` behind `push.analytico.plosca.ru`
+  ([OPERATIONS.md](OPERATIONS.md#the-push-relay)).
+- Exit: an alert, a goal and an unusual-day note reach a real iPhone and
+  Mac, decrypted by the extension; signing the device out stops them.
+
+### E2. Beyond Apple
 
 0.3's relay speaks APNs only. 0.4 adds:
 
@@ -173,7 +190,7 @@ distributor each receive a payload that decrypts to the expected alert.
 | 2. Windows | Projection generator, hosting, C1 | UI Automation run green on a CI runner; Narrator reaches every control | L |
 | 3. Linux | C2 and the Flatpak | Xvfb end-to-end run green; installs from the Flatpak bundle | M |
 | 4. Android | C3 | Compose UI tests green; widget and push on a real device | L |
-| 5. Push | Part E | Notifications arrive on all three platforms | M |
+| 5. Push | Part E: Apple push turned on (E1), then FCM, WNS and UnifiedPush (E2) | Notifications arrive on Apple devices and all three new platforms | M |
 | 6. Release 0.4 | Store listings, signing, docs, tour screenshots | Each app installs and passes the setup checklist | M |
 
 ## Sources

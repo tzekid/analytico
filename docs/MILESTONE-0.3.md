@@ -1,6 +1,6 @@
 # Milestone 0.3: the web workspace on Mac, iPhone and iPad
 
-Status: in progress. Phase 1 (server and web) and phase 2 (the app) are built and tested; phase 3 (widgets, menu bar, Siri) is built and waiting for a device check; phase 4 (push) is built and tested up to Apple, waiting for the APNs key and a device check; phase 5 is next.
+Status: in progress. Phase 1 (server and web) and phase 2 (the app) are built and tested; phase 3 (widgets, menu bar, Siri) is built and waiting for a device check; phase 4 (push) is built and tested up to Apple; turning it on (APNs key, relay deployment, a real-device check) moved to 0.4, part E, while the developer membership renewal is processed; phase 5 is next.
 
 Analytico gets native apps for macOS, iOS and iPadOS, next to the web
 workspace, and the server gains what native apps need: instance discovery,
@@ -268,7 +268,7 @@ its verification green, deployed to dev and prod, and pushed.
 | 1. Server and web | B1–B5, Settings → Devices | Contract fixtures green; the native sign-in flow works end to end in `workspace.mjs` | L |
 | 2. Apple app | C1, C2, part D | XCUITest setup → Overview on iOS and macOS; every report screen against the load-test site | L |
 | 3. Glance | C3 widgets, menu bar, App Intents | Widget and menu bar show live numbers; Shortcuts runs "Visitors today" | M |
-| 4. Push | B6, the relay, the notification extension | An alert reaches a real iPhone and Mac, encrypted end to end | M |
+| 4. Push | B6, the relay, the notification extension | Encryption, relay and extension tested against stand-ins; delivery to real devices moved to 0.4 (part E) | M |
 | 5. Release 0.3 | TestFlight and App Store, a notarized Mac build, docs, the tour extended to app screenshots | Both apps install from TestFlight and pass the setup checklist | M |
 
 ---
