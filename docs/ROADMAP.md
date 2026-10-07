@@ -3,8 +3,8 @@
 Status: implemented, 2026-10-06. All phases (0–6) are built and covered by
 `tests/v3.mjs`; `AGENTS.md` and `PRODUCT.md` carry the doctrine changes from
 section 9. This document stays as the record of why.
-What comes next: [MILESTONE-0.3.md](MILESTONE-0.3.md), native apps on every
-platform.
+What comes next: [MILESTONE-0.3.md](MILESTONE-0.3.md), the Mac, iPhone and iPad
+apps, then [MILESTONE-0.4.md](MILESTONE-0.4.md), Windows, Linux and Android.
 
 ## 1. Goal and interpretation
 
