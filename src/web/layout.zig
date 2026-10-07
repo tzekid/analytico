@@ -387,8 +387,8 @@ fn viewDialogs(ctx: *Ctx, view: data.View, path: []const u8) !void {
     try render(w,
         \\<div class="dialog-body"><span class="chip self-start">{summary}</span><input type="hidden" name="filters" value="{filters}">
         \\<div><div class="field mb-6">Notify me when</div><div class="row nowrap">
-        \\<select class="input" name="metric"><option value="page_views">Page views</option><option value="visitors">Visitors</option><option value="events"{!event}>{events}</option></select>
-        \\<select class="input" name="direction"><option value="drops">drops by</option><option value="rises">rises by</option></select>
+        \\<select class="input" name="metric" aria-label="Metric"><option value="page_views">Page views</option><option value="visitors">Visitors</option><option value="events"{!event}>{events}</option></select>
+        \\<select class="input" name="direction" aria-label="Direction"><option value="drops">drops by</option><option value="rises">rises by</option></select>
         \\<input class="input input-number" name="threshold" type="number" min="1" max="1000" value="20" aria-label="Percent"><span class="secondary nobreak">% vs previous day</span></div></div>
         \\<div class="card on-canvas" data-alert-preview><div class="hint">PREVIEW · LAST 30 DAYS</div><svg class="spark spark-preview" viewBox="0 0 300 60" preserveAspectRatio="none"></svg><p class="hint ink" data-alert-verdict>Checking the last 30 days…</p></div>
         \\<input class="input" name="name" value="{name}" aria-label="Alert name" required maxlength="80">

@@ -242,7 +242,7 @@ fn result(ctx: *Ctx, view: data.View, steps: []const Step, window_ms: i64) !void
         // A bar too short to hold its share shows it just above instead.
         const short = share < 18;
         try w.writeAll("<div class=\"funnel-col\"><div class=\"funnel-track\">");
-        if (index > 0 and previous > value) try render(w, "<span class=\"funnel-drop\" style=\"bottom:calc({share:.1}% + {lift}px)\">−{left} left</span>", .{ .share = share, .lift = @as(u32, if (short) 44 else 10), .left = html.int(@intFromFloat(previous - value)) });
+        if (index > 0 and previous > value) try render(w, "<span class=\"funnel-drop\" style=\"bottom:calc({share:.1}% + {lift}px)\">{left} left</span>", .{ .share = share, .lift = @as(u32, if (short) 44 else 10), .left = html.int(@intFromFloat(previous - value)) });
         if (short) try render(w, "<span class=\"funnel-value\" style=\"bottom:calc({share:.1}% + 6px)\">{share:.1}%</span>", .{ .share = share });
         try render(w, "<div class=\"funnel-bar{!short}\" style=\"height:{height:.1}%;--w:{width:.1}%\">{share:.1}%</div></div><div><strong>{count}</strong><small title=\"{value}\">{label}</small>", .{ .short = if (short) " short" else "", .height = @max(share, 1.5), .width = @max(share, 4), .share = share, .count = html.int(counts[index]), .value = step.value, .label = try stepLabel(ctx, view.site, step) });
         if (index > 0) try render(w, "<small><b class=\"ink\">{rate:.1}%</b> from previous</small>", .{ .rate = if (previous == 0) 0 else value / previous * 100 });

@@ -69,7 +69,7 @@ pub const tones = [_]Tone{
     .{ .color = "#D64937", .wash = "#FBEDEA" },
     .{ .color = "#0057AE", .wash = "#E6EEF7" },
     .{ .color = "#644A9B", .wash = "#EFEBF5" },
-    .{ .color = "#1F8A87", .wash = "#E5F2F1" },
+    .{ .color = "#1A7471", .wash = "#E5F2F1" },
     .{ .color = "#9A5B08", .wash = "#F8EEDF" },
 };
 
