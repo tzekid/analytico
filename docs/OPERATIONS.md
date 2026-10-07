@@ -53,6 +53,8 @@ analytico migrate --data ~/.local/share/analytico-sqlite \
 systemctl --user start analytico.service
 ```
 
+Schema 10 lets the Mac, iPhone and iPad apps sign in (a built-in OAuth
+client and a device name per sign-in); it is instant.
 Schema 9 stores each browser event's traffic class (filled from its page
 view in one pass; quick), adds per-day summaries of visit paths, page
 sections and Web Vitals, and a small cache for Retention. It then has the background job
@@ -124,6 +126,13 @@ same way once OpenAI issues a client ID (a limited trial today); using a
 ChatGPT plan for AI needs none, see below. Nobody can remove
 their last way in, and a method can only be turned off for everyone when no
 one depends on it alone.
+
+The Analytico apps for Mac, iPhone and iPad connect to an instance by its
+address. They read `/.well-known/analytico` to check it, then sign in
+through the instance's own sign-in page in a browser sheet and receive
+tokens for the read API only (never for `/mcp`). Each signed-in device is
+listed under Settings → Sign-in → Signed-in apps, where its owner can sign
+it out. Behind Caddy nothing changes: the apps use the public origin.
 
 Email delivery (alerts, scheduled reports, invites) uses any SMTP server:
 STARTTLS on 587, TLS on 465, or a plain local relay. Configure it under

@@ -9,6 +9,7 @@ const assets = @import("../assets.zig");
 const auth = @import("auth.zig");
 const ctx_mod = @import("ctx.zig");
 const data = @import("data.zig");
+const db_mod = @import("../db.zig");
 const html = @import("html.zig");
 const layout = @import("layout.zig");
 
@@ -37,6 +38,10 @@ pub fn route(ctx: *Ctx, parts: []const []const u8) !bool {
             try authorizationServer(ctx);
             return true;
         }
+        if (is(parts[1], "analytico")) {
+            try discovery(ctx);
+            return true;
+        }
         return false;
     }
     if (is(parts[0], "oauth") and parts.len == 2) {
@@ -53,6 +58,43 @@ pub fn route(ctx: *Ctx, parts: []const []const u8) !bool {
         return true;
     }
     return false;
+}
+
+/// The client API level native apps check before signing in. Raised only
+/// when an app-facing endpoint changes incompatibly.
+pub const api_level = 1;
+
+/// Built-in OAuth clients of the native apps ("analytico-apple"), created
+/// by the schema. Their tokens read `/api/v1`; MCP tokens read `/mcp` only.
+pub fn isApp(client_id: []const u8) bool {
+    return std.mem.startsWith(u8, client_id, "analytico-");
+}
+
+/// What a native app checks before it offers sign-in: that this is
+/// Analytico, which version, and whether anyone can sign in yet. Nothing
+/// here goes beyond what the public sign-in page shows.
+fn discovery(ctx: *Ctx) !void {
+    const arena = ctx.arena;
+    const origin = try ctx.publicOrigin();
+    const host = if (std.mem.find(u8, origin, "://")) |index| origin[index + 3 ..] else origin;
+    var sign_in: std.ArrayList([]const u8) = .empty;
+    for (try @import("signin.zig").enabledMethods(arena, ctx.db)) |method| try sign_in.append(arena, @tagName(method));
+    const people = try ctx.db.scalar(arena, i64, "SELECT count(*) FROM users u WHERE " ++ auth.joined_sql, .{});
+    try ctx.header("cache-control", "public, max-age=60");
+    try std.json.Stringify.value(.{
+        .product = "analytico",
+        .name = host,
+        .version = @import("../cli.zig").version,
+        .api = .{ .level = api_level, .base = "/api/v1" },
+        .oauth = .{
+            .issuer = origin,
+            .authorization_endpoint = try std.fmt.allocPrint(arena, "{s}/oauth/authorize", .{origin}),
+            .token_endpoint = try std.fmt.allocPrint(arena, "{s}/oauth/token", .{origin}),
+        },
+        .sign_in = sign_in.items,
+        .setup_complete = people != 0,
+    }, .{}, ctx.w());
+    return ctx.json();
 }
 
 fn protectedResource(ctx: *Ctx) !void {
@@ -136,7 +178,7 @@ fn register(ctx: *Ctx) !void {
         const db = ctx.shared.lockWrite();
         defer ctx.shared.unlockWrite();
         // Unauthenticated registration stays bounded: drop old unused clients.
-        try db.run(arena, "DELETE FROM oauth_clients WHERE client_id IN (SELECT client_id FROM oauth_clients c WHERE NOT EXISTS(SELECT 1 FROM oauth_grants g WHERE g.client_id=c.client_id) ORDER BY created_at_ms LIMIT max(0,(SELECT count(*) FROM oauth_clients)-200))", .{});
+        try db.run(arena, "DELETE FROM oauth_clients WHERE client_id IN (SELECT client_id FROM oauth_clients c WHERE client_id NOT LIKE 'analytico-%' AND NOT EXISTS(SELECT 1 FROM oauth_grants g WHERE g.client_id=c.client_id) ORDER BY created_at_ms LIMIT max(0,(SELECT count(*) FROM oauth_clients)-200))", .{});
         try db.run(arena, "INSERT INTO oauth_clients(client_id,name,redirect_uris,created_at_ms) VALUES(?,?,?,?)", .{ &client_id, name, uris_json.written(), ctx.now() });
     }
     ctx.status = .created;
@@ -174,7 +216,9 @@ fn authorize(ctx: *Ctx) !void {
     const client_id = params.get("client_id") orelse "";
     const redirect_uri = params.get("redirect_uri") orelse "";
     const client = try findClient(ctx, client_id) orelse return layout.message(ctx, .bad_request, "Unknown app", "This connection request came from an app that isn’t registered. Start the connection again from Claude or ChatGPT.");
-    if (!validRedirect(redirect_uri) or !registeredRedirect(arena, client, redirect_uri)) return layout.message(ctx, .bad_request, "Unexpected redirect", "The app asked to return to an address it didn’t register. Nothing was shared.");
+    // Native apps return through their own scheme, registered by the schema.
+    const app = isApp(client_id);
+    if (!(validRedirect(redirect_uri) or app) or !registeredRedirect(arena, client, redirect_uri)) return layout.message(ctx, .bad_request, "Unexpected redirect", "The app asked to return to an address it didn’t register. Nothing was shared.");
     const state = params.get("state") orelse "";
     const challenge = params.get("code_challenge") orelse "";
     if (!is(params.get("response_type") orelse "", "code") or challenge.len < 43 or challenge.len > 128 or !is(params.get("code_challenge_method") orelse "", "S256")) {
@@ -200,10 +244,14 @@ fn authorize(ctx: *Ctx) !void {
         if (allowed.items.len == 0) return layout.message(ctx, .bad_request, "Choose at least one website", "Go back and pick which websites the app may read, or allow all of them.");
         const code = try auth.newToken(ctx.shared.io);
         const hashed = auth.hashToken(&code);
+        // An app's sign-in is one device, kept across token refreshes.
+        var device_bytes: [16]u8 = undefined;
+        try ctx.shared.io.randomSecure(&device_bytes);
+        const device_id = std.fmt.bytesToHex(device_bytes, .lower);
         const db = ctx.shared.lockWrite();
         defer ctx.shared.unlockWrite();
         try db.run(arena, "DELETE FROM oauth_grants WHERE expires_at_ms<?", .{ctx.now()});
-        try db.run(arena, "INSERT INTO oauth_grants(token_hash,kind,client_id,user_id,sites,redirect_uri,code_challenge,expires_at_ms,created_at_ms) VALUES(?,'code',?,?,?,?,?,?,?)", .{ &hashed, client_id, user.id, allowed.items, redirect_uri, challenge, ctx.now() + code_ms, ctx.now() });
+        try db.run(arena, "INSERT INTO oauth_grants(token_hash,kind,client_id,user_id,sites,redirect_uri,code_challenge,expires_at_ms,created_at_ms,device_id,device_name) VALUES(?,'code',?,?,?,?,?,?,?,?,?)", .{ &hashed, client_id, user.id, allowed.items, redirect_uri, challenge, ctx.now() + code_ms, ctx.now(), if (app) @as(?[]const u8, &device_id) else null, if (app) @as(?[]const u8, deviceName(params)) else null });
         return ctx.redirectFmt("{s}{s}code={s}&state={f}", .{ redirect_uri, separator, &code, html.url(state) });
     }
     // Consent screen. Its form redirects to the client, which CSP must allow.
@@ -218,22 +266,39 @@ fn authorize(ctx: *Ctx) !void {
     // Anyone can register an app under any name; where it returns is the tell.
     try render(w,
         \\<main class="login"><div class="login-card login-card-wide"><div class="row gap-12"><span class="mark" style="background:{color}">{letter}
-    , .{ .color = if (is_claude) "#C96442" else if (is_chatgpt) "#000" else "#6F625D", .letter = if (is_claude) "C" else if (is_chatgpt) "" else "A" });
+    , .{ .color = if (app) "#D64937" else if (is_claude) "#C96442" else if (is_chatgpt) "#000" else "#6F625D", .letter = if (app) "A" else if (is_claude) "C" else if (is_chatgpt) "" else "A" });
     if (is_chatgpt) try layout.icon(w, "chatgpt");
     try render(w,
         \\</span><span class="muted">→</span><img src="{logo}" width="36" height="36" alt=""></div>
+    , .{ .logo = assets.path("favicon.svg") });
+    if (app) {
+        try render(w,
+            \\<h1>Sign in to the Analytico app on {device}</h1><p class="secondary">Signed in as {email}. The app shows the reports you see here and can add chart notes. It can’t change settings.</p><p class="hint">After you allow it, you go back to the app. Sign it out any time in Settings → Sign-in.</p><form method="post" action="/oauth/authorize" class="form-grid mt-20" data-native>
+        , .{ .device = deviceName(params), .email = user.email });
+    } else try render(w,
         \\<h1>{client} wants to read your analytics</h1><p class="secondary">Signed in as {email}. Read-only — it can’t change settings or see visitors.</p><p class="hint">After you allow it, you go back to <strong>{host}</strong>.</p><form method="post" action="/oauth/authorize" class="form-grid mt-20" data-native>
-    , .{ .logo = assets.path("favicon.svg"), .client = client.name, .email = user.email, .host = host });
-    const keep = [_][]const u8{ "client_id", "redirect_uri", "state", "code_challenge", "code_challenge_method", "response_type", "scope", "resource" };
+    , .{ .client = client.name, .email = user.email, .host = host });
+    const keep = [_][]const u8{ "client_id", "redirect_uri", "state", "code_challenge", "code_challenge_method", "response_type", "scope", "resource", "device_name" };
     for (keep) |key| if (params.get(key)) |value| try render(w, "<input type=\"hidden\" name=\"{key}\" value=\"{value}\">", .{ .key = key, .value = value });
     try w.writeAll("<div class=\"card consent-sites\"><div class=\"menu-label flush-left\">Websites it can read</div><label class=\"check consent-all\"><input type=\"checkbox\" name=\"all\" value=\"1\" checked><span><strong class=\"strong\">All websites</strong> <span class=\"hint\">including ones you add later</span></span></label><div class=\"consent-picks\">");
     for (sites) |site| try render(w, "<label class=\"check consent-pick\"><input type=\"checkbox\" name=\"site\" value=\"{id}\" checked>{title} <span class=\"hint\">{host}</span></label>", .{ .id = site.id, .title = site.title(), .host = site.host() });
     try w.writeAll("</div>");
+    if (app) {
+        try w.writeAll("</div><div class=\"row end\"><button class=\"btn\" name=\"decision\" value=\"deny\">Cancel</button><button class=\"btn btn-primary\" name=\"decision\" value=\"allow\">Sign in</button></div></form></div></main></body></html>");
+        return ctx.html();
+    }
     const paths = try ai.sharePaths(arena, ctx.db);
     const sources = try ai.shareSources(arena, ctx.db);
     try w.print("</div><p class=\"hint\">It sees aggregated numbers{s}{s}. Never IP addresses, session IDs or raw events. Disconnect any time in Settings → AI.</p>", .{ if (paths) ", page paths" else "", if (sources) ", referrers and campaign names" else "" });
     try w.writeAll("<div class=\"row end\"><button class=\"btn\" name=\"decision\" value=\"deny\">Cancel</button><button class=\"btn btn-primary\" name=\"decision\" value=\"allow\">Allow read access</button></div></form></div></main></body></html>");
     return ctx.html();
+}
+
+/// The name an app gives its device ("MacBook Pro"), shown in Settings.
+fn deviceName(params: html.Params) []const u8 {
+    const name = std.mem.trim(u8, params.get("device_name") orelse "", " ");
+    @import("../domain.zig").validateText(name, 60, false) catch return "Unnamed device";
+    return if (name.len == 0) "Unnamed device" else name;
 }
 
 fn base64url(arena: std.mem.Allocator, bytes: []const u8) ![]const u8 {
@@ -242,14 +307,21 @@ fn base64url(arena: std.mem.Allocator, bytes: []const u8) ![]const u8 {
     return encoder.encode(out, bytes);
 }
 
-fn issueTokens(ctx: *Ctx, db: anytype, client_id: []const u8, user_id: i64, sites: []const u8) !void {
+const Device = struct { id: ?[]const u8, name: ?[]const u8 };
+
+fn issueTokens(ctx: *Ctx, db: anytype, client_id: []const u8, user_id: i64, sites: []const u8, device: Device) !void {
     const access = try auth.newToken(ctx.shared.io);
     const refresh = try auth.newToken(ctx.shared.io);
     const now = ctx.now();
-    try db.run(ctx.arena, "INSERT INTO oauth_grants(token_hash,kind,client_id,user_id,sites,expires_at_ms,created_at_ms) VALUES(?,'access',?,?,?,?,?)", .{ &auth.hashToken(&access), client_id, user_id, sites, now + access_ms, now });
-    try db.run(ctx.arena, "INSERT INTO oauth_grants(token_hash,kind,client_id,user_id,sites,expires_at_ms,created_at_ms) VALUES(?,'refresh',?,?,?,?,?)", .{ &auth.hashToken(&refresh), client_id, user_id, sites, now + refresh_ms, now });
+    try db.run(ctx.arena, "INSERT INTO oauth_grants(token_hash,kind,client_id,user_id,sites,expires_at_ms,created_at_ms,device_id,device_name) VALUES(?,'access',?,?,?,?,?,?,?)", .{ &auth.hashToken(&access), client_id, user_id, sites, now + access_ms, now, device.id, device.name });
+    try db.run(ctx.arena, "INSERT INTO oauth_grants(token_hash,kind,client_id,user_id,sites,expires_at_ms,created_at_ms,device_id,device_name) VALUES(?,'refresh',?,?,?,?,?,?,?)", .{ &auth.hashToken(&refresh), client_id, user_id, sites, now + refresh_ms, now, device.id, device.name });
     try ctx.header("cache-control", "no-store");
-    try std.json.Stringify.value(.{ .access_token = &access, .token_type = "Bearer", .expires_in = access_ms / 1000, .refresh_token = &refresh, .scope = "analytics:read" }, .{}, ctx.w());
+    try std.json.Stringify.value(.{ .access_token = &access, .token_type = "Bearer", .expires_in = access_ms / 1000, .refresh_token = &refresh, .scope = if (isApp(client_id)) "app:read app:notes" else "analytics:read" }, .{}, ctx.w());
+}
+
+fn optionalText(arena: std.mem.Allocator, statement: anytype, index: usize) !?[]const u8 {
+    if (statement.columnType(index) == db_mod.sqlite.SQLITE_NULL) return null;
+    return try arena.dupe(u8, statement.columnText(index));
 }
 
 fn token(ctx: *Ctx) !void {
@@ -263,7 +335,7 @@ fn token(ctx: *Ctx) !void {
     if (is(grant_type, "authorization_code")) {
         const code = form.get("code") orelse "";
         const hashed = auth.hashToken(code);
-        var statement = try db.prepare(arena, "SELECT client_id,user_id,sites,redirect_uri,code_challenge FROM oauth_grants WHERE token_hash=? AND kind='code' AND expires_at_ms>?");
+        var statement = try db.prepare(arena, "SELECT client_id,user_id,sites,redirect_uri,code_challenge,device_id,device_name FROM oauth_grants WHERE token_hash=? AND kind='code' AND expires_at_ms>?");
         defer statement.deinit();
         try statement.bindText(1, &hashed);
         try statement.bindInt(2, now);
@@ -273,6 +345,7 @@ fn token(ctx: *Ctx) !void {
         const sites = try arena.dupe(u8, statement.columnText(2));
         const redirect_uri = try arena.dupe(u8, statement.columnText(3));
         const challenge = try arena.dupe(u8, statement.columnText(4));
+        const device: Device = .{ .id = try optionalText(arena, &statement, 5), .name = try optionalText(arena, &statement, 6) };
         // Codes are single-use whatever happens next.
         try db.run(arena, "DELETE FROM oauth_grants WHERE token_hash=?", .{&hashed});
         if (!is(grant_client, client_id) or !is(redirect_uri, form.get("redirect_uri") orelse "")) return oauthError(ctx, .bad_request, "invalid_grant", "Client or redirect URI mismatch.");
@@ -280,13 +353,13 @@ fn token(ctx: *Ctx) !void {
         var digest: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(verifier, &digest, .{});
         if (verifier.len < 43 or !is(try base64url(arena, &digest), challenge)) return oauthError(ctx, .bad_request, "invalid_grant", "PKCE verification failed.");
-        try issueTokens(ctx, db, client_id, user_id, sites);
+        try issueTokens(ctx, db, client_id, user_id, sites, device);
         return ctx.json();
     }
     if (is(grant_type, "refresh_token")) {
         const refresh = form.get("refresh_token") orelse "";
         const hashed = auth.hashToken(refresh);
-        var statement = try db.prepare(arena, "SELECT client_id,user_id,sites FROM oauth_grants WHERE token_hash=? AND kind='refresh' AND expires_at_ms>?");
+        var statement = try db.prepare(arena, "SELECT client_id,user_id,sites,device_id,device_name FROM oauth_grants WHERE token_hash=? AND kind='refresh' AND expires_at_ms>?");
         defer statement.deinit();
         try statement.bindText(1, &hashed);
         try statement.bindInt(2, now);
@@ -294,10 +367,11 @@ fn token(ctx: *Ctx) !void {
         const grant_client = try arena.dupe(u8, statement.columnText(0));
         const user_id = statement.columnInt(1);
         const sites = try arena.dupe(u8, statement.columnText(2));
+        const device: Device = .{ .id = try optionalText(arena, &statement, 3), .name = try optionalText(arena, &statement, 4) };
         if (client_id.len != 0 and !is(grant_client, client_id)) return oauthError(ctx, .bad_request, "invalid_grant", "Client mismatch.");
         try db.run(arena, "DELETE FROM oauth_grants WHERE token_hash=?", .{&hashed});
         try db.run(arena, "DELETE FROM oauth_grants WHERE expires_at_ms<?", .{now});
-        try issueTokens(ctx, db, grant_client, user_id, sites);
+        try issueTokens(ctx, db, grant_client, user_id, sites, device);
         return ctx.json();
     }
     return oauthError(ctx, .bad_request, "unsupported_grant_type", "Use authorization_code or refresh_token.");
@@ -312,7 +386,7 @@ fn bearer(ctx: *Ctx) !?Grant {
     if (!std.ascii.startsWithIgnoreCase(header, "bearer ")) return null;
     const value = std.mem.trim(u8, header[7..], " ");
     const hashed = auth.hashToken(value);
-    var statement = try ctx.db.prepare(ctx.arena, "SELECT c.name,g.sites,u.id,u.email,u.role,u.all_sites FROM oauth_grants g JOIN oauth_clients c ON c.client_id=g.client_id JOIN users u ON u.id=g.user_id WHERE g.token_hash=? AND g.kind='access' AND g.expires_at_ms>?");
+    var statement = try ctx.db.prepare(ctx.arena, "SELECT c.name,g.sites,u.id,u.email,u.role,u.all_sites FROM oauth_grants g JOIN oauth_clients c ON c.client_id=g.client_id JOIN users u ON u.id=g.user_id WHERE g.token_hash=? AND g.kind='access' AND g.expires_at_ms>? AND g.client_id NOT LIKE 'analytico-%'");
     defer statement.deinit();
     try statement.bindText(1, &hashed);
     try statement.bindInt(2, ctx.now());
@@ -325,6 +399,36 @@ fn bearer(ctx: *Ctx) !?Grant {
         .all_sites = statement.columnBool(5),
     };
     return .{ .client_name = try ctx.arena.dupe(u8, statement.columnText(0)), .sites = try ctx.arena.dupe(u8, statement.columnText(1)) };
+}
+
+/// A native app's access token: who signed in, which sites, which device.
+pub const AppGrant = struct { sites: []const u8, device_id: []const u8 };
+
+pub fn appBearer(ctx: *Ctx) !?AppGrant {
+    const header = ctx.head.authorization;
+    if (!std.ascii.startsWithIgnoreCase(header, "bearer ")) return null;
+    const hashed = auth.hashToken(std.mem.trim(u8, header[7..], " "));
+    var statement = try ctx.db.prepare(ctx.arena, "SELECT g.sites,g.device_id,u.id,u.email,u.role,u.all_sites FROM oauth_grants g JOIN users u ON u.id=g.user_id WHERE g.token_hash=? AND g.kind='access' AND g.expires_at_ms>? AND g.client_id LIKE 'analytico-%' AND g.device_id IS NOT NULL");
+    defer statement.deinit();
+    try statement.bindText(1, &hashed);
+    try statement.bindInt(2, ctx.now());
+    if (try statement.step() != .row) return null;
+    // The app reads with the access of the person who signed in.
+    ctx.user = .{
+        .id = statement.columnInt(2),
+        .email = try ctx.arena.dupe(u8, statement.columnText(3)),
+        .role = std.meta.stringToEnum(ctx_mod.Role, statement.columnText(4)) orelse return null,
+        .all_sites = statement.columnBool(5),
+    };
+    return .{ .sites = try ctx.arena.dupe(u8, statement.columnText(0)), .device_id = try ctx.arena.dupe(u8, statement.columnText(1)) };
+}
+
+/// Whether a grant's site list ("*" or "3,7") includes a site.
+pub fn grantAllows(sites: []const u8, site_id: i64) bool {
+    if (std.mem.eql(u8, sites, "*")) return true;
+    var parts = std.mem.splitScalar(u8, sites, ',');
+    while (parts.next()) |part| if ((std.fmt.parseInt(i64, part, 10) catch continue) == site_id) return true;
+    return false;
 }
 
 fn rpcError(ctx: *Ctx, id: ?std.json.Value, code: i64, message: []const u8) !void {

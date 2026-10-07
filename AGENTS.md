@@ -143,7 +143,10 @@ Google/ChatGPT subjects and optional argon2id password hashes; that is account
 data, never visitor data. Passkeys and provider callbacks are bound to the
 `public_origin` pinned by the CLI, never to request headers. A provider
 identity is linked only by a signed-in user, an invite or first run — never by
-matching email addresses. Session, invite and OAuth tokens are stored
+matching email addresses. The native apps sign in as built-in OAuth clients
+(`analytico-*`, redirect `analytico://oauth`); their tokens read `/api/v1`
+and write chart notes, never `/mcp`, and MCP tokens never read `/api/v1`.
+Session, invite and OAuth tokens are stored
 only as SHA-256 hashes. API keys and the SMTP password are encrypted at rest
 with a key derived from the instance key.
 

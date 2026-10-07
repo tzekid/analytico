@@ -8,6 +8,7 @@ const ctx_mod = @import("ctx.zig");
 const customers = @import("customers.zig");
 const data = @import("data.zig");
 const db_mod = @import("../db.zig");
+const mcp = @import("mcp.zig");
 const geo = @import("../geo.zig");
 const html = @import("html.zig");
 const layout = @import("layout.zig");
@@ -330,38 +331,79 @@ fn apiError(ctx: *Ctx, status: std.http.Status, code: []const u8) !void {
     return ctx.json();
 }
 
+/// Who is calling the read API: an API key (read-only, optionally one
+/// website) or a signed-in native app (the sites its sign-in allowed, plus
+/// chart notes).
+const Caller = union(enum) { key: Key, app: mcp.AppGrant };
+
 fn api(ctx: *Ctx, parts: []const []const u8) !void {
     const arena = ctx.arena;
-    if (ctx.method != .GET) return apiError(ctx, .method_not_allowed, "read_only");
-    const key = try apiKey(ctx) orelse {
+    const caller: Caller = if (try apiKey(ctx)) |key| .{ .key = key } else if (try mcp.appBearer(ctx)) |grant| .{ .app = grant } else {
         try ctx.header("www-authenticate", "Bearer");
         return apiError(ctx, .unauthorized, "invalid_key");
     };
+    if (ctx.method != .GET and caller != .app) return apiError(ctx, .method_not_allowed, "read_only");
     {
         const db = ctx.shared.lockWrite();
         defer ctx.shared.unlockWrite();
-        try db.run(arena, "UPDATE api_keys SET last_used_at_ms=? WHERE id=?", .{ ctx.now(), key.id });
+        switch (caller) {
+            .key => |key| try db.run(arena, "UPDATE api_keys SET last_used_at_ms=? WHERE id=?", .{ ctx.now(), key.id }),
+            .app => try db.run(arena, "UPDATE oauth_grants SET last_used_at_ms=? WHERE token_hash=?", .{ ctx.now(), &auth.hashToken(std.mem.trim(u8, ctx.head.authorization[7..], " ")) }),
+        }
     }
     var visible: std.ArrayList(data.Site) = .empty;
     for (try ctx.visibleSites()) |site| {
-        if (key.site_id == null or key.site_id.? == site.id) try visible.append(arena, site);
+        const allowed = switch (caller) {
+            .key => |key| key.site_id == null or key.site_id.? == site.id,
+            .app => |grant| mcp.grantAllows(grant.sites, site.id),
+        };
+        if (allowed) try visible.append(arena, site);
     }
     const w = ctx.w();
-    if (parts.len == 1 and is(parts[0], "sites")) {
-        try w.writeAll("{\"sites\":[");
-        for (visible.items, 0..) |site, index| {
+    if (parts.len == 1 and is(parts[0], "catalog")) {
+        try w.writeAll("{\"reports\":[");
+        for (catalog.reports, 0..) |report, index| {
             if (index != 0) try w.writeByte(',');
-            try std.json.Stringify.value(.{ .slug = site.slug, .name = site.title(), .host = site.host(), .mode = @tagName(site.mode) }, .{}, w);
+            try w.writeAll("{\"name\":");
+            try std.json.Stringify.value(report.name, .{}, w);
+            try w.writeAll(",\"title\":");
+            try std.json.Stringify.value(report.title, .{}, w);
+            try w.writeAll(",\"description\":");
+            try std.json.Stringify.value(report.description, .{}, w);
+            try w.writeAll(",\"parameters\":");
+            try catalog.schema(w, &report, false);
+            try w.writeByte('}');
         }
         try w.writeAll("]}");
         return ctx.json();
     }
-    if (parts.len != 3 or !is(parts[0], "sites")) return apiError(ctx, .not_found, "unknown_endpoint");
+    if (parts.len == 1 and is(parts[0], "sites")) {
+        // Today's visitors come from the daily summaries, so the list is cheap.
+        const today = ctx.now() - @mod(ctx.now(), data.day_ms);
+        try w.writeAll("{\"sites\":[");
+        for (visible.items, 0..) |site, index| {
+            if (index != 0) try w.writeByte(',');
+            const view = try catalog.view(arena, site, .{}, ctx.now());
+            const totals = try data.totals(arena, ctx.db, view, today, today + data.day_ms);
+            try std.json.Stringify.value(.{ .slug = site.slug, .name = site.title(), .host = site.host(), .mode = @tagName(site.mode), .currency = site.currency, .today = .{ .visitors = totals.visitor_days, .page_views = totals.views } }, .{}, w);
+        }
+        try w.writeAll("]}");
+        return ctx.json();
+    }
+    if (parts.len < 3 or !is(parts[0], "sites")) return apiError(ctx, .not_found, "unknown_endpoint");
     var site: ?data.Site = null;
     for (visible.items) |candidate| if (is(candidate.slug, parts[1])) {
         site = candidate;
     };
     const chosen = site orelse return apiError(ctx, .not_found, "unknown_site");
+    if (is(parts[2], "notes")) return notes(ctx, chosen, parts[3..]);
+    if (parts.len == 3 and is(parts[2], "live") and ctx.method == .GET) {
+        // The connection is handed to the live broadcaster, as for the workspace.
+        ctx.live_site = chosen.id;
+        ctx.responded = true;
+        return;
+    }
+    if (parts.len != 3 or ctx.method != .GET) return apiError(ctx, .not_found, "unknown_endpoint");
     // Every report in the catalog, by name.
     const report = catalog.find(parts[2]) orelse return apiError(ctx, .not_found, "unknown_report");
     const table = catalog.run(arena, ctx.db, report, chosen, ctx.query, ctx.now()) catch |err| return apiError(ctx, .bad_request, switch (err) {
@@ -379,6 +421,44 @@ fn api(ctx: *Ctx, parts: []const []const u8) !void {
     try w.print("{{\"site\":\"{s}\",\"report\":\"{s}\",\"from\":\"{s}\",\"to\":\"{s}\",\"rows\":", .{ chosen.slug, report.name, &data.dateText(range.start_ms), &data.dateText(range.end_ms - 1) });
     try catalog.render(w, table, .json);
     try w.writeByte('}');
+    return ctx.json();
+}
+
+/// Chart notes: the period's notes and drafts; apps may add one, keep a
+/// draft or remove a note, with the same rules as the workspace forms.
+fn notes(ctx: *Ctx, site: data.Site, rest: []const []const u8) !void {
+    const arena = ctx.arena;
+    const w = ctx.w();
+    if (rest.len == 0 and ctx.method == .GET) {
+        const range = (try catalog.view(arena, site, ctx.query, ctx.now())).range;
+        const Note = struct { id: i64, day: []const u8, label: []const u8, draft: bool };
+        const rows = try ctx.db.all(arena, Note, "SELECT id,day,label,draft FROM annotations WHERE site_id=? AND day>=? AND day<=? ORDER BY day,id", .{ site.id, &data.dateText(range.start_ms), &data.dateText(range.end_ms - 1) });
+        try std.json.Stringify.value(.{ .notes = rows }, .{}, w);
+        return ctx.json();
+    }
+    if (!ctx.can(.editor)) return apiError(ctx, .forbidden, "editor_role_required");
+    if (rest.len == 0 and ctx.method == .POST) {
+        const day = try ctx.field("day");
+        const label = std.mem.trim(u8, try ctx.field("label"), " ");
+        _ = data.parseDate(day) catch return apiError(ctx, .bad_request, "invalid_day");
+        @import("../domain.zig").validateText(label, 60, false) catch return apiError(ctx, .bad_request, "invalid_label");
+        const db = ctx.shared.lockWrite();
+        defer ctx.shared.unlockWrite();
+        try db.run(arena, "INSERT INTO annotations(site_id,day,label,created_at_ms) VALUES(?,?,?,?)", .{ site.id, day, label, ctx.now() });
+        ctx.status = .created;
+        try w.print("{{\"id\":{d}}}", .{db.lastInsertRowId()});
+        return ctx.json();
+    }
+    const id = if (rest.len >= 1) std.fmt.parseInt(i64, rest[0], 10) catch return apiError(ctx, .not_found, "unknown_note") else return apiError(ctx, .not_found, "unknown_endpoint");
+    const db = ctx.shared.lockWrite();
+    defer ctx.shared.unlockWrite();
+    if (rest.len == 2 and is(rest[1], "keep") and ctx.method == .POST) {
+        try db.run(arena, "UPDATE annotations SET draft=0 WHERE id=? AND site_id=?", .{ id, site.id });
+    } else if (rest.len == 1 and ctx.method == .DELETE) {
+        try db.run(arena, "DELETE FROM annotations WHERE id=? AND site_id=?", .{ id, site.id });
+    } else return apiError(ctx, .not_found, "unknown_endpoint");
+    if (db.changes() == 0) return apiError(ctx, .not_found, "unknown_note");
+    ctx.status = .no_content;
     return ctx.json();
 }
 

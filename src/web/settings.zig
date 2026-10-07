@@ -478,7 +478,7 @@ fn aiSection(ctx: *Ctx, site: ?data.Site) !void {
     try w.writeAll("<h3 class=\"section-title\">For the whole team</h3>");
     // Connected apps (MCP clients with live refresh tokens).
     const Connection = struct { name: []const u8, last: i64, week: i64 };
-    const connections = try db.all(arena, Connection, "SELECT c.name,max(coalesce(g.last_used_at_ms,g.created_at_ms)),(SELECT count(*) FROM ai_log l WHERE l.origin=c.name AND l.at_ms>=?) FROM oauth_grants g JOIN oauth_clients c ON c.client_id=g.client_id WHERE g.kind='refresh' AND g.expires_at_ms>? GROUP BY c.name", .{ ctx.now() - 7 * data.day_ms, ctx.now() });
+    const connections = try db.all(arena, Connection, "SELECT c.name,max(coalesce(g.last_used_at_ms,g.created_at_ms)),(SELECT count(*) FROM ai_log l WHERE l.origin=c.name AND l.at_ms>=?) FROM oauth_grants g JOIN oauth_clients c ON c.client_id=g.client_id WHERE g.kind='refresh' AND g.expires_at_ms>? AND g.client_id NOT LIKE 'analytico-%' GROUP BY c.name", .{ ctx.now() - 7 * data.day_ms, ctx.now() });
     const providers = [_]struct { []const u8, []const u8, []const u8, []const u8, ai.Provider, []const u8 }{
         .{ "Claude", "by Anthropic", "#C96442", "C", .anthropic, "claude" },
         .{ "ChatGPT", "by OpenAI", "#000", "", .openai, "chatgpt" },
@@ -652,7 +652,7 @@ fn aiPost(ctx: *Ctx, action: []const u8) !void {
     if (is(action, "disconnect")) {
         const db = ctx.shared.lockWrite();
         defer ctx.shared.unlockWrite();
-        try db.run(arena, "DELETE FROM oauth_grants WHERE client_id IN (SELECT client_id FROM oauth_clients WHERE name=?)", .{try ctx.field("client")});
+        try db.run(arena, "DELETE FROM oauth_grants WHERE client_id IN (SELECT client_id FROM oauth_clients WHERE name=? AND client_id NOT LIKE 'analytico-%')", .{try ctx.field("client")});
         return ctx.done("Disconnected. The app can no longer read your analytics.", "{s}", .{back});
     }
     if (is(action, "remove-key")) {
@@ -695,7 +695,7 @@ fn aiPost(ctx: *Ctx, action: []const u8) !void {
 
 fn aiStatus(ctx: *Ctx) !void {
     const since = std.fmt.parseInt(i64, ctx.param("since") orelse "0", 10) catch 0;
-    var statement = try ctx.db.prepare(ctx.arena, "SELECT c.name FROM oauth_grants g JOIN oauth_clients c ON c.client_id=g.client_id WHERE g.kind='refresh' AND g.created_at_ms>? ORDER BY g.created_at_ms DESC LIMIT 1");
+    var statement = try ctx.db.prepare(ctx.arena, "SELECT c.name FROM oauth_grants g JOIN oauth_clients c ON c.client_id=g.client_id WHERE g.kind='refresh' AND g.created_at_ms>? AND g.client_id NOT LIKE 'analytico-%' ORDER BY g.created_at_ms DESC LIMIT 1");
     defer statement.deinit();
     try statement.bindInt(1, since);
     const w = ctx.w();

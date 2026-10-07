@@ -30,6 +30,24 @@ fn people(arena: std.mem.Allocator, count: i64) ![]const u8 {
     return std.fmt.allocPrint(arena, "{d} {s}", .{ count, if (count == 1) "person" else "people" });
 }
 
+/// The Analytico apps signed in as you, one row per device, newest use
+/// first. Signing one out deletes its tokens; the app asks to sign in again.
+fn devices(ctx: *Ctx) !void {
+    const w = ctx.w();
+    const Device = struct { id: []const u8, name: []const u8, client: []const u8, first: i64, last: i64 };
+    const rows = try ctx.db.all(ctx.arena, Device, "SELECT g.device_id,max(g.device_name),max(c.name),min(g.created_at_ms),max(coalesce(g.last_used_at_ms,g.created_at_ms)) FROM oauth_grants g JOIN oauth_clients c ON c.client_id=g.client_id WHERE g.user_id=? AND g.device_id IS NOT NULL AND g.kind='refresh' AND g.expires_at_ms>? GROUP BY g.device_id ORDER BY 5 DESC", .{ ctx.user.?.id, ctx.now() });
+    if (rows.len == 0) return;
+    try w.writeAll("<h3 class=\"section-title mt-32\">Signed-in apps<span class=\"note\">The Analytico app on your devices</span></h3><section class=\"card card-flush\" data-devices><div class=\"method-list\">");
+    for (rows) |device| {
+        try w.writeAll("<div class=\"method-row\"><span class=\"auth-mark passkey\">");
+        try icon(w, "sites");
+        try render(w,
+            \\</span><div class="grow"><strong>{name}</strong><small>{client} · last used {last}</small></div><div class="row nowrap"><form method="post" action="/settings/signin/sign-out-device" data-confirm="Sign out {name}? The app asks to sign in again."><input type="hidden" name="device" value="{id}"><button class="btn">Sign out</button></form></div></div>
+        , .{ .name = device.name, .client = device.client, .last = data.ago(device.last, ctx.now()), .id = device.id });
+    }
+    try w.writeAll("</div></section>");
+}
+
 pub fn section(ctx: *Ctx) !void {
     const arena = ctx.arena;
     const db = ctx.db;
@@ -98,8 +116,9 @@ pub fn section(ctx: *Ctx) !void {
         \\<dialog class="dialog" id="password-dialog"><form method="post" action="/settings/signin/password"><div class="dialog-head"><div><h2>{title}</h2><p>Signs out your other devices.</p></div><button class="btn btn-quiet btn-icon close" type="button" data-close aria-label="Close">×</button></div>
         \\<div class="dialog-body"><input type="text" name="username" value="{email}" autocomplete="username" hidden><label class="field">New password<input class="input" type="password" name="password" autocomplete="new-password" minlength="10" required><small>At least 10 characters.</small></label></div>
         \\<div class="dialog-foot"><button class="btn" type="button" data-close>Cancel</button><button class="btn btn-primary">Save password</button></div></form></dialog>
-        \\<h3 class="section-title mt-32">Ways to sign in for everyone<span class="note">Turning one off never locks anyone out</span></h3><section class="card card-flush"><div class="method-list">
     , .{ .title = if (has_password) "Change your password" else "Set a password", .email = user.email });
+    try devices(ctx);
+    try w.writeAll("<h3 class=\"section-title mt-32\">Ways to sign in for everyone<span class=\"note\">Turning one off never locks anyone out</span></h3><section class=\"card card-flush\"><div class=\"method-list\">");
 
     // ---- the instance
     const main = try signin.primary(arena, db);
@@ -188,7 +207,10 @@ pub fn post(ctx: *Ctx, action: []const u8) !void {
     }
     const db = ctx.shared.lockWrite();
     defer ctx.shared.unlockWrite();
-    if (is(action, "rename-passkey")) {
+    if (is(action, "sign-out-device")) {
+        try db.run(arena, "DELETE FROM oauth_grants WHERE device_id=? AND user_id=?", .{ try ctx.field("device"), user.id });
+        try ctx.flash("Signed out. The app asks to sign in again.", "", "");
+    } else if (is(action, "rename-passkey")) {
         const label = std.mem.trim(u8, try ctx.field("label"), " ");
         @import("../domain.zig").validateText(label, 64, false) catch return fail(ctx, "Give the passkey a short name.");
         try db.run(arena, "UPDATE passkeys SET label=? WHERE id=? AND user_id=?", .{ label, std.fmt.parseInt(i64, try ctx.field("id"), 10) catch 0, user.id });

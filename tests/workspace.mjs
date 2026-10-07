@@ -195,6 +195,62 @@ await journey("workspace", async (t) => {
   await page.goto(`${origin}/settings/ai?site=shop`);
   await page.getByText("Claude subscription").waitFor();
 
+  // The Mac and iPhone app: discovery, sign-in through the browser with its
+  // own client and scheme, then the read API, notes and the live stream.
+  const discovery = await (await fetch(`${origin}/.well-known/analytico`)).json();
+  assert.deepEqual([discovery.product, discovery.api.level, discovery.setup_complete, discovery.oauth.token_endpoint], ["analytico", 1, true, `${origin}/oauth/token`]);
+  assert.ok(discovery.sign_in.includes("passkey"), discovery.sign_in);
+  const appVerifier = randomBytes(32).toString("base64url");
+  const appChallenge = createHash("sha256").update(appVerifier).digest("base64url");
+  await page.goto(`${origin}/oauth/authorize?response_type=code&client_id=analytico-apple&redirect_uri=${encodeURIComponent("analytico://oauth")}&code_challenge=${appChallenge}&code_challenge_method=S256&state=a1&device_name=${encodeURIComponent("Test iPhone")}`);
+  await page.getByRole("heading", { name: "Sign in to the Analytico app on Test iPhone" }).waitFor();
+  // Chromium won't follow analytico://, so post the consent form's own fields
+  // with the browser's session and read where the server sends the app.
+  const consentFields = await page.locator("form[action='/oauth/authorize']").evaluate((form) => Object.fromEntries(new FormData(form)));
+  const consent = await page.context().request.post(`${origin}/oauth/authorize`, { form: { ...consentFields, decision: "allow" }, headers: { origin }, maxRedirects: 0 });
+  const appReturn = new URL(consent.headers().location);
+  assert.deepEqual([appReturn.protocol, appReturn.searchParams.get("state")], ["analytico:", "a1"]);
+  const exchange = (body) => fetch(`${origin}/oauth/token`, { method: "POST", body: new URLSearchParams(body) }).then((response) => response.json());
+  const appTokens = await exchange({ grant_type: "authorization_code", code: appReturn.searchParams.get("code"), client_id: "analytico-apple", redirect_uri: "analytico://oauth", code_verifier: appVerifier });
+  assert.equal(appTokens.scope, "app:read app:notes");
+  const app = (path, init = {}) => fetch(`${origin}/api/v1${path}`, { ...init, headers: { authorization: `Bearer ${appTokens.access_token}`, ...init.headers } });
+  const appSites = (await (await app("/sites")).json()).sites;
+  const shopSite = appSites.find((site) => site.slug === "shop");
+  assert.ok(shopSite && Number.isInteger(shopSite.today.visitors) && shopSite.today.page_views >= 3, JSON.stringify(appSites));
+  assert.ok((await (await app("/catalog")).json()).reports.some((report) => report.name === "overview"));
+  assert.equal((await (await app("/sites/shop/overview?range=7d")).json()).report, "overview");
+  // Separate scopes: app tokens don't open the connector, and the reverse.
+  assert.equal((await fetch(`${origin}/mcp`, { method: "POST", headers: { authorization: `Bearer ${appTokens.access_token}`, "content-type": "application/json" }, body: "{}" })).status, 401);
+  assert.equal((await fetch(`${origin}/api/v1/sites`, { headers: { authorization: `Bearer ${tokens.access_token}` } })).status, 401);
+  const today = new Date().toISOString().slice(0, 10);
+  const added = await app("/sites/shop/notes", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ day: today, label: "Sent from the app" }) });
+  assert.equal(added.status, 201);
+  const noteId = (await added.json()).id;
+  assert.ok((await (await app("/sites/shop/notes?range=7d")).json()).notes.some((note) => note.id === noteId && note.label === "Sent from the app" && !note.draft));
+  assert.equal((await app(`/sites/shop/notes/${noteId}`, { method: "DELETE" })).status, 204);
+  assert.equal((await app("/sites/shop/notes", { method: "POST", body: new URLSearchParams({ day: "yesterday", label: "x" }) })).status, 400);
+  const stream = new AbortController();
+  const live = await app("/sites/shop/live", { signal: stream.signal });
+  assert.equal(live.headers.get("content-type"), "text/event-stream");
+  const firstEvent = new TextDecoder().decode((await live.body.getReader().read()).value);
+  stream.abort();
+  assert.match(firstEvent, /retry: 5000/);
+  // Refresh rotates the tokens and keeps the device.
+  const rotated = await exchange({ grant_type: "refresh_token", refresh_token: appTokens.refresh_token, client_id: "analytico-apple" });
+  assert.equal((await exchange({ grant_type: "refresh_token", refresh_token: appTokens.refresh_token, client_id: "analytico-apple" })).error, "invalid_grant");
+  appTokens.access_token = rotated.access_token;
+  assert.equal((await app("/sites")).status, 200);
+  // The app is a device under Settings → Sign-in, not an AI connector; signing it out ends its access.
+  await page.goto(`${origin}/settings/ai?site=shop`);
+  assert.equal(await page.getByText("Analytico for Mac, iPhone and iPad").count(), 0);
+  await page.goto(`${origin}/settings/signin`);
+  const deviceRow = page.locator("[data-devices] .method-row", { hasText: "Test iPhone" });
+  await deviceRow.waitFor();
+  page.once("dialog", (dialog) => dialog.accept());
+  await deviceRow.getByRole("button", { name: "Sign out" }).click();
+  await page.locator(".toast", { hasText: "Signed out" }).waitFor();
+  assert.equal((await app("/sites")).status, 401);
+
   // Settings → Sign-in: the passkey is listed; set up Google and link it.
   await page.goto(`${origin}/settings/signin`);
   await page.locator(".method-row", { hasText: "Linux · Passkey" }).waitFor();
@@ -250,5 +306,5 @@ await journey("workspace", async (t) => {
   await page.locator(".tabbar").getByRole("link", { name: "Pages" }).click();
   await page.waitForURL(/\/shop\/pages$/);
 
-  return "passkey first run, pages, goals, funnels, filters, alerts, notes, BYOK ask, MCP connector, Google linking and sign-in, teammate invite";
+  return "passkey first run, pages, goals, funnels, filters, alerts, notes, BYOK ask, MCP connector, app sign-in and API, Google linking and sign-in, teammate invite";
 });

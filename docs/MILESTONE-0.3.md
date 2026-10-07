@@ -1,6 +1,6 @@
 # Milestone 0.3: the web workspace on Mac, iPhone and iPad
 
-Status: plan. Nothing here is built yet.
+Status: in progress. Phase 1 (server and web) is built and tested; phases 2–5 are next.
 
 Analytico gets native apps for macOS, iOS and iPadOS, next to the web
 workspace, and the server gains what native apps need: instance discovery,
@@ -62,26 +62,26 @@ page), so the apps hand them to the browser.
 
 ### B1. Instance discovery
 
-`GET /.well-known/analytico`, public, cached for a minute:
+`GET /.well-known/analytico`, public, cached for a minute (built):
 
 ```json
 {
   "product": "analytico",
-  "name": "Plosca analytics",
-  "version": "0.3.0",
-  "api": { "min_client": "0.3.0", "base": "/api/v1" },
+  "name": "analytics.example.com",
+  "version": "1.0.0-dev",
+  "api": { "level": 1, "base": "/api/v1" },
   "oauth": { "issuer": "https://analytics.example.com", "authorization_endpoint": "…/oauth/authorize", "token_endpoint": "…/oauth/token" },
-  "sign_in": ["passkey", "google", "chatgpt"],
+  "sign_in": ["passkey", "google"],
   "setup_complete": true
 }
 ```
 
 The setup screen uses it to tell "not reachable", "not Analytico",
-"needs an update" and "not set up yet" apart (part D). It reveals nothing
-a visitor of the sign-in page does not already see.
+"needs an update" (an API level the app does not know) and "not set up
+yet" apart (part D). The name is the public host; there is no separate
+instance name. Nothing in it goes beyond what the sign-in page shows.
 
-Verification: `tests/cli.mjs` fetches it on a fresh and on a set-up
-instance; the version comes from `cli.version`.
+Verification: `tests/workspace.mjs` reads it on a set-up instance.
 
 ### B2. Native sign-in (OAuth 2.1 with PKCE)
 
@@ -107,34 +107,26 @@ Verification: `tests/workspace.mjs` runs the full code flow with a
 loopback redirect, uses the token on `/api/v1`, refreshes it, revokes it
 from Settings and sees the next call fail with 401.
 
-### B3. Report contracts and display strings
+### B3. Report contracts
 
-- `analytico catalog --json` and `GET /api/v1/catalog`: every report with
-  its parameters and its **output schema**, meaning field names, types,
-  units, currency and nullability.
-- Every report response gains an `effective` block (site, period,
-  comparison, filters, generated at, freshness such as "summaries until
-  14:05" or "updated daily") and an `availability` note per section
-  ("Unavailable in Lite mode", never zero).
-- Numbers that the workspace formats gain a `display` twin: changes
-  ("+12.4%", "6.4×"), durations, money, percentages and dates. The strings
-  come from the same functions as the workspace (`html.Change` and
-  friends), so every surface shows identical text.
-- `tests/contracts/`: one reference response per report for a seeded
-  fixture site, checked byte for byte by `tests/cli.mjs`. Client test
-  suites load the same files.
+- `GET /api/v1/catalog`: every report with its title, description and
+  parameters as JSON Schema (the same schema the MCP tools use).
+- Report responses keep raw values; the apps format them with the
+  platform's locale-aware formatters, so numbers read the way each person
+  expects ("18.420" in German). Changes are shown as in the workspace:
+  "+12.4%", or a multiple ("6.4×") from three times the previous value up.
+- Reference responses per report for a seeded fixture site
+  (`tests/contracts/`) come with the Apple app in phase 2, where they are
+  first consumed.
 
-Verification: the contract test fails when a report's fields change
-without an updated fixture.
+### B4. Sites, notes, and reads per screen
 
-### B4. Missing reads and two writes
-
-Native screens need reads the catalog does not have yet: `retention`
-(served from the daily cache), `notes` (chart notes and drafted ones),
-`live` (online now and the last 20 page views), and `sites` with today's
-visitors. Writes: add a note, keep or dismiss a drafted note. They call the
-same functions, permission checks and audit entries as the workspace
-forms.
+Built: `GET /api/v1/sites` with each site's visitors and page views today
+(from the daily summaries); `GET /api/v1/sites/{slug}/notes` for a period
+(chart notes and drafted ones); `POST …/notes` to add one,
+`POST …/notes/{id}/keep` and `DELETE …/notes/{id}`, with the editor role
+and the same validation as the workspace. Further reads (retention, live
+page views) are added with the screen that needs them, in phase 2.
 
 ### B5. Live stream for apps
 
@@ -234,8 +226,8 @@ document (page "v4 · Apps · Setup", desktop and phone).
      "The certificate for … is not valid";
    - `GET /.well-known/analytico`: "This address isn't an Analytico
      instance" for anything else;
-   - `api.min_client` against the app version: "This instance runs
-     0.2. Ask its owner to update to 0.3 or later";
+   - `api.level` the app understands: "This instance needs an update.
+     Ask its owner to update Analytico";
    - `setup_complete`: "This instance isn't set up yet. Open it in a
      browser to create the first account."
 3. **Instance card.** Name, host, version and the sign-in methods,
@@ -291,8 +283,8 @@ analytico/
 2. iOS, iPadOS and macOS 26 or later; SwiftUI; no third-party
    dependencies.
 3. No local summary replica in 0.3; a bounded response cache instead.
-4. Display strings come from the server; the apps do not re-implement
-   number formatting.
+4. Raw values from the server; the apps format numbers in the person's
+   locale with the platform's formatters.
 5. Push through a publisher-run relay with end-to-end encryption.
 6. Settings, team and administration stay web-only.
 

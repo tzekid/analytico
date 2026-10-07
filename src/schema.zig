@@ -16,10 +16,10 @@ const std = @import("std");
 const db_mod = @import("db.zig");
 
 const baseline_version: i64 = 6;
-pub const current_version: i64 = 9;
+pub const current_version: i64 = 10;
 
 /// Migrations after the baseline: index 0 takes schema 6 to 7.
-const migrations = [_][]const u8{ chatgpt_sql, draft_notes_sql, scale_sql };
+const migrations = [_][]const u8{ chatgpt_sql, draft_notes_sql, scale_sql, apps_sql };
 
 /// 7: each person can run Analytico's AI on their own ChatGPT plan. The
 /// registration (issued client) outlives a sign-out; tokens are sealed;
@@ -83,6 +83,19 @@ const scale_sql =
     \\DELETE FROM rollup_days;
     \\INSERT INTO schema_migrations VALUES(9,'summaries-for-scale',unixepoch('subsec')*1000);
     \\PRAGMA user_version=9;
+    \\COMMIT;
+;
+
+/// 10: native apps sign in like MCP clients, through a built-in OAuth
+/// client per platform. Each sign-in is one device, named by the app and
+/// kept across token refreshes, so Settings can list and sign it out.
+const apps_sql =
+    \\BEGIN IMMEDIATE;
+    \\ALTER TABLE oauth_grants ADD COLUMN device_id TEXT;
+    \\ALTER TABLE oauth_grants ADD COLUMN device_name TEXT;
+    \\INSERT INTO oauth_clients(client_id,name,redirect_uris,created_at_ms) VALUES('analytico-apple','Analytico for Mac, iPhone and iPad','["analytico://oauth"]',unixepoch('subsec')*1000) ON CONFLICT DO NOTHING;
+    \\INSERT INTO schema_migrations VALUES(10,'native-apps',unixepoch('subsec')*1000);
+    \\PRAGMA user_version=10;
     \\COMMIT;
 ;
 
