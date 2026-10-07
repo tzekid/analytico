@@ -1,7 +1,7 @@
 Third-party assets embedded in the workspace
 
 fonts/roboto.woff2      Roboto, Copyright 2011 The Roboto Project Authors.
-                        SIL Open Font License 1.1. Latin subset.
+                        SIL Open Font License 1.1. Latin subset, weights 400–700.
 fonts/quando.woff2      Quando, Copyright 2011 Joana Correia (joana@joanacorreia.com).
                         SIL Open Font License 1.1. Latin subset.
 fonts/quicksand.woff2   Quicksand, Copyright 2011 The Quicksand Project Authors.
@@ -10,6 +10,9 @@ icons.svg               Icons from Lucide (https://lucide.dev), ISC License,
                         Copyright (c) for portions of Lucide are held by
                         Cole Bemis 2013-2022 as part of Feather (MIT); all other
                         copyright (c) for Lucide are held by Lucide Contributors.
+                        The ChatGPT logo (symbol "chatgpt") is a trademark of
+                        OpenAI, from developers.openai.com/siwc, used as approved
+                        for Sign in with ChatGPT.
 
 player.js, player.css    rrweb 2.1.7 replay player, MIT License, Copyright (c) 2018
                         Contributors (https://github.com/rrweb-io/rrweb/graphs/contributors)

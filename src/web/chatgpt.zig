@@ -24,6 +24,7 @@ const Ctx = ctx_mod.Ctx;
 const Shared = ctx_mod.Shared;
 const esc = html.esc;
 const render = html.render;
+const icon = layout.icon;
 
 const resource = "https://api.openai.com/v1";
 const scopes = "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct";
@@ -495,12 +496,16 @@ pub fn card(ctx: *Ctx) !void {
     if (ctx.param("chatgpt")) |outcome| if (std.meta.stringToEnum(Problem, outcome)) |problem| {
         try render(w, "<div class=\"callout callout-warn mb-16\"><span>{problem}</span></div>", .{ .problem = problem.text() });
     };
-    try w.writeAll("<section class=\"card mb-16\"><div class=\"row-between top\"><div class=\"row nowrap gap-12\"><span class=\"mark mark-chatgpt\">G</span><div>");
+    try w.writeAll("<section class=\"card mb-16\"><div class=\"row-between top\"><div class=\"row nowrap gap-12\"><span class=\"mark mark-chatgpt\">");
+    try icon(w, "chatgpt");
+    try w.writeAll("</span><div>");
     if (current == null or current.?.tokens == null) {
         try w.writeAll(
             \\<strong class="t-15">Use your ChatGPT plan</strong><div class="hint">Ask and Why? run on your own ChatGPT plan, within its usage limits — no API key. Only you use it.</div></div></div>
-            \\<div class="row nowrap"><a class="btn btn-chatgpt" href="/settings/ai/chatgpt/start" target="_blank" data-chatgpt-start>Continue with ChatGPT</a></div></div>
+            \\<div class="row nowrap"><a class="btn btn-chatgpt" href="/settings/ai/chatgpt/start" target="_blank" data-chatgpt-start>
         );
+        try icon(w, "chatgpt");
+        try w.writeAll("Continue with ChatGPT</a></div></div>");
         if (current != null) try w.writeAll("<p class=\"hint mt-10\"><a class=\"link\" href=\"/settings/ai/chatgpt/start?another=1\" target=\"_blank\" data-chatgpt-start>Use another ChatGPT account</a></p>");
         try w.writeAll("</section>");
         return waitingDialog(w);
@@ -519,9 +524,13 @@ pub fn card(ctx: *Ctx) !void {
     try w.writeAll("</select></label>");
     if (ctx.can(.admin)) try render(w, "<label class=\"row nowrap\"><input type=\"checkbox\" name=\"background\" value=\"1\" data-autosubmit{!checked}><span>Use my plan for alerts and scheduled emails when there’s no API key</span></label>", .{ .checked = if (value.background) " checked" else "" });
     try w.writeAll("</form></section>");
-    if (!value.welcomed) try w.writeAll(
-        \\<dialog class="dialog" data-open><form method="post" action="/settings/ai/chatgpt/welcomed"><div class="dialog-head"><div><h2>You’re using your ChatGPT plan</h2><p>Ask and Why? in Analytico now run on your ChatGPT plan and count toward its usage limits. Only aggregated numbers are sent, as set under “What the AI can see”.</p></div></div><div class="dialog-foot"><button class="btn btn-primary">Got it</button></div></form></dialog>
-    );
+    if (!value.welcomed) {
+        try w.writeAll("<dialog class=\"dialog\" data-open><form method=\"post\" action=\"/settings/ai/chatgpt/welcomed\"><div class=\"dialog-head\"><div><span class=\"mark mark-chatgpt mb-10\">");
+        try icon(w, "chatgpt");
+        try w.writeAll(
+            \\</span><h2>You’re using your ChatGPT plan</h2><p>Ask and Why? in Analytico now run on your ChatGPT plan and count toward its usage limits. Only aggregated numbers are sent, as set under “What the AI can see”.</p></div></div><div class="dialog-foot"><button class="btn btn-primary">Got it</button></div></form></dialog>
+        );
+    }
 }
 
 fn waitingDialog(w: *std.Io.Writer) !void {

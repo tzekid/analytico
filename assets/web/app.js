@@ -907,6 +907,9 @@
     body.replaceChildren(question);
     const callout = document.createElement("div");
     callout.className = "callout callout-warn";
+    // A spent ChatGPT plan keeps ChatGPT's mark next to its message.
+    const sprite = $("svg.i use")?.getAttribute("href").split("#")[0];
+    if (href.startsWith("https://chatgpt.com/") && sprite) callout.insertAdjacentHTML("beforeend", `<svg class="i" aria-hidden="true"><use href="${sprite}#chatgpt"/></svg>`);
     const span = document.createElement("span");
     span.textContent = message;
     callout.append(span);

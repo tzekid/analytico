@@ -654,7 +654,9 @@ pub fn askSheet(ctx: *Ctx, site: data.Site, id_text: []const u8) !void {
     try render(w, "<form method=\"post\" action=\"/{slug}/ask\" class=\"ask-input\" data-ask-form><input type=\"hidden\" name=\"view\" value=\"{view}\"><input class=\"input\" name=\"q\" placeholder=\"Ask a follow-up…\" required maxlength=\"500\" autocomplete=\"off\"><button class=\"btn btn-primary btn-icon\" aria-label=\"Ask\">", .{ .slug = site.slug, .view = close });
     try icon(w, "send");
     const on_plan = std.mem.endsWith(u8, row.model, plan_suffix);
-    try render(w, "</button></form><p class=\"hint\">{model} · {source} · aggregates only · {used}", .{ .model = modelLabel(if (on_plan) row.model[0 .. row.model.len - plan_suffix.len] else row.model), .source = if (on_plan) "Using ChatGPT plan" else "instance key", .used = row.data_used });
+    try render(w, "</button></form><p class=\"hint\">{model} · ", .{ .model = modelLabel(if (on_plan) row.model[0 .. row.model.len - plan_suffix.len] else row.model) });
+    if (on_plan) try icon(w, "chatgpt");
+    try render(w, "{source} · aggregates only · {used}", .{ .source = if (on_plan) "Using ChatGPT plan" else "instance key", .used = row.data_used });
     if (on_plan) try render(w, " · <a class=\"link\" href=\"{url}\" target=\"_blank\" rel=\"noopener\">Manage usage</a>", .{ .url = chatgpt.usage_url });
     if (row.cost_micro > 0) try render(w, " · ≈${cost:.3}", .{ .cost = @as(f64, @floatFromInt(row.cost_micro)) / 1_000_000 });
     if (ctx.can(.admin)) try render(w, " · <a class=\"link\" href=\"/settings/ai/log/{id}?site={slug}\">See what was sent</a>", .{ .id = id, .slug = site.slug });

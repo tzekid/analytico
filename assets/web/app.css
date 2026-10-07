@@ -1,5 +1,5 @@
 /* Analytico workspace. Tokens mirror the Sketch foundations page. */
-@font-face { font-family: "Roboto"; src: url("roboto.woff2") format("woff2"); font-weight: 100 900; font-display: swap; }
+@font-face { font-family: "Roboto"; src: url("roboto.woff2") format("woff2"); font-weight: 400 700; font-display: swap; }
 @font-face { font-family: "Quando"; src: url("quando.woff2") format("woff2"); font-weight: 400; font-display: swap; }
 @font-face { font-family: "Quicksand"; src: url("quicksand.woff2") format("woff2"); font-weight: 300 700; font-display: swap; }
 /* Local fallbacks shaped like the web fonts, so text keeps its line height
@@ -90,6 +90,9 @@ h1.title { font: 400 25px/32px var(--display); letter-spacing: -.005em; }
 /* OpenAI's sign-in button rules: black (or white), nothing else. */
 .btn-chatgpt { background: #000; border-color: #000; color: #fff; }
 .btn-chatgpt:hover { background: #2b2b2b; border-color: #2b2b2b; }
+.btn-chatgpt .i { color: #fff; width: 18px; height: 18px; }
+.mark .i { width: 20px; height: 20px; }
+.hint .i { width: 13px; height: 13px; margin: -2px 3px 0 0; }
 .btn-danger { background: var(--error); border-color: var(--error); color: #fff; }
 .btn-quiet { border-color: transparent; background: transparent; color: var(--ink-2); }
 .btn-quiet:hover { background: var(--subtle); border-color: transparent; }

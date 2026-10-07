@@ -149,6 +149,10 @@ await journey("ai", async (t) => {
 
   // A forged ID token, then an account without plan sharing: refused, nothing saved.
   await page.goto(`${origin}/settings/ai`);
+  // OpenAI's approved button: black, with the ChatGPT logo.
+  const logo = page.locator("a.btn-chatgpt svg");
+  assert.match(await logo.locator("use").getAttribute("href"), /#chatgpt$/);
+  assert.equal((await logo.boundingBox()).width, 18);
   mode.forged = true;
   let popup = await continueWith();
   await popup.getByText("couldn’t be verified").waitFor();
@@ -256,6 +260,7 @@ await journey("ai", async (t) => {
   await sheet.getByRole("button", { name: "Ask", exact: true }).click();
   await page.locator("#ask-sheet").getByText("Usage limit reached").waitFor();
   assert.equal(await page.locator("#ask-sheet").getByRole("link", { name: "Manage usage" }).getAttribute("href"), "https://chatgpt.com/settings/usage");
+  assert.match(await page.locator("#ask-sheet .callout use").getAttribute("href"), /#chatgpt$/);
   assert.equal(seen.anthropic.length, anthropicBefore);
 
   // Plain-language filters: the description becomes chips, then the view.
