@@ -92,6 +92,7 @@ struct SitesRoot: View {
 struct SitesList: View {
     @Environment(AppModel.self) private var model
     let client: Client
+    @State private var showsNotifications = false
 
     var body: some View {
         NavigationStack {
@@ -136,8 +137,20 @@ struct SitesList: View {
             }
             .toolbar {
                 ToolbarItem(placement: .automatic) {
-                    Button("Sign Out", role: .destructive) { model.signOut() }
+                    Menu {
+                        #if os(iOS)
+                        Button("Notifications…", systemImage: "bell") { showsNotifications = true }
+                        #else
+                        SettingsLink { Label("Notifications…", systemImage: "bell") }
+                        #endif
+                        Button("Sign Out", role: .destructive) { model.signOut() }
+                    } label: {
+                        Label("Account", systemImage: "person.crop.circle")
+                    }
                 }
+            }
+            .sheet(isPresented: $showsNotifications) {
+                NavigationStack { NotificationSettings() }
             }
         }
     }
@@ -151,6 +164,7 @@ struct SiteView: View {
     let site: Site
     @State private var screen: Screen? = .overview
     @State private var view = ViewState()
+    @State private var showsNotifications = false
 
     var body: some View {
         NavigationSplitView {
@@ -171,6 +185,11 @@ struct SiteView: View {
                             Button(other.name) { model.selectedSite = other.slug }
                         }
                         Divider()
+                        #if os(iOS)
+                        Button("Notifications…", systemImage: "bell") { showsNotifications = true }
+                        #else
+                        SettingsLink { Label("Notifications…", systemImage: "bell") }
+                        #endif
                         Button("Sign Out", role: .destructive) { model.signOut() }
                     } label: {
                         Label("Sites", systemImage: "rectangle.stack")
@@ -183,6 +202,9 @@ struct SiteView: View {
                     .toolbar { toolbar }
                     .safeAreaInset(edge: .bottom) { FilterBar(view: $view) }
             }
+        }
+        .sheet(isPresented: $showsNotifications) {
+            NavigationStack { NotificationSettings() }
         }
         .onChange(of: model.pendingLink, initial: true) { _, link in
             guard let link else { return }

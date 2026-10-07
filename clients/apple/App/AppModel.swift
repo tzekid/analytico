@@ -1,7 +1,13 @@
 import AnalyticoKit
 import Foundation
 import Observation
+import UserNotifications
 import WidgetKit
+#if os(iOS)
+import UIKit
+#else
+import AppKit
+#endif
 
 /// The signed-in instance and its sites, or the setup flow when there is none.
 @MainActor @Observable
@@ -26,6 +32,19 @@ final class AppModel {
     /// People online now on the selected site, for the macOS menu bar.
     private(set) var online: Int?
     private var live: Task<Void, Never>?
+
+    /// The push token Apple gave this device, and what it should be told.
+    var pushToken: Data? {
+        didSet { Task { await registerPush() } }
+    }
+    var pushKinds = Shared.pushKinds {
+        didSet {
+            Shared.pushKinds = pushKinds
+            Task { await registerPush() }
+        }
+    }
+    private(set) var pushStatus: UNAuthorizationStatus = .notDetermined
+    private(set) var pushProblem: String?
 
     /// A view opened from an `analytico://` or workspace link, applied once.
     var pendingLink: URL?
@@ -52,7 +71,11 @@ final class AppModel {
     }
 
     func signOut() {
-        if let client { store.remove(client.instance.origin) }
+        if let client {
+            // The instance forgets this device; its tokens still work until the request is sent.
+            Task { try? await client.unregisterDevice() }
+            store.remove(client.instance.origin)
+        }
         Shared.instance = nil
         WidgetCenter.shared.reloadAllTimelines()
         live?.cancel()
@@ -83,11 +106,42 @@ final class AppModel {
         #endif
     }
 
+    /// Asks once for permission, then for a push token.
+    func enablePush() async {
+        let center = UNUserNotificationCenter.current()
+        if await center.notificationSettings().authorizationStatus == .notDetermined {
+            _ = try? await center.requestAuthorization(options: [.alert, .sound, .badge])
+        }
+        pushStatus = await center.notificationSettings().authorizationStatus
+        guard pushStatus == .authorized || pushStatus == .provisional else { return }
+        #if os(iOS)
+        UIApplication.shared.registerForRemoteNotifications()
+        #else
+        NSApplication.shared.registerForRemoteNotifications()
+        #endif
+    }
+
+    private func registerPush() async {
+        guard let client, let pushToken else { return }
+        #if DEBUG
+        let development = true
+        #else
+        let development = false
+        #endif
+        do {
+            try await client.registerDevice(token: pushToken, key: PushKey.current(), kinds: pushKinds, development: development)
+            pushProblem = nil
+        } catch {
+            pushProblem = "Couldn’t turn on notifications with your Analytico. Its server may need an update."
+        }
+    }
+
     func loadSites() async {
         guard let client else { return }
         do {
             sites = try await client.sites()
             sitesError = nil
+            await enablePush()
             if selectedSite == nil || !sites.contains(where: { $0.slug == selectedSite }), sites.count == 1 {
                 selectedSite = sites[0].slug
             } else if live == nil {

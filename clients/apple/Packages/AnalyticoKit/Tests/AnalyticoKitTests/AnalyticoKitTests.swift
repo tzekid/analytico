@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Testing
 @testable import AnalyticoKit
@@ -99,5 +100,24 @@ import Testing
         #expect(report.rows[0]["page_views"] == .int(1284))
         #expect(report.rows[0]["active_ms"]?.number == 12.5)
         #expect(report.rows[0]["orders"] == .null)
+    }
+}
+
+@Suite struct PushTests {
+    static func base64URL(_ text: String) -> Data {
+        var text = text.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        text += String(repeating: "=", count: (4 - text.count % 4) % 4)
+        return Data(base64Encoded: text)!
+    }
+
+    /// The example message from RFC 8291, section 5.
+    @Test func opensTheRFCExample() throws {
+        let key = try PushKey(privateKey: P256.KeyAgreement.PrivateKey(rawRepresentation: Self.base64URL("q1dXpw3UpT5VOmu_cf_v6ih07Aems3njxI-JWgLcM94")), authSecret: Self.base64URL("BTBZMqHH6r4Tts7J_aSIgg"))
+        #expect(key.publicKey.base64URL == "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4")
+        let sealed = Self.base64URL("DGv6ra1nlYgDCS1FRnbzlwAAEABBBP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A_yl95bQpu6cVPTpK4Mqgkf1CXztLVBSt2Ks3oZwbuwXPXLWyouBWLVWGNWQexSgSxsj_Qulcy4a-fN")
+        #expect(String(decoding: try key.open(sealed), as: UTF8.self) == "When I grow up, I want to be a watermelon")
+        var tampered = sealed
+        tampered[tampered.count - 1] ^= 1
+        #expect(throws: (any Error).self) { try key.open(tampered) }
     }
 }

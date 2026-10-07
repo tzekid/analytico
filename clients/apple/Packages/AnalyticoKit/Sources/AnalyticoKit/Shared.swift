@@ -21,6 +21,12 @@ public enum Shared {
         set { defaults.set(newValue, forKey: "site") }
     }
 
+    /// The notifications this device asked for; all of them by default.
+    public static var pushKinds: Set<PushKind> {
+        get { defaults.string(forKey: "pushKinds").map { Set($0.split(separator: ",").compactMap { PushKind(rawValue: String($0)) }) } ?? Set(PushKind.allCases) }
+        set { defaults.set(newValue.map(\.rawValue).sorted().joined(separator: ","), forKey: "pushKinds") }
+    }
+
     /// A client for the signed-in instance, or nil when signed out.
     public static func client() -> Client? {
         guard let instance, let tokens = store.load(instance.origin) else { return nil }

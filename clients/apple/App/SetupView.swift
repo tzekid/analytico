@@ -238,6 +238,7 @@ struct Problem: View {
     }
 }
 
+@MainActor
 enum Device {
     /// What Settings → Sign-in calls this device: "MacBook Pro", "iPhone".
     static var name: String {

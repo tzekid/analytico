@@ -1,8 +1,9 @@
 Analytico.xcodeproj/
 App/Info.plist
-App/Analytico.entitlements
 Packages/AnalyticoKit/.build/
 Packages/AnalyticoKit/.swiftpm/
 build/
 Widgets/Info.plist
 Widgets/AnalyticoWidgets.entitlements
+Notifications/Info.plist
+Notifications/AnalyticoNotifications.entitlements

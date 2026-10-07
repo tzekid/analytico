@@ -26,6 +26,7 @@ targets:
     dependencies:
       - package: AnalyticoKit
       - target: AnalyticoWidgets
+      - target: AnalyticoNotifications
     info:
       path: App/Info.plist
       properties:
@@ -41,15 +42,13 @@ targets:
         LSApplicationCategoryType: public.app-category.business
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
-    entitlements:
-      path: App/Analytico.entitlements
-      properties:
-        com.apple.security.app-sandbox: true
-        com.apple.security.network.client: true
-        com.apple.security.application-groups: [group.ru.plosca.analytico]
-        keychain-access-groups: [$(AppIdentifierPrefix)ru.plosca.analytico]
     settings:
       base:
+        # Push is `aps-environment` on iOS and a developer key on macOS;
+        # export switches both to production.
+        CODE_SIGN_ENTITLEMENTS[sdk=iphoneos*]: App/Analytico-iOS.entitlements
+        CODE_SIGN_ENTITLEMENTS[sdk=iphonesimulator*]: App/Analytico-iOS.entitlements
+        CODE_SIGN_ENTITLEMENTS[sdk=macosx*]: App/Analytico-macOS.entitlements
         PRODUCT_BUNDLE_IDENTIFIER: ru.plosca.analytico
         PRODUCT_NAME: Analytico
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
@@ -83,6 +82,30 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: ru.plosca.analytico.widgets
         PRODUCT_NAME: AnalyticoWidgets
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+  AnalyticoNotifications:
+    type: app-extension
+    supportedDestinations: [iOS, macOS]
+    sources:
+      - path: Notifications
+    dependencies:
+      - package: AnalyticoKit
+    info:
+      path: Notifications/Info.plist
+      properties:
+        CFBundleDisplayName: Analytico
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.usernotifications.service
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).NotificationService
+    entitlements:
+      path: Notifications/AnalyticoNotifications.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.application-groups: [group.ru.plosca.analytico]
+        keychain-access-groups: [$(AppIdentifierPrefix)ru.plosca.analytico]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ru.plosca.analytico.notifications
+        PRODUCT_NAME: AnalyticoNotifications
 schemes:
   Analytico:
     build:

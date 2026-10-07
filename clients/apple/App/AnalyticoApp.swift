@@ -4,7 +4,12 @@ import SwiftUI
 
 @main
 struct AnalyticoApp: App {
-    @State private var model = AppModel()
+    #if os(iOS)
+    @UIApplicationDelegateAdaptor private var delegate: AppDelegate
+    #else
+    @NSApplicationDelegateAdaptor private var delegate: AppDelegate
+    #endif
+    private var model: AppModel { delegate.model }
 
     var body: some Scene {
         WindowGroup {
@@ -23,6 +28,9 @@ struct AnalyticoApp: App {
         }
         #endif
         #if os(macOS)
+        Settings {
+            NotificationSettings().environment(model)
+        }
         MenuBarExtra {
             MenuBarContent().environment(model)
         } label: {
