@@ -138,6 +138,10 @@ await journey("ai", async (t) => {
   const db = t.db("analytico.db", {});
   const put = db.prepare("INSERT INTO settings(name,value) VALUES(?,?)");
   for (const [name, value] of [["chatgpt.auth_origin", base], ["chatgpt.api_base", `${base}/v1`], ["ai.provider", "anthropic"], ["ai.model", "claude-test"], ["ai.base_url", `${base}/anthropic`]]) put.run(name, value);
+  // One earlier visit: a site without any data shows its waiting state instead of reports.
+  const seededAt = Date.now() - 86_400_000;
+  db.prepare(`INSERT INTO page_views(site_id,event_id,page_id,session_id,occurred_at_ms,received_at_ms,received_date,visitor_day_id,tracking_mode,path,referrer_host,
+    viewport_class,language,tracker_version,consent_mode,internal,country,browser,operating_system,device,traffic_class) VALUES((SELECT id FROM sites WHERE slug='shop'),'seed-event','seed-page','seed-session',?,?,?,'seedvisitor00001','session','/',NULL,'desktop','en','1','analytics',0,'DE','chrome','linux','desktop','human_like')`).run(seededAt, seededAt, new Date(seededAt).toISOString().slice(0, 10));
   db.close();
   await t.serve();
 
