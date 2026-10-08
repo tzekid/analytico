@@ -17,7 +17,14 @@ public struct Site: Codable, Hashable, Sendable, Identifiable {
     public var host: String
     public var mode: String
     public var currency: String
+    /// The first day with data; nil until the first visit arrives.
+    public var firstDay: String?
     public var today: Today
+
+    enum CodingKeys: String, CodingKey {
+        case slug, name, host, mode, currency, today
+        case firstDay = "first_day"
+    }
 
     public var id: String { slug }
     public var initial: String { String(name.first.map { String($0).uppercased() } ?? "?") }

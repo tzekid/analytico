@@ -390,7 +390,9 @@ fn api(ctx: *Ctx, parts: []const []const u8) !void {
             if (index != 0) try w.writeByte(',');
             const view = try catalog.view(arena, site, .{}, ctx.now());
             const totals = try data.totals(arena, ctx.db, view, today, today + data.day_ms);
-            try std.json.Stringify.value(.{ .slug = site.slug, .name = site.title(), .host = site.host(), .mode = @tagName(site.mode), .currency = site.currency, .today = .{ .visitors = totals.visitor_days, .page_views = totals.views } }, .{}, w);
+            // The first day with data lets apps tell "no data yet" from "no visits in this period".
+            const first = try data.firstDay(arena, ctx.db, site.id);
+            try std.json.Stringify.value(.{ .slug = site.slug, .name = site.title(), .host = site.host(), .mode = @tagName(site.mode), .currency = site.currency, .first_day = if (first) |day| @as(?[]const u8, try arena.dupe(u8, &data.dateText(day))) else null, .today = .{ .visitors = totals.visitor_days, .page_views = totals.views } }, .{}, w);
         }
         try w.writeAll("]}");
         return ctx.json();

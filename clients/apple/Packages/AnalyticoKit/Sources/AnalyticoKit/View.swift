@@ -105,10 +105,25 @@ public struct ViewState: Hashable, Sendable, Codable {
         return parts.url!
     }
 
+    /// Chosen days, "2026-09-30"…"2026-09-30", instead of a preset.
+    public static func custom(from: String, to: String, filters: [Filter] = []) -> ViewState {
+        var view = ViewState(period: .week, filters: filters)
+        view.from = from
+        view.to = to
+        return view
+    }
+
+    public var isCustom: Bool { from != nil && to != nil }
+
     /// Reads a workspace or `analytico://` link back into a view.
     public init(url: URL) {
         let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
-        period = items.first { $0.name == "range" }.flatMap { Period(rawValue: $0.value ?? "") } ?? .week
+        let value = { (name: String) in items.first { $0.name == name }?.value }
+        period = value("range").flatMap { Period(rawValue: $0) } ?? .week
         filters = items.filter { $0.name == "f" }.compactMap { Filter(query: $0.value ?? "") }
+        if value("range") == "custom", let from = value("from"), let to = value("to") {
+            self.from = from
+            self.to = to
+        }
     }
 }

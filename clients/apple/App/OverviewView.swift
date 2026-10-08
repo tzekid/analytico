@@ -6,6 +6,7 @@ import SwiftUI
 /// their change, the trend against the previous period, the top lists and
 /// the period's notes.
 struct OverviewView: View {
+    @Environment(\.openURL) private var openURL
     let client: Client
     let site: Site
     @Binding var view: ViewState
@@ -17,13 +18,18 @@ struct OverviewView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 if let failure { Problem(title: "The overview didn’t load", detail: failure) }
-                if let data {
+                if let data, data.pageViews == 0 {
+                    nothingHere(data)
+                } else if let data {
                     notes(data)
                     tiles(data)
-                    TrendChart(current: data.trend, previous: data.previousTrend, notes: data.notes.filter { !$0.draft }, period: view.period)
-                        .frame(height: 220)
-                        .padding(16)
-                        .background(.background, in: .rect(cornerRadius: 12))
+                    VStack(alignment: .leading, spacing: 10) {
+                        if let wording = data.wording { ChartLegend(wording: wording, compared: !data.previousTrend.isEmpty) }
+                        TrendChart(current: data.trend, previous: data.previousTrend, notes: data.notes.filter { !$0.draft }, running: data.wording?.running ?? false, hourly: data.hourly)
+                            .frame(height: 220)
+                    }
+                    .padding(16)
+                    .background(.background, in: .rect(cornerRadius: 12))
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 300), spacing: 16)], alignment: .leading, spacing: 16) {
                         TopList(title: "Sources", dimension: "source", rows: data.sources, view: $view)
                         TopList(title: "Pages", dimension: "page", rows: data.pages, view: $view)
@@ -69,12 +75,52 @@ struct OverviewView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(tile.label).font(.subheadline).foregroundStyle(.secondary)
                     Text(tile.value).font(Theme.display(26, relativeTo: .title)).monospacedDigit().minimumScaleFactor(0.6).lineLimit(1)
-                    ChangeLabel(change: tile.change, suffix: view.period.comparison)
+                    ChangeLabel(change: tile.change, suffix: tile.change.text.isEmpty ? "" : data.wording?.versus ?? "")
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(14)
                 .background(.background, in: .rect(cornerRadius: 12))
                 .accessibilityElement(children: .combine)
+            }
+        }
+    }
+
+    /// No visits in this view: a site still waiting for its first visit,
+    /// filters that match nothing, or a period without data. Each says which.
+    @ViewBuilder private func nothingHere(_ data: OverviewData) -> some View {
+        let between = data.wording?.between ?? "in this period"
+        if site.firstDay == nil {
+            ContentUnavailableView {
+                Label("Waiting for your first visit", systemImage: "hourglass")
+            } description: {
+                Text("Charts appear here once the tracker on \(site.host) reports a page view. Dates and filters become useful then.")
+            } actions: {
+                Button("Open setup in the workspace") { openURL(client.instance.origin.appending(path: "\(site.slug)/setup")) }
+                    .buttonStyle(.borderedProminent)
+            }
+        } else if !view.filters.isEmpty {
+            ContentUnavailableView {
+                Label("No visits match these filters", systemImage: "line.3.horizontal.decrease.circle")
+            } description: {
+                Text("Nothing matched \(view.filters.map { "\(Labels.dimension($0.dimension)) \($0.negated ? "is not" : "is") \(Labels.value($0.value, dimension: $0.dimension))" }.joined(separator: " and ")) \(between).")
+            } actions: {
+                Button("Clear filters") { view.filters = [] }
+                    .buttonStyle(.borderedProminent)
+            }
+        } else {
+            let first = site.firstDay.flatMap(Dates.parse)
+            let before = if let first, let wording = data.wording { wording.end < first } else { false }
+            ContentUnavailableView {
+                Label(data.wording?.isToday == true ? "No visits yet today" : "No visits \(between)", systemImage: "calendar")
+            } description: {
+                if before, let first {
+                    Text("\(site.name) has data from \(first.formatted(Dates.style.day().month(.abbreviated).year())). These dates are before tracking started, so there is nothing to show yet.")
+                } else {
+                    Text("The tracker reported nothing in these dates. Data health in the workspace shows whether collection stopped.")
+                }
+            } actions: {
+                Button("Show the last 30 days") { view = ViewState(period: .month, filters: view.filters) }
+                    .buttonStyle(.borderedProminent)
             }
         }
     }
@@ -108,6 +154,10 @@ struct OverviewData {
     }
 
     var tiles: [Tile]
+    /// What the period is called, for labels and comparisons.
+    var wording: PeriodWording?
+    var pageViews: Double
+    var hourly: Bool
     var trend: [Point]
     var previousTrend: [Point]
     var sources: [Report.Row]
@@ -125,11 +175,15 @@ struct OverviewData {
         async let countries = client.report("breakdown", site: slug, view: view, parameters: ["dimension": "country", "limit": "6"])
         async let devices = client.report("breakdown", site: slug, view: view, parameters: ["dimension": "device", "limit": "4"])
         async let notes = client.notes(site: slug, view: view)
-        let totals = try await overview.rows.first ?? [:]
+        let report = try await overview
+        let totals = report.rows.first ?? [:]
         let number = { (key: String) in totals[key]?.number ?? 0 }
-        let days = Dates.days(view.period)
+        let rolling = !view.isCustom && view.period == .day
+        let wording = PeriodWording(from: report.from, to: report.to, rolling: rolling)
+        // A running period averages over the days so far, like the workspace.
+        let days = wording?.elapsedDays ?? 1
         var tiles = [
-            Tile(label: "Visitors / day", value: Format.count(Int((number("visitor_days") / days).rounded())), change: Format.change(number("visitor_days"), number("previous_visitor_days"))),
+            Tile(label: wording?.oneDay == true ? "Visitors" : "Visitors / day", value: Format.count(Int((number("visitor_days") / days).rounded())), change: Format.change(number("visitor_days"), number("previous_visitor_days"))),
             Tile(label: "Page views", value: Format.count(Int(number("page_views"))), change: Format.change(number("page_views"), number("previous_page_views"))),
             // Lite mode has no visits; like the workspace, it shows visitor-days.
             site.mode == "lite"
@@ -142,13 +196,15 @@ struct OverviewData {
         }
         // The previous period's series, shifted onto the current one.
         let current = try await series.rows.map(Point.init(row:))
-        let report = try await overview
         var previous: [Point] = []
-        if view.period != .day, let before = view.previous(from: report.from, to: report.to) {
+        if !rolling, let before = view.previous(from: report.from, to: report.to) {
             previous = (try? await client.report("timeseries", site: slug, view: before, parameters: ["metric": "visitors"]).rows.map(Point.init(row:))) ?? []
         }
         return try await OverviewData(
             tiles: tiles,
+            wording: wording,
+            pageViews: number("page_views"),
+            hourly: rolling || wording?.oneDay == true,
             trend: current,
             previousTrend: zip(current, previous).map { Point(at: $0.at, value: $1.value) },
             sources: sources.rows, pages: pages.rows, countries: countries.rows, devices: devices.rows,
@@ -174,23 +230,36 @@ struct Point: Identifiable {
 }
 
 /// Visitors over the period, the previous period dashed, notes as rules.
+/// A running period's last bucket is a "now" band, never a drop.
 struct TrendChart: View {
     let current: [Point]
     let previous: [Point]
     let notes: [Note]
-    let period: ViewState.Period
+    let running: Bool
+    let hourly: Bool
+
+    private var complete: [Point] { running ? Array(current.dropLast()) : current }
+    private var partial: Point? { running ? current.last : nil }
+    private var bucket: TimeInterval { hourly ? 3600 : 86_400 }
 
     var body: some View {
         Chart {
+            if let partial {
+                RectangleMark(xStart: .value("Now", partial.at - bucket / 2), xEnd: .value("Now", partial.at + bucket / 2))
+                    .foregroundStyle(Theme.brand.opacity(0.1))
+                    .annotation(position: .top) {
+                        Text("now").font(.caption2.weight(.semibold)).foregroundStyle(Theme.brand)
+                    }
+            }
             ForEach(previous) { point in
-                LineMark(x: .value("Day", point.at), y: .value("Visitors", point.value), series: .value("Period", "Before"))
+                LineMark(x: .value("Time", point.at), y: .value("Visitors", point.value), series: .value("Period", "Before"))
                     .foregroundStyle(.secondary)
                     .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4, 4]))
             }
-            ForEach(current) { point in
-                AreaMark(x: .value("Day", point.at), y: .value("Visitors", point.value))
+            ForEach(complete) { point in
+                AreaMark(x: .value("Time", point.at), y: .value("Visitors", point.value))
                     .foregroundStyle(LinearGradient(colors: [Theme.brand.opacity(0.25), Theme.brand.opacity(0)], startPoint: .top, endPoint: .bottom))
-                LineMark(x: .value("Day", point.at), y: .value("Visitors", point.value), series: .value("Period", "Now"))
+                LineMark(x: .value("Time", point.at), y: .value("Visitors", point.value), series: .value("Period", "Now"))
                     .foregroundStyle(Theme.brand)
                     .lineStyle(StrokeStyle(lineWidth: 2))
             }
@@ -205,7 +274,33 @@ struct TrendChart: View {
             }
         }
         .chartYAxis { AxisMarks(position: .leading) }
-        .accessibilityLabel("Visitors over the period")
+        .environment(\.timeZone, .gmt)
+        .accessibilityLabel(hourly ? "Visitors hour by hour" : "Visitors over the period")
+    }
+}
+
+/// Which line is which, by its dates: "● Wed 30 Sep  – – Tue 29 Sep".
+struct ChartLegend: View {
+    let wording: PeriodWording
+    let compared: Bool
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Text("Visitors").font(.headline)
+            Spacer()
+            HStack(spacing: 6) {
+                Circle().fill(Theme.brand).frame(width: 8, height: 8)
+                Text(wording.this).fontWeight(.semibold)
+            }
+            if compared {
+                HStack(spacing: 6) {
+                    Capsule().fill(.secondary).frame(width: 12, height: 2)
+                    Text(wording.previous).foregroundStyle(.secondary)
+                }
+            }
+        }
+        .font(.caption)
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -289,10 +384,18 @@ struct AddNoteSheet: View {
 }
 
 enum Dates {
+    /// "2026-09-30", "2026-09-30T14:00Z" (hourly rows) or a full timestamp.
     static func parse(_ text: String) -> Date? {
         if text.count == 10 { return try? Date(text + "T00:00:00Z", strategy: .iso8601) }
+        if text.count == 17, text.hasSuffix("Z") { return try? Date(text.dropLast() + ":00Z", strategy: .iso8601) }
         return try? Date(text, strategy: .iso8601)
     }
+
+    /// Midnight today on the instance's clock (UTC).
+    static var today: Date { Calendar.utc.startOfDay(for: .now) }
+
+    /// Dates as the instance keeps them, in the reader's words.
+    static var style: Date.FormatStyle { Date.FormatStyle(timeZone: .gmt) }
 
     static func iso(_ date: Date) -> String {
         date.formatted(.iso8601.year().month().day())
@@ -302,12 +405,12 @@ enum Dates {
         parse(day)?.formatted(.dateTime.day().month(.abbreviated)) ?? day
     }
 
-    static func days(_ period: ViewState.Period) -> Double {
-        switch period {
-        case .day: 1
-        case .week: 7
-        case .month: 30
-        case .quarter: 90
-        }
-    }
+}
+
+extension Calendar {
+    static let utc: Calendar = {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .gmt
+        return calendar
+    }()
 }

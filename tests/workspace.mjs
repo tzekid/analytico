@@ -219,6 +219,7 @@ await journey("workspace", async (t) => {
   const appSites = (await (await app("/sites")).json()).sites;
   const shopSite = appSites.find((site) => site.slug === "shop");
   assert.ok(shopSite && Number.isInteger(shopSite.today.visitors) && shopSite.today.page_views >= 3, JSON.stringify(appSites));
+  assert.equal(shopSite.first_day, new Date().toISOString().slice(0, 10));
   assert.ok((await (await app("/catalog")).json()).reports.some((report) => report.name === "overview"));
   assert.equal((await (await app("/sites/shop/overview?range=7d")).json()).report, "overview");
   // Separate scopes: app tokens don't open the connector, and the reverse.

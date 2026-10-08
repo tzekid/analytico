@@ -27,6 +27,7 @@ import Testing
         #expect(Format.change(112.4, 100, locale: english).text == "+12.4%")
         #expect(Format.change(97.9, 100, locale: english).text == "−2.1%")
         #expect(Format.change(100, 100, locale: english).text == "0.0%")
+        #expect(Format.change(0, 0, locale: english).text == "")
         #expect(Format.change(640, 100, locale: english).text == "6.4×")
         #expect(Format.change(2246, 100, locale: english).text == "22×")
         #expect(Format.change(5, 0, locale: english).text == "new")
@@ -119,5 +120,46 @@ import Testing
         var tampered = sealed
         tampered[tampered.count - 1] ^= 1
         #expect(throws: (any Error).self) { try key.open(tampered) }
+    }
+}
+
+@Suite struct PeriodTests {
+    static let english = Locale(identifier: "en_GB")
+    // Thursday 8 Oct 2026, 14:40 UTC.
+    static let now = try! Date("2026-10-08T14:40:00Z", strategy: .iso8601)
+
+    @Test func oneDayReadsHourByHour() throws {
+        let day = try #require(PeriodWording(from: "2026-09-30", to: "2026-09-30", now: Self.now, locale: Self.english))
+        #expect(day.oneDay && !day.running)
+        // The reader's locale decides punctuation ("Wed, 30 Sep 2026" in en_GB).
+        #expect(day.title == "Wed, 30 Sep 2026 · hour by hour")
+        #expect(day.versus == "vs Tue 29 Sep")
+        #expect(day.button == "30 Sep")
+    }
+
+    @Test func todayIsSoFar() throws {
+        let today = try #require(PeriodWording(from: "2026-10-08", to: "2026-10-08", now: Self.now, locale: Self.english))
+        #expect(today.isToday && today.running)
+        #expect(today.title == "Today so far, until 14:40")
+        #expect(today.versus == "vs yesterday by 14:40")
+        #expect(today.this == "Today" && today.previous == "Yesterday")
+        #expect(abs(today.elapsedDays - 1) < 0.0001)
+    }
+
+    @Test func spansNameTheirComparison() throws {
+        let month = try #require(PeriodWording(from: "2026-09-01", to: "2026-09-30", now: Self.now, locale: Self.english))
+        let squeeze = { (text: String) in text.replacingOccurrences(of: " ", with: "").replacingOccurrences(of: "\u{2009}", with: "") }
+        #expect(squeeze(month.this) == "1–30Sep")
+        #expect(squeeze(month.previous) == "2–31Aug")
+        #expect(squeeze(month.versus) == "vs2–31Aug")
+        let week = try #require(PeriodWording(from: "2026-10-02", to: "2026-10-08", now: Self.now, locale: Self.english))
+        #expect(abs(week.elapsedDays - (6 + 14.0 / 24 + 40.0 / 1440)) < 0.001)
+    }
+
+    @Test func customLinksRoundTrip() {
+        let view = ViewState.custom(from: "2026-09-30", to: "2026-09-30")
+        let url = view.workspaceURL(origin: URL(string: "https://analytics.example.com")!, site: "shop")
+        #expect(url.absoluteString == "https://analytics.example.com/shop?range=custom&from=2026-09-30&to=2026-09-30")
+        #expect(ViewState(url: url) == view)
     }
 }

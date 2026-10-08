@@ -227,10 +227,12 @@ struct SiteView: View {
 
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
         ToolbarItem {
-            Picker("Period", selection: $view.period) {
-                ForEach(ViewState.Period.allCases) { Text($0.short).tag($0) }
+            // Screens with their own period say so instead of offering a menu that does nothing.
+            switch screen ?? .overview {
+            case .retention: FixedPeriod(text: "Last 8 weeks · updated daily", why: "Retention follows each week’s visitors for 8 weeks, so it doesn’t use the period.")
+            case .live: FixedPeriod(text: "Right now", why: "Live shows the last five minutes.")
+            default: PeriodMenu(view: $view, site: site)
             }
-            .pickerStyle(.menu)
         }
         ToolbarItem {
             Button {

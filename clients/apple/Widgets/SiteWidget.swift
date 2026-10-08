@@ -19,7 +19,7 @@ struct SiteWidget: Widget {
                 .containerBackground(.fill.tertiary, for: .widget)
         }
         .configurationDisplayName("Visitors today")
-        .description("Today’s visitors and the last week for one website.")
+        .description("Today’s visitors so far, and the six days before.")
         #if os(iOS)
         .supportedFamilies([.systemSmall, .systemMedium, .accessoryRectangular, .accessoryInline])
         #else
@@ -61,8 +61,9 @@ struct Provider: AppIntentTimelineProvider {
             guard let site = sites.first(where: { $0.slug == configuration.site?.id }) ?? sites.first(where: { $0.slug == Shared.site }) ?? sites.first else {
                 return SiteEntry(date: .now, state: .unavailable)
             }
-            let week = try await client.report("timeseries", site: site.slug, view: ViewState(period: .week), parameters: ["metric": "visitors"]).rows.map { Int($0["value"]?.number ?? 0) }
-            return SiteEntry(date: .now, state: .ready(name: site.name, visitors: site.today.visitors, pageViews: site.today.pageViews, week: week), site: site.slug)
+            // Today is still running; its partial count would end the sparkline in a cliff.
+            let week = try await client.report("timeseries", site: site.slug, view: ViewState(period: .week), parameters: ["metric": "visitors"]).rows.map { Int($0["value"]?.number ?? 0) }.dropLast()
+            return SiteEntry(date: .now, state: .ready(name: site.name, visitors: site.today.visitors, pageViews: site.today.pageViews, week: Array(week)), site: site.slug)
         } catch {
             return SiteEntry(date: .now, state: .unavailable)
         }

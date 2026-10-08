@@ -11,7 +11,8 @@ public enum Format {
     /// "new" from nothing, and from three times the previous value up a
     /// multiple: "6.4×", "22×".
     public static func change(_ current: Double, _ previous: Double, locale: Locale = .current) -> Change {
-        if previous == 0 { return Change(text: current == 0 ? "0.0%".replacingOccurrences(of: ".", with: locale.decimalSeparator ?? ".") : "new", direction: current == 0 ? .flat : .up) }
+        // Nothing against nothing is not "0%": no label at all.
+        if previous == 0 { return Change(text: current == 0 ? "" : "new", direction: current == 0 ? .flat : .up) }
         let percent = (current - previous) / previous * 100
         let times = current / previous
         if times >= 10 { return Change(text: "\(Int(times.rounded()))×", direction: .up) }
