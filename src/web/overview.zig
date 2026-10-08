@@ -230,7 +230,7 @@ fn nothingHere(ctx: *Ctx, view: data.View, base: []const u8) !void {
         else if (today)
             "Nothing has arrived since midnight (UTC). Data health shows whether collection stopped."
         else
-            "The tracker reported nothing in these dates. Data health shows whether collection stopped.",
+            if (range.oneDay()) "The tracker reported nothing that day. Data health shows whether collection stopped." else "The tracker reported nothing in these dates. Data health shows whether collection stopped.",
         .actions = try html.print(arena, "<a class=\"btn btn-primary\" href=\"{recent}\">Show the last 30 days</a>{!second}", .{
             .recent = try view.href(arena, base, &.{ .{ "range", "30d" }, .{ "from", "" }, .{ "to", "" } }),
             .second = if (before) "<button class=\"btn\" type=\"button\" popovertarget=\"range-pop\">Pick other dates</button>" else try html.print(arena, "<a class=\"btn\" href=\"/{slug}/health\">Open data health</a>", .{ .slug = view.site.slug }),

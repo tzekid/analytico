@@ -44,6 +44,7 @@ struct OverviewView: View {
         }
         .background(Color.secondary.opacity(0.06))
         .navigationTitle("Overview")
+        .navigationSubtitle(data?.wording.map { "\($0.title) · \($0.versus)" } ?? "")
         .task(id: view) { await load() }
         .refreshable { await load() }
         .toolbar {
@@ -115,8 +116,10 @@ struct OverviewView: View {
             } description: {
                 if before, let first {
                     Text("\(site.name) has data from \(first.formatted(Dates.style.day().month(.abbreviated).year())). These dates are before tracking started, so there is nothing to show yet.")
+                } else if data.wording?.isToday == true {
+                    Text("Nothing has arrived since midnight (UTC). Data health in the workspace shows whether collection stopped.")
                 } else {
-                    Text("The tracker reported nothing in these dates. Data health in the workspace shows whether collection stopped.")
+                    Text("The tracker reported nothing \(data.wording?.oneDay == true ? "that day" : "in these dates"). Data health in the workspace shows whether collection stopped.")
                 }
             } actions: {
                 Button("Show the last 30 days") { view = ViewState(period: .month, filters: view.filters) }
@@ -183,7 +186,7 @@ struct OverviewData {
         // A running period averages over the days so far, like the workspace.
         let days = wording?.elapsedDays ?? 1
         var tiles = [
-            Tile(label: wording?.oneDay == true ? "Visitors" : "Visitors / day", value: Format.count(Int((number("visitor_days") / days).rounded())), change: Format.change(number("visitor_days"), number("previous_visitor_days"))),
+            Tile(label: wording?.oneDay == true ? "Visitors" : "Visitors / day", value: average(number("visitor_days") / days), change: Format.change(number("visitor_days"), number("previous_visitor_days"))),
             Tile(label: "Page views", value: Format.count(Int(number("page_views"))), change: Format.change(number("page_views"), number("previous_page_views"))),
             // Lite mode has no visits; like the workspace, it shows visitor-days.
             site.mode == "lite"
@@ -211,6 +214,11 @@ struct OverviewData {
             notes: notes
         )
     }
+}
+
+/// Small averages keep a decimal, as in the workspace: 0.5, not 0.
+private func average(_ value: Double) -> String {
+    value < 10 && value != value.rounded() ? value.formatted(.number.precision(.fractionLength(1))) : Format.count(Int(value.rounded()))
 }
 
 struct Point: Identifiable {
@@ -247,8 +255,8 @@ struct TrendChart: View {
             if let partial {
                 RectangleMark(xStart: .value("Now", partial.at - bucket / 2), xEnd: .value("Now", partial.at + bucket / 2))
                     .foregroundStyle(Theme.brand.opacity(0.1))
-                    .annotation(position: .top) {
-                        Text("now").font(.caption2.weight(.semibold)).foregroundStyle(Theme.brand)
+                    .annotation(position: .overlay, alignment: .top) {
+                        Text("now").font(.caption2.weight(.semibold)).foregroundStyle(Theme.brand).padding(.top, 4)
                     }
             }
             ForEach(previous) { point in

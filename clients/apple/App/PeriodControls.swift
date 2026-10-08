@@ -23,8 +23,11 @@ struct PeriodMenu: View {
                 Button("Custom range…") { choosing = true }
             }
         } label: {
-            Label(label, systemImage: "calendar")
-                .labelStyle(.titleAndIcon)
+            // Text, not just an icon: the button always says which period is shown.
+            HStack(spacing: 5) {
+                Image(systemName: "calendar")
+                Text(label)
+            }
         }
         .accessibilityLabel("Period: \(label)")
         .sheet(isPresented: $choosing) {
@@ -88,16 +91,17 @@ struct CustomRangeSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Binding var view: ViewState
     let site: Site
-    @State private var from = Date()
-    @State private var to = Date()
+    @State private var from = Dates.today
+    @State private var to = Dates.today
 
-    private var first: Date { site.firstDay.flatMap(Dates.parse) ?? Dates.today }
+    /// The first day with data, never after today (a range must not be empty).
+    private var first: Date { min(site.firstDay.flatMap(Dates.parse) ?? Dates.today, Dates.today) }
 
     var body: some View {
         NavigationStack {
             Form {
                 DatePicker("From", selection: $from, in: first...Dates.today, displayedComponents: .date)
-                DatePicker("To", selection: $to, in: from...Dates.today, displayedComponents: .date)
+                DatePicker("To", selection: $to, in: min(from, Dates.today)...Dates.today, displayedComponents: .date)
                 Section {
                     Text("Data from \(first.formatted(Dates.style.day().month(.abbreviated).year())) to today. One day shows hours; longer ranges show days.")
                         .font(.footnote)
@@ -119,8 +123,8 @@ struct CustomRangeSheet: View {
         }
         .frame(minWidth: 360, minHeight: 260)
         .onAppear {
-            from = view.from.flatMap(Dates.parse) ?? Dates.today
-            to = view.to.flatMap(Dates.parse) ?? Dates.today
+            from = min(max(view.from.flatMap(Dates.parse) ?? Dates.today, first), Dates.today)
+            to = min(max(view.to.flatMap(Dates.parse) ?? Dates.today, from), Dates.today)
         }
     }
 }
