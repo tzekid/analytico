@@ -413,8 +413,16 @@ struct TrendChart: View {
     var metric: ChartMetric = .visitors
     /// iPhone: only the first and last day are named, at the chart's edges.
     var compact = false
+    /// The bucket under the pointer (Mac, iPad) or the finger (iPhone).
+    @State private var selection: Date?
 
     private var complete: [Point] { running ? Array(current.dropLast()) : current }
+
+    /// The bucket nearest to where the pointer is.
+    private var selected: Point? {
+        guard let selection else { return nil }
+        return current.min { abs($0.at.timeIntervalSince(selection)) < abs($1.at.timeIntervalSince(selection)) }
+    }
     private var labelFormat: Date.FormatStyle {
         if hourly { return Dates.style.hour() }
         return compact || current.count > 8 ? Dates.style.day().month(.abbreviated) : Dates.style.weekday(.abbreviated).day()
@@ -455,6 +463,20 @@ struct TrendChart: View {
                 PointMark(x: .value("Time", last.at), y: .value("Value", last.value))
                     .symbol { Circle().strokeBorder(Theme.brand, lineWidth: 2).background(Circle().fill(Theme.surface)).frame(width: 9, height: 9) }
             }
+            if let point = selected {
+                RuleMark(x: .value("Selected", point.at))
+                    .foregroundStyle(Theme.ink2.opacity(0.35))
+                    .lineStyle(StrokeStyle(lineWidth: 1))
+                    .annotation(position: .top, spacing: 2, overflowResolution: .init(x: .fit(to: .chart), y: .disabled)) {
+                        ChartTooltip(point: point, before: previous.first { $0.at == point.at }, hourly: hourly, metric: metric, running: running && point.at == current.last?.at)
+                    }
+                PointMark(x: .value("Selected", point.at), y: .value("Value", point.value))
+                    .symbol { Circle().fill(Theme.brand).frame(width: 9, height: 9).overlay(Circle().strokeBorder(Theme.surface, lineWidth: 2)) }
+                if let before = previous.first(where: { $0.at == point.at }) {
+                    PointMark(x: .value("Selected", before.at), y: .value("Before", before.value))
+                        .symbol { Circle().fill(Theme.muted).frame(width: 7, height: 7) }
+                }
+            }
             ForEach(notes) { note in
                 if let day = Dates.parse(note.day) {
                     RuleMark(x: .value("Note", day))
@@ -465,6 +487,24 @@ struct TrendChart: View {
                 }
             }
         }
+        .chartXSelection(value: $selection)
+        #if os(macOS)
+        // The Mac follows the pointer, as the workspace's chart does.
+        .chartOverlay { proxy in
+            GeometryReader { geometry in
+                Rectangle().fill(.clear).contentShape(.rect)
+                    .onContinuousHover { phase in
+                        switch phase {
+                        case .active(let location):
+                            guard let plot = proxy.plotFrame else { return }
+                            selection = proxy.value(atX: location.x - geometry[plot].origin.x, as: Date.self)
+                        case .ended:
+                            selection = nil
+                        }
+                    }
+            }
+        }
+        #endif
         .chartYAxis {
             AxisMarks(position: .leading, values: .automatic(desiredCount: 4)) { value in
                 AxisGridLine().foregroundStyle(Theme.subtle)
@@ -492,6 +532,40 @@ struct TrendChart: View {
         }
         .environment(\.timeZone, .gmt)
         .accessibilityLabel(hourly ? "\(metric.title(oneDay: true)) hour by hour" : "\(metric.title(oneDay: false)) over the period")
+    }
+}
+
+/// The hovered bucket: when, its value, and the period before's.
+private struct ChartTooltip: View {
+    let point: Point
+    let before: Point?
+    let hourly: Bool
+    let metric: ChartMetric
+    let running: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(point.at.formatted(hourly ? Dates.style.weekday(.abbreviated).hour().minute() : Dates.style.weekday(.abbreviated).day().month(.abbreviated)) + (running ? " · so far" : ""))
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.7))
+            Text(metric.noun(point.value)).font(.caption.weight(.semibold)).foregroundStyle(.white)
+            if let before {
+                let change = Format.change(point.value, before.value)
+                HStack(spacing: 4) {
+                    Text("before: \(metric == .active ? Format.duration(milliseconds: before.value) : Format.count(Int(before.value)))")
+                        .foregroundStyle(.white.opacity(0.7))
+                    if !change.text.isEmpty {
+                        Text(change.text).fontWeight(.semibold)
+                            .foregroundStyle(change.direction == .up ? Color(red: 0.48, green: 0.83, blue: 0.63) : change.direction == .down ? Color(red: 0.95, green: 0.63, blue: 0.63) : .white)
+                    }
+                }
+                .font(.caption2)
+            }
+        }
+        .monospacedDigit()
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(Color(light: 0x282421, dark: 0x3A3330), in: .rect(cornerRadius: 8))
     }
 }
 
