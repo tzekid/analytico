@@ -257,6 +257,10 @@ await journey("ux", async (t) => {
     await drag([head.x + head.width / 2, head.y + 20], [head.x + head.width / 2, head.y + 560]);
     await phone.waitForURL((url) => !url.searchParams.has("page"));
     assert.equal(await phone.locator("dialog.sheet[open]").count(), 0);
+    // Closing went back a step: Back now leaves Pages instead of reopening the sheet.
+    await phone.goBack();
+    await phone.waitForURL((url) => !url.pathname.endsWith("/pages"));
+    assert.equal(await phone.locator("dialog.sheet[open]").count(), 0);
   }
   await touchContext.close();
 

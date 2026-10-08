@@ -285,6 +285,9 @@
     const key = url.href;
     // Where to come back to on "back".
     if (mode === "push") history.replaceState({ ...(history.state || {}), scroll: scrollY }, "");
+    // Opening a sheet from its page: closing it goes back there instead of
+    // adding a step, so Back doesn't reopen a sheet just closed.
+    if (mode === "push" && !$("dialog[data-sheet][open]")) sheetFrom = location.href;
     // Reloading the current page always fetches fresh.
     if (key === location.href && mode !== "none") { ahead.delete(key); seen.delete(key); }
     const quick = ahead.get(key);
@@ -473,10 +476,15 @@
 
   // ------------------------------------------------------------ dialogs, sheets, popovers
 
+  let sheetFrom = null;
   function closeDialog(dialog) {
     const href = dialog.dataset.closeHref;
     dialog.close();
-    if (href) navigate(href, { mode: "push", keepScroll: true });
+    if (!href) return;
+    const back = sheetFrom && new URL(sheetFrom).href === new URL(href, location.href).href && history.length > 1;
+    sheetFrom = null;
+    if (back) history.back();
+    else navigate(href, { mode: "replace", keepScroll: true });
   }
 
 
@@ -1490,6 +1498,8 @@
       // Wide screens keep the page beside a sheet usable, as an inspector.
       if (dialog.matches("[data-sheet]") && matchMedia("(min-width: 1100px)").matches) dialog.show();
       else dialog.showModal();
+      // Chrome focuses the first link despite autofocus on the dialog.
+      dialog.focus({ preventScroll: true });
     });
     const params = new URLSearchParams(location.search);
     const requested = params.get("dialog");

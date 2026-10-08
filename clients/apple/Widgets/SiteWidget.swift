@@ -18,6 +18,8 @@ struct SiteWidget: Widget {
         AppIntentConfiguration(kind: "site", intent: SiteWidgetIntent.self, provider: Provider()) { entry in
             SiteWidgetView(entry: entry)
                 .containerBackground(Theme.canvas, for: .widget)
+                // A tap opens the widget's site, not whichever the app had open.
+                .widgetURL(entry.site.flatMap { URL(string: "analytico://open/\($0)") })
         }
         .configurationDisplayName("Visitors today")
         .description("Today’s visitors so far against yesterday by now, and the six days before.")

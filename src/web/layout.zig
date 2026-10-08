@@ -281,7 +281,7 @@ fn controls(ctx: *Ctx, view: data.View, options: Head) !void {
         try render(w, "<a class=\"btn\" href=\"{href}\" role=\"button\" aria-pressed=\"{pressed}\" title=\"{title}\">", .{
             .href = try view.href(arena, options.path, &.{.{ "cmp", if (view.compare) "0" else "" }}),
             .pressed = if (view.compare) "true" else "false",
-            .title = if (view.compare) "Comparing with the previous period. Click to stop." else "Compare with the previous period",
+            .title = if (view.compare) "Comparing with the previous period; press again to stop" else "Compare with the previous period",
         });
         try icon(w, "compare");
         try render(w, "<span class=\"btn-label\">{label}</span></a>", .{ .label = if (view.compare) "Comparing" else "Compare" });
