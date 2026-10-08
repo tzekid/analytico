@@ -401,6 +401,8 @@ struct Sidebar: View {
     @State private var switching = false
     @State private var settings = false
     @FocusState private var searching: Bool
+    /// The report list takes ↑ and ↓ once a row was clicked, as a Mac sidebar does.
+    @FocusState private var listFocused: Bool
 
     private var matches: [(String, [Screen])] {
         let words = query.trimmingCharacters(in: .whitespaces)
@@ -462,11 +464,17 @@ struct Sidebar: View {
                         ForEach(group.1) { screen in
                             SidebarRow(screen: screen, selected: state.screen == screen, online: screen == .live ? state.online : nil) {
                                 state.screen = screen
+                                listFocused = true
                             }
                         }
                     }
                 }
                 .padding(.top, 12)
+                .focusable()
+                .focused($listFocused)
+                .focusEffectDisabled()
+                .onKeyPress(.downArrow) { step(1) }
+                .onKeyPress(.upArrow) { step(-1) }
             }
             .scrollIndicators(.never)
             Divider().padding(.vertical, 8)
@@ -476,6 +484,13 @@ struct Sidebar: View {
         }
         .padding(12)
         .sheet(isPresented: $settings) { SettingsSheet() }
+    }
+
+    private func step(_ by: Int) -> KeyPress.Result {
+        let screens = matches.flatMap(\.1)
+        guard let index = screens.firstIndex(of: state.screen) else { return .ignored }
+        state.screen = screens[min(max(index + by, 0), screens.count - 1)]
+        return .handled
     }
 
     @ViewBuilder private var settingsRow: some View {

@@ -252,6 +252,9 @@
       openSheet.dataset.closeHref = nextSheet.dataset.closeHref || "";
       openSheet.scrollTop = 0;
       document.title = next.title;
+      // The row whose details are open stays marked.
+      const shown = new URL(url, location.href).searchParams.get("page");
+      $$("tr[data-href]").forEach((row) => row.toggleAttribute("aria-selected", shown !== null && new URL(row.dataset.href, location.href).searchParams.get("page") === shown));
       if (mode === "push") history.pushState({}, "", url);
       else if (mode === "replace") history.replaceState({}, "", url);
       $$(".chart[data-chart]", openSheet).forEach(setupChart);
@@ -819,7 +822,7 @@
     });
     plot.addEventListener("pointerdown", (event) => {
       pointer = event.pointerType;
-      if (pointer === "mouse" || event.target.closest(".chart-tip, .chart-why, .why")) return;
+      if (pointer === "mouse" || event.target.closest(".chart-tip, .chart-why, .why, .chart-mark")) return;
       $$(".chart.pinned").forEach((other) => other !== chart && other.classList.remove("pinned", "hovering"));
       chart.classList.add("pinned");
       show(event.clientX);
@@ -858,8 +861,19 @@
     });
   }
 
+  document.addEventListener("keydown", (event) => {
+    const sheet = $("dialog.sheet[open]:not(:modal)");
+    if (event.key === "Escape" && sheet && !event.defaultPrevented) closeDialog(sheet);
+  });
+
   document.addEventListener("pointerdown", (event) => {
     if (event.pointerType === "mouse") return;
+    const tip = event.target.closest?.("[data-tip]");
+    $$("[data-tip].tip-on").forEach((other) => other !== tip && other.classList.remove("tip-on"));
+    tip?.classList.toggle("tip-on");
+    const mark = event.target.closest?.(".chart-mark");
+    $$(".chart-mark.open").forEach((other) => other !== mark && other.classList.remove("open"));
+    mark?.classList.toggle("open");
     $$(".chart.pinned").forEach((chart) => {
       if (!chart.contains(event.target)) chart.classList.remove("pinned", "hovering");
     });
@@ -1473,7 +1487,9 @@
       // Focus the dialog itself, not its first link (which drew a focus ring).
       dialog.autofocus = true;
       dialog.tabIndex = -1;
-      dialog.showModal();
+      // Wide screens keep the page beside a sheet usable, as an inspector.
+      if (dialog.matches("[data-sheet]") && matchMedia("(min-width: 1100px)").matches) dialog.show();
+      else dialog.showModal();
     });
     const params = new URLSearchParams(location.search);
     const requested = params.get("dialog");

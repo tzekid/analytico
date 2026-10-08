@@ -11,6 +11,7 @@ struct OverviewView: View {
     @Environment(\.openURL) private var openURL
     @State private var data = Loaded<OverviewData>()
     @State private var metric: ChartMetric = .visitors
+    @State private var pinned: Date?
 
     var body: some View {
         let waiting = state.site.firstDay == nil && data.value?.pageViews == 0
@@ -32,7 +33,14 @@ struct OverviewView: View {
     }
 
     private func load() async {
+        pinned = nil
         data.apply(await fetch { try await OverviewData.load(client: state.client, site: state.site, view: state.view, metric: metric) })
+    }
+
+    /// Just that day, hour by hour, with the same filters.
+    private func open(_ day: Date) {
+        let iso = Dates.iso(day)
+        state.view = .custom(from: iso, to: iso, filters: state.view.filters, keeping: state.view)
     }
 
     // MARK: Metrics
@@ -91,14 +99,39 @@ struct OverviewView: View {
     private func chart(_ data: OverviewData) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline) {
-                Text(metric.title(oneDay: data.wording?.oneDay == true)).font(Theme.cardTitle).foregroundStyle(Theme.ink)
+                // The loaded data's metric: the title never runs ahead of the line it names.
+                Text(data.metric.title(oneDay: data.wording?.oneDay == true)).font(Theme.cardTitle).foregroundStyle(Theme.ink)
                 Spacer()
                 if let wording = data.wording { ChartLegend(wording: wording, compared: !data.previousTrend.isEmpty) }
             }
-            if let insight = data.insight {
+            if let day = pinned, let point = data.trend.first(where: { $0.at == day }) {
+                let before = data.previousTrend.first { $0.at == day }
+                let change = before.map { Format.change(point.value, $0.value) }
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(day.formatted(data.hourly ? Dates.style.weekday(.abbreviated).hour().minute() : Dates.style.weekday(.abbreviated).day().month(.abbreviated)) + (data.wording?.running == true && day == data.trend.last?.at ? " · so far" : ""))
+                            .font(.caption).foregroundStyle(Theme.ink2)
+                        HStack(spacing: 6) {
+                            Text(data.metric.noun(point.value)).fontWeight(.semibold).foregroundStyle(Theme.ink)
+                            if let change, !change.text.isEmpty { ChangeLabel(change: change, versus: "vs \(data.metric == .active ? Format.duration(milliseconds: before!.value) : Format.count(Int(before!.value)))") }
+                        }
+                    }
+                    Spacer(minLength: 4)
+                    if !data.hourly {
+                        Button("Open this day →") { open(day) }
+                            .buttonStyle(.plain)
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(Theme.brandDark)
+                    }
+                    Button { pinned = nil } label: { Image(systemName: "xmark").font(.caption.weight(.bold)).foregroundStyle(Theme.ink2).frame(width: 28, height: 28).background(Theme.subtle, in: .circle) }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Clear the selected day")
+                }
+                .font(sizeClass == .compact ? .footnote : .callout)
+            } else if let insight = data.insight {
                 Text(insight).font(sizeClass == .compact ? .footnote : .callout).foregroundStyle(Theme.ink2)
             }
-            TrendChart(current: data.trend, previous: data.previousTrend, notes: data.notes.filter { !$0.draft }, running: data.wording?.running ?? false, hourly: data.hourly, metric: metric, compact: sizeClass == .compact)
+            TrendChart(current: data.trend, previous: data.previousTrend, notes: data.notes.filter { !$0.draft }, running: data.wording?.running ?? false, hourly: data.hourly, metric: data.metric, compact: sizeClass == .compact, pinned: $pinned, open: open)
                 .frame(height: sizeClass == .compact ? 190 : 230)
         }
         .card()
@@ -129,6 +162,7 @@ struct OverviewView: View {
                             .contentShape(.rect)
                     }
                     .buttonStyle(.plain)
+                    .rowMenu("source", row["value"]?.text ?? "", label: row["label"]?.text)
                     .accessibilityHint("Filters every report by this source")
                 }
                 if data.sources.isEmpty { Text("Nothing yet in this period").font(.callout).foregroundStyle(Theme.ink2) }
@@ -150,6 +184,7 @@ struct OverviewView: View {
                             .contentShape(.rect)
                     }
                     .buttonStyle(.plain)
+                    .rowMenu("country", code, label: row["label"]?.text)
                 }
             }
             Text("Country from the IP at collection · IP never stored").font(.caption).foregroundStyle(Theme.muted)
@@ -190,6 +225,7 @@ struct OverviewView: View {
                             .contentShape(.rect)
                     }
                     .buttonStyle(.plain)
+                    .rowMenu("page", row["value"]?.text ?? "")
                 }
             }
             footerLink("All pages") { state.show(.pages) }
@@ -302,8 +338,8 @@ enum ChartMetric: String, Hashable {
 
     func noun(_ value: Double) -> String {
         switch self {
-        case .visitors: "\(Format.count(Int(value))) visitors"
-        case .views: "\(Format.count(Int(value))) page views"
+        case .visitors: plural(Int(value), "visitor")
+        case .views: plural(Int(value), "page view")
         case .active: Format.duration(milliseconds: value)
         }
     }
@@ -413,18 +449,26 @@ struct TrendChart: View {
     var metric: ChartMetric = .visitors
     /// iPhone: only the first and last day are named, at the chart's edges.
     var compact = false
+    /// The bucket a finger last let go of (iPhone), shown above the chart.
+    @Binding var pinned: Date?
+    /// Opens a day (daily charts only): a click on the Mac.
+    var open: ((Date) -> Void)?
     /// The bucket under the pointer (Mac, iPad) or the finger (iPhone).
     @State private var selection: Date?
+
+    /// The bucket nearest to a date.
+    func nearest(_ date: Date) -> Point? {
+        current.min { abs($0.at.timeIntervalSince(date)) < abs($1.at.timeIntervalSince(date)) }
+    }
 
     private var complete: [Point] { running ? Array(current.dropLast()) : current }
 
     /// The bucket nearest to where the pointer is.
     private var selected: Point? {
-        guard let selection else { return nil }
-        return current.min { abs($0.at.timeIntervalSince(selection)) < abs($1.at.timeIntervalSince(selection)) }
+        selection.flatMap(nearest) ?? pinned.flatMap(nearest)
     }
     private var labelFormat: Date.FormatStyle {
-        if hourly { return Dates.style.hour() }
+        if hourly { return Dates.style.hour(.twoDigits(amPM: .abbreviated)).minute() }
         return compact || current.count > 8 ? Dates.style.day().month(.abbreviated) : Dates.style.weekday(.abbreviated).day()
     }
 
@@ -464,12 +508,18 @@ struct TrendChart: View {
                     .symbol { Circle().strokeBorder(Theme.brand, lineWidth: 2).background(Circle().fill(Theme.surface)).frame(width: 9, height: 9) }
             }
             if let point = selected {
+                #if os(macOS)
                 RuleMark(x: .value("Selected", point.at))
                     .foregroundStyle(Theme.ink2.opacity(0.35))
                     .lineStyle(StrokeStyle(lineWidth: 1))
-                    .annotation(position: .top, spacing: 2, overflowResolution: .init(x: .fit(to: .chart), y: .disabled)) {
+                    .annotation(position: .top, spacing: 2, overflowResolution: .init(x: .fit(to: .chart), y: .fit(to: .chart))) {
                         ChartTooltip(point: point, before: previous.first { $0.at == point.at }, hourly: hourly, metric: metric, running: running && point.at == current.last?.at)
                     }
+                #else
+                RuleMark(x: .value("Selected", point.at))
+                    .foregroundStyle(Theme.ink2.opacity(0.35))
+                    .lineStyle(StrokeStyle(lineWidth: 1))
+                #endif
                 PointMark(x: .value("Selected", point.at), y: .value("Value", point.value))
                     .symbol { Circle().fill(Theme.brand).frame(width: 9, height: 9).overlay(Circle().strokeBorder(Theme.surface, lineWidth: 2)) }
                 if let before = previous.first(where: { $0.at == point.at }) {
@@ -487,22 +537,14 @@ struct TrendChart: View {
                 }
             }
         }
-        .chartXSelection(value: $selection)
-        #if os(macOS)
-        // The Mac follows the pointer, as the workspace's chart does.
-        .chartOverlay { proxy in
-            GeometryReader { geometry in
-                Rectangle().fill(.clear).contentShape(.rect)
-                    .onContinuousHover { phase in
-                        switch phase {
-                        case .active(let location):
-                            guard let plot = proxy.plotFrame else { return }
-                            selection = proxy.value(atX: location.x - geometry[plot].origin.x, as: Date.self)
-                        case .ended:
-                            selection = nil
-                        }
-                    }
-            }
+        .pointerSelection($selection, click: hourly ? nil : { date in if let point = nearest(date) { open?(point.at) } })
+        #if os(iOS)
+        // The chosen bucket's value shows above the chart, and stays when the finger lifts.
+        .onChange(of: selection) { _, now in
+            if let now { pinned = nearest(now)?.at }
+        }
+        .onChange(of: pinned) { _, now in
+            if now == nil { selection = nil }
         }
         #endif
         .chartYAxis {
@@ -532,6 +574,35 @@ struct TrendChart: View {
         }
         .environment(\.timeZone, .gmt)
         .accessibilityLabel(hourly ? "\(metric.title(oneDay: true)) hour by hour" : "\(metric.title(oneDay: false)) over the period")
+    }
+}
+
+extension View {
+    /// Reads a chart at the pointer: hovering on the Mac, as the workspace's
+    /// chart does; touch and drag on iPhone and iPad.
+    func pointerSelection(_ selection: Binding<Date?>, click: ((Date) -> Void)? = nil) -> some View {
+        #if os(macOS)
+        chartOverlay { proxy in
+            GeometryReader { geometry in
+                Rectangle().fill(.clear).contentShape(.rect)
+                    .onTapGesture { location in
+                        guard let click, let plot = proxy.plotFrame, let date = proxy.value(atX: location.x - geometry[plot].origin.x, as: Date.self) else { return }
+                        click(date)
+                    }
+                    .onContinuousHover { phase in
+                        switch phase {
+                        case .active(let location):
+                            guard let plot = proxy.plotFrame else { return }
+                            selection.wrappedValue = proxy.value(atX: location.x - geometry[plot].origin.x, as: Date.self)
+                        case .ended:
+                            selection.wrappedValue = nil
+                        }
+                    }
+            }
+        }
+        #else
+        chartXSelection(value: selection)
+        #endif
     }
 }
 

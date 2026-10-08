@@ -26,6 +26,7 @@ struct ScreenScaffold<Content: View>: View {
         ScrollView {
             VStack(alignment: .leading, spacing: compact ? 12 : 16) {
                 header
+                if filters && !waiting && screen.fixedPeriod == nil { FilterChips() }
                 if let stale { StaleNotice(since: stale) { Task { await reload() } } }
                 content
             }
@@ -36,6 +37,10 @@ struct ScreenScaffold<Content: View>: View {
         }
         .background(Theme.canvas)
         .refreshable { await reload() }
+        #if os(macOS)
+        // One report shows at a time on the Mac; iPhone tabs keep several alive.
+        .focusedSceneValue(\.reload, ReloadAction(screen: screen, run: reload))
+        #endif
     }
 
     @ViewBuilder private var header: some View {
@@ -90,6 +95,48 @@ struct ScreenScaffold<Content: View>: View {
         if screen == .paths && state.site.mode == "lite" { return "Paths need Session or Full mode" }
         guard let wording else { return " " }
         return state.view.compare && compare ? "\(wording.title) · \(wording.compared)" : wording.title
+    }
+}
+
+/// What every report is filtered by, each removable, as on the web.
+struct FilterChips: View {
+    @Environment(SiteState.self) private var state
+
+    var body: some View {
+        if !state.view.filters.isEmpty {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    if state.view.any && state.view.filters.count > 1 {
+                        Text("Any of").font(.footnote).foregroundStyle(Theme.ink2)
+                    }
+                    ForEach(state.view.filters) { filter in
+                        Button { state.view.filters.removeAll { $0 == filter } } label: {
+                            HStack(spacing: 6) {
+                                (Text("\(Labels.dimension(filter.dimension)) \(filter.negated ? "is not" : "is") ") + Text(Labels.value(filter.value, dimension: filter.dimension)).fontWeight(.semibold))
+                                    .lineLimit(1)
+                                Image(systemName: "xmark").font(.caption2.weight(.bold))
+                            }
+                            .font(.footnote)
+                            .foregroundStyle(Theme.brandDark)
+                            .padding(.horizontal, 10)
+                            .frame(height: 30)
+                            .background(Theme.brandWash, in: .rect(cornerRadius: 8))
+                            .contentShape(.rect)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Remove filter: \(Labels.dimension(filter.dimension)) \(filter.negated ? "is not" : "is") \(Labels.value(filter.value, dimension: filter.dimension))")
+                    }
+                    if state.view.filters.count > 1 {
+                        Button("Clear all") { state.view.filters = [] }
+                            .buttonStyle(.plain)
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(Theme.brandDark)
+                            .padding(.horizontal, 6)
+                    }
+                }
+            }
+            .scrollClipDisabled()
+        }
     }
 }
 
@@ -582,12 +629,51 @@ struct ActionsMenu: View {
     }
 
     private func copy(_ url: URL) {
-        #if os(iOS)
-        UIPasteboard.general.url = url
-        #else
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(url.absoluteString, forType: .string)
-        #endif
+        copyText(url.absoluteString)
+    }
+}
+
+func copyText(_ text: String) {
+    #if os(iOS)
+    UIPasteboard.general.string = text
+    #else
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(text, forType: .string)
+    #endif
+}
+
+extension View {
+    /// Long-press (iPhone, iPad) or right-click (Mac) on a row: filter by it,
+    /// leave it out, its details and page, copy it.
+    func rowMenu(_ dimension: String, _ value: String, label: String? = nil) -> some View {
+        modifier(RowMenu(dimension: dimension, value: value, label: label ?? value))
+    }
+}
+
+private struct RowMenu: ViewModifier {
+    @Environment(SiteState.self) private var state
+    @Environment(\.openURL) private var openURL
+    let dimension: String
+    let value: String
+    let label: String
+
+    func body(content: Content) -> some View {
+        content.contextMenu {
+            Button { state.filter(dimension, value) } label: { Label("Filter by \(label)", image: "Icons/filter") }
+            Button {
+                state.view.filters.removeAll { $0.dimension == dimension }
+                state.view.filters.append(.init(dimension: dimension, value: value, negated: true))
+            } label: { Label("Leave out \(label)", image: "Icons/x") }
+            if dimension == "page" {
+                Divider()
+                Button { state.inspect(value) } label: { Label("Page details", image: "Icons/pages") }
+                if let url = URL(string: "https://\(state.site.host)\(value)") {
+                    Button { openURL(url) } label: { Label("Open on \(state.site.host)", image: "Icons/external") }
+                }
+            }
+            Divider()
+            Button { copyText(value) } label: { Label("Copy", image: "Icons/copy") }
+        }
     }
 }
 

@@ -58,14 +58,32 @@ struct AnalyticoShortcuts: AppShortcutsProvider {
 extension FocusedValues {
     /// The site open in the focused window, for the Go menu.
     @Entry var siteState: SiteState?
+    /// Reloads the report in the focused window, for View → Refresh (⌘R).
+    @Entry var reload: ReloadAction?
+}
+
+/// Equal by screen: a re-render with a new closure is not a change, so
+/// publishing it can't loop.
+struct ReloadAction: Equatable {
+    let screen: Screen
+    let run: () async -> Void
+
+    static func == (left: ReloadAction, right: ReloadAction) -> Bool { left.screen == right.screen }
 }
 
 #if os(macOS)
 /// Go: ⌘1–⌘9 open reports in sidebar order; [ and ] shorten or lengthen the period.
 struct GoCommands: Commands {
     @FocusedValue(\.siteState) private var state
+    @FocusedValue(\.reload) private var reload
 
     var body: some Commands {
+        CommandGroup(before: .toolbar) {
+            Button("Refresh") { if let reload { Task { await reload.run() } } }
+                .keyboardShortcut("r")
+                .disabled(reload == nil)
+            Divider()
+        }
         CommandMenu("Go") {
             let screens = Screen.groups.flatMap(\.1)
             ForEach(Array(screens.prefix(9).enumerated()), id: \.element) { index, screen in

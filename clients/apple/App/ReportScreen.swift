@@ -75,6 +75,7 @@ struct SourcesView: View {
                             .contentShape(.rect)
                     }
                     .buttonStyle(.plain)
+                    .rowMenu("source", row["value"]?.text ?? "", label: row["label"]?.text)
                     .accessibilityHint("Filters every report by this source")
                 }
                 if sources.rows.isEmpty { Text("No visits in this period.").foregroundStyle(Theme.ink2) }
@@ -153,6 +154,7 @@ struct CampaignList: View {
                                 .contentShape(.rect)
                         }
                         .buttonStyle(.plain)
+                        .rowMenu("campaign", row["campaign"]?.text ?? "")
                     }
                 }
             }
@@ -265,6 +267,7 @@ struct AudienceView: View {
                                 .contentShape(.rect)
                         }
                         .buttonStyle(.plain)
+                        .rowMenu(tab.dimension, key, label: tab == .countries ? row["label"]?.text : Labels.value(key, dimension: tab.dimension))
                     }
                     if report.rows.isEmpty { Text("No visits in this period.").foregroundStyle(Theme.ink2) }
                     if tab == .countries { Text("Country from the IP at collection · the IP is never stored").font(.caption).foregroundStyle(Theme.muted) }
@@ -393,7 +396,7 @@ struct ErrorsView: View {
                     HStack(spacing: 12) {
                         Icon("bug", size: 20)
                         VStack(alignment: .leading, spacing: 1) {
-                            Text("\(report.rows.count) \(report.rows.count == 1 ? "error" : "errors") happened \(Format.count(Int(times))) times").font(.subheadline.weight(.semibold))
+                            Text("\(plural(report.rows.count, "error")) happened \(plural(Int(times), "time"))").font(.subheadline.weight(.semibold))
                             Text("Most often on \(report.rows.first?["path"]?.text ?? "")").font(.caption)
                         }
                         Spacer()
@@ -409,7 +412,7 @@ struct ErrorsView: View {
                                 Text(row["message"]?.text ?? "").foregroundStyle(Theme.ink).lineLimit(3)
                                 Text([row["path"]?.text, row["browsers"]?.text].compactMap { $0?.isEmpty == false ? $0 : nil }.joined(separator: " · ")).font(.caption).foregroundStyle(Theme.ink2).lineLimit(1)
                                 HStack {
-                                    Text("\(Format.count(Int(number(row, "occurrences")))) times · \(Format.count(Int(number(row, "visits")))) visits")
+                                    Text("\(plural(Int(number(row, "occurrences")), "time")) · \(plural(Int(number(row, "visits")), "visit"))")
                                         .font(.caption.weight(.semibold)).foregroundStyle(Theme.bad)
                                         .padding(.horizontal, 10).padding(.vertical, 3)
                                         .background(Theme.brandWash, in: .capsule)

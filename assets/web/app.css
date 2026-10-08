@@ -272,6 +272,12 @@ a.metric:hover { border-color: var(--border-strong); }
 /* Touch: the page still scrolls up and down over a chart; sideways scrubs. */
 .chart-plot { touch-action: pan-y; -webkit-user-select: none; user-select: none; }
 .chart.pinned .chart-tip { pointer-events: auto; }
+/* Values a bar holds: on hover with a mouse, on a tap with a finger. */
+[data-tip] { position: relative; }
+[data-tip]::after { content: attr(data-tip); position: absolute; bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%); z-index: 5; padding: 6px 10px; border-radius: 8px; background: var(--tooltip); color: var(--tooltip-ink); font-size: 12px; font-weight: 600; line-height: 16px; white-space: nowrap; pointer-events: none; opacity: 0; }
+[data-tip]:hover::after, [data-tip].tip-on::after { opacity: 1; }
+.barchart-col:first-child[data-tip]::after { left: 0; transform: none; }
+.barchart-col:last-child[data-tip]::after { left: auto; right: 0; transform: none; }
 .chart-open { display: block; margin-top: 6px; padding-top: 6px; border-top: 1px solid #ffffff26; color: var(--link-on-dark); font-size: 12px; font-weight: 600; }
 .now-band { fill: var(--brand); fill-opacity: .1; }
 .chart-now { position: absolute; top: -18px; transform: translateX(-50%); color: var(--brand-dark); font-size: 11px; font-weight: 600; pointer-events: none; }
@@ -398,6 +404,11 @@ dialog::backdrop { background: var(--scrim); }
 .dialog-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 16px 28px 20px; border-top: 1px solid var(--border); }
 .sheet { position: fixed; inset: 8px 8px 8px auto; width: min(460px, calc(100vw - 16px)); height: auto; max-height: none; max-width: none; margin: 0; padding: 0; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow-sheet); overflow-y: auto; }
 .sheet::backdrop { background: var(--scrim-light); }
+/* Wide screens: an open sheet sits beside the page, like the apps' inspector; the table stays usable. */
+@media (min-width: 1100px) {
+  dialog.sheet:not(:modal) { z-index: 30; }
+  body:has(dialog.sheet[open]:not(:modal)) .main { padding-right: 476px; }
+}
 .sheet-head { position: sticky; top: 0; z-index: 1; display: flex; align-items: flex-start; gap: 12px; padding: 20px 24px 0; background: var(--surface); }
 .sheet-head .overline { font-size: 11px; line-height: 16px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
 .sheet-head h2 { font-size: 17px; line-height: 24px; font-weight: 600; word-break: break-all; }
@@ -614,7 +625,7 @@ dialog:focus { outline: none; }
   .controls { width: 100%; }
   .controls .seg { flex: 1; } .controls .seg a { flex: 1; min-width: 0; }
   .controls .btn-label { display: inline; }
-  .phone-only { display: inline; }
+  .phone-only { display: inline; } .phone-hide { display: none; }
   .controls .btn-actions { width: auto; padding: 0 12px; }
   .metrics { gap: 9px; }
   .metric { grid-template-columns: minmax(0, 1fr) auto; column-gap: 8px; padding: 12px 14px 14px; }
@@ -645,6 +656,24 @@ dialog:focus { outline: none; }
   .sheet-head::before { content: ""; position: absolute; top: 8px; left: 50%; width: 37px; height: 5px; margin-left: -18px; border-radius: 3px; background: var(--border-strong); }
   .sheet-head { padding: 26px 16px 0; }
   .sheet .tabs { padding: 0 16px; }
+  /* Forms at 16px: iOS zooms into anything smaller when it gets focus. */
+  .input.input, .input.input.mono { font-size: 16px; }
+  /* Room for the floating tab bar under the last card. */
+  .panel { padding-bottom: calc(100px + env(safe-area-inset-bottom)); }
+  /* Where a finger lands: 40–44 pt. */
+  .btn-icon { width: 40px; height: 40px; }
+  .sheet-close { width: 40px; height: 40px; }
+  .switch { width: 51px; height: 31px; }
+  .switch input { border-radius: 16px; }
+  .switch input::after { width: 27px; height: 27px; }
+  .switch input:checked::after { transform: translateX(20px); }
+  .check { min-height: 44px; }
+  .check input { width: 22px; height: 22px; }
+  details > summary { min-height: 44px; display: flex; align-items: center; }
+  .card-foot a, a.link:not(p a, .hint a), button.link, .table th a { display: inline-block; padding: 12px 0; margin: -12px 0; }
+  .edit-cell { padding-block: 9px; }
+  /* A chart note's label: tap its pin. */
+  .chart-mark.open b { display: inline; }
   .seg.seg-sheet { margin: 12px 16px 0; }
   .btn.btn-wide { height: 50px; border-radius: 25px; font-size: 17px; }
   .sheet-body { padding: 16px 16px 28px; }

@@ -583,6 +583,16 @@ pub const Metric = enum {
             .active => "active",
         };
     }
+
+    /// The unit for a count: "1 visitor", "2 visitors".
+    pub fn unitFor(self: Metric, count: i64) []const u8 {
+        if (count != 1) return if (self == .active) "active minutes" else self.unit();
+        return switch (self) {
+            .visitors, .visitor_days => "visitor",
+            .views => "view",
+            .active => "active minute",
+        };
+    }
 };
 
 /// Everything a site page needs to render a consistent view.

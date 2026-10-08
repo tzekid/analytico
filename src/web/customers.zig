@@ -158,8 +158,10 @@ fn revenueChart(ctx: *Ctx, view: data.View) !void {
             label = if (every == 1 or range.bucket_ms == data.hour_ms) range.bucketLabel(&short, index) else if (date.month != last_month) try std.fmt.bufPrint(&short, "{d} {s}", .{ date.day, data.month_names[date.month - 1] }) else try std.fmt.bufPrint(&short, "{d}", .{date.day});
             last_month = date.month;
         }
-        try render(w, "<div class=\"barchart-col{!best}\" title=\"{amount}\"><div class=\"barchart-stack\"><span class=\"bar-browser\" style=\"height:{browser:.1}%\"></span><span class=\"bar-confirmed\" style=\"height:{confirmed:.1}%\"></span></div><small>{label}</small></div>", .{
+        var long: [32]u8 = undefined;
+        try render(w, "<div class=\"barchart-col{!best}\" data-tip=\"{day} · {amount}\"><div class=\"barchart-stack\"><span class=\"bar-browser\" style=\"height:{browser:.1}%\"></span><span class=\"bar-confirmed\" style=\"height:{confirmed:.1}%\"></span></div><small>{label}</small></div>", .{
             .best = if (index == best) " best" else "",
+            .day = range.bucketLong(&long, index),
             .amount = html.money(a + b, view.site.currency),
             .browser = @as(f64, @floatFromInt(b)) / @as(f64, @floatFromInt(peak)) * 100,
             .confirmed = @as(f64, @floatFromInt(a)) / @as(f64, @floatFromInt(peak)) * 100,
@@ -426,7 +428,7 @@ fn retentionBody(arena: std.mem.Allocator, numbers: Retention, w: *std.Io.Writer
     for (active, returning, 0..) |total, back, index| {
         const date = data.civil(origin + @as(i64, @intCast(index)) * week_ms);
         const percent = if (total == 0) 0 else @as(f64, @floatFromInt(back)) / @as(f64, @floatFromInt(total)) * 100;
-        try render(w, "<div class=\"barchart-col{!best}\" title=\"{total} visitors, {back} returning\"><div class=\"barchart-stack\"><span class=\"bar-new\" style=\"height:{new:.1}%\"></span><span class=\"bar-returning\" style=\"height:{returning:.1}%\">{percent}</span></div><small>{day} {month}</small></div>", .{
+        try render(w, "<div class=\"barchart-col{!best}\" data-tip=\"Week of {day} {month} · {total} visitors, {back} returning\"><div class=\"barchart-stack\"><span class=\"bar-new\" style=\"height:{new:.1}%\"></span><span class=\"bar-returning\" style=\"height:{returning:.1}%\">{percent}</span></div><small>{day} {month}</small></div>", .{
             .best = if (index == 7) " best" else "",
             .total = total,
             .back = back,

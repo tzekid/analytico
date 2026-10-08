@@ -86,7 +86,7 @@ struct PagesView: View {
                                 Spacer(minLength: 8)
                                 VStack(alignment: .trailing, spacing: 0) {
                                     Text(Format.count(row.views)).font(Theme.display(20, relativeTo: .title3)).foregroundStyle(Theme.ink).monospacedDigit()
-                                    Text("views").font(.caption2).foregroundStyle(Theme.muted)
+                                    Text(row.views == 1 ? "view" : "views").font(.caption2).foregroundStyle(Theme.muted)
                                 }
                             }
                             GeometryReader { geometry in
@@ -99,6 +99,7 @@ struct PagesView: View {
                         .contentShape(.rect)
                     }
                     .buttonStyle(.plain)
+                    .rowMenu("page", row.path)
                     .accessibilityHint("Opens the page’s details")
                 }
             }
@@ -168,6 +169,7 @@ struct PagesView: View {
                         .contentShape(.rect)
                     }
                     .buttonStyle(.plain)
+                    .rowMenu("page", row.path)
                     Divider()
                 }
             }
@@ -284,6 +286,7 @@ struct PageDetail: View {
                     } else {
                         Button { state.page = nil } label: { Image(systemName: "xmark").font(.callout.weight(.semibold)).foregroundStyle(Theme.ink2) }
                             .buttonStyle(.plain)
+                            .keyboardShortcut(.cancelAction)
                             .accessibilityLabel("Close")
                     }
                 }

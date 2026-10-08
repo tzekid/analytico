@@ -1,4 +1,5 @@
 import AnalyticoKit
+import Charts
 import SwiftUI
 
 /// Who is on the site right now, the last half hour minute by minute, the
@@ -53,16 +54,8 @@ struct LiveView: View {
                 }
             }
             Text("Page views per minute · last 30 minutes").font(.caption).foregroundStyle(Theme.muted).padding(.top, 14)
-            let busiest = max(1, live.minutes.max() ?? 1)
-            HStack(alignment: .bottom, spacing: 3) {
-                ForEach(Array(live.minutes.enumerated()), id: \.offset) { index, count in
-                    RoundedRectangle(cornerRadius: 2)
-                        .fill(count == 0 ? Theme.border : index == live.minutes.count - 1 ? Theme.brand.opacity(0.45) : Theme.brand)
-                        .frame(height: count == 0 ? 3 : max(6, 80 * Double(count) / Double(busiest)))
-                }
-            }
-            .frame(height: 80, alignment: .bottom)
-            .accessibilityLabel("\(live.minutes.reduce(0, +)) page views in the last 30 minutes")
+            MinuteBars(minutes: live.minutes)
+                .frame(height: 80)
         }
         .card(padding: 20)
         .animation(.default, value: state.online)
@@ -77,6 +70,7 @@ struct LiveView: View {
                         ShareRow(title: path, value: Format.count(count), share: Double(count) / top * 0.8, rule: false).contentShape(.rect)
                     }
                     .buttonStyle(.plain)
+                    .rowMenu("page", path)
                 }
                 if live.reading.isEmpty { Text("No one is reading a page right now. Pages appear here the moment someone arrives.").font(.callout).foregroundStyle(Theme.ink2) }
             }
@@ -147,7 +141,51 @@ struct LiveView: View {
     }
 }
 
+/// The last half hour, minute by minute; the newest minute is still
+/// filling. Hover or touch a bar for its count.
+struct MinuteBars: View {
+    let minutes: [LiveData.Minute]
+    @State private var selection: Date?
+
+    private var selected: LiveData.Minute? {
+        guard let selection else { return nil }
+        return minutes.min { abs($0.at.timeIntervalSince(selection)) < abs($1.at.timeIntervalSince(selection)) }
+    }
+
+    var body: some View {
+        let busiest = max(1, minutes.map(\.count).max() ?? 1)
+        Chart(minutes, id: \.at) { minute in
+            BarMark(x: .value("Minute", minute.at, unit: .minute), y: .value("Page views", minute.count == 0 ? Double(busiest) * 0.04 : Double(minute.count)))
+                .foregroundStyle(minute.count == 0 ? Theme.border : minute.at == minutes.last?.at ? Theme.brand.opacity(0.45) : Theme.brand)
+                .clipShape(.rect(cornerRadii: .init(topLeading: 2, topTrailing: 2)))
+                .opacity(selected == nil || selected?.at == minute.at ? 1 : 0.5)
+            if let selected, selected.at == minute.at {
+                RuleMark(x: .value("Minute", minute.at, unit: .minute))
+                    .foregroundStyle(.clear)
+                    .annotation(position: .top, spacing: 0, overflowResolution: .init(x: .fit(to: .chart), y: .fit(to: .chart))) {
+                        Text("\(minute.at.formatted(date: .omitted, time: .shortened)) · \(plural(minute.count, "page view"))")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 8).padding(.vertical, 4)
+                            .background(Color(light: 0x282421, dark: 0x3A3330), in: .rect(cornerRadius: 6))
+                    }
+            }
+        }
+        .chartXAxis(.hidden)
+        .chartYAxis(.hidden)
+        // Scaled to the busiest minute, so an empty half hour shows stubs, not full bars.
+        .chartYScale(domain: 0...Double(busiest))
+        .pointerSelection($selection)
+        .accessibilityLabel("\(minutes.reduce(0) { $0 + $1.count }) page views in the last 30 minutes")
+    }
+}
+
 struct LiveData {
+    struct Minute {
+        var at: Date
+        var count: Int
+    }
+
     struct View {
         var at: Date
         var path: String
@@ -156,7 +194,7 @@ struct LiveData {
         var device: String
     }
 
-    var minutes: [Int]
+    var minutes: [Minute]
     var reading: [(String, Int)]
     var views: [View]
     var last: Date?
@@ -175,7 +213,7 @@ struct LiveData {
         let since = Date.now.addingTimeInterval(-300)
         var reading: [String: Int] = [:]
         for view in views where view.at >= since { reading[view.path, default: 0] += 1 }
-        return try await LiveData(minutes: minutes.rows.map { Int($0["page_views"]?.number ?? 0) },
+        return try await LiveData(minutes: minutes.rows.map { Minute(at: Dates.parse($0["at"]?.text ?? "") ?? .now, count: Int($0["page_views"]?.number ?? 0)) },
                                   reading: reading.sorted { $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value }.prefix(6).map { ($0.key, $0.value) },
                                   views: Array(views.prefix(12)), last: views.first?.at)
     }

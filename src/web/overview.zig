@@ -442,7 +442,7 @@ pub fn sourcesCard(ctx: *Ctx, view: data.View, base: []const u8, total_views: i6
     const w = ctx.w();
     const sources = try data.top(arena, ctx.db, view, .source, 5);
     try w.writeAll("<section class=\"card\">");
-    try ui.cardHead(w, "Where visitors come from", "<span class=\"meta\">Page views</span>");
+    try ui.cardHead(w, "Where visitors come from", "<span class=\"meta\">Page views · <span class=\"phone-hide\">click</span><span class=\"phone-only\">tap</span> to filter</span>");
     try w.writeAll("<div class=\"rank\">");
     const keys = try arena.alloc([]const u8, sources.len);
     for (sources, keys) |row, *key| key.* = row.key;
@@ -518,7 +518,7 @@ pub fn trendCard(ctx: *Ctx, view: data.View, base: []const u8) !void {
         const before = try data.totals(arena, ctx.db, view, range.prev_start_ms, range.prev_end_ms);
         const value: f64 = if (metric == .views) @floatFromInt(now_totals.views) else @floatFromInt(now_totals.visitor_days);
         const earlier: f64 = if (metric == .views) @floatFromInt(before.views) else @floatFromInt(before.visitor_days);
-        try w.print("<p class=\"insight\">So far today: {f} {s} by {f}", .{ html.int(@intFromFloat(value)), metric.unit(), data.clock(range.now_ms, range.now_ms) });
+        try w.print("<p class=\"insight\">So far today: {f} {s} by {f}", .{ html.int(@intFromFloat(value)), metric.unitFor(@intFromFloat(value)), data.clock(range.now_ms, range.now_ms) });
         if (earlier > 0 and view.compare) {
             const change = html.changeValue(value, earlier);
             try w.print(", {d:.0}% {s} than yesterday by the same time", .{ @abs(change), if (change >= 0) "more" else "fewer" });
@@ -526,7 +526,7 @@ pub fn trendCard(ctx: *Ctx, view: data.View, base: []const u8) !void {
         try w.writeAll(".</p>");
     } else if (current.len != 0 and current[best] > 0) {
         // One day names hours only; the date is already in the title.
-        try w.print("<p class=\"insight\">{s} was the busiest {s} — {f} {s}", .{ if (range.oneDay()) names[0][best] else names[1][best], if (range.bucket_ms == data.hour_ms) "hour" else "day", if (metric == .active) html.Int{ .value = @intFromFloat(current[best] / 60_000) } else html.int(@intFromFloat(current[best])), if (metric == .active) "active minutes" else metric.unit() });
+        try w.print("<p class=\"insight\">{s} was the busiest {s} — {f} {s}", .{ if (range.oneDay()) names[0][best] else names[1][best], if (range.bucket_ms == data.hour_ms) "hour" else "day", if (metric == .active) html.Int{ .value = @intFromFloat(current[best] / 60_000) } else html.int(@intFromFloat(current[best])), metric.unitFor(if (metric == .active) @intFromFloat(current[best] / 60_000) else @intFromFloat(current[best])) });
         for (marks) |mark| if (mark.index + 1 == best or mark.index == best) {
             try w.print(", {s} “{f}”", .{ if (mark.index == best) "the day of" else "one day after", esc(mark.label) });
             break;
