@@ -123,18 +123,34 @@ final class AppModel {
 
     private func registerPush() async {
         guard let client, let pushToken else { return }
-        #if DEBUG
-        let development = true
-        #else
-        let development = false
-        #endif
         do {
-            try await client.registerDevice(token: pushToken, key: PushKey.current(), kinds: pushKinds, development: development)
+            try await client.registerDevice(token: pushToken, key: PushKey.current(), kinds: pushKinds, development: Self.sandboxPush)
             pushProblem = nil
         } catch {
             pushProblem = "Couldn’t turn on notifications with your Analytico. Its server may need an update."
         }
     }
+
+    /// Which APNs server issued this device's token follows the signature,
+    /// not the build configuration: a development profile means the sandbox.
+    /// App Store and TestFlight builds carry no profile and use production.
+    private static let sandboxPush: Bool = {
+        #if os(iOS)
+        let url = Bundle.main.bundleURL.appending(path: "embedded.mobileprovision")
+        let key = "aps-environment"
+        #else
+        let url = Bundle.main.bundleURL.appending(path: "Contents/embedded.provisionprofile")
+        let key = "com.apple.developer.aps-environment"
+        #endif
+        // The profile is a signed envelope around a plain XML property list.
+        guard let data = try? Data(contentsOf: url),
+              let start = data.range(of: Data("<?xml".utf8)),
+              let end = data.range(of: Data("</plist>".utf8), in: start.lowerBound..<data.endIndex),
+              let profile = try? PropertyListSerialization.propertyList(from: data[start.lowerBound..<end.upperBound], format: nil) as? [String: Any],
+              let entitlements = profile["Entitlements"] as? [String: Any]
+        else { return false }
+        return entitlements[key] as? String == "development"
+    }()
 
     func loadSites() async {
         guard let client else { return }

@@ -152,15 +152,12 @@ gate fails after two weeks, fall back to W1, keeping the same
 ### E1. Turning on Apple push (from 0.3)
 
 0.3 ships the code: device keys, RFC 8291 encryption, the relay and the
-notification extension, each tested against stand-ins. What is left needs
-an active developer membership (the renewal of 8 October 2026 was still
-processing):
+notification extension, each tested against stand-ins. Since 8 October
+2026 automatic signing includes Push Notifications on `ru.plosca.analytico`,
+and the relay runs on plosca as `analytico-relay.service` behind
+`push.analytico.plosca.ru` with the "Analytico push" APNs key
+([OPERATIONS.md](OPERATIONS.md#the-push-relay)). What is left:
 
-- Automatic signing enables Push Notifications on `ru.plosca.analytico`
-  (Xcode refuses it while the membership reads as expired).
-- An APNs key (`AuthKey_<KEYID>.p8`) installed on plosca; the relay runs as
-  `analytico-relay.service` behind `push.analytico.plosca.ru`
-  ([OPERATIONS.md](OPERATIONS.md#the-push-relay)).
 - Exit: an alert, a goal and an unusual-day note reach a real iPhone and
   Mac, decrypted by the extension; signing the device out stops them.
 
