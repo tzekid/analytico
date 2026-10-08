@@ -31,6 +31,8 @@ targets:
       path: App/Info.plist
       properties:
         CFBundleDisplayName: Analytico
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         CFBundleURLTypes:
           - CFBundleURLName: ru.plosca.analytico
             CFBundleURLSchemes: [analytico]
@@ -68,6 +70,8 @@ targets:
       path: Widgets/Info.plist
       properties:
         CFBundleDisplayName: Analytico
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         UIAppFonts: [Quando-Regular.ttf]
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
@@ -91,6 +95,8 @@ targets:
       path: Notifications/Info.plist
       properties:
         CFBundleDisplayName: Analytico
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         NSExtension:
           NSExtensionPointIdentifier: com.apple.usernotifications.service
           NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).NotificationService
