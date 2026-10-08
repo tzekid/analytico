@@ -570,7 +570,7 @@ await journey("v3", async (t) => {
   const shownInp = Number.parseInt(await page.locator("section.card", { hasText: "Interaction to Next Paint" }).locator(".metric-value-l").nth(1).textContent(), 10);
   assert.ok(shownInp >= p75(inp) && shownInp <= p75(inp.map(roundedUp)), `INP p75 ${shownInp} ms, raw samples ${inp}`);
   await page.goto(`${originA}/shop/pages?range=7d&page=${encodeURIComponent("/archive")}`);
-  assert.equal((await page.locator(".mini", { hasText: "Views" }).locator("strong").textContent()).trim(), String(row(`SELECT count(*) n FROM page_views WHERE ${human} AND path='/archive'`, weekFrom).n));
+  assert.equal((await page.locator(".metrics-sheet .metric", { hasText: "Views" }).locator(".metric-value").textContent()).trim(), String(row(`SELECT count(*) n FROM page_views WHERE ${human} AND path='/archive'`, weekFrom).n));
   assert.equal((await page.locator(".row", { hasText: "intro" }).locator(".reach-pct").textContent()).trim(), "100%");
   await page.goto(`${originA}/shop/errors?range=7d`);
   const visits = row(`SELECT count(DISTINCT coalesce(session_id,page_id)) n FROM page_views WHERE ${human}`, weekFrom).n;
