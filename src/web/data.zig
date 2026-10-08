@@ -159,6 +159,10 @@ pub fn reservedSlug(slug: []const u8) bool {
 
 pub const RangeKind = enum { @"24h", @"7d", @"30d", @"90d", custom };
 
+/// How a custom range was changed into one that can be shown; the page
+/// says so instead of quietly showing something else.
+pub const Correction = enum { none, swapped, shortened, future, unreadable };
+
 pub const Range = struct {
     kind: RangeKind,
     start_ms: i64,
@@ -168,8 +172,7 @@ pub const Range = struct {
     prev_start_ms: i64,
     prev_end_ms: i64,
     now_ms: i64,
-    from_text: []const u8 = "",
-    to_text: []const u8 = "",
+    correction: Correction = .none,
 
     pub fn parse(params: html.Params, now_ms: i64) Range {
         const kind = std.meta.stringToEnum(RangeKind, params.get("range") orelse "7d") orelse .@"7d";
@@ -188,52 +191,164 @@ pub const Range = struct {
                 break :blk .{ .kind = kind, .start_ms = today - (count_days - 1) * day_ms, .end_ms = today + day_ms, .bucket_ms = day_ms, .buckets = @intCast(count_days), .prev_start_ms = 0, .prev_end_ms = 0, .now_ms = now_ms };
             },
             .custom => custom: {
-                const from = parseDate(params.get("from") orelse "") catch break :custom parse(.{}, now_ms);
-                const to = parseDate(params.get("to") orelse "") catch break :custom parse(.{}, now_ms);
-                if (to < from or to - from > 366 * day_ms) break :custom parse(.{}, now_ms);
+                var from = parseDate(params.get("from") orelse "") catch break :custom unreadable(now_ms);
+                var to = parseDate(params.get("to") orelse "") catch break :custom unreadable(now_ms);
+                var correction: Correction = .none;
+                if (to < from) {
+                    std.mem.swap(i64, &from, &to);
+                    correction = .swapped;
+                }
+                if (to > today) {
+                    to = today;
+                    from = @min(from, to);
+                    correction = .future;
+                }
+                if (to - from > 365 * day_ms) {
+                    from = to - 365 * day_ms;
+                    correction = .shortened;
+                }
+                // One day reads hour by hour; a single daily point says nothing.
+                if (from == to) break :custom .{ .kind = kind, .start_ms = from, .end_ms = to + day_ms, .bucket_ms = hour_ms, .buckets = 24, .prev_start_ms = 0, .prev_end_ms = 0, .now_ms = now_ms, .correction = correction };
                 const count_days: usize = @intCast(@divExact(to - from, day_ms) + 1);
-                break :custom .{ .kind = kind, .start_ms = from, .end_ms = to + day_ms, .bucket_ms = day_ms, .buckets = count_days, .prev_start_ms = 0, .prev_end_ms = 0, .now_ms = now_ms, .from_text = params.get("from").?, .to_text = params.get("to").? };
+                break :custom .{ .kind = kind, .start_ms = from, .end_ms = to + day_ms, .bucket_ms = day_ms, .buckets = count_days, .prev_start_ms = 0, .prev_end_ms = 0, .now_ms = now_ms, .correction = correction };
             },
         };
+        if (out.correction == .unreadable) return out;
         out.prev_end_ms = out.start_ms;
         out.prev_start_ms = out.start_ms - (out.end_ms - out.start_ms);
+        // A period still running is compared with the same stretch of the
+        // one before, so "today" is not measured against a whole day.
+        if (out.end_ms > now_ms) out.prev_end_ms = out.prev_start_ms + (now_ms - out.start_ms);
         return out;
     }
 
+    fn unreadable(now_ms: i64) Range {
+        var out = parse(.{}, now_ms);
+        out.correction = .unreadable;
+        return out;
+    }
+
+    /// Days elapsed, for per-day averages; a running period counts only
+    /// what has happened so far.
     pub fn days(self: Range) f64 {
-        return @max(1.0, @as(f64, @floatFromInt(self.end_ms - self.start_ms)) / @as(f64, @floatFromInt(day_ms)));
+        const end = @min(self.end_ms, @max(self.now_ms, self.start_ms + hour_ms));
+        return @max(1.0, @as(f64, @floatFromInt(end - self.start_ms)) / @as(f64, @floatFromInt(day_ms)));
     }
 
-    /// "21–27 Sep 2026", "28 Sep – 4 Oct 2026", "Last 24 hours".
+    /// "vs Tue 29 Sep" next to a change.
+    pub fn versus(self: Range, arena: std.mem.Allocator) ![]const u8 {
+        return std.fmt.allocPrint(arena, "{f}", .{self.text(.versus)});
+    }
+
+    /// A single custom day, shown hour by hour.
+    pub fn oneDay(self: Range) bool {
+        return self.kind == .custom and self.end_ms - self.start_ms == day_ms;
+    }
+
+    /// The bucket still filling up, when the period runs until now.
+    pub fn partial(self: Range) ?usize {
+        if (self.end_ms <= self.now_ms or self.now_ms < self.start_ms) return null;
+        return @intCast(@divFloor(self.now_ms - self.start_ms, self.bucket_ms));
+    }
+
+    fn todayStart(self: Range) i64 {
+        return self.now_ms - @mod(self.now_ms, day_ms);
+    }
+
+    /// "21–27 Sep 2026", "Wed 30 Sep 2026, hour by hour", "Last 24 hours".
     pub fn format(self: Range, w: *std.Io.Writer) std.Io.Writer.Error!void {
-        if (self.kind == .@"24h") return w.writeAll("Last 24 hours");
-        const a = civil(self.start_ms);
-        const b = civil(self.end_ms - 1);
-        if (a.year != b.year) return w.print("{d} {s} {d} – {d} {s} {d}", .{ a.day, month_names[a.month - 1], a.year, b.day, month_names[b.month - 1], b.year });
-        if (a.month != b.month) return w.print("{d} {s} – {d} {s} {d}", .{ a.day, month_names[a.month - 1], b.day, month_names[b.month - 1], b.year });
-        if (a.day == b.day) return w.print("{d} {s} {d}", .{ a.day, month_names[a.month - 1], a.year });
-        return w.print("{d}–{d} {s} {d}", .{ a.day, b.day, month_names[a.month - 1], a.year });
+        return self.text(.subtitle).format(w);
     }
 
-    pub fn comparisonLabel(self: Range) []const u8 {
-        return switch (self.kind) {
-            .@"24h" => "the previous 24 hours",
-            .@"7d" => "the previous 7 days",
-            .@"30d" => "the previous 30 days",
-            .@"90d" => "the previous 90 days",
-            .custom => "the previous period",
-        };
+    pub fn text(self: Range, wording: Wording) Text {
+        return .{ .range = self, .wording = wording };
     }
 
-    pub fn shortComparison(self: Range) []const u8 {
-        return switch (self.kind) {
-            .@"24h" => "vs yesterday",
-            .@"7d" => "vs last week",
-            .@"30d" => "vs previous 30d",
-            .@"90d" => "vs previous 90d",
-            .custom => "vs previous",
-        };
-    }
+    pub const Wording = enum {
+        /// The page subtitle: "1–30 Sep 2026", "Today so far, until 14:40".
+        subtitle,
+        /// After "compared with": "2–31 Aug", "yesterday until 14:40".
+        compared,
+        /// Next to a change: "vs Tue 29 Sep", "vs yesterday by 14:40".
+        versus,
+        /// The custom date button: "Today", "30 Sep", "1–31 Jan 2025".
+        button,
+        /// The chart legend for this period and the one compared with.
+        this,
+        previous,
+        /// What was corrected, for a toast.
+        correction,
+        /// "on Wed 30 Sep 2026", "between 1 and 31 Jan 2025".
+        between,
+    };
+
+    pub const Text = struct {
+        range: Range,
+        wording: Wording,
+
+        pub fn format(self: Text, w: *std.Io.Writer) std.Io.Writer.Error!void {
+            const r = self.range;
+            const today_start = r.todayStart();
+            const is_today = r.oneDay() and r.start_ms == today_start;
+            const length = r.end_ms - r.start_ms;
+            const prev_end = r.prev_start_ms + length;
+            switch (self.wording) {
+                .subtitle => {
+                    if (r.kind == .@"24h") return w.writeAll("Last 24 hours");
+                    if (is_today) return w.print("Today so far, until {f}", .{clock(r.now_ms, r.now_ms)});
+                    if (r.oneDay()) {
+                        try writeDay(w, r.start_ms, true, true);
+                        return w.writeAll(", hour by hour");
+                    }
+                    return writeSpan(w, r.start_ms, r.end_ms, true);
+                },
+                .compared, .versus => {
+                    if (self.wording == .versus) try w.writeAll("vs ");
+                    if (r.kind == .@"24h") return w.writeAll("the previous 24 hours");
+                    if (is_today) return w.print("yesterday {s} {f}", .{ if (self.wording == .versus) "by" else "until", clock(r.now_ms, r.now_ms) });
+                    if (r.oneDay()) return writeDay(w, r.prev_start_ms, true, otherYear(r.prev_start_ms, r.now_ms));
+                    try writeSpan(w, r.prev_start_ms, prev_end, otherYear(prev_end - 1, r.now_ms));
+                    if (self.wording == .compared and r.partial() != null) try w.writeAll(", up to the same time of day");
+                },
+                .button => {
+                    if (is_today) return w.writeAll("Today");
+                    if (r.oneDay() and r.start_ms == today_start - day_ms) return w.writeAll("Yesterday");
+                    return writeSpan(w, r.start_ms, r.end_ms, otherYear(r.end_ms - 1, r.now_ms));
+                },
+                .this => {
+                    if (r.kind == .@"24h") return w.writeAll("Last 24 hours");
+                    if (is_today) return w.writeAll("Today");
+                    if (r.oneDay()) return writeDay(w, r.start_ms, true, otherYear(r.start_ms, r.now_ms));
+                    return writeSpan(w, r.start_ms, r.end_ms, otherYear(r.end_ms - 1, r.now_ms));
+                },
+                .previous => {
+                    if (r.kind == .@"24h") return w.writeAll("Previous 24 hours");
+                    if (is_today) return w.writeAll("Yesterday");
+                    if (r.oneDay()) return writeDay(w, r.prev_start_ms, true, otherYear(r.prev_start_ms, r.now_ms));
+                    return writeSpan(w, r.prev_start_ms, prev_end, otherYear(prev_end - 1, r.now_ms));
+                },
+                .between => {
+                    if (r.oneDay()) {
+                        try w.writeAll("on ");
+                        return writeDay(w, r.start_ms, true, true);
+                    }
+                    if (r.kind == .@"24h") return w.writeAll("in the last 24 hours");
+                    const a = civil(r.start_ms);
+                    const b = civil(r.end_ms - 1);
+                    if (a.year != b.year) return w.print("between {d} {s} {d} and {d} {s} {d}", .{ a.day, month_names[a.month - 1], a.year, b.day, month_names[b.month - 1], b.year });
+                    if (a.month != b.month) return w.print("between {d} {s} and {d} {s} {d}", .{ a.day, month_names[a.month - 1], b.day, month_names[b.month - 1], b.year });
+                    return w.print("between {d} and {d} {s} {d}", .{ a.day, b.day, month_names[a.month - 1], b.year });
+                },
+                .correction => switch (r.correction) {
+                    .none => {},
+                    .swapped => try w.print("From and To were the wrong way round, so they were swapped: showing {f}.", .{r.text(.button)}),
+                    .shortened => try w.print("A range can be a year at most, so it was shortened: showing {f}.", .{r.text(.button)}),
+                    .future => try w.print("A range can’t go past today, so it ends today: showing {f}.", .{r.text(.button)}),
+                    .unreadable => try w.writeAll("Those dates couldn’t be read, so this shows the last 7 days."),
+                },
+            }
+        }
+    };
 
     /// Label for bucket `index`: "Mon 21", "14:00", "21 Sep".
     pub fn bucketLabel(self: Range, buffer: []u8, index: usize) []const u8 {
@@ -245,9 +360,17 @@ pub const Range = struct {
     }
 
     pub fn bucketLong(self: Range, buffer: []u8, index: usize) []const u8 {
-        const at = self.start_ms + @as(i64, @intCast(index)) * self.bucket_ms;
+        return longAt(buffer, self.start_ms + @as(i64, @intCast(index)) * self.bucket_ms, self.bucket_ms);
+    }
+
+    /// The matching bucket of the period compared with: "Tue 29 Sep, 14:00".
+    pub fn previousLong(self: Range, buffer: []u8, index: usize) []const u8 {
+        return longAt(buffer, self.prev_start_ms + @as(i64, @intCast(index)) * self.bucket_ms, self.bucket_ms);
+    }
+
+    fn longAt(buffer: []u8, at: i64, bucket_ms: i64) []const u8 {
         const date = civil(at);
-        if (self.bucket_ms == hour_ms) return std.fmt.bufPrint(buffer, "{s} {d} {s}, {d:0>2}:00", .{ weekday_names[weekday(at)], date.day, month_names[date.month - 1], @as(u64, @intCast(@divFloor(@mod(at, day_ms), hour_ms))) }) catch "";
+        if (bucket_ms == hour_ms) return std.fmt.bufPrint(buffer, "{s} {d} {s}, {d:0>2}:00", .{ weekday_names[weekday(at)], date.day, month_names[date.month - 1], @as(u64, @intCast(@divFloor(@mod(at, day_ms), hour_ms))) }) catch "";
         return std.fmt.bufPrint(buffer, "{s} {d} {s}", .{ weekday_names[weekday(at)], date.day, month_names[date.month - 1] }) catch "";
     }
 
@@ -257,6 +380,32 @@ pub const Range = struct {
         return @intCast(@divFloor(at - self.start_ms, self.bucket_ms));
     }
 };
+
+fn otherYear(at: i64, now_ms: i64) bool {
+    return civil(at).year != civil(now_ms).year;
+}
+
+/// "Wed 30 Sep 2026", "30 Sep".
+fn writeDay(w: *std.Io.Writer, at: i64, with_weekday: bool, with_year: bool) std.Io.Writer.Error!void {
+    const date = civil(at);
+    if (with_weekday) try w.print("{s} ", .{weekday_names[weekday(at)]});
+    try w.print("{d} {s}", .{ date.day, month_names[date.month - 1] });
+    if (with_year) try w.print(" {d}", .{date.year});
+}
+
+/// "1–30 Sep", "28 Sep – 4 Oct", "28 Dec 2025 – 3 Jan 2026"; `end` is exclusive.
+fn writeSpan(w: *std.Io.Writer, start: i64, end: i64, with_year: bool) std.Io.Writer.Error!void {
+    if (end - start <= day_ms) return writeDay(w, start, false, with_year);
+    const a = civil(start);
+    const b = civil(end - 1);
+    if (a.year != b.year) return w.print("{d} {s} {d} – {d} {s} {d}", .{ a.day, month_names[a.month - 1], a.year, b.day, month_names[b.month - 1], b.year });
+    if (a.month != b.month) {
+        try w.print("{d} {s} – {d} {s}", .{ a.day, month_names[a.month - 1], b.day, month_names[b.month - 1] });
+    } else {
+        try w.print("{d}–{d} {s}", .{ a.day, b.day, month_names[a.month - 1] });
+    }
+    if (with_year) try w.print(" {d}", .{b.year});
+}
 
 pub const month_names = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
 pub const weekday_names = [_][]const u8{ "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
@@ -466,7 +615,7 @@ pub const View = struct {
         var first = true;
         const keys = [_][]const u8{ "range", "from", "to", "cmp", "m", "fm" };
         for (keys) |key| {
-            var value = self.params.get(key) orelse "";
+            var value = try self.state(arena, key);
             for (overrides) |pair| if (std.mem.eql(u8, pair[0], key)) {
                 value = pair[1];
             };
@@ -504,6 +653,16 @@ pub const View = struct {
             }
         }
         return out.written();
+    }
+
+    /// A view-state value for links and forms. The period comes from the
+    /// parsed range, so a corrected range is carried on, not the raw URL.
+    pub fn state(self: View, arena: std.mem.Allocator, key: []const u8) ![]const u8 {
+        const custom = self.range.kind == .custom;
+        if (std.mem.eql(u8, key, "range")) return @tagName(self.range.kind);
+        if (std.mem.eql(u8, key, "from")) return if (custom) try arena.dupe(u8, &dateText(self.range.start_ms)) else "";
+        if (std.mem.eql(u8, key, "to")) return if (custom) try arena.dupe(u8, &dateText(self.range.end_ms - 1)) else "";
+        return self.params.get(key) orelse "";
     }
 
     pub fn hasFilter(self: View, dim: Dim) ?[]const u8 {
@@ -1090,6 +1249,18 @@ pub fn online(arena: std.mem.Allocator, db: *db_mod.Db, site_id: i64, now_ms: i6
     return db.scalar(arena, i64, "SELECT count(DISTINCT visitor_day_id) FROM page_views WHERE site_id=? AND received_at_ms>=? AND internal=0 AND traffic_class IN ('human_like','unknown')", .{ site_id, now_ms - 5 * 60_000 });
 }
 
+/// The first day with any data, collected or imported; null before the
+/// first visit.
+pub fn firstDay(arena: std.mem.Allocator, db: *db_mod.Db, site_id: i64) !?i64 {
+    const collected = try db.scalar(arena, i64, "SELECT coalesce(min(received_at_ms),0) FROM page_views WHERE site_id=?", .{site_id});
+    const imported = try db.scalar(arena, []const u8, "SELECT coalesce(min(day),'') FROM imported_daily WHERE site_id=?", .{site_id});
+    var first: ?i64 = if (collected > 0) collected - @mod(collected, day_ms) else null;
+    if (parseDate(imported)) |day| {
+        first = if (first) |known| @min(known, day) else day;
+    } else |_| {}
+    return first;
+}
+
 pub fn lastSeen(arena: std.mem.Allocator, db: *db_mod.Db, site_id: i64) !i64 {
     return db.scalar(arena, i64, "SELECT coalesce(max(received_at_ms),0) FROM page_views WHERE site_id=?", .{site_id});
 }
@@ -1181,4 +1352,60 @@ test "dates" {
     const range = Range.parse(try html.Params.parse(std.testing.allocator, ""), at + 5 * hour_ms);
     try w.print("{f}", .{range});
     try std.testing.expectEqualStrings("19–25 Sep 2026", w.buffered());
+}
+
+test "ranges say what they show" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // Thursday 8 Oct 2026, 14:40.
+    const now = try parseDate("2026-10-08") + 14 * hour_ms + 40 * 60_000;
+    const say = struct {
+        fn text(a: std.mem.Allocator, range: Range, wording: Range.Wording) ![]const u8 {
+            return std.fmt.allocPrint(a, "{f}", .{range.text(wording)});
+        }
+    }.text;
+    const parse = struct {
+        fn range(a: std.mem.Allocator, query: []const u8, at: i64) !Range {
+            return Range.parse(try html.Params.parse(a, query), at);
+        }
+    }.range;
+
+    // One past day reads hour by hour, against the day before.
+    const day = try parse(arena, "range=custom&from=2026-09-30&to=2026-09-30", now);
+    try std.testing.expectEqual(hour_ms, day.bucket_ms);
+    try std.testing.expectEqual(@as(usize, 24), day.buckets);
+    try std.testing.expectEqual(@as(?usize, null), day.partial());
+    try std.testing.expectEqualStrings("Wed 30 Sep 2026, hour by hour", try say(arena, day, .subtitle));
+    try std.testing.expectEqualStrings("vs Tue 29 Sep", try say(arena, day, .versus));
+    try std.testing.expectEqualStrings("30 Sep", try say(arena, day, .button));
+    try std.testing.expectEqualStrings("on Wed 30 Sep 2026", try say(arena, day, .between));
+
+    // Today so far, against yesterday up to the same time.
+    const today = try parse(arena, "range=custom&from=2026-10-08&to=2026-10-08", now);
+    try std.testing.expectEqual(@as(?usize, 14), today.partial());
+    try std.testing.expectEqual(today.prev_start_ms + 14 * hour_ms + 40 * 60_000, today.prev_end_ms);
+    try std.testing.expectEqualStrings("Today so far, until 14:40", try say(arena, today, .subtitle));
+    try std.testing.expectEqualStrings("vs yesterday by 14:40", try say(arena, today, .versus));
+    try std.testing.expectEqualStrings("Today", try say(arena, today, .button));
+
+    // A span names the period it is compared with.
+    const month = try parse(arena, "range=custom&from=2026-09-01&to=2026-09-30", now);
+    try std.testing.expectEqualStrings("2–31 Aug", try say(arena, month, .previous));
+    try std.testing.expectEqualStrings("between 1 and 30 Sep 2026", try say(arena, month, .between));
+
+    // Corrections are named, never silent.
+    const swapped = try parse(arena, "range=custom&from=2026-09-30&to=2026-09-01", now);
+    try std.testing.expectEqual(Correction.swapped, swapped.correction);
+    try std.testing.expectEqualStrings("1–30 Sep", try say(arena, swapped, .button));
+    const future = try parse(arena, "range=custom&from=2026-11-01&to=2026-11-30", now);
+    try std.testing.expectEqual(Correction.future, future.correction);
+    try std.testing.expectEqualStrings("Today", try say(arena, future, .button));
+    const long = try parse(arena, "range=custom&from=2024-01-01&to=2026-09-30", now);
+    try std.testing.expectEqual(Correction.shortened, long.correction);
+    try std.testing.expectEqual(@as(usize, 366), long.buckets);
+    const broken = try parse(arena, "range=custom&from=yesterday&to=2026-09-30", now);
+    try std.testing.expectEqual(Correction.unreadable, broken.correction);
+    try std.testing.expectEqual(RangeKind.@"7d", broken.kind);
+    try std.testing.expectEqualStrings("Those dates couldn’t be read, so this shows the last 7 days.", try say(arena, broken, .correction));
 }

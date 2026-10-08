@@ -534,7 +534,7 @@ pub fn audience(ctx: *Ctx, site: data.Site) !void {
             2 => try std.fmt.allocPrint(arena, "{d:.0}%", .{tile[2]}),
             else => try std.fmt.allocPrint(arena, "{f}", .{html.duration(@intFromFloat(tile[2]))}),
         },
-        .change = if (view.compare) try ui.change(arena, tile[2], tile[3], false, view.range.shortComparison()) else "",
+        .change = if (view.compare) try ui.change(arena, tile[2], tile[3], false, try view.range.versus(arena)) else "",
     });
     try w.writeAll("</div>");
     try w.writeAll("<div class=\"grid grid-2\"><section class=\"card\"><div class=\"card-head\"><h2>Technology</h2></div>");
@@ -765,7 +765,7 @@ pub fn performance(ctx: *Ctx, site: data.Site) !void {
     const loaded = try loadSamples(ctx, view);
     var results: [vitals.len]Distribution = undefined;
     for (vitals, 0..) |vital, index| results[index] = summarize(vital, loaded.all[index].items);
-    try layout.head(ctx, .{ .title = "Performance", .subtitle = try std.fmt.allocPrint(arena, "Real-user measurements · {f} samples · p75", .{html.int(@intCast(results[0].samples))}), .view = view, .path = path, .compare = false });
+    try layout.head(ctx, .{ .title = "Performance", .subtitle = try std.fmt.allocPrint(arena, "Real-user measurements · {f} · {f} samples · p75", .{ view.range, html.int(@intCast(results[0].samples)) }), .view = view, .path = path, .compare = false });
     if (results[0].samples == 0 and results[3].samples == 0) {
         try w.writeAll("<div class=\"card\">");
         try ui.empty(w, "No performance data yet", "Use the <strong>RUM</strong> variant of the tracker to measure Core Web Vitals from real visits. It adds about 1 KB and never records content.", try html.print(arena, "<a class=\"btn btn-primary\" href=\"/{slug}/setup?rum=1\">Get the RUM snippet</a>", .{ .slug = site.slug }));

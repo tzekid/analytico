@@ -20,6 +20,7 @@ await journey("ux", async (t) => {
   // Another website: two steady weeks, then a spike from Hacker News
   // yesterday, written straight into SQLite before the server starts.
   t.cli("site", "add", "spike", "https://spike.example", "--mode", "session");
+  t.cli("site", "add", "fresh", "https://fresh.example", "--mode", "session");
   {
     const seed = t.db("analytico.db", {});
     const insert = seed.prepare(`INSERT INTO page_views(site_id,event_id,page_id,session_id,occurred_at_ms,received_at_ms,received_date,visitor_day_id,tracking_mode,path,referrer_host,
@@ -225,9 +226,63 @@ await journey("ux", async (t) => {
   await page.mouse.down();
   await page.mouse.up();
   await page.waitForURL(/range=custom&from=\d{4}-\d{2}-\d{2}&to=\d{4}-\d{2}-\d{2}/);
+  // That day is today: hour by hour, the running hour a "now" band, and
+  // every label says what it is.
+  const today = new Date().toISOString().slice(0, 10);
+  assert.match(page.url(), new RegExp(`from=${today}&to=${today}`));
+  const todayChart = JSON.parse(await page.locator(".chart-card .chart").getAttribute("data-chart"));
+  assert.equal(todayChart.v.length, 24);
+  assert.equal(todayChart.n, new Date().getUTCHours());
+  assert.equal(await page.locator(".chart-card .now-band").count(), 1);
+  assert.match(await page.locator(".subtitle").first().textContent(), /^Today so far, until \d\d:\d\d/);
+  assert.equal((await page.locator(".seg .range-dates").textContent()).trim(), "Today");
+  assert.deepEqual(await page.locator(".chart-card .legend span").allTextContents(), ["Today", "Yesterday"]);
+  assert.equal((await page.locator(".metric-label").first().textContent()).trim(), "Visitors");
+
+  // A past day: hourly, named, against the day before.
+  const day = (offset) => new Date(Date.now() - offset * 86_400_000).toISOString().slice(0, 10);
+  await page.goto(`${base}/spike?range=custom&from=${day(1)}&to=${day(1)}`);
+  const pastChart = JSON.parse(await page.locator(".chart-card .chart").getAttribute("data-chart"));
+  assert.deepEqual([pastChart.v.length, pastChart.n, pastChart.pl.length], [24, undefined, 24]);
+  assert.match(await page.locator(".subtitle").first().textContent(), /, hour by hour · compared with \w{3} \d+ \w{3}$/);
+  assert.match(await page.locator(".metric-delta").first().textContent(), /vs \w{3} \d+ \w{3}/);
+  assert.match(await page.locator(".chart-card .insight").textContent(), /^\d\d:00 was the busiest hour/);
+  assert.equal(await page.getByRole("button", { name: "Comparing" }).getAttribute("aria-pressed"), "true");
+
+  // Reversed dates are swapped and said so, not silently replaced.
+  await page.goto(`${base}/spike?range=custom&from=${day(3)}&to=${day(10)}`);
+  await page.waitForURL(new RegExp(`from=${day(10)}&to=${day(3)}`));
+  await page.locator(".toast", { hasText: "wrong way round" }).waitFor();
+
+  // A period before tracking started, and filters that match nothing.
+  await page.goto(`${base}/spike?range=custom&from=2025-01-01&to=2025-01-31`);
+  assert.equal(await page.locator("[data-stage=calendar] h2").textContent(), "No visits between 1 and 31 Jan 2025");
+  assert.match(await page.locator("[data-stage=calendar]").textContent(), /before tracking started/);
+  assert.equal(await page.locator(".metrics").count(), 0);
+  await page.goto(`${base}/spike?range=30d&f=country:ZZ`);
+  assert.equal(await page.locator("[data-stage=filter] h2").textContent(), "No visits match these filters");
+  assert.equal(await page.locator(".controls .btn-label", { hasText: "Filter · 1" }).count(), 1);
+  await page.locator("[data-stage=filter]").getByRole("link", { name: "Clear filters" }).click();
+  await page.locator(".metrics").waitFor();
+
+  // The date form refuses To before From.
+  await page.getByRole("button", { name: "Choose dates" }).click();
+  await page.locator("[data-range-form] input[name=from]").fill(day(2));
+  await page.locator("[data-range-form] input[name=to]").fill(day(5));
+  assert.match(await page.locator("[data-range-error]").textContent(), /To is before From/);
+  assert.equal(await page.locator("[data-range-form] .btn-primary").isDisabled(), true);
+  await page.keyboard.press("Escape");
+
+  // Retention covers its own period; a site without visits waits on every page.
+  await page.goto(`${base}/spike/retention`);
+  assert.equal(await page.locator(".period-tag").textContent(), "Last 8 weeks · updated daily");
+  assert.equal(await page.locator(".seg").count(), 0);
+  await page.goto(`${base}/fresh/pages`);
+  assert.equal(await page.locator("[data-stage=waiting] h2").textContent(), "Waiting for your first visit");
+  assert.equal(await page.locator(".seg").count(), 0);
 
   // The heatmap overlay's data can be computed ahead of opening the page.
   assert.equal((await page.request.get(`${base}/ux/heatmaps/warm?path=%2F`)).status(), 204);
 
-  return "group commit, engagement on page views, Server-Timing, API revalidation, live updates, lazy card, hover/touch/range prefetch, instant back with scroll, morphing, remembered views, undo, keyboard, chart drill-down, heatmap warm, anomaly note kept";
+  return "group commit, engagement on page views, Server-Timing, API revalidation, live updates, lazy card, hover/touch/range prefetch, instant back with scroll, morphing, remembered views, undo, keyboard, chart drill-down to an hourly day, dated comparisons, corrected ranges, empty and waiting states, heatmap warm, anomaly note kept";
 });

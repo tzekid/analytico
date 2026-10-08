@@ -201,7 +201,7 @@ pub fn packet(arena: std.mem.Allocator, db: *db_mod.Db, view: data.View, share_p
     const w = &out.writer;
     const site = view.site;
     const range = view.range;
-    try w.print("Website: {s} ({s}), {s} mode, times in UTC\nPeriod: {f}, compared with {s}\n", .{ site.title(), site.host(), @tagName(site.mode), range, range.comparisonLabel() });
+    try w.print("Website: {s} ({s}), {s} mode, times in UTC\nPeriod: {f}, compared with {f}\n", .{ site.title(), site.host(), @tagName(site.mode), range, range.text(.compared) });
     if (view.filters.len != 0) {
         try w.writeAll("Filters: ");
         for (view.filters, 0..) |filter, index| try w.print("{s}{s} {s} {s}", .{ if (index == 0) "" else if (view.any) " or " else " and ", filter.dim.label(), if (filter.negate) "is not" else "is", if (filter.dim == .page) try namer.path(filter.value) else if (filter.dim == .source or filter.dim == .campaign) try namer.source(filter.value) else filter.value });

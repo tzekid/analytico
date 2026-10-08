@@ -707,19 +707,27 @@
       const x = values.length === 1 ? rect.width / 2 : (index / (values.length - 1)) * rect.width;
       const top = svg ? niceTop(max) : max;
       const y = rect.height - (values[index] / top) * rect.height;
+      // The bucket still running is partial: no dot at a value it hasn't reached.
+      const running = data.n === index;
       chart.classList.add("hovering");
       hover.style.left = `${x}px`;
       dot.style.left = `${x}px`;
       dot.style.top = `${y}px`;
+      dot.style.visibility = running ? "hidden" : "";
       const value = data.d ? duration(values[index]) : `${number(values[index])} ${data.u}`;
-      let change = "";
-      if (data.p && data.p[index] > 0) {
-        const delta = ((values[index] - data.p[index]) / data.p[index]) * 100;
-        change = `<em class="${delta < 0 ? "down" : ""}">${delta >= 0 ? "+" : "−"}${Math.abs(delta).toFixed(1)}% vs previous</em>`;
+      const against = running ? data.q : data.p?.[index];
+      const name = running ? data.ql : data.pl?.[index] || "previous";
+      tip.innerHTML = "<small></small><strong></strong>";
+      if (against > 0) {
+        const delta = ((values[index] - against) / against) * 100;
+        const em = document.createElement("em");
+        if (delta < 0) em.className = "down";
+        em.textContent = `${delta >= 0 ? "+" : "−"}${Math.abs(delta).toFixed(1)}% vs ${name}`;
+        tip.append(em);
       }
-      tip.innerHTML = `<small></small><strong></strong>${change}`;
-      tip.children[0].textContent = data.l[index];
-      tip.children[1].textContent = value;
+      const label = data.l[index];
+      tip.children[0].textContent = running ? `${label}${/\d\d:\d\d$/.test(label) ? "–now" : ", until now"} · in progress` : label;
+      tip.children[1].textContent = running ? `${value} so far` : value;
       const tipWidth = tip.offsetWidth;
       tip.style.left = `${x + 16 + tipWidth > rect.width ? x - tipWidth - 16 : x + 16}px`;
       if (why) { why.style.left = `${x}px`; why.style.top = `${y}px`; }
@@ -1324,9 +1332,42 @@
     const id = setInterval(() => { if (!dialog.open) clearInterval(id); else check(); }, 3000);
   }
 
+  // ---- dates: To can't be before From; Apply waits for a valid range.
+  const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const shortDate = (iso) => { const d = new Date(`${iso}T00:00:00Z`); return `${d.getUTCDate()} ${monthNames[d.getUTCMonth()]}`; };
+  function setupRangeForm(form) {
+    if (form.dataset.ready) return;
+    form.dataset.ready = "1";
+    const { from, to } = form.elements;
+    const error = $("[data-range-error]", form);
+    const apply = $(".btn-primary", form);
+    const first = from.min;
+    const check = () => {
+      to.min = from.value && from.value > first ? from.value : first;
+      let message = "";
+      if (from.value && to.value && to.value < from.value) message = `To is before From — pick ${shortDate(from.value)} or later.`;
+      else if ((from.value && !from.checkValidity()) || (to.value && !to.checkValidity())) message = `Pick dates between ${shortDate(first)} and ${shortDate(from.max)}.`;
+      error.textContent = message;
+      error.hidden = !message;
+      to.setAttribute("aria-invalid", message ? "true" : "false");
+      apply.disabled = Boolean(message) || !from.value || !to.value;
+    };
+    form.addEventListener("input", check);
+    check();
+  }
+  // The toast after a corrected range offers "Change": it opens the dates.
+  function openDatesFromHash() {
+    if (location.hash !== "#dates") return;
+    history.replaceState(history.state, "", location.pathname + location.search);
+    $("#range-pop")?.showPopover?.();
+  }
+  window.addEventListener("hashchange", openDatesFromHash);
+
   function init() {
     selected = -1;
     $$(".chart[data-chart]").forEach(setupChart);
+    $$("[data-range-form]").forEach(setupRangeForm);
+    openDatesFromHash();
     $$("dialog[data-sheet], dialog[data-open]").forEach((dialog) => {
       if (dialog.open) return;
       // Focus the dialog itself, not its first link (which drew a focus ring).

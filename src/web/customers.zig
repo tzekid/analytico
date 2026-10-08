@@ -93,7 +93,7 @@ pub fn revenue(ctx: *Ctx, site: data.Site) !void {
         }
     };
     try w.writeAll("<div class=\"metrics\">");
-    const suffix = range.shortComparison();
+    const suffix = try range.versus(arena);
     try metricTile(w, arena, 0, "revenue", "Revenue", try std.fmt.allocPrint(arena, "{f}", .{html.money(now.revenue, site.currency)}), @floatFromInt(now.revenue), @floatFromInt(before.revenue), view.compare, suffix, false);
     try metricTile(w, arena, 1, "cart", "Orders", try std.fmt.allocPrint(arena, "{f}", .{html.int(now.orders)}), @floatFromInt(now.orders), @floatFromInt(before.orders), view.compare, suffix, false);
     const aov_now = if (now.orders == 0) 0 else @divTrunc(now.revenue + now.refunds, now.orders);
@@ -303,7 +303,7 @@ pub fn retention(ctx: *Ctx, site: data.Site) !void {
     const view = try analyze.start(ctx, site, .retention, "Retention");
     const w = ctx.w();
     const path = try std.fmt.allocPrint(arena, "/{s}/retention", .{site.slug});
-    try layout.head(ctx, .{ .title = "Retention", .subtitle = "Who comes back, and what brought them · last 8 weeks, updated daily", .view = view, .path = path, .compare = false, .filter = false });
+    try layout.head(ctx, .{ .title = "Retention", .subtitle = "Who comes back, and what brought them", .view = view, .path = path, .fixed_period = "Last 8 weeks · updated daily", .fixed_why = "Retention follows each week’s visitors for 8 weeks, so it doesn’t use the date range." });
     if (site.mode != .full) {
         try fullModeNotice(ctx, site, "Returning visitors and cohorts");
         return layout.end(ctx);

@@ -153,26 +153,27 @@ pub fn page(ctx: *Ctx, site: data.Site) !void {
         return ctx.html();
     }
     try layout.begin(ctx, try app.shell(ctx, site, .overview, "Overview", view));
+    if (try waiting(ctx, site, "Overview")) return layout.end(ctx);
     const w = ctx.w();
 
-    const last_seen = try data.lastSeen(arena, db, site.id);
     const online = try data.online(arena, db, site.id, ctx.now());
     const badge = try std.fmt.allocPrint(arena, "<span class=\"live\" data-live data-stream=\"/{s}/stream\">{d} online now</span>", .{ site.slug, online });
-    const subtitle = try std.fmt.allocPrint(arena, "{f}{s}{s}{s}", .{ range, if (view.compare) " · compared with " else "", if (view.compare) range.comparisonLabel() else "", if (try data.hasImported(arena, db, view)) " · includes imported Google Analytics history" else "" });
-    try layout.head(ctx, .{ .title = "Overview", .badge = if (last_seen != 0) badge else "", .subtitle = subtitle, .view = view, .path = base });
-
-    if (last_seen == 0 and !try data.hasImported(arena, db, view)) {
-        try w.writeAll("<div class=\"card\">");
-        try ui.empty(w, "Waiting for your first visitor", "Add the snippet to your site and open it in another tab — this page fills in by itself the moment data arrives.", try html.print(arena, "<a class=\"btn btn-primary\" href=\"/{slug}/setup\">Show the snippet</a>", .{ .slug = site.slug }));
-        try w.writeAll("</div>");
-        return layout.end(ctx);
-    }
-
     try data.prefetch(ctx.shared, ctx.db, arena, view, try overviewCalls(arena, view));
     const current = try data.totals(arena, db, view, range.start_ms, range.end_ms);
     const previous = try data.totals(arena, db, view, range.prev_start_ms, range.prev_end_ms);
+    const subtitle = try std.fmt.allocPrint(arena, "{f}{s}{s}{s}", .{
+        range,
+        if (view.compare and current.views != 0) " · compared with " else "",
+        if (view.compare and current.views != 0) try std.fmt.allocPrint(arena, "{f}", .{range.text(.compared)}) else "",
+        if (try data.hasImported(arena, db, view)) " · includes imported Google Analytics history" else "",
+    });
+    try layout.head(ctx, .{ .title = "Overview", .badge = badge, .subtitle = subtitle, .view = view, .path = base });
+    if (current.views == 0) {
+        try nothingHere(ctx, view, base);
+        return layout.end(ctx);
+    }
     try metricStrip(ctx, view, base, current, previous);
-    if (ctx.can(.editor)) try draftNotes(ctx, site);
+    if (ctx.can(.editor)) try draftNotes(ctx, view);
     try trendCard(ctx, view, base);
     try w.writeAll("<div class=\"grid grid-3 overview-cards mt-16\">");
     try sourcesCard(ctx, view, base, current.views);
@@ -184,10 +185,65 @@ pub fn page(ctx: *Ctx, site: data.Site) !void {
     return layout.end(ctx);
 }
 
+/// A site that has never had a visit: every report page says so, with the
+/// snippet, instead of empty tables and controls that can do nothing yet.
+pub fn waiting(ctx: *Ctx, site: data.Site, title: []const u8) !bool {
+    if (try data.firstDay(ctx.arena, ctx.db, site.id) != null) return false;
+    try layout.head(ctx, .{ .title = title, .subtitle = try std.fmt.allocPrint(ctx.arena, "{s} · waiting for the first visit", .{site.host()}) });
+    try ui.stage(ctx.w(), .{
+        .art = .waiting,
+        .title = "Waiting for your first visit",
+        .body = try html.print(ctx.arena, "{what} appear here once the tracker on {host} reports a page view. Dates and filters become available then.", .{ .what = if (std.mem.eql(u8, title, "Overview")) "Charts" else title, .host = site.host() }),
+        .actions = try html.print(ctx.arena, "<a class=\"btn btn-primary\" href=\"/{slug}/setup\">Show the snippet</a><a class=\"btn\" href=\"/{slug}/health\">Check setup</a>", .{ .slug = site.slug }),
+        .hint = "This page updates by itself the moment data arrives.",
+    });
+    return true;
+}
+
+/// No visits in the view: either filters match nothing, or the period has
+/// no data (before tracking started, or a gap). Each says which, with a way on.
+fn nothingHere(ctx: *Ctx, view: data.View, base: []const u8) !void {
+    const arena = ctx.arena;
+    const range = view.range;
+    if (view.filters.len != 0) {
+        var unfiltered = view;
+        unfiltered.filters = &.{};
+        const everyone = try data.totals(arena, ctx.db, unfiltered, range.start_ms, range.end_ms);
+        var names: std.Io.Writer.Allocating = .init(arena);
+        for (view.filters, 0..) |filter, index| try names.writer.print("{s}<strong>{s} {s} {f}</strong>", .{ if (index == 0) "" else if (view.any) " or " else " and ", filter.dim.label(), if (filter.negate) "is not" else "is", html.esc(filter.value) });
+        return ui.stage(ctx.w(), .{
+            .art = .filter,
+            .title = "No visits match these filters",
+            .body = try std.fmt.allocPrint(arena, "Nothing matched {s} {f}. Without {s}, {f} {s} visited.", .{ names.written(), range.text(.between), if (view.filters.len == 1) "the filter" else "the filters", html.int(everyone.visitor_days), if (everyone.visitor_days == 1) "person" else "people" }),
+            .actions = try html.print(arena, "<a class=\"btn btn-primary\" href=\"{clear}\">Clear filters</a><button class=\"btn\" type=\"button\" popovertarget=\"filter-pop\">Edit filters</button>", .{ .clear = try view.href(arena, base, &.{.{ "f!", "" }}) }),
+        });
+    }
+    const first = (try data.firstDay(arena, ctx.db, view.site.id)).?;
+    const before = range.end_ms <= first;
+    const first_date = data.civil(first);
+    const today = range.oneDay() and range.partial() != null;
+    return ui.stage(ctx.w(), .{
+        .art = .calendar,
+        .title = if (today) "No visits yet today" else try std.fmt.allocPrint(arena, "No visits {f}", .{range.text(.between)}),
+        .body = if (before)
+            try html.print(arena, "{site} has data from {day} {month} {year}. These dates are before tracking started, so there is nothing to show yet.", .{ .site = view.site.title(), .day = first_date.day, .month = data.month_names[first_date.month - 1], .year = first_date.year })
+        else if (today)
+            "Nothing has arrived since midnight (UTC). Data health shows whether collection stopped."
+        else
+            "The tracker reported nothing in these dates. Data health shows whether collection stopped.",
+        .actions = try html.print(arena, "<a class=\"btn btn-primary\" href=\"{recent}\">Show the last 30 days</a>{!second}", .{
+            .recent = try view.href(arena, base, &.{ .{ "range", "30d" }, .{ "from", "" }, .{ "to", "" } }),
+            .second = if (before) "<button class=\"btn\" type=\"button\" popovertarget=\"range-pop\">Pick other dates</button>" else try html.print(arena, "<a class=\"btn\" href=\"/{slug}/health\">Open data health</a>", .{ .slug = view.site.slug }),
+        }),
+        .hint = if (before) "Older history can come from a Google Analytics import (Settings → Integrations)." else "",
+    });
+}
+
 /// Notes the daily check drafted for days that broke the trend: kept, they
-/// join the chart; dismissed, they go.
-fn draftNotes(ctx: *Ctx, site: data.Site) !void {
-    const drafts = try ctx.db.all(ctx.arena, struct { id: i64, day: []const u8, label: []const u8 }, "SELECT id,day,label FROM annotations WHERE site_id=? AND draft=1 ORDER BY day DESC LIMIT 3", .{site.id});
+/// join the chart; dismissed, they go. Only notes for days in the view show.
+fn draftNotes(ctx: *Ctx, view: data.View) !void {
+    const site = view.site;
+    const drafts = try ctx.db.all(ctx.arena, struct { id: i64, day: []const u8, label: []const u8 }, "SELECT id,day,label FROM annotations WHERE site_id=? AND draft=1 AND day>=? AND day<=? ORDER BY day DESC LIMIT 3", .{ site.id, &data.dateText(view.range.start_ms), &data.dateText(view.range.end_ms - 1) });
     for (drafts) |note| {
         const date = data.civil(try data.parseDate(note.day));
         try render(ctx.w(),
@@ -237,14 +293,15 @@ pub fn metricStrip(ctx: *Ctx, view: data.View, base: []const u8, current: data.T
         if (metric == .visitor_days and view.site.mode == .full) {
             const now_share = try returningShare(ctx, view, range.start_ms, range.end_ms);
             const before_share = try returningShare(ctx, view, range.prev_start_ms, range.prev_end_ms);
-            const delta = (now_share - before_share) * 100;
+            const delta = ((now_share orelse 0) - (before_share orelse 0)) * 100;
             try ui.metric(w, arena, .{
                 .href = try view.href(arena, try std.fmt.allocPrint(arena, "/{s}/retention", .{view.site.slug}), &.{.{ "m", "" }}),
                 .tone = entry[2],
                 .icon = "retention",
                 .label = "Returning visitors",
-                .value = try std.fmt.allocPrint(arena, "{d:.0}%", .{now_share * 100}),
-                .change = if (!view.compare) "&nbsp;" else try std.fmt.allocPrint(arena, "<span class=\"delta {s}\">{s}{d:.0} pts</span>{s}", .{ if (@abs(delta) < 0.5) "delta-flat" else if (delta > 0) "delta-up" else "delta-down", if (delta >= 0.5) "+" else if (delta <= -0.5) "−" else "", @abs(delta), range.shortComparison() }),
+                // A share of nobody is not 0%.
+                .value = if (now_share) |share| try std.fmt.allocPrint(arena, "{d:.0}%", .{share * 100}) else "—",
+                .change = if (!view.compare or now_share == null or before_share == null) "&nbsp;" else try std.fmt.allocPrint(arena, "<span class=\"delta {s}\">{s}{d:.0} {s}</span>{s}", .{ if (@abs(delta) < 0.5) "delta-flat" else if (delta > 0) "delta-up" else "delta-down", if (delta >= 0.5) "+" else if (delta <= -0.5) "−" else "", @abs(delta), if (@round(@abs(delta)) == 1) "pt" else "pts", try range.versus(arena) }),
             });
             continue;
         }
@@ -256,25 +313,28 @@ pub fn metricStrip(ctx: *Ctx, view: data.View, base: []const u8, current: data.T
                 .icon = "revenue",
                 .label = "Revenue",
                 .value = try std.fmt.allocPrint(arena, "{f}", .{html.money(sold.revenue, view.site.currency)}),
-                .change = if (view.compare) try ui.change(arena, @floatFromInt(sold.revenue), @floatFromInt(before.revenue), false, range.shortComparison()) else "&nbsp;",
+                .change = if (view.compare) try ui.change(arena, @floatFromInt(sold.revenue), @floatFromInt(before.revenue), false, try range.versus(arena)) else "&nbsp;",
             });
             continue;
         }
         const value = current.metric(metric, range);
+        const series = try data.series(arena, ctx.db, view, metric, range.start_ms);
         try ui.metric(w, arena, .{
             .href = try view.href(arena, base, &.{.{ "m", @tagName(metric) }}),
             .current = view.metric == metric,
             .tone = entry[2],
             .icon = entry[1],
-            .label = metric.label(),
+            // One day is a total, not an average per day.
+            .label = if (metric == .visitors and range.oneDay()) "Visitors" else metric.label(),
             .value = if (metric == .active)
                 try std.fmt.allocPrint(arena, "{f}", .{html.duration(current.active_ms)})
             else if (value < 10 and value != @round(value))
                 try std.fmt.allocPrint(arena, "{d:.1}", .{value})
             else
                 try std.fmt.allocPrint(arena, "{f}", .{html.int(@intFromFloat(@round(value)))}),
-            .spark = try data.series(arena, ctx.db, view, metric, range.start_ms),
-            .change = if (view.compare) try ui.change(arena, value, previous.metric(metric, range), false, range.shortComparison()) else "&nbsp;",
+            // The bucket still filling up would end every sparkline in a cliff.
+            .spark = series[0 .. range.partial() orelse series.len],
+            .change = if (view.compare) try ui.change(arena, value, previous.metric(metric, range), false, try range.versus(arena)) else "&nbsp;",
         });
     }
     try w.writeAll("</div>");
@@ -282,11 +342,11 @@ pub fn metricStrip(ctx: *Ctx, view: data.View, base: []const u8, current: data.T
 
 /// Share of remembered visitor-days whose visitor was first seen on an
 /// earlier day.
-fn returningShare(ctx: *Ctx, view: data.View, start: i64, end: i64) !f64 {
+fn returningShare(ctx: *Ctx, view: data.View, start: i64, end: i64) !?f64 {
     const sums = try data.keySums(ctx.arena, ctx.db, view, "visitor_type", start, end, 10);
     const returning = data.keySum(sums, "returning").visitors;
     const total = returning + data.keySum(sums, "new").visitors;
-    return if (total == 0) 0 else @as(f64, @floatFromInt(returning)) / @as(f64, @floatFromInt(total));
+    return if (total == 0) null else @as(f64, @floatFromInt(returning)) / @as(f64, @floatFromInt(total));
 }
 
 /// Where visitors are: countries when places are known, devices otherwise.
@@ -431,27 +491,68 @@ pub fn trendCard(ctx: *Ctx, view: data.View, base: []const u8) !void {
     const previous = if (view.compare) try data.series(arena, ctx.db, view, metric, range.prev_start_ms) else null;
     const marks = try annotationMarks(ctx, view);
     const names = try labels(arena, range);
-    // The headline: the strongest bucket, and a note just before it if any.
+    const partial = range.partial();
+    // The headline: the strongest complete bucket, and a note just before it if any.
     var best: usize = 0;
-    for (current, 0..) |value, index| if (value > current[best]) {
+    for (current, 0..) |value, index| if (index != partial and value > current[best]) {
         best = index;
     };
     try render(w, "<section class=\"card chart-card\"><div class=\"chart-head\"><div><h2>{title}</h2>", .{ .title = view.metric.chartTitle() });
-    if (current.len != 0 and current[best] > 0) {
-        try w.print("<p class=\"insight\">{s} was the busiest {s} — {f} {s}", .{ names[1][best], if (range.bucket_ms == data.hour_ms) "hour" else "day", if (metric == .active) html.Int{ .value = @intFromFloat(current[best] / 60_000) } else html.int(@intFromFloat(current[best])), if (metric == .active) "active minutes" else metric.unit() });
+    if (range.oneDay() and partial != null and metric != .active) {
+        // Today: how far along it is, against yesterday by the same time.
+        const now_totals = try data.totals(arena, ctx.db, view, range.start_ms, range.end_ms);
+        const before = try data.totals(arena, ctx.db, view, range.prev_start_ms, range.prev_end_ms);
+        const value: f64 = if (metric == .views) @floatFromInt(now_totals.views) else @floatFromInt(now_totals.visitor_days);
+        const earlier: f64 = if (metric == .views) @floatFromInt(before.views) else @floatFromInt(before.visitor_days);
+        try w.print("<p class=\"insight\">So far today: {f} {s} by {f}", .{ html.int(@intFromFloat(value)), metric.unit(), data.clock(range.now_ms, range.now_ms) });
+        if (earlier > 0 and view.compare) {
+            const change = html.changeValue(value, earlier);
+            try w.print(", {d:.0}% {s} than yesterday by the same time", .{ @abs(change), if (change >= 0) "more" else "fewer" });
+        }
+        try w.writeAll(".</p>");
+    } else if (current.len != 0 and current[best] > 0) {
+        // One day names hours only; the date is already in the title.
+        try w.print("<p class=\"insight\">{s} was the busiest {s} — {f} {s}", .{ if (range.oneDay()) names[0][best] else names[1][best], if (range.bucket_ms == data.hour_ms) "hour" else "day", if (metric == .active) html.Int{ .value = @intFromFloat(current[best] / 60_000) } else html.int(@intFromFloat(current[best])), if (metric == .active) "active minutes" else metric.unit() });
         for (marks) |mark| if (mark.index + 1 == best or mark.index == best) {
             try w.print(", {s} “{f}”", .{ if (mark.index == best) "the day of" else "one day after", esc(mark.label) });
             break;
         };
         if (previous) |prev| if (prev[best] > 0 and @abs(html.changeValue(current[best], prev[best])) >= 1) {
             const change = html.change(current[best], prev[best]);
-            try w.print(" ({f}{s} the same {s} before)", .{ change, if (change.isMultiple()) "" else " vs", if (range.bucket_ms == data.hour_ms) "hour" else "day" });
+            if (range.oneDay()) {
+                const value = html.changeValue(current[best], prev[best]);
+                try w.print(", {d:.0}% {s} than at {s} the day before", .{ @abs(value), if (value >= 0) "more" else "fewer", names[0][best] });
+            } else try w.print(" ({f}{s} the same {s} before)", .{ change, if (change.isMultiple()) "" else " vs", if (range.bucket_ms == data.hour_ms) "hour" else "day" });
         };
         try w.writeAll(".</p>");
     }
-    try w.writeAll("</div><div class=\"legend\"><span class=\"this\">This period</span>");
-    if (view.compare) try w.writeAll("<span class=\"prev\">Previous period</span>");
+    try w.print("</div><div class=\"legend\"><span class=\"this\">{f}</span>", .{range.text(.this)});
+    if (view.compare) try w.print("<span class=\"prev\">{f}</span>", .{range.text(.previous)});
     try w.writeAll("</div></div>");
+    // The running bucket is compared with the same elapsed part of its match.
+    var partial_previous: ?f64 = null;
+    var partial_label: []const u8 = "";
+    if (partial) |index| if (view.compare) {
+        const offset = @as(i64, @intCast(index)) * range.bucket_ms;
+        const elapsed = range.now_ms - (range.start_ms + offset);
+        const slice = try data.totals(arena, ctx.db, view, range.prev_start_ms + offset, range.prev_start_ms + offset + elapsed);
+        partial_previous = switch (metric) {
+            .views => @floatFromInt(slice.views),
+            .active => @floatFromInt(slice.active_ms),
+            else => @floatFromInt(slice.visitor_days),
+        };
+        var buffer: [48]u8 = undefined;
+        const until = data.clock(range.prev_start_ms + offset + elapsed, range.prev_start_ms + offset + elapsed);
+        partial_label = if (range.bucket_ms == data.hour_ms)
+            try std.fmt.allocPrint(arena, "{s}–{f}", .{ range.previousLong(&buffer, index), until })
+        else
+            try std.fmt.allocPrint(arena, "{s} until {f}", .{ range.previousLong(&buffer, index), until });
+    };
+    const previous_labels = try arena.alloc([]const u8, range.buckets);
+    for (previous_labels, 0..) |*label, index| {
+        var buffer: [48]u8 = undefined;
+        label.* = try arena.dupe(u8, range.previousLong(&buffer, index));
+    }
     try chart.trend(arena, w, .{
         .current = current,
         .previous = previous,
@@ -463,6 +564,10 @@ pub fn trendCard(ctx: *Ctx, view: data.View, base: []const u8) !void {
         .emphasis = best,
         .why = try std.fmt.allocPrint(arena, "/{s}/why", .{view.site.slug}),
         .days = if (range.bucket_ms == data.day_ms) try bucketDays(arena, range) else &.{},
+        .previous_labels = previous_labels,
+        .partial = partial,
+        .partial_previous = partial_previous,
+        .partial_label = partial_label,
     });
     try w.writeAll("</section>");
 }

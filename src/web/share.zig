@@ -125,7 +125,7 @@ fn sharePage(ctx: *Ctx, token: []const u8) !void {
     try render(w, "</header><h1 class=\"title mt-28\">Last {days} days</h1><p class=\"subtitle\">{range} · compared with {against}</p><div class=\"metrics mt-20\">", .{
         .days = if (is(safe_range, "30d")) "30" else if (is(safe_range, "90d")) "90" else "7",
         .range = range,
-        .against = range.comparisonLabel(),
+        .against = try std.fmt.allocPrint(arena, "{f}", .{range.text(.compared)}),
     });
     const current = try data.totals(arena, ctx.db, view, range.start_ms, range.end_ms);
     const previous = try data.totals(arena, ctx.db, view, range.prev_start_ms, range.prev_end_ms);
@@ -140,7 +140,7 @@ fn sharePage(ctx: *Ctx, token: []const u8) !void {
         try tile(ctx, view, 2, "performance", "Active time", try std.fmt.allocPrint(arena, "{f}", .{html.duration(current.active_ms)}), @floatFromInt(current.active_ms), @floatFromInt(previous.active_ms), try data.series(arena, ctx.db, view, .active, range.start_ms));
         try tile(ctx, view, 3, "calendar", "Visitor-days", try std.fmt.allocPrint(arena, "{f}", .{html.int(current.visitor_days)}), @floatFromInt(current.visitor_days), @floatFromInt(previous.visitor_days), null);
     }
-    try w.writeAll("</div><section class=\"card chart-card mt-16\"><div class=\"chart-head\"><h2>Page views</h2><div class=\"legend\"><span class=\"this\">This period</span><span class=\"prev\">Previous period</span></div></div>");
+    try w.print("</div><section class=\"card chart-card mt-16\"><div class=\"chart-head\"><h2>Page views</h2><div class=\"legend\"><span class=\"this\">{f}</span><span class=\"prev\">{f}</span></div></div>", .{ range.text(.this), range.text(.previous) });
     const names = try overview.labels(arena, range);
     try chart.trend(arena, w, .{ .current = try data.series(arena, ctx.db, view, .views, range.start_ms), .previous = try data.series(arena, ctx.db, view, .views, range.prev_start_ms), .labels = names[0], .long_labels = names[1], .unit = "views", .height = 200 });
     try w.writeAll("</section><div class=\"grid grid-3 mt-16\">");
@@ -169,7 +169,7 @@ fn passwordPage(ctx: *Ctx, link: Link, problem: []const u8) !void {
 }
 
 fn tile(ctx: *Ctx, view: data.View, index: usize, icon_name: []const u8, label: []const u8, value: []const u8, current: f64, previous: f64, series: ?[]const f64) !void {
-    try ui.metric(ctx.w(), ctx.arena, .{ .tone = ui.tones[index], .icon = icon_name, .label = label, .value = value, .spark = series, .change = try ui.change(ctx.arena, current, previous, false, view.range.shortComparison()) });
+    try ui.metric(ctx.w(), ctx.arena, .{ .tone = ui.tones[index], .icon = icon_name, .label = label, .value = value, .spark = series, .change = try ui.change(ctx.arena, current, previous, false, try view.range.versus(ctx.arena)) });
 }
 
 fn countries(ctx: *Ctx, view: data.View, total: i64) !void {

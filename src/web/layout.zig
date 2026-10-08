@@ -191,6 +191,9 @@ pub const Head = struct {
     actions: bool = true,
     /// Raw HTML for extra buttons placed before the view controls.
     extra: []const u8 = "",
+    /// Pages that cover their own period show it instead of a date picker.
+    fixed_period: []const u8 = "",
+    fixed_why: []const u8 = "",
 };
 
 pub fn head(ctx: *Ctx, options: Head) !void {
@@ -207,31 +210,88 @@ pub fn head(ctx: *Ctx, options: Head) !void {
 fn controls(ctx: *Ctx, view: data.View, options: Head) !void {
     const w = ctx.w();
     const arena = ctx.arena;
+    if (options.fixed_period.len != 0) {
+        // The page covers its own period; a date picker would do nothing.
+        try render(w, "<div class=\"period-fixed\"><span class=\"period-tag\">{period}</span><small>{why}</small></div>", .{ .period = options.fixed_period, .why = options.fixed_why });
+        if (options.actions) try actionsMenu(ctx, view, options.path);
+        return;
+    }
+    const range = view.range;
     try w.writeAll("<nav class=\"seg\" aria-label=\"Date range\">");
     for ([_]data.RangeKind{ .@"24h", .@"7d", .@"30d", .@"90d" }) |kind| try render(w, "<a href=\"{href}\"{!current}>{label}</a>", .{
         .href = try view.href(arena, options.path, &.{ .{ "range", @tagName(kind) }, .{ "from", "" }, .{ "to", "" } }),
-        .current = if (view.range.kind == kind) " aria-current=\"true\"" else "",
+        .current = if (range.kind == kind) " aria-current=\"true\"" else "",
         .label = kind,
     });
-    try render(w, "<button type=\"button\" popovertarget=\"range-pop\" aria-label=\"Custom range\"{!current}>", .{ .current = if (view.range.kind == .custom) " aria-current=\"true\"" else "" });
+    try render(w, "<button type=\"button\" popovertarget=\"range-pop\" aria-label=\"Choose dates\"{!current}>", .{ .current = if (range.kind == .custom) " aria-current=\"true\"" else "" });
     try icon(w, "calendar");
-    try render(w,
-        \\</button></nav><div id="range-pop" popover class="pop" data-anchor="[popovertarget=range-pop]"><form method="get" action="{path}" class="pop-section form-grid pop-280">
-        \\<input type="hidden" name="range" value="custom">
-    , .{ .path = options.path });
-    try hiddenState(ctx, view, &.{ "range", "from", "to" });
-    try render(w,
-        \\<label class="field">From<input class="input" type="date" name="from" value="{from}" required></label>
-        \\<label class="field">To<input class="input" type="date" name="to" value="{to}" required></label>
-        \\<button class="btn btn-primary">Apply range</button></form></div>
-    , .{ .from = &data.dateText(view.range.start_ms), .to = &data.dateText(view.range.end_ms - 1) });
+    if (range.kind == .custom) try w.print("<span class=\"range-dates\">{f}</span>", .{range.text(.button)});
+    try w.writeAll("</button></nav>");
+    try rangePopover(ctx, view, options.path);
     if (options.compare) {
-        try render(w, "<a class=\"btn\" href=\"{href}\" role=\"button\" aria-label=\"Compare\" aria-pressed=\"{pressed}\">", .{ .href = try view.href(arena, options.path, &.{.{ "cmp", if (view.compare) "0" else "" }}), .pressed = if (view.compare) "true" else "false" });
+        try render(w, "<a class=\"btn\" href=\"{href}\" role=\"button\" aria-pressed=\"{pressed}\" title=\"{title}\">", .{
+            .href = try view.href(arena, options.path, &.{.{ "cmp", if (view.compare) "0" else "" }}),
+            .pressed = if (view.compare) "true" else "false",
+            .title = if (view.compare) "Comparing with the previous period. Click to stop." else "Compare with the previous period",
+        });
         try icon(w, "compare");
-        try w.writeAll("<span class=\"btn-label\">Compare</span></a>");
+        try render(w, "<span class=\"btn-label\">{label}</span></a>", .{ .label = if (view.compare) "Comparing" else "Compare" });
     }
     if (options.filter) try filterPopover(ctx, view, options.path);
     if (options.actions) try actionsMenu(ctx, view, options.path);
+}
+
+/// Quick ranges and a From/To form that only offers dates with data; the
+/// browser checks To against From before anything is sent.
+fn rangePopover(ctx: *Ctx, view: data.View, path: []const u8) !void {
+    const w = ctx.w();
+    const arena = ctx.arena;
+    const now = ctx.now();
+    const today = now - @mod(now, data.day_ms);
+    const month = data.civil(today);
+    const month_start = today - (@as(i64, month.day) - 1) * data.day_ms;
+    const last_month_end = month_start - data.day_ms;
+    const last_month_start = last_month_end - (@as(i64, data.civil(last_month_end).day) - 1) * data.day_ms;
+    try w.writeAll("<div id=\"range-pop\" popover class=\"pop pop-range\" data-anchor=\"[popovertarget=range-pop]\"><nav class=\"range-presets\" aria-label=\"Quick ranges\">");
+    const presets = [_]struct { []const u8, i64, i64 }{
+        .{ "Today", today, today },
+        .{ "Yesterday", today - data.day_ms, today - data.day_ms },
+        .{ "This month", month_start, today },
+        .{ "Last month", last_month_start, last_month_end },
+    };
+    var matched = false;
+    for (presets) |preset| {
+        const chosen = view.range.kind == .custom and view.range.start_ms == preset[1] and view.range.end_ms - data.day_ms == preset[2];
+        if (chosen) matched = true;
+        try render(w, "<a href=\"{href}\"{!current}>{label}</a>", .{
+            .href = try view.href(arena, path, &.{ .{ "range", "custom" }, .{ "from", &data.dateText(preset[1]) }, .{ "to", &data.dateText(preset[2]) } }),
+            .current = if (chosen) " aria-current=\"true\"" else "",
+            .label = preset[0],
+        });
+    }
+    try render(w, "<span class=\"range-custom\"{!current}>Custom range</span></nav>", .{ .current = if (view.range.kind == .custom and !matched) " aria-current=\"true\"" else "" });
+    const first = try data.firstDay(arena, ctx.db, view.site.id) orelse today;
+    try render(w, "<form method=\"get\" action=\"{path}\" class=\"range-form form-grid\" data-range-form><input type=\"hidden\" name=\"range\" value=\"custom\">", .{ .path = path });
+    try hiddenState(ctx, view, &.{ "range", "from", "to" });
+    const first_date = data.civil(first);
+    const today_date = data.civil(today);
+    try render(w,
+        \\<label class="field">From<input class="input" type="date" name="from" value="{from}" min="{min}" max="{max}" required></label>
+        \\<label class="field">To<input class="input" type="date" name="to" value="{to}" min="{min}" max="{max}" required></label>
+        \\<p class="field-error" data-range-error hidden></p>
+        \\<p class="range-info"><strong>Data from {fd} {fm} {fy} to today ({td} {tm}).</strong> One day shows hours; longer ranges show days.</p>
+        \\<div class="row-end"><button class="btn" type="button" popovertarget="range-pop" popovertargetaction="hide">Cancel</button><button class="btn btn-primary">Apply range</button></div></form></div>
+    , .{
+        .from = &data.dateText(view.range.start_ms),
+        .to = &data.dateText(view.range.end_ms - 1),
+        .min = &data.dateText(first),
+        .max = &data.dateText(today),
+        .fd = first_date.day,
+        .fm = data.month_names[first_date.month - 1],
+        .fy = first_date.year,
+        .td = today_date.day,
+        .tm = data.month_names[today_date.month - 1],
+    });
 }
 
 /// Hidden inputs that keep view state across a GET form.
@@ -240,7 +300,8 @@ pub fn hiddenState(ctx: *Ctx, view: data.View, skip: []const []const u8) !void {
     const keys = [_][]const u8{ "range", "from", "to", "cmp", "m", "fm" };
     outer: for (keys) |key| {
         for (skip) |name| if (std.mem.eql(u8, name, key)) continue :outer;
-        if (view.params.get(key)) |value| try render(w, "<input type=\"hidden\" name=\"{key}\" value=\"{value}\">", .{ .key = key, .value = value });
+        const value = try view.state(ctx.arena, key);
+        if (value.len != 0) try render(w, "<input type=\"hidden\" name=\"{key}\" value=\"{value}\">", .{ .key = key, .value = value });
     }
     for (skip) |name| if (std.mem.eql(u8, name, "f")) return;
     for (view.filters) |filter| try render(w, "<input type=\"hidden\" name=\"f\" value=\"{filter}\">", .{ .filter = try std.fmt.allocPrint(ctx.arena, "{f}", .{filter}) });
@@ -251,8 +312,8 @@ fn filterPopover(ctx: *Ctx, view: data.View, path: []const u8) !void {
     try render(w, "<button class=\"btn\" type=\"button\" popovertarget=\"filter-pop\" aria-label=\"Filter\"{!pressed}>", .{ .pressed = if (view.filters.len != 0) " aria-pressed=\"true\"" else "" });
     try icon(w, "filter");
     try render(w,
-        \\<span class="btn-label">Filter</span></button><div id="filter-pop" popover class="pop pop-wide" data-anchor="[popovertarget=filter-pop]"><form method="get" action="{path}" data-filter-form data-match="/{slug}/match.json">
-    , .{ .path = path, .slug = view.site.slug });
+        \\<span class="btn-label">Filter{!count}</span></button><div id="filter-pop" popover class="pop pop-wide" data-anchor="[popovertarget=filter-pop]"><form method="get" action="{path}" data-filter-form data-match="/{slug}/match.json">
+    , .{ .path = path, .slug = view.site.slug, .count = if (view.filters.len != 0) try std.fmt.allocPrint(ctx.arena, " · {d}", .{view.filters.len}) else "" });
     try hiddenState(ctx, view, &.{ "f", "fm" });
     try render(w,
         \\<div class="pop-section" data-describe="/{slug}/describe"><div class="row nowrap"><input class="input grow" data-describe-q maxlength="200" autocomplete="off" placeholder="Describe them: mobile visitors from Germany last month" aria-label="Describe the visitors"><button type="button" class="btn" data-describe-go>Go</button></div><div class="mt-10" data-describe-out hidden></div></div>
@@ -304,9 +365,9 @@ pub fn conditionRow(w: *std.Io.Writer, filter: data.Filter) !void {
 fn actionsMenu(ctx: *Ctx, view: data.View, path: []const u8) !void {
     const w = ctx.w();
     const site = view.site;
-    try w.writeAll("<button class=\"btn btn-icon\" type=\"button\" popovertarget=\"actions-pop\" aria-label=\"More actions\">");
+    try w.writeAll("<button class=\"btn btn-icon btn-actions\" type=\"button\" popovertarget=\"actions-pop\" aria-label=\"More actions\">");
     try icon(w, "more");
-    try w.writeAll("</button><div id=\"actions-pop\" popover class=\"pop\" data-anchor=\"[popovertarget=actions-pop]\"><button class=\"menu-item accent\" type=\"button\" data-palette data-ask-view>");
+    try w.writeAll("<span class=\"btn-label phone-only\">Actions</span></button><div id=\"actions-pop\" popover class=\"pop\" data-anchor=\"[popovertarget=actions-pop]\"><button class=\"menu-item accent\" type=\"button\" data-palette data-ask-view>");
     try icon(w, "sparkles");
     try render(w, "Ask about this view…<kbd>⌘J</kbd></button><div class=\"menu-sep\"></div><a class=\"menu-item\" href=\"{href}\" download>", .{ .href = try view.href(ctx.arena, try std.fmt.allocPrint(ctx.arena, "/{s}/export.csv", .{site.slug}), &.{.{ "view", path }}) });
     try icon(w, "download");

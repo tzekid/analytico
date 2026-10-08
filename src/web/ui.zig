@@ -43,6 +43,51 @@ pub fn empty(w: *Writer, title: []const u8, body: []const u8, action: []const u8
     try w.writeAll("</div>");
 }
 
+pub const Art = enum { waiting, calendar, filter };
+
+pub const Stage = struct {
+    art: Art,
+    title: []const u8,
+    /// HTML.
+    body: []const u8,
+    /// HTML buttons.
+    actions: []const u8 = "",
+    hint: []const u8 = "",
+};
+
+/// A whole-page state in place of the charts: no data yet, a period without
+/// visits, or filters that match nothing. Each names itself and offers a way on.
+pub fn stage(w: *Writer, s: Stage) !void {
+    try w.writeAll("<section class=\"stage\" data-stage=\"");
+    try w.writeAll(@tagName(s.art));
+    try w.writeAll("\"><svg class=\"stage-ghost\" viewBox=\"0 0 1000 200\" preserveAspectRatio=\"none\" aria-hidden=\"true\"><path d=\"M30,150 L210,110 L330,120 L470,80 L620,95 L790,70 L970,40\"/></svg><div class=\"stage-card\">");
+    try w.writeAll(switch (s.art) {
+        .waiting => art_card ++ art_lights ++
+            \\<rect fill="#E9E4E1" x="27" y="36" width="70" height="8" rx="4"/><rect fill="#F3EFED" x="27" y="52" width="110" height="6" rx="3"/><rect fill="#F3EFED" x="27" y="64" width="92" height="6" rx="3"/><path d="M27,90 L51,82 L75,86 L99,74 L123,78 L147,66" stroke="#E3DCD8" stroke-width="3" stroke-linecap="round" stroke-dasharray="5" fill="none"/><circle fill-opacity=".12" fill="#D64937" cx="147" cy="66" r="16"/><circle fill-opacity=".22" fill="#D64937" cx="147" cy="66" r="9"/><circle fill="#D64937" cx="147" cy="66" r="4.5"/><polygon fill="#D99A2B" points="159 20 162 27 169 30 162 33 159 40 156 33 149 30 156 27"/>
+        ++ art_dots,
+        .calendar => art_card ++
+            \\<rect x="46" y="-5" width="6" height="12" rx="3" fill="#D9CFCA"/><rect x="130" y="-5" width="6" height="12" rx="3" fill="#D9CFCA"/><g fill="#fff" stroke="#D9CFCA" stroke-width="1.5" stroke-dasharray="3 2"><rect x="27" y="32" width="14" height="10" rx="3"/><rect x="47" y="32" width="14" height="10" rx="3"/><rect x="67" y="32" width="14" height="10" rx="3"/><rect x="87" y="32" width="14" height="10" rx="3"/><rect x="107" y="32" width="14" height="10" rx="3"/><rect x="127" y="32" width="14" height="10" rx="3"/><rect x="147" y="32" width="14" height="10" rx="3"/><rect x="27" y="48" width="14" height="10" rx="3"/><rect x="47" y="48" width="14" height="10" rx="3"/><rect x="67" y="48" width="14" height="10" rx="3"/></g><g fill="#F3EFED"><rect x="107" y="48" width="14" height="10" rx="3"/><rect x="127" y="48" width="14" height="10" rx="3"/><rect x="147" y="48" width="14" height="10" rx="3"/><rect x="27" y="64" width="14" height="10" rx="3"/><rect x="47" y="64" width="14" height="10" rx="3"/><rect x="67" y="64" width="14" height="10" rx="3"/><rect x="87" y="64" width="14" height="10" rx="3"/><rect x="107" y="64" width="14" height="10" rx="3"/><rect x="127" y="64" width="14" height="10" rx="3"/><rect x="147" y="64" width="14" height="10" rx="3"/><rect x="27" y="80" width="14" height="10" rx="3"/><rect x="47" y="80" width="14" height="10" rx="3"/><rect x="67" y="80" width="14" height="10" rx="3"/><rect x="87" y="80" width="14" height="10" rx="3"/><rect x="107" y="80" width="14" height="10" rx="3"/><rect x="127" y="80" width="14" height="10" rx="3"/><rect x="147" y="80" width="14" height="10" rx="3"/></g><circle fill-opacity=".12" fill="#D64937" cx="94" cy="53" r="14"/><circle fill-opacity=".22" fill="#D64937" cx="94" cy="53" r="8"/><rect x="87" y="48" width="14" height="10" rx="3" fill="#D64937"/><polygon fill="#D99A2B" points="166 1 169 8 176 11 169 14 166 21 163 14 156 11 163 8"/>
+        ++ art_dots,
+        .filter => art_card ++ art_lights ++
+            \\<rect x="27" y="32" width="58" height="12" rx="6" fill="#FBEAE7" stroke="#F0C9C1"/><circle cx="35" cy="38" r="2.5" fill="#D64937"/><rect x="41" y="36" width="36" height="4" rx="2" fill="#E8A396"/><path d="M33,52 L83,52 L64,70 L64,80 L52,84 L52,70 Z" fill="#F3EFED" stroke="#E3DCD8" stroke-width="2.5" stroke-linejoin="round"/><g fill="#fff" stroke="#D9CFCA" stroke-width="1.5" stroke-dasharray="3 2"><rect x="101" y="36" width="54" height="8" rx="4"/><rect x="101" y="52" width="46" height="8" rx="4"/><rect x="101" y="68" width="50" height="8" rx="4"/></g><circle fill-opacity=".12" fill="#D64937" cx="58" cy="85" r="12"/><circle fill-opacity=".22" fill="#D64937" cx="58" cy="85" r="7"/><circle fill="#D64937" cx="58" cy="85" r="4"/><polygon fill="#D99A2B" points="166 1 169 8 176 11 169 14 166 21 163 14 156 11 163 8"/>
+        ++ art_dots,
+    });
+    try render(w, "</g></svg><h2>{title}</h2><p>{!body}</p>", .{ .title = s.title, .body = s.body });
+    if (s.actions.len != 0) try render(w, "<div class=\"row\">{!actions}</div>", .{ .actions = s.actions });
+    if (s.hint.len != 0) try render(w, "<p class=\"stage-hint\">{hint}</p>", .{ .hint = s.hint });
+    try w.writeAll("</div></section>");
+}
+
+const art_card =
+    \\<svg class="stage-art" viewBox="0 0 200 120" aria-hidden="true"><g transform="translate(9 10)"><rect stroke="#E9E4E1" stroke-width="2" fill="#fff" x="11" y="0" width="160" height="100" rx="12"/><rect fill="#F3EFED" x="11" y="0" width="160" height="22" rx="11"/><rect fill="#F3EFED" x="11" y="12" width="160" height="10"/>
+;
+const art_lights =
+    \\<circle fill="#D64937" cx="25" cy="11" r="3.5"/><circle fill="#D99A2B" cx="37" cy="11" r="3.5"/><circle fill="#2F8F5B" cx="49" cy="11" r="3.5"/>
+;
+const art_dots =
+    \\<circle fill-opacity=".5" fill="#0057AE" cx="3" cy="50" r="3"/><circle fill-opacity=".6" fill="#644A9B" cx="181" cy="88" r="2.5"/>
+;
+
 /// The change against the previous period, coloured by whether it is good.
 pub fn delta(w: *Writer, current: f64, previous: f64, invert: bool) !void {
     const value = html.changeValue(current, previous);
@@ -80,6 +125,8 @@ pub fn cardHead(w: *Writer, title: []const u8, aside: []const u8) !void {
 
 /// The change line under a metric: the delta and what it compares with.
 pub fn change(arena: std.mem.Allocator, current: f64, previous: f64, invert: bool, against: []const u8) ![]const u8 {
+    // Nothing against nothing is not "0%".
+    if (current == 0 and previous == 0) return "&nbsp;";
     var out: std.Io.Writer.Allocating = .init(arena);
     try delta(&out.writer, current, previous, invert);
     try out.writer.writeAll(against);

@@ -83,6 +83,53 @@ fn rememberedView(ctx: *Ctx, site: data.Site) !void {
     ctx.query = html.Params.parse(ctx.arena, try std.fmt.allocPrint(ctx.arena, "{s}&{s}", .{ saved, raw })) catch return;
 }
 
+/// Report pages of a site that has never had a visit all show the same
+/// waiting state, with the snippet, instead of empty tables.
+fn waitingReport(ctx: *Ctx, site: data.Site, page: []const u8) !bool {
+    const reports = [_]struct { []const u8, layout.Nav, []const u8 }{
+        .{ "pages", .pages, "Pages" },               .{ "acquisition", .acquisition, "Acquisition" }, .{ "search", .search, "Search" },
+        .{ "audience", .audience, "Audience" },      .{ "events", .events, "Events & goals" },        .{ "funnels", .funnels, "Funnels" },
+        .{ "sessions", .sessions, "Sessions & replays" }, .{ "heatmaps", .heatmaps, "Heatmaps" },      .{ "revenue", .revenue, "Revenue" },
+        .{ "retention", .retention, "Retention" },   .{ "people", .people, "People" },                .{ "performance", .performance, "Performance" },
+        .{ "errors", .errors, "Errors" },
+    };
+    for (reports) |report| if (is(page, report[0])) {
+        if (try data.firstDay(ctx.arena, ctx.db, site.id) != null) return false;
+        try layout.begin(ctx, try shell(ctx, site, report[1], report[2], null));
+        _ = try overview.waiting(ctx, site, report[2]);
+        try layout.end(ctx);
+        return true;
+    };
+    return false;
+}
+
+/// A custom range that had to be corrected (reversed, longer than a year,
+/// in the future, unreadable) redirects to what is shown, with a toast
+/// saying why; the address then matches the page.
+fn correctedRange(ctx: *Ctx, site: data.Site) !bool {
+    if (!std.mem.eql(u8, ctx.query.get("range") orelse "", "custom")) return false;
+    const view = try data.View.parse(ctx.arena, site, ctx.query, ctx.now());
+    if (view.range.correction == .none) return false;
+    var location: std.Io.Writer.Allocating = .init(ctx.arena);
+    const w = &location.writer;
+    try w.writeAll(ctx.path);
+    var separator: u8 = '?';
+    for ([_][]const u8{ "range", "from", "to" }) |key| {
+        const value = try view.state(ctx.arena, key);
+        if (value.len == 0 or (std.mem.eql(u8, key, "range") and std.mem.eql(u8, value, "7d"))) continue;
+        try w.print("{c}{s}={f}", .{ separator, key, html.url(value) });
+        separator = '&';
+    }
+    for (ctx.query.keys, ctx.query.values) |key, value| {
+        if (std.mem.eql(u8, key, "range") or std.mem.eql(u8, key, "from") or std.mem.eql(u8, key, "to")) continue;
+        try w.print("{c}{f}={f}", .{ separator, html.url(key), html.url(value) });
+        separator = '&';
+    }
+    try ctx.flash(try std.fmt.allocPrint(ctx.arena, "{f}", .{view.range.text(.correction)}), "Change", "#dates");
+    try ctx.redirect(location.written());
+    return true;
+}
+
 fn readHead(arena: std.mem.Allocator, request: *std.http.Server.Request) !ctx_mod.Head {
     var out: ctx_mod.Head = .{ .content_length = request.head.content_length };
     var cookies: std.ArrayList(u8) = .empty;
@@ -213,9 +260,11 @@ fn route(ctx: *Ctx) !void {
     const action = if (rest.len >= 3) rest[2] else "";
 
     if (get) try rememberedView(ctx, site);
+    if (get and try correctedRange(ctx, site)) return;
     if (get) {
         if (rest.len == 0) return overview.page(ctx, site);
         if (rest.len == 1) {
+            if (try waitingReport(ctx, site, page)) return;
             if (is(page, "pages")) return analyze.pages(ctx, site);
             if (is(page, "acquisition")) return analyze.acquisition(ctx, site);
             if (is(page, "events")) return analyze.events(ctx, site);

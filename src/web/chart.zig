@@ -21,6 +21,13 @@ pub const Trend = struct {
     why: []const u8 = "",
     /// The day of each bucket (daily charts); clicking a point opens that day.
     days: []const []const u8 = &.{},
+    /// The matching bucket of the period compared with, for the tooltip.
+    previous_labels: []const []const u8 = &.{},
+    /// The bucket still filling up: drawn as a "now" band, never as a drop.
+    partial: ?usize = null,
+    /// That bucket's comparable slice of the previous period, and its name.
+    partial_previous: ?f64 = null,
+    partial_label: []const u8 = "",
     height: u16 = 224,
 };
 
@@ -126,6 +133,17 @@ pub fn trend(arena: std.mem.Allocator, w: *Writer, chart: Trend) !void {
         try jw.writeAll(",\"k\":");
         try std.json.Stringify.value(chart.days, .{}, jw);
     }
+    if (chart.previous_labels.len == chart.current.len and chart.previous != null) {
+        try jw.writeAll(",\"pl\":");
+        try std.json.Stringify.value(chart.previous_labels, .{}, jw);
+    }
+    if (chart.partial) |index| {
+        try jw.print(",\"n\":{d}", .{index});
+        if (chart.partial_previous) |value| {
+            try jw.print(",\"q\":{d:.0},\"ql\":", .{value});
+            try std.json.Stringify.value(chart.partial_label, .{}, jw);
+        }
+    }
     try jw.print(",\"d\":{d}}}", .{@intFromBool(chart.duration)});
     try w.print("<div class=\"chart\" style=\"height:{d}px\" data-chart=\"{f}\"", .{ chart.height, html.esc(json.written()) });
     if (chart.why.len != 0) try w.print(" data-why=\"{f}\"", .{html.esc(chart.why)});
@@ -142,11 +160,19 @@ pub fn trend(arena: std.mem.Allocator, w: *Writer, chart: Trend) !void {
     tick = 0;
     while (tick <= 4) : (tick += 1) try w.print("<line x1=\"0\" x2=\"1000\" y1=\"{d}\" y2=\"{d}\"{s}/>", .{ tick * 250, tick * 250, if (tick == 4) " class=\"base\"" else "" });
     try w.writeAll("</g>");
-    const current = try project(arena, chart.current, maximum);
-    if (chart.current.len != 0) {
+    const projected_current = try project(arena, chart.current, maximum);
+    // The line stops at the last complete bucket; the running one is a band.
+    const drawn = @min(chart.partial orelse chart.current.len, chart.current.len);
+    const current = .{ projected_current[0][0..drawn], projected_current[1][0..drawn] };
+    if (chart.partial) |index| if (index < chart.current.len) {
+        const x = projected_current[0][index];
+        const half = if (chart.current.len > 1) 500.0 / @as(f64, @floatFromInt(chart.current.len - 1)) else 500.0;
+        try w.print("<rect class=\"now-band\" x=\"{d:.1}\" y=\"0\" width=\"{d:.1}\" height=\"1000\"/>", .{ @max(0, x - half), @min(1000, x + half) - @max(0, x - half) });
+    };
+    if (drawn != 0) {
         try w.writeAll("<path class=\"area-current\" d=\"");
         try monotonePath(w, current[0], current[1], true);
-        try w.print("L{d:.1},1000L{d:.1},1000Z\"/>", .{ current[0][current[0].len - 1], current[0][0] });
+        try w.print("L{d:.1},1000L{d:.1},1000Z\"/>", .{ current[0][drawn - 1], current[0][0] });
     }
     if (chart.previous) |previous| {
         const projected = try project(arena, previous, maximum);
@@ -154,13 +180,16 @@ pub fn trend(arena: std.mem.Allocator, w: *Writer, chart: Trend) !void {
         try monotonePath(w, projected[0], projected[1], true);
         try w.writeAll("\"/>");
     }
-    if (chart.current.len != 0) {
+    if (drawn != 0) {
         try w.writeAll("<path class=\"line-current\" d=\"");
         try monotonePath(w, current[0], current[1], true);
         try w.writeAll("\"/>");
     }
     try w.writeAll("</svg>");
     const denominator: f64 = @floatFromInt(@max(chart.current.len, 2) - 1);
+    if (chart.partial) |index| if (index < chart.current.len) {
+        try w.print("<span class=\"chart-now\" style=\"left:{d:.2}%\">now</span>", .{@as(f64, @floatFromInt(index)) / denominator * 100.0});
+    };
     // Marks close to the previous one take turns on a raised row.
     var previous_left: f64 = -100;
     var raised = false;

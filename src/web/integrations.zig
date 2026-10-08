@@ -1030,7 +1030,7 @@ pub fn searchPage(ctx: *Ctx, site: data.Site) !void {
         .{ "arrow-up-right", "Click-through rate", try std.fmt.allocPrint(arena, "{d:.1}%", .{ctr_now}), ctr_now, ctr_before, false },
         .{ "flag", "Average position", try std.fmt.allocPrint(arena, "{d:.1}", .{now_totals.position}), now_totals.position, before.position, true },
     };
-    for (tiles, 0..) |entry, index| try ui.metric(w, arena, .{ .tone = ui.tones[index], .icon = entry[0], .label = entry[1], .value = entry[2], .change = if (view.compare) try ui.change(arena, entry[3], entry[4], entry[5], range.shortComparison()) else "" });
+    for (tiles, 0..) |entry, index| try ui.metric(w, arena, .{ .tone = ui.tones[index], .icon = entry[0], .label = entry[1], .value = entry[2], .change = if (view.compare) try ui.change(arena, entry[3], entry[4], entry[5], try range.versus(arena)) else "" });
     try w.writeAll("</div>");
     // Queries, joined to on-site engagement and goals of their landing pages.
     var statement = try ctx.db.prepare(arena,

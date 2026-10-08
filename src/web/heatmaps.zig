@@ -191,7 +191,7 @@ pub fn page(ctx: *Ctx, site: data.Site) !void {
     const view = try analyze.start(ctx, site, .heatmaps, "Heatmaps");
     const w = ctx.w();
     const path = try std.fmt.allocPrint(arena, "/{s}/heatmaps", .{site.slug});
-    try layout.head(ctx, .{ .title = "Heatmaps", .subtitle = "Where people click, how far they scroll, what holds their attention", .view = view, .path = path, .compare = false, .filter = false });
+    try layout.head(ctx, .{ .title = "Heatmaps", .subtitle = try std.fmt.allocPrint(ctx.arena, "Where people click, how far they scroll, what holds their attention · {f}", .{view.range}), .view = view, .path = path, .compare = false, .filter = false });
     if (site.mode != .full) {
         try w.writeAll("<div class=\"card\">");
         try ui.empty(w, "Heatmaps need Full mode", "Clicks, scroll reach and attention are collected from visitors who consent in Full mode — aggregated per element, never per person.", if (ctx.can(.admin)) try html.print(arena, "<a class=\"btn btn-primary\" href=\"/settings/sites?site={slug}\">Switch to Full mode</a>", .{ .slug = site.slug }) else "");

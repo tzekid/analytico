@@ -360,7 +360,7 @@ pub fn acquisition(ctx: *Ctx, site: data.Site) !void {
     const view = try start(ctx, site, .acquisition, "Acquisition");
     const path = try sitePath(arena, site, "/acquisition");
     const tab = ctx.param("tab") orelse "sources";
-    try layout.head(ctx, .{ .title = "Acquisition", .subtitle = "Where visitors come from, and what campaigns earn", .view = view, .path = path });
+    try layout.head(ctx, .{ .title = "Acquisition", .subtitle = try std.fmt.allocPrint(arena, "Where visitors come from, and what campaigns earn · {f}", .{view.range}), .view = view, .path = path });
     try ui.tabs(ctx.w(), ctx.arena, view, path, "tab", &.{ .{ "sources", "Sources" }, .{ "campaigns", "Campaigns" }, .{ "channels", "Channels" } }, tab);
     if (std.mem.eql(u8, tab, "campaigns")) {
         try campaigns(ctx, view, path);
