@@ -30,12 +30,12 @@ pub fn sitePath(arena: std.mem.Allocator, site: data.Site, suffix: []const u8) !
     return std.fmt.allocPrint(arena, "/{s}{s}", .{ site.slug, suffix });
 }
 
-fn sheetOpen(w: *std.Io.Writer, overline: []const u8, title: []const u8, close_href: []const u8, extra: []const u8) !void {
+fn sheetOpen(w: *std.Io.Writer, overline: []const u8, title: []const u8, close_href: []const u8) !void {
     try render(w,
-        \\<dialog class="sheet" data-sheet data-close-href="{close}"><div class="sheet-head"><div class="min-0"><div class="overline">{overline}</div><h2>{title}</h2></div><div class="row nowrap ml-auto">{!extra}<a class="btn btn-quiet btn-icon" href="{close}" data-close aria-label="Close">
-    , .{ .close = close_href, .overline = overline, .title = title, .extra = extra });
+        \\<dialog class="sheet" data-sheet data-close-href="{close}" autofocus><div class="sheet-head"><div class="min-0"><div class="overline">{overline}</div><h2>{title}</h2></div><a class="sheet-close" href="{close}" data-close aria-label="Close">
+    , .{ .close = close_href, .overline = overline, .title = title });
     try icon(w, "x");
-    try w.writeAll("</a></div></div>");
+    try w.writeAll("</a></div>");
 }
 
 /// A small heading inside a sheet or card.
@@ -174,13 +174,12 @@ fn pageSheet(ctx: *Ctx, base_view: data.View, path: []const u8, page_path: []con
     view.filters = with_page.items;
     view.any = false;
     const close = try base_view.href(arena, path, &.{ .{ "q", ctx.param("q") orelse "" }, .{ "sort", ctx.param("sort") orelse "" } });
-    const visit = try html.print(arena, "<a class=\"link\" href=\"{origin}{path}\" target=\"_blank\" rel=\"noopener\">Visit page ↗</a>", .{ .origin = base_view.site.origin, .path = page_path });
-    try sheetOpen(w, "Page", page_path, close, visit);
+    try sheetOpen(w, try std.fmt.allocPrint(arena, "Page · {f}", .{base_view.range.text(.this)}), page_path, close);
     const tab = ctx.param("pt") orelse "overview";
-    try w.writeAll("<nav class=\"tabs\">");
+    try w.writeAll("<nav class=\"seg seg-sheet\" aria-label=\"Page details\">");
     for ([_][2][]const u8{ .{ "overview", "Overview" }, .{ "sections", "Sections" }, .{ "actions", "Actions" }, .{ "paths", "Paths" } }) |item| try render(w, "<a href=\"{href}\"{!current}>{label}</a>", .{
         .href = try base_view.href(arena, path, &.{ .{ "page", page_path }, .{ "pt", item[0] } }),
-        .current = if (std.mem.eql(u8, tab, item[0])) " aria-current=\"page\"" else "",
+        .current = if (std.mem.eql(u8, tab, item[0])) " aria-current=\"true\"" else "",
         .label = item[1],
     });
     try w.writeAll("</nav><div class=\"sheet-body\">");
@@ -194,20 +193,21 @@ fn pageSheet(ctx: *Ctx, base_view: data.View, path: []const u8, page_path: []con
         // Overview: four mini metrics with change, trend, next pages, sections.
         const now_values = try pageFigures(ctx, view, view.range.start_ms, view.range.end_ms);
         const prev_values = try pageFigures(ctx, view, view.range.prev_start_ms, view.range.prev_end_ms);
-        try w.writeAll("<div class=\"mini-metrics\">");
-        const labels = [_][]const u8{ "Views", "Visitors", "Avg. time", "Scroll depth" };
+        try w.writeAll("<div class=\"metrics metrics-sheet\">");
+        const labels = [_][]const u8{ "Views", "Visitors", "Avg. active", "Scroll" };
         for (labels, 0..) |label, index| {
             const current = now_values[index];
             const previous = prev_values[index];
-            try render(w, "<div class=\"mini\"><small>{label}</small><div class=\"row-between\"><strong>{value}</strong>", .{ .label = label, .value = switch (index) {
+            const value = switch (index) {
                 0, 1 => try std.fmt.allocPrint(arena, "{f}", .{html.int(@intFromFloat(current))}),
                 2 => try std.fmt.allocPrint(arena, "{f}", .{html.duration(@intFromFloat(current))}),
                 else => try std.fmt.allocPrint(arena, "{d:.0}%", .{current}),
-            } });
-            try ui.delta(w, current, previous, false);
-            try w.writeAll("</div></div>");
+            };
+            // Scroll depth changes in points, like the overview's returning share.
+            const change = if (!view.compare) "&nbsp;" else if (index == 3) try points(arena, current, previous) else try ui.change(arena, current, previous, false, "");
+            try ui.metric(w, arena, .{ .label = label, .value = value, .change = change });
         }
-        try w.writeAll("</div><div>");
+        try w.writeAll("</div><div class=\"card\">");
         try subhead(w, "Views by day");
         const names = try overview.labels(arena, view.range);
         try chart.trend(arena, w, .{ .current = try data.series(arena, ctx.db, view, .views, view.range.start_ms), .labels = names[0], .long_labels = names[1], .unit = "views", .height = 140 });
@@ -217,11 +217,22 @@ fn pageSheet(ctx: *Ctx, base_view: data.View, path: []const u8, page_path: []con
         try subhead(w, "Sections reached");
         try sectionsList(ctx, view, 6);
         try w.writeAll("</div>");
-        if (view.site.mode != .lite) {
-            try render(w, "<a class=\"link\" href=\"{href}\">See sessions that viewed this page →</a>", .{ .href = try base_view.href(arena, try sitePath(arena, view.site, "/sessions"), &.{.{ "f+", try std.fmt.allocPrint(arena, "page:{s}", .{page_path}) }}) });
-        }
     }
+    // The page's way out, on every tab: filter everything by it, then its sessions and the page itself.
+    const filtered = try base_view.href(arena, path, &.{.{ "f+", try std.fmt.allocPrint(arena, "page:{s}", .{page_path}) }});
+    try render(w, "<div class=\"sheet-actions\"><a class=\"btn btn-primary btn-wide\" href=\"{filtered}\">Filter every report by this page</a>", .{ .filtered = filtered });
+    if (view.site.mode != .lite) {
+        try render(w, "<a class=\"link\" href=\"{href}\">See sessions that viewed this page →</a>", .{ .href = try base_view.href(arena, try sitePath(arena, view.site, "/sessions"), &.{.{ "f+", try std.fmt.allocPrint(arena, "page:{s}", .{page_path}) }}) });
+    }
+    try render(w, "<a class=\"link\" href=\"{origin}{path}\" target=\"_blank\" rel=\"noopener\">Open the page on {host} ↗</a></div>", .{ .origin = base_view.site.origin, .path = page_path, .host = base_view.site.host() });
     try w.writeAll("</div></dialog>");
+}
+
+/// "+4 pts", "−1 pt": a change between two percentages.
+fn points(arena: std.mem.Allocator, current: f64, previous: f64) ![]const u8 {
+    const delta = current - previous;
+    const class = if (@abs(delta) < 0.5) "delta-flat" else if (delta > 0) "delta-up" else "delta-down";
+    return std.fmt.allocPrint(arena, "<span class=\"delta {s}\">{s}{d:.0} {s}</span>", .{ class, if (delta >= 0.5) "+" else if (delta <= -0.5) "−" else "", @abs(delta), if (@round(@abs(delta)) == 1) "pt" else "pts" });
 }
 
 /// Views, visitors, average active time and average scroll of a page's

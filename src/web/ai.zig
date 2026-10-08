@@ -635,7 +635,7 @@ pub fn askSheet(ctx: *Ctx, site: data.Site, id_text: []const u8) !void {
     const row = try ctx.db.one(arena, Row, "SELECT question,answer,model,cost_micro,data_used FROM ai_log WHERE id=? AND site_id=?", .{ id, site.id }) orelse return;
     const w = ctx.w();
     const close = try stripParam(arena, ctx.target, "ask");
-    try render(w, "<dialog class=\"sheet\" data-sheet data-close-href=\"{close}\" id=\"ask-sheet\"><div class=\"sheet-head ask-head\"><div class=\"row\">", .{ .close = close });
+    try render(w, "<dialog class=\"sheet\" data-sheet data-close-href=\"{close}\" id=\"ask-sheet\" autofocus><div class=\"sheet-head ask-head\"><div class=\"row\">", .{ .close = close });
     try icon(w, "sparkles");
     try render(w, "<h2>Ask</h2></div><div class=\"row nowrap ml-auto\"><button class=\"btn btn-quiet\" type=\"button\" data-palette>New question</button><a class=\"btn btn-quiet btn-icon\" href=\"{close}\" data-close aria-label=\"Close\">", .{ .close = close });
     try icon(w, "x");

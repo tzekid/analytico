@@ -217,6 +217,47 @@ await journey("ux", async (t) => {
   await phone.waitForURL(`${base}/ux/live`);
   const overflow = await phone.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
   assert.equal(overflow, 0);
+
+  {
+    // A finger reads the chart instead of opening a day: a tap shows the value
+    // and offers the day, a sideways drag scrubs, and a pull closes a sheet.
+    const cdp = await touchContext.newCDPSession(phone);
+    const touch = (type, points) => cdp.send("Input.dispatchTouchEvent", { type, touchPoints: points.map(([x, y]) => ({ x, y })) });
+    const drag = async (from, to, steps = 12) => {
+      await touch("touchStart", [from]);
+      for (let i = 1; i <= steps; i++) {
+        await touch("touchMove", [[from[0] + ((to[0] - from[0]) * i) / steps, from[1] + ((to[1] - from[1]) * i) / steps]]);
+        await delay(16);
+      }
+      await touch("touchEnd", []);
+    };
+    await phone.goto(`${base}/spike?range=30d`);
+    const plot = phone.locator(".chart-card .chart-plot");
+    await plot.scrollIntoViewIfNeeded();
+    const area = await plot.boundingBox();
+    await touch("touchStart", [[area.x + area.width * 0.3, area.y + area.height / 2]]);
+    await touch("touchEnd", []);
+    await phone.locator(".chart-card .chart.pinned .chart-open").waitFor();
+    assert.equal(new URL(phone.url()).searchParams.get("range"), "30d");
+    const before = await phone.locator(".chart-card .chart-tip small").textContent();
+    await drag([area.x + area.width * 0.3, area.y + area.height / 2], [area.x + area.width * 0.8, area.y + area.height / 2]);
+    assert.notEqual(await phone.locator(".chart-card .chart-tip small").textContent(), before);
+    const open = await phone.locator(".chart-card .chart-open").boundingBox();
+    await touch("touchStart", [[open.x + open.width / 2, open.y + open.height / 2]]);
+    await touch("touchEnd", []);
+    await phone.waitForURL(/range=custom/);
+    await phone.goto(`${base}/spike/pages?range=30d`);
+    await phone.locator("tbody tr a").first().click();
+    const sheet = phone.locator("dialog.sheet[open]");
+    await sheet.waitFor();
+    const head = await phone.locator("dialog.sheet .sheet-head").boundingBox();
+    await drag([head.x + head.width / 2, head.y + 20], [head.x + head.width / 2, head.y + 60], 4);
+    await delay(300);
+    assert.equal(await sheet.isVisible(), true);
+    await drag([head.x + head.width / 2, head.y + 20], [head.x + head.width / 2, head.y + 560]);
+    await phone.waitForURL((url) => !url.searchParams.has("page"));
+    assert.equal(await phone.locator("dialog.sheet[open]").count(), 0);
+  }
   await touchContext.close();
 
   // The daily check drafted a note for the spike; kept, it joins the chart.

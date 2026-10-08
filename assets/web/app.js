@@ -477,6 +477,59 @@
   }
 
 
+  // Phones: a bottom sheet follows a finger pulling it down, from anywhere
+  // once its content is scrolled to the top, and closes past a third of its
+  // height or on a flick; otherwise it springs back. A form with unsaved
+  // input stays open, as on iOS.
+  let pull = null;
+  const sheetAt = (node) => node.closest?.("dialog.sheet[open], dialog.dialog[open], [popover].as-sheet:popover-open");
+  const dismissSheet = (sheet) => {
+    if (sheet.matches("[popover]")) sheet.hidePopover();
+    else closeDialog(sheet);
+  };
+  document.addEventListener("touchstart", (event) => {
+    pull = null;
+    if (event.touches.length !== 1 || !matchMedia("(max-width: 720px)").matches) return;
+    const sheet = sheetAt(event.target);
+    if (!sheet || event.target.closest("input, textarea, select, .chart-plot, pre")) return;
+    const y = event.touches[0].clientY;
+    pull = { sheet, startY: y, lastY: y, lastAt: event.timeStamp, speed: 0, dy: 0, active: false, atTop: sheet.scrollTop <= 0 };
+  }, { passive: true });
+  document.addEventListener("touchmove", (event) => {
+    if (!pull) return;
+    const y = event.touches[0].clientY;
+    const dy = y - pull.startY;
+    if (!pull.active) {
+      // Only a pull down from the top moves the sheet; anything else scrolls it.
+      if (Math.abs(dy) < 6) return;
+      if (dy < 0 || !pull.atTop || pull.sheet.scrollTop > 0) return void (pull = null);
+      pull.active = true;
+      pull.sheet.style.transition = "none";
+    }
+    event.preventDefault();
+    pull.speed = (y - pull.lastY) / Math.max(1, event.timeStamp - pull.lastAt);
+    pull.lastY = y;
+    pull.lastAt = event.timeStamp;
+    pull.dy = Math.max(0, dy - 6);
+    pull.sheet.style.transform = `translateY(${pull.dy}px)`;
+  }, { passive: false });
+  const letGo = (cancelled) => {
+    if (!pull?.active) return void (pull = null);
+    const { sheet, dy, speed } = pull;
+    pull = null;
+    const close = !cancelled && !sheet.dataset.dirty && (dy > sheet.offsetHeight / 3 || (speed > 0.5 && dy > 30));
+    sheet.style.transition = "transform .18s ease-out";
+    sheet.style.transform = close ? `translateY(${sheet.offsetHeight}px)` : "";
+    setTimeout(() => {
+      sheet.style.transition = "";
+      if (!close) return;
+      sheet.style.transform = "";
+      dismissSheet(sheet);
+    }, 180);
+  };
+  document.addEventListener("touchend", () => letGo(false));
+  document.addEventListener("touchcancel", () => letGo(true));
+
   // Autofill pop-ups and drags that end outside a dialog also produce clicks on
   // its backdrop; only a press that starts there counts.
   let pressedBackdrop = null;
@@ -740,22 +793,47 @@
       tip.style.left = `${x + 16 + tipWidth > rect.width ? x - tipWidth - 16 : x + 16}px`;
       if (why) { why.style.left = `${x}px`; why.style.top = `${y}px`; }
     };
-    plot.addEventListener("mousemove", (event) => show(event.clientX));
-    plot.addEventListener("touchstart", (event) => show(event.touches[0].clientX), { passive: true });
-    // Clicking a day opens just that day, with the same filters.
+    // The day a bucket opens: just that day, with the same filters.
+    const dayHref = (at) => {
+      const url = new URL(location.href);
+      url.searchParams.set("range", "custom");
+      url.searchParams.set("from", data.k[at]);
+      url.searchParams.set("to", data.k[at]);
+      return url.href;
+    };
+    // A mouse hovers and clicks a day to open it. A finger touches to read a
+    // value and drags sideways to scrub (up and down still scroll the page);
+    // a tap never navigates: the tooltip offers the day instead.
+    let pointer = "mouse";
+    const touchTip = () => {
+      if (pointer === "mouse" || !data.k?.[index] || data.n === index) return;
+      const open = document.createElement("a");
+      open.className = "chart-open";
+      open.href = dayHref(index);
+      open.textContent = `Open ${data.l[index]} →`;
+      tip.append(open);
+    };
+    plot.addEventListener("pointermove", (event) => {
+      if (event.pointerType === "mouse") return show(event.clientX);
+      if (event.buttons && !event.target.closest(".chart-tip, .chart-why, .why")) { show(event.clientX); touchTip(); }
+    });
+    plot.addEventListener("pointerdown", (event) => {
+      pointer = event.pointerType;
+      if (pointer === "mouse" || event.target.closest(".chart-tip, .chart-why, .why")) return;
+      $$(".chart.pinned").forEach((other) => other !== chart && other.classList.remove("pinned", "hovering"));
+      chart.classList.add("pinned");
+      show(event.clientX);
+      touchTip();
+    });
     if (data.k) {
       chart.classList.add("drillable");
       plot.addEventListener("click", (event) => {
-        if (event.target.closest(".chart-why, .why") || index < 0 || !data.k[index]) return;
-        const url = new URL(location.href);
-        url.searchParams.set("range", "custom");
-        url.searchParams.set("from", data.k[index]);
-        url.searchParams.set("to", data.k[index]);
-        navigate(url.href);
+        if (pointer !== "mouse" || event.target.closest(".chart-why, .why, .chart-tip") || index < 0 || !data.k[index]) return;
+        navigate(dayHref(index));
       });
     }
     chart.addEventListener("mouseleave", (event) => {
-      if (event.relatedTarget?.closest?.(".chart-why, .why")) return;
+      if (pointer !== "mouse" || event.relatedTarget?.closest?.(".chart-why, .why")) return;
       chart.classList.remove("hovering");
     });
     why?.addEventListener("click", async (event) => {
@@ -779,6 +857,13 @@
       }
     });
   }
+
+  document.addEventListener("pointerdown", (event) => {
+    if (event.pointerType === "mouse") return;
+    $$(".chart.pinned").forEach((chart) => {
+      if (!chart.contains(event.target)) chart.classList.remove("pinned", "hovering");
+    });
+  }, true);
 
   function niceTop(value) {
     const target = value * 1.08;
