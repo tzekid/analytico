@@ -118,7 +118,22 @@ await journey("ux", async (t) => {
   await t.until(async () => Number((await badge.textContent()).split(" ")[0]) === online + 1, "badge updated live");
   assert.equal(await page.evaluate(() => window.sameDocument), true);
 
+  // The Live page counts people as they arrive and lists their page views,
+  // without a reload; the old Sessions tab leads there.
+  await page.goto(`${base}/ux/sessions?tab=live`);
+  await page.waitForURL(`${base}/ux/live`);
+  await page.evaluate(() => { window.sameDocument = true; });
+  const liveCount = page.locator(".live-count");
+  const present = Number(await liveCount.textContent());
+  await send([pageView(randomUUID(), randomUUID(), "/arriving")], "198.51.100.251");
+  await t.until(async () => Number(await liveCount.textContent()) === present + 1, "live page updated");
+  await page.locator(".feed-path", { hasText: "/arriving" }).waitFor();
+  await page.locator("#live-now .rank", { hasText: "/arriving" }).waitFor();
+  assert.equal(await page.locator(".sidebar [data-live-count]").textContent(), String(present + 1));
+  assert.equal(await page.evaluate(() => window.sameDocument), true);
+
   // The insights card loads on its own, after the page.
+  await page.goto(`${base}/ux`);
   await page.locator("[data-lazy][data-ready]").waitFor({ state: "attached" });
   assert.ok(requested("part=insights"));
 
@@ -183,6 +198,25 @@ await journey("ux", async (t) => {
   await phone.goto(`${base}/ux`);
   await phone.locator("a[href^='/ux/sessions']").first().dispatchEvent("touchstart");
   await t.until(() => phoneRequests.some((url) => url.includes("/ux/sessions")), "touch prefetch");
+
+  // Phones: the site switcher and the period open as bottom sheets, and
+  // every section without a tab is under More.
+  await phone.getByRole("button", { name: "Switch website" }).locator("visible=true").click();
+  await phone.locator("#site-menu.as-sheet").getByRole("link", { name: /Add a website/ }).waitFor();
+  await phone.keyboard.press("Escape");
+  await phone.getByRole("button", { name: "Choose dates" }).click();
+  assert.equal(await phone.locator("[popover].as-sheet:popover-open").count(), 1);
+  await phone.keyboard.press("Escape");
+  await phone.locator(".tabbar").getByRole("link", { name: "More" }).click();
+  await phone.waitForURL(`${base}/ux/more`);
+  assert.equal(await phone.locator(".tabbar [aria-current]").textContent(), "More");
+  await phone.locator(".more-list").getByRole("link", { name: "Funnels" }).click();
+  await phone.waitForURL(/\/ux\/funnels/);
+  assert.equal(await phone.locator(".tabbar [aria-current]").textContent(), "More");
+  await phone.locator(".tabbar").getByRole("link", { name: "Live" }).click();
+  await phone.waitForURL(`${base}/ux/live`);
+  const overflow = await phone.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+  assert.equal(overflow, 0);
   await touchContext.close();
 
   // The daily check drafted a note for the spike; kept, it joins the chart.
@@ -245,7 +279,7 @@ await journey("ux", async (t) => {
   const pastChart = JSON.parse(await page.locator(".chart-card .chart").getAttribute("data-chart"));
   assert.deepEqual([pastChart.v.length, pastChart.n, pastChart.pl.length], [24, undefined, 24]);
   assert.match(await page.locator(".subtitle").first().textContent(), /, hour by hour · compared with \w{3} \d+ \w{3}$/);
-  assert.match(await page.locator(".metric-delta").first().textContent(), /vs \w{3} \d+ \w{3}/);
+  assert.match(await page.locator(".metric-delta").first().textContent(), /[%×]vs [\d,]+$/);
   assert.match(await page.locator(".chart-card .insight").textContent(), /^\d\d:00 was the busiest hour/);
   assert.equal(await page.getByRole("button", { name: "Comparing" }).getAttribute("aria-pressed"), "true");
 
@@ -284,5 +318,5 @@ await journey("ux", async (t) => {
   // The heatmap overlay's data can be computed ahead of opening the page.
   assert.equal((await page.request.get(`${base}/ux/heatmaps/warm?path=%2F`)).status(), 204);
 
-  return "group commit, engagement on page views, Server-Timing, API revalidation, live updates, lazy card, hover/touch/range prefetch, instant back with scroll, morphing, remembered views, undo, keyboard, chart drill-down to an hourly day, dated comparisons, corrected ranges, empty and waiting states, heatmap warm, anomaly note kept";
+  return "group commit, engagement on page views, Server-Timing, API revalidation, live updates, the Live page, phone sheets and More, lazy card, hover/touch/range prefetch, instant back with scroll, morphing, remembered views, undo, keyboard, chart drill-down to an hourly day, dated comparisons, corrected ranges, empty and waiting states, heatmap warm, anomaly note kept";
 });

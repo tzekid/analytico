@@ -68,7 +68,6 @@ pub fn build(b: *std.Build) void {
         .{ "web_js", "assets/web/app.js" },
         .{ "web_icons", "assets/web/icons.svg" },
         .{ "web_favicon", "assets/web/favicon.svg" },
-        .{ "font_roboto", "assets/web/fonts/roboto.woff2" },
         .{ "font_quando", "assets/web/fonts/quando.woff2" },
         .{ "font_quicksand", "assets/web/fonts/quicksand.woff2" },
     }) |asset| module.addAnonymousImport(asset[0], .{ .root_source_file = b.path(asset[1]) });

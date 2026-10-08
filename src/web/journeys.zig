@@ -10,6 +10,7 @@ const html = @import("html.zig");
 const layout = @import("layout.zig");
 const ui = @import("ui.zig");
 const overview = @import("overview.zig");
+const app = @import("app.zig");
 
 const Ctx = ctx_mod.Ctx;
 const esc = html.esc;
@@ -458,28 +459,79 @@ fn nextPagesFrom(ctx: *Ctx, view: data.View, from: []const u8) !void {
     try w.writeAll("</div>");
 }
 
-pub fn liveTab(ctx: *Ctx, view: data.View) !void {
+/// Live: who is on the site right now, the last half hour minute by minute,
+/// the pages being read and the latest page views. The stream keeps the
+/// count current and redraws the rest when a page view arrives.
+pub fn live(ctx: *Ctx, site: data.Site) !void {
+    const arena = ctx.arena;
+    const now = ctx.now();
+    try layout.begin(ctx, try app.shell(ctx, site, .live, "Live", null));
+    const online = try data.online(arena, ctx.db, site.id, now);
+    try layout.head(ctx, .{ .title = "Live", .subtitle = try std.fmt.allocPrint(arena, "{s} · updates by itself", .{site.host()}), .extra = try html.print(arena, "<span class=\"period-tag live-tag{!quiet}\">Right now · the last 5 minutes</span>", .{ .quiet = if (online == 0) " quiet" else "" }) });
     const w = ctx.w();
-    var statement = try ctx.db.prepare(ctx.arena,
-        \\SELECT at,kind,name,path,session_id FROM (
-        \\ SELECT received_at_ms at,'page' kind,'' name,path,session_id FROM page_views WHERE site_id=?1 AND received_at_ms>=?2 AND internal=0 AND traffic_class IN ('human_like','unknown')
-        \\ UNION ALL SELECT received_at_ms,'event',name,coalesce(path,''),session_id FROM events WHERE site_id=?1 AND received_at_ms>=?2 AND internal=0
-        \\) ORDER BY at DESC LIMIT 40
-    );
-    defer statement.deinit();
-    try statement.bindInt(1, view.site.id);
-    try statement.bindInt(2, ctx.now() - 30 * 60_000);
-    try render(w, "<section class=\"card\" id=\"live-feed\" data-refresh-live data-stream=\"/{slug}/stream\"><div class=\"card-head\">", .{ .slug = view.site.slug });
-    try w.writeAll("<h2>Last 30 minutes</h2><span class=\"live\">Updating</span></div><div class=\"timeline\">");
+    // data-last: a page view that lands before the stream connects still redraws the page.
+    const last = try data.lastSeen(arena, ctx.db, site.id);
+    try render(w, "<section id=\"live-now\" class=\"stack\" data-refresh-live data-stream=\"/{slug}/stream\" data-last=\"{last}\"><div class=\"grid live-grid\"><section class=\"card live-hero\"><div class=\"live-count num\" data-live-count>{online}</div>", .{ .slug = site.slug, .last = last, .online = online });
+    if (online != 0) {
+        try render(w, "<p class=\"secondary\">{people} on {host} right now</p>", .{ .people = if (online == 1) "person" else "people", .host = site.host() });
+    } else {
+        try render(w, "<p class=\"secondary\">Nobody is on {host} right now</p>", .{ .host = site.host() });
+        if (last != 0) try render(w, "<p class=\"hint\">The last page view was {ago}. This updates by itself.</p>", .{ .ago = data.ago(last, now) });
+    }
+    // Page views per minute over the last half hour; the newest minute is still filling.
+    var minutes: [30]i64 = @splat(0);
+    const start = now - @mod(now, 60_000) - 29 * 60_000;
+    var per_minute = try ctx.db.prepare(arena, "SELECT (received_at_ms-?2)/60000,count(*) FROM page_views WHERE site_id=?1 AND received_at_ms>=?2 AND internal=0 AND traffic_class IN ('human_like','unknown') GROUP BY 1");
+    defer per_minute.deinit();
+    try per_minute.bindInt(1, site.id);
+    try per_minute.bindInt(2, start);
+    var busiest: i64 = 1;
+    while (try per_minute.step() == .row) {
+        const index = per_minute.columnInt(0);
+        if (index >= 0 and index < 30) minutes[@intCast(index)] = per_minute.columnInt(1);
+        busiest = @max(busiest, per_minute.columnInt(1));
+    }
+    try w.writeAll("<p class=\"hint live-minutes-label\">Page views per minute · last 30 minutes</p><div class=\"live-minutes\" aria-hidden=\"true\">");
+    for (minutes, 0..) |count, index| try render(w, "<span{!class} style=\"height:{height:.0}%\"></span>", .{ .class = if (count == 0) " class=\"zero\"" else if (index == 29) " class=\"now\"" else "", .height = if (count == 0) 2 else @max(6, @as(f64, @floatFromInt(count)) / @as(f64, @floatFromInt(busiest)) * 100) });
+    try w.writeAll("</div></section><section class=\"card\">");
+    try ui.cardHead(w, "On these pages now", "");
+    var pages = try ctx.db.prepare(arena, "SELECT path,count(DISTINCT visitor_day_id) n FROM page_views WHERE site_id=? AND received_at_ms>=? AND internal=0 AND traffic_class IN ('human_like','unknown') GROUP BY path ORDER BY n DESC,path LIMIT 6");
+    defer pages.deinit();
+    try pages.bindInt(1, site.id);
+    try pages.bindInt(2, now - 5 * 60_000);
+    var top: i64 = 0;
     var any = false;
-    while (try statement.step() == .row) {
+    try w.writeAll("<div class=\"rank\">");
+    while (try pages.step() == .row) {
+        const count = pages.columnInt(1);
+        if (!any) top = count;
         any = true;
-        const is_page = std.mem.eql(u8, statement.columnText(1), "page");
-        try render(w, "<div class=\"tl-row\"><span class=\"tl-time\">{ago}</span><span class=\"tl-dot {tone}\"></span><div><strong>{title}</strong><small>{detail}</small></div></div>", .{ .ago = data.ago(statement.columnInt(0), ctx.now()), .tone = if (is_page) "" else "blue", .title = if (is_page) statement.columnText(3) else statement.columnText(2), .detail = if (is_page) "Page view" else statement.columnText(3) });
+        try ui.rankRow(w, arena, .{ .width = @as(f64, @floatFromInt(count)) / @as(f64, @floatFromInt(top)) * 80 + 8, .bar = "var(--brand-wash)", .name = try arena.dupe(u8, pages.columnText(0)), .value = try std.fmt.allocPrint(arena, "{d}", .{count}) });
     }
     try w.writeAll("</div>");
-    if (!any) try w.writeAll("<p class=\"hint\">Quiet right now. New visits appear here within seconds.</p>");
-    try w.writeAll("</section>");
+    if (!any) try w.writeAll("<p class=\"hint\">No one is reading a page right now. Pages appear here the moment someone arrives.</p>");
+    // A table on wide screens, a two-line list on phones.
+    try w.writeAll("</section></div><section class=\"card card-flush\"><div class=\"card-head table-head\"><h2>Latest page views</h2></div><div class=\"feed\" role=\"table\"><div class=\"feed-row feed-head\" role=\"row\"><span role=\"columnheader\">When</span><span role=\"columnheader\">Page</span><span role=\"columnheader\">Source</span><span role=\"columnheader\">Country</span><span role=\"columnheader\">Device</span></div>");
+    var latest = try ctx.db.prepare(arena, "SELECT received_at_ms,path,coalesce(nullif(utm_source,''),nullif(referrer_host,''),'direct'),coalesce(country,''),device FROM page_views WHERE site_id=? AND received_at_ms>=? AND internal=0 AND traffic_class IN ('human_like','unknown') ORDER BY received_at_ms DESC LIMIT 10");
+    defer latest.deinit();
+    try latest.bindInt(1, site.id);
+    try latest.bindInt(2, now - data.day_ms);
+    var rows: usize = 0;
+    while (try latest.step() == .row) : (rows += 1) {
+        const at = latest.columnInt(0);
+        const fresh = now - at < 60_000;
+        try render(w, "<div class=\"feed-row\" role=\"row\"><span class=\"feed-when {when}\" role=\"cell\">{ago}</span><span class=\"feed-path\" role=\"cell\">{path}</span><span class=\"feed-source\" role=\"cell\">{source}</span><span class=\"feed-country\" role=\"cell\">{country}</span><span class=\"feed-device secondary\" role=\"cell\">{device}</span></div>", .{
+            .when = if (fresh) "good strong" else "muted",
+            .ago = if (fresh) "now" else try std.fmt.allocPrint(arena, "{f}", .{data.ago(at, now)}),
+            .path = latest.columnText(1),
+            .source = try overview.sourceLabel(arena, latest.columnText(2)),
+            .country = @import("../geo.zig").countryName(latest.columnText(3)),
+            .device = capitalized(arena, latest.columnText(4)),
+        });
+    }
+    if (rows == 0) try w.writeAll("<p class=\"hint pad-20\">No page views in the last 24 hours.</p>");
+    try w.writeAll("</div></section></section>");
+    return layout.end(ctx);
 }
 
 // ---------------------------------------------------------------- Audience
@@ -518,23 +570,26 @@ pub fn audience(ctx: *Ctx, site: data.Site) !void {
         }
     };
     try w.writeAll("<div class=\"metrics\">");
-    const tiles = [_]struct { []const u8, []const u8, f64, f64, u8 }{
-        .{ "Visitor-days", "audience", @floatFromInt(now_stats.visitors), @floatFromInt(prev_stats.visitors), 0 },
-        .{ "Pages per visitor", "pages", ratio.of(now_stats.views, now_stats.visitors), ratio.of(prev_stats.views, prev_stats.visitors), 1 },
-        .{ "Engaged views", "zap", ratio.of(now_stats.engaged, now_stats.views) * 100, ratio.of(prev_stats.engaged, prev_stats.views) * 100, 2 },
-        .{ "Active time per visitor", "clock", ratio.of(now_stats.active, now_stats.visitors), ratio.of(prev_stats.active, prev_stats.visitors), 3 },
+    const tiles = [_]struct { []const u8, f64, f64, u8 }{
+        .{ "Visitor-days", @floatFromInt(now_stats.visitors), @floatFromInt(prev_stats.visitors), 0 },
+        .{ "Pages per visitor", ratio.of(now_stats.views, now_stats.visitors), ratio.of(prev_stats.views, prev_stats.visitors), 1 },
+        .{ "Engaged views", ratio.of(now_stats.engaged, now_stats.views) * 100, ratio.of(prev_stats.engaged, prev_stats.views) * 100, 2 },
+        .{ "Active time per visitor", ratio.of(now_stats.active, now_stats.visitors), ratio.of(prev_stats.active, prev_stats.visitors), 3 },
     };
-    for (tiles, 0..) |tile, index| try ui.metric(w, arena, .{
-        .tone = ui.tones[index],
-        .icon = tile[1],
+    const format = struct {
+        fn text(a: std.mem.Allocator, kind: u8, value: f64) ![]const u8 {
+            return switch (kind) {
+                0 => try std.fmt.allocPrint(a, "{f}", .{html.int(@intFromFloat(value))}),
+                1 => try std.fmt.allocPrint(a, "{d:.1}", .{value}),
+                2 => try std.fmt.allocPrint(a, "{d:.0}%", .{value}),
+                else => try std.fmt.allocPrint(a, "{f}", .{html.duration(@intFromFloat(value))}),
+            };
+        }
+    };
+    for (tiles) |tile| try ui.metric(w, arena, .{
         .label = tile[0],
-        .value = switch (tile[4]) {
-            0 => try std.fmt.allocPrint(arena, "{f}", .{html.int(@intFromFloat(tile[2]))}),
-            1 => try std.fmt.allocPrint(arena, "{d:.1}", .{tile[2]}),
-            2 => try std.fmt.allocPrint(arena, "{d:.0}%", .{tile[2]}),
-            else => try std.fmt.allocPrint(arena, "{f}", .{html.duration(@intFromFloat(tile[2]))}),
-        },
-        .change = if (view.compare) try ui.change(arena, tile[2], tile[3], false, try view.range.versus(arena)) else "",
+        .value = try format.text(arena, tile[3], tile[1]),
+        .change = if (view.compare) try ui.change(arena, tile[1], tile[2], false, try ui.versus(arena, try format.text(arena, tile[3], tile[2]))) else "",
     });
     try w.writeAll("</div>");
     try w.writeAll("<div class=\"grid grid-2\"><section class=\"card\"><div class=\"card-head\"><h2>Technology</h2></div>");

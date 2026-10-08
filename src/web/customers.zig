@@ -53,11 +53,10 @@ fn conversionBase(ctx: *Ctx, view: data.View, start: i64, end: i64) !i64 {
     return (try data.totals(ctx.arena, ctx.db, view, start, end)).visitor_days;
 }
 
-fn metricTile(w: *std.Io.Writer, arena: std.mem.Allocator, index: usize, icon_name: []const u8, label: []const u8, value: []const u8, current: f64, previous: f64, compare: bool, suffix: []const u8, points: bool) !void {
+fn metricTile(w: *std.Io.Writer, arena: std.mem.Allocator, label: []const u8, value: []const u8, before: []const u8, current: f64, previous: f64, compare: bool, points: bool) !void {
     const delta = current - previous;
+    const suffix = try ui.versus(arena, before);
     try ui.metric(w, arena, .{
-        .tone = ui.tones[index],
-        .icon = icon_name,
         .label = label,
         .value = value,
         .change = if (!compare) "" else if (points)
@@ -93,14 +92,14 @@ pub fn revenue(ctx: *Ctx, site: data.Site) !void {
         }
     };
     try w.writeAll("<div class=\"metrics\">");
-    const suffix = try range.versus(arena);
-    try metricTile(w, arena, 0, "revenue", "Revenue", try std.fmt.allocPrint(arena, "{f}", .{html.money(now.revenue, site.currency)}), @floatFromInt(now.revenue), @floatFromInt(before.revenue), view.compare, suffix, false);
-    try metricTile(w, arena, 1, "cart", "Orders", try std.fmt.allocPrint(arena, "{f}", .{html.int(now.orders)}), @floatFromInt(now.orders), @floatFromInt(before.orders), view.compare, suffix, false);
+    try metricTile(w, arena, "Revenue", try std.fmt.allocPrint(arena, "{f}", .{html.money(now.revenue, site.currency)}), try std.fmt.allocPrint(arena, "{f}", .{html.money(before.revenue, site.currency)}), @floatFromInt(now.revenue), @floatFromInt(before.revenue), view.compare, false);
+    try metricTile(w, arena, "Orders", try std.fmt.allocPrint(arena, "{f}", .{html.int(now.orders)}), try std.fmt.allocPrint(arena, "{f}", .{html.int(before.orders)}), @floatFromInt(now.orders), @floatFromInt(before.orders), view.compare, false);
     const aov_now = if (now.orders == 0) 0 else @divTrunc(now.revenue + now.refunds, now.orders);
     const aov_before = if (before.orders == 0) 0 else @divTrunc(before.revenue + before.refunds, before.orders);
-    try metricTile(w, arena, 2, "events", "Average order", try std.fmt.allocPrint(arena, "{f}", .{html.money(aov_now, site.currency)}), @floatFromInt(aov_now), @floatFromInt(aov_before), view.compare, suffix, false);
+    try metricTile(w, arena, "Average order", try std.fmt.allocPrint(arena, "{f}", .{html.money(aov_now, site.currency)}), try std.fmt.allocPrint(arena, "{f}", .{html.money(aov_before, site.currency)}), @floatFromInt(aov_now), @floatFromInt(aov_before), view.compare, false);
     const rate_now = ratio.of(now.orders, visits_now) * 100;
-    try metricTile(w, arena, 3, "funnels", "Conversion rate", try std.fmt.allocPrint(arena, "{d:.1}%", .{rate_now}), rate_now, ratio.of(before.orders, visits_before) * 100, view.compare, suffix, true);
+    const rate_before = ratio.of(before.orders, visits_before) * 100;
+    try metricTile(w, arena, "Conversion rate", try std.fmt.allocPrint(arena, "{d:.1}%", .{rate_now}), try std.fmt.allocPrint(arena, "{d:.1}%", .{rate_before}), rate_now, rate_before, view.compare, true);
     try w.writeAll("</div>");
 
     try w.writeAll("<div class=\"grid split-main mt-16\">");
@@ -205,7 +204,7 @@ fn checkout(ctx: *Ctx, view: data.View) !void {
                 worst = index;
             }
         }
-        try ui.rankRow(w, arena, .{ .width = @max(8, @as(f64, @floatFromInt(counts[index])) / @as(f64, @floatFromInt(top)) * 80), .bar = "#ebe6f3", .name = step[1], .value = try std.fmt.allocPrint(arena, "{f}", .{html.int(counts[index])}) });
+        try ui.rankRow(w, arena, .{ .width = @max(8, @as(f64, @floatFromInt(counts[index])) / @as(f64, @floatFromInt(top)) * 80), .bar = "var(--violet-wash)", .name = step[1], .value = try std.fmt.allocPrint(arena, "{f}", .{html.int(counts[index])}) });
     }
     try w.writeAll("</div>");
     if (worst > 0 and counts[worst - 1] > 0) {

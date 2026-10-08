@@ -10,7 +10,17 @@ const Ctx = ctx_mod.Ctx;
 const esc = html.esc;
 const render = html.render;
 
-pub const Nav = enum { overview, dashboards, reports, pages, acquisition, search, audience, events, funnels, sessions, heatmaps, revenue, retention, people, performance, errors, health, settings, setup, none };
+pub const Nav = enum { overview, live, dashboards, reports, pages, acquisition, search, audience, events, funnels, sessions, heatmaps, revenue, retention, people, performance, errors, health, settings, setup, more, none };
+
+const Item = struct { Nav, []const u8, []const u8, []const u8 };
+/// The workspace's sections in sidebar order; More lists the same on phones.
+pub const groups = [_]struct { []const u8, []const Item }{
+    .{ "", &.{ .{ .overview, "", "overview", "Overview" }, .{ .live, "/live", "live", "Live" }, .{ .dashboards, "/dashboards", "dashboards", "Dashboards" }, .{ .reports, "/reports", "reports", "Reports & alerts" } } },
+    .{ "Traffic", &.{ .{ .pages, "/pages", "pages", "Pages" }, .{ .acquisition, "/acquisition", "sources", "Acquisition" }, .{ .search, "/search", "search", "Search" }, .{ .audience, "/audience", "map-pin", "Audience" } } },
+    .{ "Behaviour", &.{ .{ .events, "/events", "events", "Events & goals" }, .{ .funnels, "/funnels", "funnels", "Funnels" }, .{ .sessions, "/sessions", "play-circle", "Sessions & replays" }, .{ .heatmaps, "/heatmaps", "heatmap", "Heatmaps" } } },
+    .{ "Customers", &.{ .{ .revenue, "/revenue", "revenue", "Revenue" }, .{ .retention, "/retention", "retention", "Retention" }, .{ .people, "/people", "people", "People" } } },
+    .{ "Quality", &.{ .{ .performance, "/performance", "performance", "Performance" }, .{ .errors, "/errors", "bug", "Errors" } } },
+};
 
 pub const Shell = struct {
     title: []const u8,
@@ -35,10 +45,10 @@ pub fn icon(w: *std.Io.Writer, name: []const u8) !void {
 pub fn document(ctx: *Ctx, title: []const u8) !void {
     try render(ctx.w(),
         \\<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-        \\<title>{title}</title><meta name="theme-color" content="#F7F5F4"><link rel="icon" href="{favicon}" type="image/svg+xml">
-        \\<link rel="preload" href="{roboto}" as="font" type="font/woff2" crossorigin><link rel="preload" href="{quando}" as="font" type="font/woff2" crossorigin>
+        \\<title>{title}</title><meta name="theme-color" content="#F7F5F4" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#171412" media="(prefers-color-scheme: dark)"><link rel="icon" href="{favicon}" type="image/svg+xml">
+        \\<link rel="preload" href="{quando}" as="font" type="font/woff2" crossorigin>
         \\<link rel="stylesheet" href="{css}"><script src="{js}" defer></script></head><body>
-    , .{ .title = title, .favicon = assets.path("favicon.svg"), .roboto = assets.path("roboto.woff2"), .quando = assets.path("quando.woff2"), .css = assets.path("app.css"), .js = assets.path("app.js") });
+    , .{ .title = title, .favicon = assets.path("favicon.svg"), .quando = assets.path("quando.woff2"), .css = assets.path("app.css"), .js = assets.path("app.js") });
 }
 
 pub fn begin(ctx: *Ctx, shell: Shell) !void {
@@ -56,30 +66,19 @@ pub fn begin(ctx: *Ctx, shell: Shell) !void {
             \\<button class="site-switch" popovertarget="site-menu" aria-label="Switch website"><span class="site-avatar">{initial}</span><div><strong>{title}</strong><small>{host}</small></div>
         , .{ .initial = &[_]u8{site.initial()}, .title = site.title(), .host = site.host() });
         try icon(w, "chevrons-up-down");
-        try w.writeAll("</button><div id=\"site-menu\" popover class=\"pop\" data-anchor=\".site-switch\"><div class=\"menu-label\">Websites</div>");
-        for (shell.sites) |other| {
-            try render(w, "<a class=\"menu-item\" href=\"/{slug}\"><span class=\"site-avatar site-avatar-s\">{initial}</span>{title}", .{ .slug = other.slug, .initial = &[_]u8{other.initial()}, .title = other.title() });
-            if (other.id == site.id) try icon(w, "check");
-            try w.writeAll("</a>");
-        }
-        try w.writeAll("<div class=\"menu-sep\"></div><a class=\"menu-item\" href=\"/setup\">");
-        try icon(w, "plus");
-        try w.writeAll("Add a website</a></div><button class=\"search-trigger\" data-palette type=\"button\">");
+        try w.writeAll("</button><button class=\"search-trigger\" data-palette type=\"button\">");
         try icon(w, "sparkles");
         try w.writeAll("<span>Search or ask…</span><kbd>⌘K</kbd></button>");
-        const groups = [_]struct { []const u8, []const struct { Nav, []const u8, []const u8, []const u8 } }{
-            .{ "", &.{ .{ .overview, "", "overview", "Overview" }, .{ .dashboards, "/dashboards", "dashboards", "Dashboards" }, .{ .reports, "/reports", "reports", "Reports & alerts" } } },
-            .{ "Traffic", &.{ .{ .pages, "/pages", "pages", "Pages" }, .{ .acquisition, "/acquisition", "sources", "Acquisition" }, .{ .search, "/search", "search", "Search" }, .{ .audience, "/audience", "map-pin", "Audience" } } },
-            .{ "Behaviour", &.{ .{ .events, "/events", "events", "Events & goals" }, .{ .funnels, "/funnels", "funnels", "Funnels" }, .{ .sessions, "/sessions", "play-circle", "Sessions & replays" }, .{ .heatmaps, "/heatmaps", "heatmap", "Heatmaps" } } },
-            .{ "Customers", &.{ .{ .revenue, "/revenue", "revenue", "Revenue" }, .{ .retention, "/retention", "retention", "Retention" }, .{ .people, "/people", "people", "People" } } },
-            .{ "Quality", &.{ .{ .performance, "/performance", "performance", "Performance" }, .{ .errors, "/errors", "bug", "Errors" } } },
-        };
+        const online = try data.online(ctx.arena, ctx.db, site.id, ctx.now());
         for (groups) |group| {
             if (group[0].len != 0) try render(w, "<div class=\"nav-group\">{name}</div>", .{ .name = group[0] });
             for (group[1]) |item| {
-                try render(w, "<a class=\"nav\" href=\"/{slug}{suffix}{!carry}\"{!current}>", .{ .slug = site.slug, .suffix = item[1], .carry = try std.fmt.allocPrint(ctx.arena, "{f}", .{esc(shell.carry)}), .current = current(shell.nav == item[0]) });
+                try render(w, "<a class=\"nav\" href=\"/{slug}{suffix}{!carry}\"{!current}>", .{ .slug = site.slug, .suffix = item[1], .carry = if (item[0] == .live) "" else try std.fmt.allocPrint(ctx.arena, "{f}", .{esc(shell.carry)}), .current = current(shell.nav == item[0]) });
                 try icon(w, item[2]);
-                try render(w, "<span>{label}</span></a>", .{ .label = item[3] });
+                try render(w, "<span>{label}</span>", .{ .label = item[3] });
+                // People online now, kept current by the live stream.
+                if (item[0] == .live) try render(w, "<b class=\"count{!quiet}\" data-live-count>{online}</b>", .{ .quiet = if (online == 0) " quiet" else "", .online = online });
+                try w.writeAll("</a>");
             }
         }
     }
@@ -105,9 +104,60 @@ pub fn begin(ctx: *Ctx, shell: Shell) !void {
     }
     try w.writeAll("</div></nav>");
     if (shell.site) |site| {
+        // Outside the sidebar, which phones hide: the phone bar opens it too.
+        try w.writeAll("<div id=\"site-menu\" popover class=\"pop\" data-anchor=\".site-switch\"><div class=\"menu-label\">Websites</div>");
+        for (shell.sites) |other| {
+            try render(w, "<a class=\"menu-item\" href=\"/{slug}\"><span class=\"site-avatar site-avatar-s\">{initial}</span>{title}", .{ .slug = other.slug, .initial = &[_]u8{other.initial()}, .title = other.title() });
+            if (other.id == site.id) try icon(w, "check");
+            try w.writeAll("</a>");
+        }
+        try w.writeAll("<div class=\"menu-sep\"></div><a class=\"menu-item\" href=\"/setup\">");
+        try icon(w, "plus");
+        try w.writeAll("Add a website</a></div>");
+    }
+    if (shell.site) |site| {
         try render(w, "<main class=\"main\" data-site=\"{slug}\"{!view}>", .{ .slug = site.slug, .view = if (shell.has_view) try html.print(ctx.arena, " data-view=\"{carry}\"", .{ .carry = shell.carry }) else "" });
     } else try w.writeAll("<main class=\"main\">");
     try w.writeAll("<div class=\"panel\" id=\"panel\">");
+    if (shell.site) |site| {
+        // Phones: the site switcher and settings float above the page.
+        try render(w, "<div class=\"phone-bar\"><button class=\"phone-site glass\" type=\"button\" popovertarget=\"site-menu\" aria-label=\"Switch website\"><img src=\"{logo}\" alt=\"\"><span><strong>{title}</strong><small>{host}</small></span>", .{ .logo = assets.path("favicon.svg"), .title = site.title(), .host = site.host() });
+        try icon(w, "chevrons-up-down");
+        try render(w, "</button><a class=\"phone-round glass\" href=\"/settings?site={slug}\" aria-label=\"Settings\">", .{ .slug = site.slug });
+        try icon(w, "settings");
+        try w.writeAll("</a></div>");
+    }
+}
+
+/// Phones: every section without a tab of its own, grouped as in the sidebar.
+pub fn more(ctx: *Ctx, site: data.Site, shell: Shell) !void {
+    try begin(ctx, shell);
+    try head(ctx, .{ .title = "More" });
+    const w = ctx.w();
+    const tabs = [_]Nav{ .overview, .live, .pages, .acquisition };
+    for (groups) |group| {
+        if (group[0].len != 0) try render(w, "<div class=\"overline more-head\">{name}</div>", .{ .name = group[0] });
+        try w.writeAll("<nav class=\"card card-flush more-list\">");
+        for (group[1]) |item| {
+            if (std.mem.indexOfScalar(Nav, &tabs, item[0]) != null) continue;
+            try render(w, "<a class=\"more-row\" href=\"/{slug}{suffix}\">", .{ .slug = site.slug, .suffix = item[1] });
+            try icon(w, item[2]);
+            try render(w, "<span>{label}</span>", .{ .label = item[3] });
+            try icon(w, "chevron-right");
+            try w.writeAll("</a>");
+        }
+        try w.writeAll("</nav>");
+    }
+    try render(w, "<nav class=\"card card-flush more-list mt-16\"><a class=\"more-row\" href=\"/{slug}/health\">", .{ .slug = site.slug });
+    try icon(w, "quality");
+    try w.writeAll("<span>Data health</span>");
+    try icon(w, "chevron-right");
+    try render(w, "</a><a class=\"more-row\" href=\"/settings?site={slug}\">", .{ .slug = site.slug });
+    try icon(w, "settings");
+    try w.writeAll("<span>Settings</span>");
+    try icon(w, "chevron-right");
+    try w.writeAll("</a></nav>");
+    return end(ctx);
 }
 
 fn current(yes: bool) []const u8 {
@@ -120,29 +170,27 @@ pub fn end(ctx: *Ctx) !void {
     const w = ctx.w();
     try w.writeAll("</div></main>");
     if (shell.site) |site| {
-        try w.writeAll("<nav class=\"tabbar\" aria-label=\"Sections\">");
-        const Tab = struct { Nav, []const u8, []const u8, []const u8 };
-        // Full mode puts replays and people within reach; other modes keep sources and alerts.
-        const tabs: []const Tab = if (site.mode == .full) &.{
-            .{ .overview, "", "overview", "Overview" },
-            .{ .pages, "/pages", "pages", "Pages" },
-            .{ .sessions, "/sessions", "play-circle", "Replays" },
-            .{ .people, "/people", "people", "People" },
-            .{ .settings, "", "menu", "More" },
-        } else &.{
+        try w.writeAll("<nav class=\"tabbar glass\" aria-label=\"Sections\">");
+        const tabs = [_]Item{
             .{ .overview, "", "overview", "Overview" },
             .{ .pages, "/pages", "pages", "Pages" },
             .{ .acquisition, "/acquisition", "sources", "Sources" },
-            .{ .reports, "/reports", "reports", "Alerts" },
-            .{ .settings, "", "menu", "More" },
+            .{ .live, "/live", "live", "Live" },
+            .{ .more, "/more", "more", "More" },
         };
+        // Sections without a tab of their own light up More.
+        const shown = for (tabs) |tab| {
+            if (tab[0] == shell.nav) break shell.nav;
+        } else Nav.more;
         for (tabs) |tab| {
-            try render(w, "<a href=\"{href}\"{!current}>", .{
-                .href = if (tab[0] == .settings) try std.fmt.allocPrint(ctx.arena, "/settings?site={s}", .{site.slug}) else try std.fmt.allocPrint(ctx.arena, "/{s}{s}{s}", .{ site.slug, tab[1], shell.carry }),
-                .current = current(shell.nav == tab[0]),
+            try render(w, "<a href=\"/{slug}{suffix}{!carry}\"{!current}>", .{
+                .slug = site.slug,
+                .suffix = tab[1],
+                .carry = if (tab[0] == .live or tab[0] == .more) "" else try std.fmt.allocPrint(ctx.arena, "{f}", .{esc(shell.carry)}),
+                .current = current(shown == tab[0]),
             });
             try icon(w, tab[2]);
-            try render(w, "{label}</a>", .{ .label = tab[3] });
+            try render(w, "<span>{label}</span></a>", .{ .label = tab[3] });
         }
         try w.writeAll("</nav>");
     }
@@ -225,7 +273,8 @@ fn controls(ctx: *Ctx, view: data.View, options: Head) !void {
     });
     try render(w, "<button type=\"button\" popovertarget=\"range-pop\" aria-label=\"Choose dates\"{!current}>", .{ .current = if (range.kind == .custom) " aria-current=\"true\"" else "" });
     try icon(w, "calendar");
-    if (range.kind == .custom) try w.print("<span class=\"range-dates\">{f}</span>", .{range.text(.button)});
+    // The segment always says what it is: the chosen dates, or Custom.
+    if (range.kind == .custom) try w.print("<span class=\"range-dates\">{f}</span>", .{range.text(.button)}) else try w.writeAll("<span class=\"range-dates\">Custom</span>");
     try w.writeAll("</button></nav>");
     try rangePopover(ctx, view, options.path);
     if (options.compare) {

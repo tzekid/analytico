@@ -1,7 +1,5 @@
 Third-party assets embedded in the workspace
 
-fonts/roboto.woff2      Roboto, Copyright 2011 The Roboto Project Authors.
-                        SIL Open Font License 1.1. Latin subset, weights 400–700.
 fonts/quando.woff2      Quando, Copyright 2011 Joana Correia (joana@joanacorreia.com).
                         SIL Open Font License 1.1. Latin subset.
 fonts/quicksand.woff2   Quicksand, Copyright 2011 The Quicksand Project Authors.

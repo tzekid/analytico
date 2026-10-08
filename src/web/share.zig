@@ -131,14 +131,14 @@ fn sharePage(ctx: *Ctx, token: []const u8) !void {
     const previous = try data.totals(arena, ctx.db, view, range.prev_start_ms, range.prev_end_ms);
     const now_sales = try customers.sales(ctx.arena, ctx.db, view, range.start_ms, range.end_ms);
     const before_sales = try customers.sales(ctx.arena, ctx.db, view, range.prev_start_ms, range.prev_end_ms);
-    try tile(ctx, view, 0, "audience", "Visitors / day", try std.fmt.allocPrint(arena, "{f}", .{html.int(@intFromFloat(@round(current.metric(.visitors, range))))}), current.metric(.visitors, range), previous.metric(.visitors, range), try data.series(arena, ctx.db, view, .visitors, range.start_ms));
-    try tile(ctx, view, 1, "pages", "Page views", try std.fmt.allocPrint(arena, "{f}", .{html.int(current.views)}), @floatFromInt(current.views), @floatFromInt(previous.views), try data.series(arena, ctx.db, view, .views, range.start_ms));
+    try tile(ctx, "Visitors / day", try std.fmt.allocPrint(arena, "{f}", .{html.int(@intFromFloat(@round(current.metric(.visitors, range))))}), try std.fmt.allocPrint(arena, "{f}", .{html.int(@intFromFloat(@round(previous.metric(.visitors, range))))}), current.metric(.visitors, range), previous.metric(.visitors, range));
+    try tile(ctx, "Page views", try std.fmt.allocPrint(arena, "{f}", .{html.int(current.views)}), try std.fmt.allocPrint(arena, "{f}", .{html.int(previous.views)}), @floatFromInt(current.views), @floatFromInt(previous.views));
     if (now_sales.orders > 0 or before_sales.orders > 0) {
-        try tile(ctx, view, 2, "revenue", "Revenue", try std.fmt.allocPrint(arena, "{f}", .{html.money(now_sales.revenue, site.currency)}), @floatFromInt(now_sales.revenue), @floatFromInt(before_sales.revenue), null);
-        try tile(ctx, view, 3, "cart", "Orders", try std.fmt.allocPrint(arena, "{f}", .{html.int(now_sales.orders)}), @floatFromInt(now_sales.orders), @floatFromInt(before_sales.orders), null);
+        try tile(ctx, "Revenue", try std.fmt.allocPrint(arena, "{f}", .{html.money(now_sales.revenue, site.currency)}), try std.fmt.allocPrint(arena, "{f}", .{html.money(before_sales.revenue, site.currency)}), @floatFromInt(now_sales.revenue), @floatFromInt(before_sales.revenue));
+        try tile(ctx, "Orders", try std.fmt.allocPrint(arena, "{f}", .{html.int(now_sales.orders)}), try std.fmt.allocPrint(arena, "{f}", .{html.int(before_sales.orders)}), @floatFromInt(now_sales.orders), @floatFromInt(before_sales.orders));
     } else {
-        try tile(ctx, view, 2, "performance", "Active time", try std.fmt.allocPrint(arena, "{f}", .{html.duration(current.active_ms)}), @floatFromInt(current.active_ms), @floatFromInt(previous.active_ms), try data.series(arena, ctx.db, view, .active, range.start_ms));
-        try tile(ctx, view, 3, "calendar", "Visitor-days", try std.fmt.allocPrint(arena, "{f}", .{html.int(current.visitor_days)}), @floatFromInt(current.visitor_days), @floatFromInt(previous.visitor_days), null);
+        try tile(ctx, "Active time", try std.fmt.allocPrint(arena, "{f}", .{html.duration(current.active_ms)}), try std.fmt.allocPrint(arena, "{f}", .{html.duration(previous.active_ms)}), @floatFromInt(current.active_ms), @floatFromInt(previous.active_ms));
+        try tile(ctx, "Visitor-days", try std.fmt.allocPrint(arena, "{f}", .{html.int(current.visitor_days)}), try std.fmt.allocPrint(arena, "{f}", .{html.int(previous.visitor_days)}), @floatFromInt(current.visitor_days), @floatFromInt(previous.visitor_days));
     }
     try w.print("</div><section class=\"card chart-card mt-16\"><div class=\"chart-head\"><h2>Page views</h2><div class=\"legend\"><span class=\"this\">{f}</span><span class=\"prev\">{f}</span></div></div>", .{ range.text(.this), range.text(.previous) });
     const names = try overview.labels(arena, range);
@@ -168,8 +168,8 @@ fn passwordPage(ctx: *Ctx, link: Link, problem: []const u8) !void {
     return ctx.html();
 }
 
-fn tile(ctx: *Ctx, view: data.View, index: usize, icon_name: []const u8, label: []const u8, value: []const u8, current: f64, previous: f64, series: ?[]const f64) !void {
-    try ui.metric(ctx.w(), ctx.arena, .{ .tone = ui.tones[index], .icon = icon_name, .label = label, .value = value, .spark = series, .change = try ui.change(ctx.arena, current, previous, false, try view.range.versus(ctx.arena)) });
+fn tile(ctx: *Ctx, label: []const u8, value: []const u8, before: []const u8, current: f64, previous: f64) !void {
+    try ui.metric(ctx.w(), ctx.arena, .{ .label = label, .value = value, .change = try ui.change(ctx.arena, current, previous, false, try ui.versus(ctx.arena, before)) });
 }
 
 fn countries(ctx: *Ctx, view: data.View, total: i64) !void {

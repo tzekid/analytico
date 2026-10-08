@@ -449,7 +449,7 @@ fn channels(ctx: *Ctx, view: data.View) !void {
         };
         total += statement.columnInt(2);
     }
-    const colors = [_][]const u8{ "#A0948E", "#0057AE", "#644A9B", "#D64937", "#C77D12", "#1F8A87", "#6F625D", "#D9D2CE" };
+    const colors = [_][]const u8{ "var(--muted)", "var(--blue)", "var(--violet)", "var(--brand)", "var(--amber)", "var(--teal)", "var(--ink-2)", "var(--border-strong)" };
     try w.writeAll("<div class=\"grid grid-2\"><section class=\"card\">");
     try ui.cardHead(w, "Channel mix", "<span class=\"meta\">Share of page views</span>");
     try w.writeAll("<div class=\"share-bar mb-16\">");

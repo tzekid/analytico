@@ -1025,12 +1025,12 @@ pub fn searchPage(ctx: *Ctx, site: data.Site) !void {
     const ctr_before = if (before.impressions == 0) 0 else @as(f64, @floatFromInt(before.clicks)) / @as(f64, @floatFromInt(before.impressions)) * 100;
     try w.writeAll("<div class=\"metrics\">");
     const tiles = [_]struct { []const u8, []const u8, []const u8, f64, f64, bool }{
-        .{ "search", "Clicks from Google", try std.fmt.allocPrint(arena, "{f}", .{html.int(now_totals.clicks)}), @floatFromInt(now_totals.clicks), @floatFromInt(before.clicks), false },
-        .{ "eye", "Impressions", try std.fmt.allocPrint(arena, "{f}", .{html.int(now_totals.impressions)}), @floatFromInt(now_totals.impressions), @floatFromInt(before.impressions), false },
-        .{ "arrow-up-right", "Click-through rate", try std.fmt.allocPrint(arena, "{d:.1}%", .{ctr_now}), ctr_now, ctr_before, false },
-        .{ "flag", "Average position", try std.fmt.allocPrint(arena, "{d:.1}", .{now_totals.position}), now_totals.position, before.position, true },
+        .{ "Clicks from Google", try std.fmt.allocPrint(arena, "{f}", .{html.int(now_totals.clicks)}), try std.fmt.allocPrint(arena, "{f}", .{html.int(before.clicks)}), @floatFromInt(now_totals.clicks), @floatFromInt(before.clicks), false },
+        .{ "Impressions", try std.fmt.allocPrint(arena, "{f}", .{html.int(now_totals.impressions)}), try std.fmt.allocPrint(arena, "{f}", .{html.int(before.impressions)}), @floatFromInt(now_totals.impressions), @floatFromInt(before.impressions), false },
+        .{ "Click-through rate", try std.fmt.allocPrint(arena, "{d:.1}%", .{ctr_now}), try std.fmt.allocPrint(arena, "{d:.1}%", .{ctr_before}), ctr_now, ctr_before, false },
+        .{ "Average position", try std.fmt.allocPrint(arena, "{d:.1}", .{now_totals.position}), try std.fmt.allocPrint(arena, "{d:.1}", .{before.position}), now_totals.position, before.position, true },
     };
-    for (tiles, 0..) |entry, index| try ui.metric(w, arena, .{ .tone = ui.tones[index], .icon = entry[0], .label = entry[1], .value = entry[2], .change = if (view.compare) try ui.change(arena, entry[3], entry[4], entry[5], try range.versus(arena)) else "" });
+    for (tiles) |entry| try ui.metric(w, arena, .{ .label = entry[0], .value = entry[1], .change = if (view.compare) try ui.change(arena, entry[3], entry[4], entry[5], try ui.versus(arena, entry[2])) else "" });
     try w.writeAll("</div>");
     // Queries, joined to on-site engagement and goals of their landing pages.
     var statement = try ctx.db.prepare(arena,

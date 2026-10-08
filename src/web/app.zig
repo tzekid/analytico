@@ -19,6 +19,7 @@ const customers = @import("customers.zig");
 const heatmaps = @import("heatmaps.zig");
 const share = @import("share.zig");
 const integrations = @import("integrations.zig");
+const journeys = @import("journeys.zig");
 
 const Ctx = ctx_mod.Ctx;
 
@@ -279,6 +280,8 @@ fn route(ctx: *Ctx) !void {
             if (is(page, "people")) return customers.people(ctx, site);
             if (is(page, "performance")) return analyze.performance(ctx, site);
             if (is(page, "health")) return manage.health(ctx, site);
+            if (is(page, "live")) return journeys.live(ctx, site);
+            if (is(page, "more")) return layout.more(ctx, site, try shell(ctx, site, .more, "More", null));
             if (is(page, "reports")) return manage.reports(ctx, site);
             if (is(page, "dashboards")) return manage.dashboards(ctx, site, null);
             if (is(page, "setup")) return manage.setupPage(ctx, site);

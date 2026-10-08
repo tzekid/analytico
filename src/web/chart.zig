@@ -220,26 +220,6 @@ pub fn trend(arena: std.mem.Allocator, w: *Writer, chart: Trend) !void {
     try w.writeAll("</div></div>");
 }
 
-/// Small area sparkline for metric tiles.
-pub fn spark(arena: std.mem.Allocator, w: *Writer, values: []const f64, color: []const u8) !void {
-    var largest: f64 = 0;
-    for (values) |value| largest = @max(largest, value);
-    const maximum = if (largest <= 0) 1 else largest * 1.15;
-    const projected = try project(arena, values, maximum);
-    const id = std.hash.Wyhash.hash(0, color) % 100000;
-    try w.print(
-        \\<svg class="metric-spark spark" viewBox="0 0 1000 1000" preserveAspectRatio="none" aria-hidden="true"><defs><linearGradient id="s{d}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="{s}" stop-opacity=".22"/><stop offset="1" stop-color="{s}" stop-opacity="0"/></linearGradient></defs>
-    , .{ id, color, color });
-    if (values.len != 0) {
-        try w.writeAll("<path d=\"");
-        try monotonePath(w, projected[0], projected[1], true);
-        try w.print("L1000,1000L0,1000Z\" fill=\"url(#s{d})\"/><path d=\"", .{id});
-        try monotonePath(w, projected[0], projected[1], true);
-        try w.print("\" fill=\"none\" stroke=\"{s}\" stroke-width=\"2\"/>", .{color});
-    }
-    try w.writeAll("</svg>");
-}
-
 test "nice maximum" {
     try std.testing.expectEqual(@as(f64, 4000), niceMax(3400));
     try std.testing.expectEqual(@as(f64, 250), niceMax(210));

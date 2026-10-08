@@ -49,6 +49,8 @@ pub fn sessions(ctx: *Ctx, site: data.Site) !void {
         return layout.end(ctx);
     }
     const tab = ctx.param("tab") orelse "sessions";
+    // Live became its own page.
+    if (std.mem.eql(u8, tab, "live")) return ctx.redirectFmt("/{s}/live", .{site.slug});
     // Without filters the total comes from the daily summaries and each
     // signal from its own small table; filters need the sessions themselves.
     var counts_sql = data.Sql.init(arena);
@@ -81,17 +83,14 @@ pub fn sessions(ctx: *Ctx, site: data.Site) !void {
     defer counts.deinit();
     _ = try counts.step();
     const total = counts.columnInt(0);
-    const online = try data.online(arena, ctx.db, site.id, ctx.now());
     const subtitle = if (site.mode == .full)
         try std.fmt.allocPrint(arena, "{f} sessions · {f} recorded · {f}", .{ html.int(total), html.int(counts.columnInt(1)), view.range })
     else
         try std.fmt.allocPrint(arena, "{f} sessions · {f}", .{ html.int(total), view.range });
     try layout.head(ctx, .{ .title = "Sessions & replays", .subtitle = subtitle, .view = view, .path = path });
-    try ui.tabs(ctx.w(), ctx.arena, view, path, "tab", &.{ .{ "sessions", "Sessions" }, .{ "paths", "Paths" }, .{ "live", try std.fmt.allocPrint(arena, "Live · {d}", .{online}) } }, tab);
+    try ui.tabs(ctx.w(), ctx.arena, view, path, "tab", &.{ .{ "sessions", "Sessions" }, .{ "paths", "Paths" } }, tab);
     if (std.mem.eql(u8, tab, "paths")) {
         try journeys.pathsTab(ctx, view, path);
-    } else if (std.mem.eql(u8, tab, "live")) {
-        try journeys.liveTab(ctx, view);
     } else {
         const signal = std.meta.stringToEnum(Signal, ctx.param("signal") orelse "");
         const w = ctx.w();

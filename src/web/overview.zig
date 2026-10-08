@@ -76,7 +76,7 @@ pub fn sourceRow(ctx: *Ctx, w: *std.Io.Writer, key: []const u8, label: []const u
     const arena = ctx.arena;
     const direct = std.mem.eql(u8, key, "direct");
     const within = std.mem.eql(u8, key, self_referrer);
-    const tone = if (direct or within) Tone{ .color = "#6F625D", .wash = "#F3EFED" } else toneFor(key);
+    const tone = if (direct or within) Tone{ .color = "var(--ink-2)", .wash = "var(--subtle)" } else toneFor(key);
     var avatar: std.Io.Writer.Allocating = .init(arena);
     try sourceAvatar(&avatar.writer, key, label);
     try ui.rankRow(w, arena, .{
@@ -279,16 +279,10 @@ pub fn metricStrip(ctx: *Ctx, view: data.View, base: []const u8, current: data.T
     const w = ctx.w();
     const range = view.range;
     try w.writeAll("<div class=\"metrics\">");
-    const metrics = [_]struct { data.Metric, []const u8, Tone }{
-        .{ .visitors, "audience", tones[0] },
-        .{ .visitor_days, "calendar", tones[1] },
-        .{ .views, "pages", tones[2] },
-        .{ .active, "performance", tones[3] },
-    };
+    const metrics = [_]data.Metric{ .visitors, .visitor_days, .views, .active };
     const customers = @import("customers.zig");
     const sold = try customers.sales(ctx.arena, ctx.db, view, range.start_ms, range.end_ms);
-    for (metrics) |entry| {
-        const metric = entry[0];
+    for (metrics) |metric| {
         // Full mode remembers visitors: show who came back instead of visitor-days.
         if (metric == .visitor_days and view.site.mode == .full) {
             const now_share = try returningShare(ctx, view, range.start_ms, range.end_ms);
@@ -296,12 +290,10 @@ pub fn metricStrip(ctx: *Ctx, view: data.View, base: []const u8, current: data.T
             const delta = ((now_share orelse 0) - (before_share orelse 0)) * 100;
             try ui.metric(w, arena, .{
                 .href = try view.href(arena, try std.fmt.allocPrint(arena, "/{s}/retention", .{view.site.slug}), &.{.{ "m", "" }}),
-                .tone = entry[2],
-                .icon = "retention",
                 .label = "Returning visitors",
                 // A share of nobody is not 0%.
                 .value = if (now_share) |share| try std.fmt.allocPrint(arena, "{d:.0}%", .{share * 100}) else "—",
-                .change = if (!view.compare or now_share == null or before_share == null) "&nbsp;" else try std.fmt.allocPrint(arena, "<span class=\"delta {s}\">{s}{d:.0} {s}</span>{s}", .{ if (@abs(delta) < 0.5) "delta-flat" else if (delta > 0) "delta-up" else "delta-down", if (delta >= 0.5) "+" else if (delta <= -0.5) "−" else "", @abs(delta), if (@round(@abs(delta)) == 1) "pt" else "pts", try range.versus(arena) }),
+                .change = if (!view.compare or now_share == null or before_share == null) "&nbsp;" else try std.fmt.allocPrint(arena, "<span class=\"delta {s}\">{s}{d:.0} {s}</span>{s}", .{ if (@abs(delta) < 0.5) "delta-flat" else if (delta > 0) "delta-up" else "delta-down", if (delta >= 0.5) "+" else if (delta <= -0.5) "−" else "", @abs(delta), if (@round(@abs(delta)) == 1) "pt" else "pts", try ui.versus(arena, try std.fmt.allocPrint(arena, "{d:.0}%", .{before_share.? * 100})) }),
             });
             continue;
         }
@@ -309,35 +301,31 @@ pub fn metricStrip(ctx: *Ctx, view: data.View, base: []const u8, current: data.T
             const before = try customers.sales(ctx.arena, ctx.db, view, range.prev_start_ms, range.prev_end_ms);
             try ui.metric(w, arena, .{
                 .href = try view.href(arena, try std.fmt.allocPrint(arena, "/{s}/revenue", .{view.site.slug}), &.{.{ "m", "" }}),
-                .tone = entry[2],
-                .icon = "revenue",
                 .label = "Revenue",
                 .value = try std.fmt.allocPrint(arena, "{f}", .{html.money(sold.revenue, view.site.currency)}),
-                .change = if (view.compare) try ui.change(arena, @floatFromInt(sold.revenue), @floatFromInt(before.revenue), false, try range.versus(arena)) else "&nbsp;",
+                .change = if (view.compare) try ui.change(arena, @floatFromInt(sold.revenue), @floatFromInt(before.revenue), false, try ui.versus(arena, try std.fmt.allocPrint(arena, "{f}", .{html.money(before.revenue, view.site.currency)}))) else "&nbsp;",
             });
             continue;
         }
         const value = current.metric(metric, range);
-        const series = try data.series(arena, ctx.db, view, metric, range.start_ms);
+        const before = previous.metric(metric, range);
         try ui.metric(w, arena, .{
             .href = try view.href(arena, base, &.{.{ "m", @tagName(metric) }}),
             .current = view.metric == metric,
-            .tone = entry[2],
-            .icon = entry[1],
             // One day is a total, not an average per day.
             .label = if (metric == .visitors and range.oneDay()) "Visitors" else metric.label(),
-            .value = if (metric == .active)
-                try std.fmt.allocPrint(arena, "{f}", .{html.duration(current.active_ms)})
-            else if (value < 10 and value != @round(value))
-                try std.fmt.allocPrint(arena, "{d:.1}", .{value})
-            else
-                try std.fmt.allocPrint(arena, "{f}", .{html.int(@intFromFloat(@round(value)))}),
-            // The bucket still filling up would end every sparkline in a cliff.
-            .spark = series[0 .. range.partial() orelse series.len],
-            .change = if (view.compare) try ui.change(arena, value, previous.metric(metric, range), false, try range.versus(arena)) else "&nbsp;",
+            .value = try metricText(arena, metric, value, current.active_ms),
+            .change = if (view.compare) try ui.change(arena, value, before, false, try ui.versus(arena, try metricText(arena, metric, before, previous.active_ms))) else "&nbsp;",
         });
     }
     try w.writeAll("</div>");
+}
+
+/// A metric as its card shows it: small averages keep a decimal.
+fn metricText(arena: std.mem.Allocator, metric: data.Metric, value: f64, active_ms: i64) ![]const u8 {
+    if (metric == .active) return std.fmt.allocPrint(arena, "{f}", .{html.duration(active_ms)});
+    if (value < 10 and value != @round(value)) return std.fmt.allocPrint(arena, "{d:.1}", .{value});
+    return std.fmt.allocPrint(arena, "{f}", .{html.int(@intFromFloat(@round(value)))});
 }
 
 /// Share of remembered visitor-days whose visitor was first seen on an

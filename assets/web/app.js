@@ -504,6 +504,14 @@
   document.addEventListener("toggle", (event) => {
     const pop = event.target;
     if (!(pop instanceof HTMLElement) || !pop.hasAttribute("popover") || event.newState !== "open") return;
+    // Phones get popovers as sheets from the bottom of the screen.
+    const sheet = matchMedia("(max-width: 720px)").matches;
+    pop.classList.toggle("as-sheet", sheet);
+    if (sheet) {
+      pop.style.left = pop.style.top = "";
+      if (pop.matches("#filter-pop")) setupFilter(pop);
+      return;
+    }
     const anchor = pop.dataset.anchor ? $(pop.dataset.anchor) : null;
     if (!anchor) return;
     const rect = anchor.getBoundingClientRect();
@@ -1183,18 +1191,20 @@
   let stream = null;
   let lastSeen = null;
   function connectLive() {
-    const source = $("[data-stream]")?.dataset.stream;
-    const url = source ? new URL(source, location.href).href : null;
+    const source = $("[data-stream]");
+    const url = source ? new URL(source.dataset.stream, location.href).href : null;
     if (stream && stream.url === url) return;
     stream?.close();
     stream = null;
-    lastSeen = null;
+    // The newest page view the page was drawn with, when it says so.
+    lastSeen = source?.dataset.last ? Number(source.dataset.last) : null;
     if (!url) return;
     stream = new EventSource(url);
     stream.onmessage = (event) => {
       let update;
       try { update = JSON.parse(event.data); } catch { return; }
       $$("[data-live]").forEach((badge) => { badge.textContent = `${update.online} online now`; });
+      $$("[data-live-count]").forEach((count) => { count.textContent = update.online; count.classList.toggle("quiet", update.online === 0); });
       const setup = $("[data-setup-status]");
       if (setup && !setup.classList.contains("ok") && update.last > 0) setupReceived(setup);
       if (lastSeen !== null && update.last !== lastSeen) $$("[data-refresh-live]").forEach(refreshSection);
@@ -1351,6 +1361,11 @@
       error.hidden = !message;
       to.setAttribute("aria-invalid", message ? "true" : "false");
       apply.disabled = Boolean(message) || !from.value || !to.value;
+      // The button names what it will show.
+      if (!apply.disabled) {
+        const days = Math.round((Date.parse(to.value) - Date.parse(from.value)) / 86400000) + 1;
+        apply.textContent = days === 1 ? `Show ${shortDate(from.value)} · hour by hour` : `Show ${shortDate(from.value)} – ${shortDate(to.value)} · ${days} days`;
+      } else apply.textContent = "Show these dates";
     };
     form.addEventListener("input", check);
     check();

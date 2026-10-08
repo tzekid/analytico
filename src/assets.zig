@@ -17,7 +17,6 @@ const list = [_]Asset{
     .{ .name = "app", .extension = "css", .content_type = "text/css; charset=utf-8", .bytes = @embedFile("web_css") },
     .{ .name = "app", .extension = "js", .content_type = "text/javascript; charset=utf-8", .bytes = @embedFile("web_js") },
     .{ .name = "icons", .extension = "svg", .content_type = "image/svg+xml", .bytes = @embedFile("web_icons") },
-    .{ .name = "roboto", .extension = "woff2", .content_type = "font/woff2", .bytes = @embedFile("font_roboto") },
     .{ .name = "quando", .extension = "woff2", .content_type = "font/woff2", .bytes = @embedFile("font_quando") },
     .{ .name = "quicksand", .extension = "woff2", .content_type = "font/woff2", .bytes = @embedFile("font_quicksand") },
     .{ .name = "favicon", .extension = "svg", .content_type = "image/svg+xml", .bytes = @embedFile("web_favicon") },
@@ -86,8 +85,8 @@ pub fn find(request_path: []const u8) ?Asset {
 test "stylesheet loads fonts by their hashed paths" {
     init();
     const css = find(path("app.css")).?.bytes;
-    try std.testing.expect(std.mem.find(u8, css, path("roboto.woff2")) != null);
-    try std.testing.expect(std.mem.find(u8, css, "url(\"roboto.woff2\")") == null);
+    try std.testing.expect(std.mem.find(u8, css, path("quando.woff2")) != null);
+    try std.testing.expect(std.mem.find(u8, css, "url(\"quando.woff2\")") == null);
 }
 
 // ---------------------------------------------------------------- collector scripts

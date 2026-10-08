@@ -109,13 +109,14 @@ pub fn tabs(w: *Writer, arena: std.mem.Allocator, view: data.View, path: []const
 
 pub const Tone = struct { color: []const u8, wash: []const u8 };
 
-/// The workspace's five accent colours, each with its pale background.
+/// The workspace's five accent colours, each with its pale background, as
+/// tokens so they follow light and dark.
 pub const tones = [_]Tone{
-    .{ .color = "#D64937", .wash = "#FBEDEA" },
-    .{ .color = "#0057AE", .wash = "#E6EEF7" },
-    .{ .color = "#644A9B", .wash = "#EFEBF5" },
-    .{ .color = "#1A7471", .wash = "#E5F2F1" },
-    .{ .color = "#9A5B08", .wash = "#F8EEDF" },
+    .{ .color = "var(--brand)", .wash = "var(--brand-wash)" },
+    .{ .color = "var(--blue)", .wash = "var(--tone-blue-wash)" },
+    .{ .color = "var(--violet)", .wash = "var(--violet-wash)" },
+    .{ .color = "var(--teal)", .wash = "var(--teal-wash)" },
+    .{ .color = "var(--warning)", .wash = "var(--amber-wash)" },
 };
 
 /// A card's title row; `aside` is HTML (a meta note or a link).
@@ -136,28 +137,29 @@ pub fn change(arena: std.mem.Allocator, current: f64, previous: f64, invert: boo
 pub const Metric = struct {
     href: []const u8 = "",
     current: bool = false,
-    tone: Tone,
-    icon: []const u8,
     label: []const u8,
     value: []const u8,
-    spark: ?[]const f64 = null,
-    /// HTML: usually `change`, or "&nbsp;" without a comparison.
+    /// HTML: usually `change` with " vs {previous value}", or "&nbsp;"
+    /// without a comparison. The subtitle names the compared period once.
     change: []const u8,
 };
 
-/// A headline number; with `href`, a link (the overview's tiles switch the chart).
+/// A metric card; with `href`, a link (the overview's cards switch the chart).
 pub fn metric(w: *Writer, arena: std.mem.Allocator, m: Metric) !void {
-    try render(w, "<{!tag} class=\"metric\"{!href}{!current}><span class=\"metric-label\"><span class=\"badge\" style=\"background:{wash};color:{color}\">", .{
-        .tag = if (m.href.len != 0) "a" else "div",
+    const tag = if (m.href.len != 0) "a" else "div";
+    try render(w, "<{!tag} class=\"metric\"{!href}{!current}><span class=\"metric-label\">{label}</span><span class=\"metric-value\">{value}</span><span class=\"metric-delta\">{!change}</span></{!tag}>", .{
+        .tag = tag,
         .href = if (m.href.len != 0) try html.print(arena, " href=\"{href}\"", .{ .href = m.href }) else "",
         .current = if (m.current) " aria-current=\"true\"" else "",
-        .wash = m.tone.wash,
-        .color = m.tone.color,
+        .label = m.label,
+        .value = m.value,
+        .change = m.change,
     });
-    try @import("layout.zig").icon(w, m.icon);
-    try render(w, "</span>{label}</span><span class=\"metric-value\">{value}</span>", .{ .label = m.label, .value = m.value });
-    if (m.spark) |values| try @import("chart.zig").spark(arena, w, values, m.tone.color);
-    try render(w, "<span class=\"metric-delta\">{!change}</span></{!tag}>", .{ .change = m.change, .tag = if (m.href.len != 0) "a" else "div" });
+}
+
+/// " vs 1,272": what the change in a metric card compares with.
+pub fn versus(arena: std.mem.Allocator, previous: []const u8) ![]const u8 {
+    return html.print(arena, "<span class=\"vs\">vs {previous}</span>", .{ .previous = previous });
 }
 
 pub const Rank = struct {

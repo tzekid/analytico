@@ -195,7 +195,7 @@ await step("27-replay", "Session replay", "Behaviour", async (p) => {
   await delay(2500);
 }, { full: false, settle: 800 });
 await step("28-paths", "Paths through the site", "Behaviour", go("/fieldnotes/sessions?tab=paths&range=30d"));
-await step("29-live", "Live sessions", "Behaviour", go("/fieldnotes/sessions?tab=live"));
+await step("29-live", "Live", "Live", go("/fieldnotes/live"));
 await step("30-heatmaps", "Heatmaps", "Behaviour", go("/fieldnotes/heatmaps?range=7d"));
 const overlayPage = await desktop.newPage();
 watch(overlayPage);
@@ -344,7 +344,7 @@ await step("74-phone-replay", "Phone: a replay", "Phone", async (p) => {
 await step("75-phone-more", "Phone: the More menu", "Phone", async (p) => {
   await p.goto(`${base}/fieldnotes`);
   await p.locator(".tabbar").getByRole("link", { name: /More/ }).click();
-  await p.waitForURL(/\/settings/);
+  await p.waitForURL(/\/fieldnotes\/more/);
   await delay(400);
 }, { page: mobile, full: false });
 await phone.close();
