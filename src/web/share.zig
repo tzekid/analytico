@@ -365,6 +365,22 @@ fn api(ctx: *Ctx, parts: []const []const u8) !void {
         .app => |grant| device(ctx, grant.device_id),
         .key => apiError(ctx, .not_found, "unknown_endpoint"),
     };
+    if (parts.len == 2 and is(parts[0], "device") and is(parts[1], "test") and ctx.method == .POST) return switch (caller) {
+        .app => |grant| if (try push.sendTest(arena, ctx.shared, ctx.db, grant.device_id)) {
+            ctx.status = .no_content;
+            return ctx.json();
+        } else apiError(ctx, .conflict, "device_not_registered"),
+        .key => apiError(ctx, .not_found, "unknown_endpoint"),
+    };
+    // The signed-in person, for the apps' settings.
+    if (parts.len == 1 and is(parts[0], "me") and ctx.method == .GET) return switch (caller) {
+        .app => {
+            const user = ctx.user.?;
+            try std.json.Stringify.value(.{ .email = user.email, .role = @tagName(user.role) }, .{}, w);
+            return ctx.json();
+        },
+        .key => apiError(ctx, .not_found, "unknown_endpoint"),
+    };
     if (parts.len == 1 and is(parts[0], "catalog")) {
         try w.writeAll("{\"reports\":[");
         for (catalog.reports, 0..) |report, index| {

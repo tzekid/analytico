@@ -14,6 +14,7 @@ const domain = @import("../domain.zig");
 const html = @import("html.zig");
 const customers = @import("customers.zig");
 const behaviour = @import("behaviour.zig");
+const overview = @import("overview.zig");
 
 pub const Value = union(enum) { null, int: i64, float: f64, text: []const u8 };
 
@@ -74,23 +75,26 @@ pub const common = [_]Param{
 const limit_param: Param = .{ .name = "limit", .description = "Maximum rows (1–1000, default 100)", .kind = .integer };
 
 pub const reports = [_]Report{
-    .{ .name = "overview", .title = "Overview", .description = "Totals for the period and the previous period: page views, visitor-days, sessions, active time, orders and revenue.", .run = overviewReport },
-    .{ .name = "breakdown", .title = "Breakdown", .description = "Page views and visitor-days per value of one dimension, with the previous period.", .reveals = .paths_and_sources, .params = &.{ .{ .name = "dimension", .description = "Dimension", .values = &dim_names, .required = true }, limit_param }, .run = breakdownReport },
+    .{ .name = "overview", .title = "Overview", .description = "Totals for the period and the previous period: page views, visitor-days, sessions, active time, orders, revenue and the share of returning visitors (Full mode).", .run = overviewReport },
+    .{ .name = "breakdown", .title = "Breakdown", .description = "Page views and visitor-days per value of one dimension, with the previous period; label names the value as the workspace does, and channel classifies sources.", .reveals = .paths_and_sources, .params = &.{ .{ .name = "dimension", .description = "Dimension", .values = &dim_names, .required = true }, limit_param }, .run = breakdownReport },
     .{ .name = "timeseries", .title = "Time series", .description = "One metric per day (per hour for 24h).", .params = &.{.{ .name = "metric", .description = "Metric", .values = &.{ "views", "visitor_days", "active" } }}, .run = timeseriesReport },
     .{ .name = "pages", .title = "Pages", .description = "Every page with views, visitors, engagement, scroll and clicks out.", .reveals = .paths, .params = &.{limit_param}, .run = pagesReport },
-    .{ .name = "acquisition", .title = "Acquisition", .description = "Sources and mediums with views and visitors.", .reveals = .sources, .params = &.{limit_param}, .run = acquisitionReport },
+    .{ .name = "acquisition", .title = "Acquisition", .description = "Sources and mediums with views and visitors, each source's label and channel (Search, Social, Email, Paid, AI assistants, Referral, Direct, Within the site).", .reveals = .sources, .params = &.{limit_param}, .run = acquisitionReport },
     .{ .name = "campaigns", .title = "Campaigns", .description = "UTM campaigns with views, visitors and sessions.", .reveals = .sources, .params = &.{limit_param}, .run = campaignsReport },
     .{ .name = "events", .title = "Events", .description = "Custom events with occurrences, sessions and value.", .params = &.{limit_param}, .run = eventsReport },
     .{ .name = "goals", .title = "Goals", .description = "Each goal with completions and the share of visitor-days that reached it.", .reveals = .paths, .run = goalsReport },
     .{ .name = "funnel", .title = "Funnel", .description = "Sessions reaching each step of a saved funnel, in order, within its time window.", .reveals = .paths, .sessions = true, .params = &.{.{ .name = "name", .description = "Funnel name", .required = true }}, .run = funnelReport },
-    .{ .name = "paths", .title = "Next pages", .description = "Where visitors went next from a page.", .reveals = .paths, .sessions = true, .params = &.{ .{ .name = "from_path", .description = "Page path such as /pricing", .required = true }, limit_param }, .run = pathsReport },
+    .{ .name = "paths", .title = "Next pages", .description = "Where visitors went next from a page.", .reveals = .paths, .sessions = true, .params = &.{ .{ .name = "from_path", .description = "Page path such as /pricing", .required = true }, .{ .name = "exits", .description = "1 also lists leaving the site, as an empty next_path" }, limit_param }, .run = pathsReport },
+    .{ .name = "came_from", .title = "Previous pages", .description = "Where visitors were just before a page; an empty previous_path means they entered the site there.", .reveals = .paths, .sessions = true, .params = &.{ .{ .name = "to_path", .description = "Page path such as /pricing", .required = true }, limit_param }, .run = cameFromReport },
     .{ .name = "revenue", .title = "Products", .description = "Products with views, add-to-carts, orders, revenue and refunds (minor currency units).", .params = &.{limit_param}, .run = revenueReport },
     .{ .name = "errors", .title = "Errors", .description = "JavaScript errors, grouped: occurrences, visits affected, where and since when.", .reveals = .paths, .params = &.{limit_param}, .run = errorsReport },
     .{ .name = "search", .title = "Site search", .description = "What visitors searched for on the site, and how often nothing was found.", .reveals = .paths, .params = &.{limit_param}, .run = searchReport },
+    .{ .name = "vitals", .title = "Web Vitals", .description = "LCP, INP, CLS and TTFB over every page: p50, p75 and p95 (milliseconds; CLS in thousandths), samples, and how many were good, needed work or were poor.", .run = vitalsReport },
     .{ .name = "performance", .title = "Performance", .description = "Core Web Vitals percentiles (TTFB, FCP, LCP, INP, CLS) by page type, release, navigation and device.", .params = &.{limit_param}, .run = performanceReport },
     .{ .name = "sections", .title = "Sections", .description = "Marked page sections: how often each was seen and where visitors stopped.", .params = &.{limit_param}, .run = sectionsReport },
     .{ .name = "actions", .title = "Actions", .description = "Marked actions and rage clicks.", .params = &.{limit_param}, .run = actionsReport },
-    .{ .name = "recent", .title = "Recent activity", .description = "The latest page views and events.", .reveals = .paths, .params = &.{limit_param}, .run = recentReport },
+    .{ .name = "minutes", .title = "Last 30 minutes", .description = "Page views per minute over the last 30 minutes, oldest first; the newest minute is still filling. Ignores the period.", .run = minutesReport },
+    .{ .name = "recent", .title = "Recent activity", .description = "The latest page views and events; page views with where they came from (and its label), country and device.", .reveals = .paths, .params = &.{limit_param}, .run = recentReport },
     .{ .name = "coverage", .title = "Coverage", .description = "How complete collection is: summaries, unknown traffic, sessions, internal views and performance samples.", .run = coverageReport },
     .{ .name = "traffic", .title = "Traffic classes", .description = "Page views by traffic class (human-like, bots, monitors, internal).", .run = trafficReport },
     .{ .name = "sessions", .title = "Sessions", .description = "Recent sessions with length, pages, events, landing and exit page.", .reveals = .paths, .sessions = true, .params = &.{limit_param}, .run = sessionsReport },
@@ -314,15 +318,28 @@ fn overviewReport(input: Input) !Table {
     const current = try data.totals(input.arena, input.db, view_value, range.start_ms, range.end_ms);
     const previous = try data.totals(input.arena, input.db, view_value, range.prev_start_ms, range.prev_end_ms);
     const sold = try customers.sales(input.arena, input.db, view_value, range.start_ms, range.end_ms);
-    var table: TableBuilder = .{ .arena = input.arena, .columns = &.{ "from", "to", "page_views", "visitor_days", "sessions", "active_ms", "orders", "revenue_minor", "currency", "previous_page_views", "previous_visitor_days", "previous_sessions", "previous_active_ms" } };
-    try table.add(.{ try input.arena.dupe(u8, &data.dateText(range.start_ms)), try input.arena.dupe(u8, &data.dateText(range.end_ms - 1)), current.views, current.visitor_days, current.sessions, current.active_ms, sold.orders, sold.revenue, view_value.site.currency, previous.views, previous.visitor_days, previous.sessions, previous.active_ms });
+    const sold_before = try customers.sales(input.arena, input.db, view_value, range.prev_start_ms, range.prev_end_ms);
+    // Full mode only: Lite keeps no visitor across days.
+    const full = view_value.site.mode == .full;
+    const returning = if (full) try data.returningShare(input.arena, input.db, view_value, range.start_ms, range.end_ms) else null;
+    const returning_before = if (full) try data.returningShare(input.arena, input.db, view_value, range.prev_start_ms, range.prev_end_ms) else null;
+    var table: TableBuilder = .{ .arena = input.arena, .columns = &.{ "from", "to", "page_views", "visitor_days", "sessions", "active_ms", "orders", "revenue_minor", "currency", "returning_share", "previous_page_views", "previous_visitor_days", "previous_sessions", "previous_active_ms", "previous_orders", "previous_revenue_minor", "previous_returning_share" } };
+    try table.add(.{ try input.arena.dupe(u8, &data.dateText(range.start_ms)), try input.arena.dupe(u8, &data.dateText(range.end_ms - 1)), current.views, current.visitor_days, current.sessions, current.active_ms, sold.orders, sold.revenue, view_value.site.currency, returning, previous.views, previous.visitor_days, previous.sessions, previous.active_ms, sold_before.orders, sold_before.revenue, returning_before });
     return table.done();
 }
 
 fn breakdownReport(input: Input) !Table {
     const dim = std.meta.stringToEnum(data.Dim, input.get("dimension") orelse "page") orelse return error.InvalidParameter;
-    var table: TableBuilder = .{ .arena = input.arena, .columns = &.{ "value", "page_views", "visitor_days", "previous_page_views" } };
-    for (try data.top(input.arena, input.db, input.view, dim, @intCast(input.int("limit", 100, 1, 1000)))) |row| try table.add(.{ row.key, row.value, row.extra, row.previous });
+    // label: what the workspace calls the value; channel: a source's channel, which keeps its colour.
+    var table: TableBuilder = .{ .arena = input.arena, .columns = &.{ "value", "page_views", "visitor_days", "previous_page_views", "label", "channel" } };
+    for (try data.top(input.arena, input.db, input.view, dim, @intCast(input.int("limit", 100, 1, 1000)))) |row| {
+        const label = switch (dim) {
+            .source => try overview.sourceLabel(input.arena, row.key),
+            .country => @import("../geo.zig").countryName(row.key),
+            else => row.key,
+        };
+        try table.add(.{ row.key, row.value, row.extra, row.previous, label, if (dim == .source) @as(?[]const u8, overview.channel(row.key, "")) else null });
+    }
     return table.done();
 }
 
@@ -462,17 +479,40 @@ fn legacy(input: Input, sql: []const u8) !Table {
     return sqlTable(input.arena, &statement);
 }
 
+/// A page-view report over the view's period, with all of its filters.
+fn pageViewTable(input: Input, head: []const u8, tail: []const u8) !Table {
+    var sql = data.Sql.init(input.arena);
+    try sql.add(head);
+    try sql.add(" WHERE ");
+    try sql.pageViews(input.view, input.view.range.start_ms, input.view.range.end_ms);
+    try sql.add(tail);
+    try sql.int(input.int("limit", 100, 1, 1000));
+    var statement = try sql.prepare(input.db);
+    defer statement.deinit();
+    return sqlTable(input.arena, &statement);
+}
+
 fn pagesReport(input: Input) !Table {
-    return legacy(input, pages_sql);
+    return pageViewTable(input, pages_head, pages_tail);
 }
 fn acquisitionReport(input: Input) !Table {
-    return legacy(input, acquisition_sql);
+    const plain = try pageViewTable(input, acquisition_head, acquisition_tail);
+    var table: TableBuilder = .{ .arena = input.arena, .columns = &.{ "source", "medium", "views", "visitors", "label", "channel" } };
+    for (plain.rows) |row| try table.add(.{ row[0].text, row[1].text, row[2].int, row[3].int, try overview.sourceLabel(input.arena, row[0].text), overview.channel(row[0].text, row[1].text) });
+    return table.done();
 }
 fn campaignsReport(input: Input) !Table {
-    return legacy(input, campaigns_sql);
+    return pageViewTable(input, campaigns_head, campaigns_tail);
 }
 fn eventsReport(input: Input) !Table {
-    return legacy(input, events_sql);
+    var sql = data.Sql.init(input.arena);
+    try sql.add("SELECT e.name,e.source,count(*) AS occurrences,count(DISTINCT e.session_id) AS sessions,coalesce(sum(e.value_minor),0) AS value_minor,max(coalesce(e.currency,'')) AS currency FROM events e WHERE ");
+    try sql.events(input.view, input.view.range.start_ms, input.view.range.end_ms);
+    try sql.add(" GROUP BY e.name,e.source ORDER BY occurrences DESC,e.name LIMIT ");
+    try sql.int(input.int("limit", 100, 1, 1000));
+    var statement = try sql.prepare(input.db);
+    defer statement.deinit();
+    return sqlTable(input.arena, &statement);
 }
 fn sectionsReport(input: Input) !Table {
     return legacy(input, sections_sql);
@@ -480,8 +520,34 @@ fn sectionsReport(input: Input) !Table {
 fn actionsReport(input: Input) !Table {
     return legacy(input, actions_sql);
 }
+fn minutesReport(input: Input) !Table {
+    const last = try data.lastMinutes(input.arena, input.db, input.view.site.id, input.now_ms);
+    var table: TableBuilder = .{ .arena = input.arena, .columns = &.{ "at", "page_views" } };
+    for (last.counts, 0..) |count, index| {
+        const at = last.start + @as(i64, @intCast(index)) * 60_000;
+        const minute = @divFloor(@mod(at, data.day_ms), 60_000);
+        try table.add(.{ try std.fmt.allocPrint(input.arena, "{s}T{d:0>2}:{d:0>2}Z", .{ &data.dateText(at), @as(u64, @intCast(@divFloor(minute, 60))), @as(u64, @intCast(@mod(minute, 60))) }), count });
+    }
+    return table.done();
+}
+
 fn recentReport(input: Input) !Table {
-    return legacy(input, recent_sql);
+    const plain = try legacy(input, recent_sql);
+    // Where a page view came from, named as the workspace names it ("Google").
+    const columns = try input.arena.alloc([]const u8, plain.columns.len + 1);
+    @memcpy(columns[0..plain.columns.len], plain.columns);
+    columns[plain.columns.len] = "referrer_label";
+    const rows = try input.arena.alloc([]const Value, plain.rows.len);
+    for (plain.rows, rows) |row, *out| {
+        const cells = try input.arena.alloc(Value, row.len + 1);
+        @memcpy(cells[0..row.len], row);
+        cells[row.len] = switch (row[6]) {
+            .text => |key| .{ .text = try overview.sourceLabel(input.arena, key) },
+            else => .null,
+        };
+        out.* = cells;
+    }
+    return .{ .columns = columns, .rows = rows };
 }
 fn coverageReport(input: Input) !Table {
     return legacy(input, coverage_sql);
@@ -489,8 +555,19 @@ fn coverageReport(input: Input) !Table {
 fn trafficReport(input: Input) !Table {
     return legacy(input, traffic_sql);
 }
+fn vitalsReport(input: Input) !Table {
+    const journeys = @import("journeys.zig");
+    const loaded = try journeys.loadSamples(input.arena, input.db, input.view);
+    var table: TableBuilder = .{ .arena = input.arena, .columns = &.{ "metric", "name", "samples", "p50", "p75", "p95", "good", "needs_work", "poor", "good_below", "poor_above" } };
+    for (journeys.vitals, 0..) |vital, index| {
+        const result = journeys.summarize(vital, loaded.all[index].items);
+        try table.add(.{ vital.key, vital.name, @as(i64, @intCast(result.samples)), result.p50, result.p75, result.p95, @as(i64, @intCast(result.good)), @as(i64, @intCast(result.samples - result.good - result.poor)), @as(i64, @intCast(result.poor)), vital.good, vital.poor });
+    }
+    return table.done();
+}
+
 fn performanceReport(input: Input) !Table {
-    return legacy(input, performance_sql);
+    return pageViewTable(input, performance_head, performance_tail);
 }
 
 fn sessionsReport(input: Input) !Table {
@@ -533,10 +610,20 @@ fn pathsReport(input: Input) !Table {
     // Whole days come from the daily summaries, like the workspace's paths.
     const next = try @import("journeys.zig").nextSteps(input.arena, input.db, input.view, from_path, input.int("limit", 100, 1, 1000) + 1);
     var table: TableBuilder = .{ .arena = input.arena, .columns = &.{ "from_path", "next_path", "transitions" } };
+    const exits = std.mem.eql(u8, input.get("exits") orelse "", "1");
     for (next.steps) |step| {
-        // The catalog has always listed only steps to another page.
-        if (step.path.len != 0) try table.add(.{ from_path, step.path, step.count });
+        // Leaving the site is listed only when asked for, as it always was.
+        if (step.path.len != 0 or exits) try table.add(.{ from_path, step.path, step.count });
     }
+    return table.done();
+}
+
+fn cameFromReport(input: Input) !Table {
+    const to_path = input.get("to_path").?;
+    try domain.validatePath(to_path);
+    const steps = try @import("journeys.zig").previousSteps(input.arena, input.db, input.view, to_path, input.int("limit", 100, 1, 1000));
+    var table: TableBuilder = .{ .arena = input.arena, .columns = &.{ "to_path", "previous_path", "transitions" } };
+    for (steps) |step| try table.add(.{ to_path, step.path, step.count });
     return table.done();
 }
 
@@ -548,7 +635,10 @@ fn economicsReport(input: Input) !Table {
     return sqlTable(input.arena, &statement);
 }
 
-const pages_sql =
+// The page-view reports take every filter, as the workspace does: the
+// WHERE clause comes from data.Sql, so source:, country:, negations and
+// "any condition" mean the same everywhere.
+const pages_head =
     \\SELECT pv.path,coalesce(max(pv.page_type),'') AS page_type,coalesce(max(pv.content_id),'') AS content_id,
     \\ count(*) AS views,count(DISTINCT pv.visitor_day_id) AS visitors,
     \\ coalesce(round(avg(ps.visible_ms)),0) AS avg_visible_ms,coalesce(round(avg(ps.active_ms)),0) AS avg_active_ms,
@@ -557,26 +647,22 @@ const pages_sql =
     \\ coalesce(sum(ps.outbound_clicks),0) AS outbound_clicks,coalesce(sum(ps.downloads),0) AS downloads,
     \\ coalesce(sum(ps.form_attempts),0) AS form_attempts
     \\FROM page_views pv LEFT JOIN page_summaries ps ON ps.site_id=pv.site_id AND ps.page_id=pv.page_id
-    \\WHERE pv.internal=0 AND pv.traffic_class IN ('human_like','unknown') AND pv.site_id=? AND pv.received_at_ms>=? AND pv.received_at_ms<?
-    \\AND (?='' OR coalesce(pv.release_id,'')=?) AND (?='' OR coalesce(pv.utm_campaign,'')=?) AND (?='' OR pv.path=?)
-    \\GROUP BY pv.path ORDER BY views DESC,pv.path LIMIT ?
 ;
-const acquisition_sql =
+const pages_tail = " GROUP BY pv.path ORDER BY views DESC,pv.path LIMIT ";
+const acquisition_head =
     \\SELECT coalesce(nullif(pv.utm_source,''),nullif(pv.referrer_host,''),'direct') AS source,
     \\ coalesce(nullif(pv.utm_medium,''),'') AS medium,count(*) AS views,
     \\ count(DISTINCT pv.visitor_day_id) AS visitors
-    \\FROM page_views pv WHERE pv.internal=0 AND pv.traffic_class IN ('human_like','unknown') AND pv.site_id=? AND pv.received_at_ms>=? AND pv.received_at_ms<?
-    \\AND (?='' OR coalesce(pv.release_id,'')=?) AND (?='' OR coalesce(pv.utm_campaign,'')=?) AND (?='' OR pv.path=?)
-    \\GROUP BY source,medium ORDER BY views DESC,source LIMIT ?
+    \\FROM page_views pv
 ;
-const campaigns_sql =
+const acquisition_tail = " GROUP BY source,medium ORDER BY views DESC,source LIMIT ";
+const campaigns_head =
     \\SELECT coalesce(pv.utm_source,'') AS source,coalesce(pv.utm_campaign,'') AS campaign,
     \\ coalesce(pv.utm_content,'') AS content,count(*) AS views,
     \\ count(DISTINCT pv.visitor_day_id) AS visitors,count(DISTINCT pv.session_id) AS sessions
-    \\FROM page_views pv WHERE pv.internal=0 AND pv.traffic_class IN ('human_like','unknown') AND pv.site_id=? AND pv.received_at_ms>=? AND pv.received_at_ms<?
-    \\AND (?='' OR coalesce(pv.release_id,'')=?) AND (?='' OR coalesce(pv.utm_campaign,'')=?) AND (?='' OR pv.path=?)
-    \\AND pv.utm_campaign IS NOT NULL GROUP BY source,campaign,content ORDER BY views DESC LIMIT ?
+    \\FROM page_views pv
 ;
+const campaigns_tail = " AND pv.utm_campaign IS NOT NULL GROUP BY source,campaign,content ORDER BY views DESC LIMIT ";
 const sections_sql =
     \\WITH filtered AS (
     \\ SELECT pv.site_id,pv.page_id FROM page_views pv WHERE pv.internal=0 AND pv.traffic_class IN ('human_like','unknown')
@@ -597,18 +683,12 @@ const actions_sql =
     \\AND (?='' OR coalesce(e.release_id,'')=?) AND (?='' OR coalesce(json_extract(e.properties_json,'$.campaign'),'')=?) AND (?='' OR coalesce(e.path,'')=?)
     \\AND (e.name LIKE 'action_%' OR e.name='rage_click') GROUP BY e.name,action ORDER BY occurrences DESC LIMIT ?
 ;
-const events_sql =
-    \\SELECT e.name,e.source,count(*) AS occurrences,count(DISTINCT e.session_id) AS sessions,
-    \\ coalesce(sum(e.value_minor),0) AS value_minor,max(coalesce(e.currency,'')) AS currency
-    \\FROM events e WHERE e.internal=0 AND e.site_id=? AND e.received_at_ms>=? AND e.received_at_ms<? AND (e.source='server' OR e.traffic_class IN ('human_like','unknown'))
-    \\AND (?='' OR coalesce(e.release_id,'')=?) AND (?='' OR coalesce(json_extract(e.properties_json,'$.campaign'),'')=?) AND (?='' OR coalesce(e.path,'')=?)
-    \\GROUP BY e.name,e.source ORDER BY occurrences DESC,e.name LIMIT ?
-;
 const recent_sql =
-    \\SELECT received_at_ms,kind,name,path,source,session_id FROM (
-    \\ SELECT pv.received_at_ms,'page_view' AS kind,'page_view' AS name,pv.path,'browser' AS source,pv.session_id,pv.release_id,pv.utm_campaign
+    \\SELECT received_at_ms,kind,name,path,source,session_id,referrer,country,device FROM (
+    \\ SELECT pv.received_at_ms,'page_view' AS kind,'page_view' AS name,pv.path,'browser' AS source,pv.session_id,pv.release_id,pv.utm_campaign,
+    \\  coalesce(nullif(pv.utm_source,''),nullif(pv.referrer_host,''),'direct') AS referrer,pv.country,pv.device
     \\ FROM page_views pv WHERE pv.internal=0 AND pv.traffic_class IN ('human_like','unknown') AND pv.site_id=?1 AND pv.received_at_ms>=?2 AND pv.received_at_ms<?3
-    \\ UNION ALL SELECT e.received_at_ms,'event',e.name,coalesce(e.path,''),e.source,e.session_id,e.release_id,json_extract(e.properties_json,'$.campaign')
+    \\ UNION ALL SELECT e.received_at_ms,'event',e.name,coalesce(e.path,''),e.source,e.session_id,e.release_id,json_extract(e.properties_json,'$.campaign'),NULL,NULL,NULL
     \\ FROM events e WHERE e.internal=0 AND e.site_id=?1 AND e.received_at_ms>=?2 AND e.received_at_ms<?3 AND (e.source='server' OR e.traffic_class IN ('human_like','unknown'))
     \\) WHERE (?4='' OR coalesce(release_id,'')=?5) AND (?6='' OR coalesce(utm_campaign,'')=?7) AND (?8='' OR path=?9)
     \\ORDER BY received_at_ms DESC LIMIT ?10
@@ -631,13 +711,13 @@ const traffic_sql =
     \\AND (?4='' OR coalesce(pv.release_id,'')=?5) AND (?6='' OR coalesce(pv.utm_campaign,'')=?7) AND (?8='' OR pv.path=?9)
     \\GROUP BY pv.traffic_class,pv.internal ORDER BY page_views DESC,pv.traffic_class LIMIT ?10
 ;
-const performance_sql =
+const performance_head =
     \\WITH base AS (
     \\ SELECT coalesce(pv.page_type,'') AS page_type,coalesce(pv.release_id,'') AS release_id,
     \\ coalesce(pv.navigation_type,'') AS navigation_type,pv.device,ps.*
     \\ FROM page_views pv JOIN page_summaries ps ON ps.site_id=pv.site_id AND ps.page_id=pv.page_id
-    \\ WHERE pv.internal=0 AND pv.traffic_class IN ('human_like','unknown') AND pv.site_id=?1 AND pv.received_at_ms>=?2 AND pv.received_at_ms<?3
-    \\ AND (?4='' OR coalesce(pv.release_id,'')=?5) AND (?6='' OR coalesce(pv.utm_campaign,'')=?7) AND (?8='' OR pv.path=?9)
+;
+const performance_tail =
     \\), samples AS (
     \\ SELECT page_type,release_id,navigation_type,device,'ttfb' metric,ttfb_ms value FROM base WHERE ttfb_ms IS NOT NULL UNION ALL
     \\ SELECT page_type,release_id,navigation_type,device,'fcp',fcp_ms FROM base WHERE fcp_ms IS NOT NULL UNION ALL
@@ -655,7 +735,7 @@ const performance_sql =
     \\ min(CASE WHEN rn*100>=n*75 THEN value END) p75,
     \\ min(CASE WHEN rn*100>=n*95 THEN value END) p95
     \\FROM ranked GROUP BY page_type,release_id,navigation_type,device,metric
-    \\ORDER BY page_type,release_id,navigation_type,device,metric LIMIT ?10
+    \\ORDER BY page_type,release_id,navigation_type,device,metric LIMIT 
 ;
 const sessions_sql =
     \\SELECT pv.session_id,min(pv.received_at_ms) AS started_at_ms,max(pv.received_at_ms) AS ended_at_ms,

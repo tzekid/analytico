@@ -406,26 +406,6 @@ fn sources(ctx: *Ctx, view: data.View) !void {
     try w.writeAll("<div class=\"card-foot\"><span>Engaged: at least 10 s active, half the page scrolled, or an interaction.</span><span>Click a source to filter every page</span></div></section>");
 }
 
-fn channelOf(key: []const u8, medium: []const u8) []const u8 {
-    if (std.mem.eql(u8, key, "direct")) return "Direct";
-    if (std.mem.eql(u8, key, overview.self_referrer)) return "Within the site";
-    if (std.mem.indexOf(u8, medium, "email") != null or std.mem.indexOf(u8, medium, "newsletter") != null) return "Email";
-    if (std.mem.indexOf(u8, medium, "cpc") != null or std.mem.indexOf(u8, medium, "paid") != null or std.mem.indexOf(u8, medium, "ads") != null) return "Paid";
-    // Whole labels of the host ("chatgpt" in chatgpt.com, never "t.co" inside it).
-    const has = struct {
-        fn label(host: []const u8, names: []const []const u8) bool {
-            var parts = std.mem.splitScalar(u8, host, '.');
-            while (parts.next()) |part| for (names) |name| if (std.mem.eql(u8, part, name)) return true;
-            return false;
-        }
-    };
-    if (has.label(key, &.{ "chatgpt", "openai", "perplexity", "claude", "gemini", "copilot" })) return "AI assistants";
-    if (has.label(key, &.{ "google", "bing", "duckduckgo", "ecosia", "yandex", "baidu", "search", "qwant", "startpage", "kagi" })) return "Search";
-    if (std.mem.eql(u8, key, "t.co") or std.mem.eql(u8, key, "x.com") or has.label(key, &.{ "facebook", "instagram", "twitter", "linkedin", "lnkd", "reddit", "ycombinator", "mastodon", "bsky", "youtube", "tiktok", "pinterest", "threads" })) return "Social";
-    if (has.label(key, &.{ "mail", "newsletter" })) return "Email";
-    return "Referral";
-}
-
 fn channels(ctx: *Ctx, view: data.View) !void {
     const arena = ctx.arena;
     const w = ctx.w();
@@ -442,14 +422,15 @@ fn channels(ctx: *Ctx, view: data.View) !void {
     var visitors: [names.len]i64 = @splat(0);
     var total: i64 = 0;
     while (try statement.step() == .row) {
-        const channel = channelOf(statement.columnText(0), statement.columnText(1));
+        const channel = overview.channel(statement.columnText(0), statement.columnText(1));
         for (names, 0..) |name, index| if (std.mem.eql(u8, name, channel)) {
             views[index] += statement.columnInt(2);
             visitors[index] += statement.columnInt(3);
         };
         total += statement.columnInt(2);
     }
-    const colors = [_][]const u8{ "var(--muted)", "var(--blue)", "var(--violet)", "var(--brand)", "var(--amber)", "var(--teal)", "var(--ink-2)", "var(--border-strong)" };
+    var colors: [names.len][]const u8 = undefined;
+    for (names, &colors) |name, *color| color.* = overview.channelTone(name).color;
     try w.writeAll("<div class=\"grid grid-2\"><section class=\"card\">");
     try ui.cardHead(w, "Channel mix", "<span class=\"meta\">Share of page views</span>");
     try w.writeAll("<div class=\"share-bar mb-16\">");

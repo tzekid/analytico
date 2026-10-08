@@ -751,7 +751,7 @@ fn renderWidget(ctx: *Ctx, view: data.View, base: []const u8, key: []const u8, t
         try w.writeAll("<section class=\"card\">");
         try ui.cardHead(w, "Web vitals · p75", "");
         try w.writeAll("<dl class=\"kv\">");
-        const loaded = try journeys.loadSamples(ctx, view);
+        const loaded = try journeys.loadSamples(ctx.arena, ctx.db, view);
         for (journeys.vitals, 0..) |vital, index| {
             const result = journeys.summarize(vital, loaded.all[index].items);
             if (result.samples == 0) {

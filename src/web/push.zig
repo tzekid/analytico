@@ -24,7 +24,6 @@ pub const Message = struct { kind: Kind, site_id: i64, site: []const u8, title: 
 /// Encrypts to every device that wants this kind and may see the site; a
 /// device the relay reports as gone is forgotten.
 pub fn send(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, message: Message) !void {
-    const Device = struct { device_id: []const u8, token: []const u8, environment: []const u8, public_key: []const u8, auth_secret: []const u8 };
     // A device delivers only while its sign-in lives, so signing out or
     // revoking the app stops notifications without further bookkeeping.
     const devices = try db.all(arena, Device,
@@ -33,6 +32,21 @@ pub fn send(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, message: 
         \\AND (u.all_sites=1 OR u.role IN ('admin','owner') OR EXISTS(SELECT 1 FROM user_sites WHERE user_id=u.id AND site_id=?2))
         \\AND EXISTS(SELECT 1 FROM oauth_grants g WHERE g.device_id=d.device_id AND g.kind='refresh' AND g.expires_at_ms>?3 AND (g.sites='*' OR instr(','||g.sites||',', ','||?2||',')>0))
     , .{ @tagName(message.kind), message.site_id, domain.nowMs() });
+    try deliver(arena, shared, db, devices, message);
+}
+
+/// "Send a test notification" from the app's settings: this device only,
+/// whatever it asked to be told about. False when it isn't registered.
+pub fn sendTest(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, device_id: []const u8) !bool {
+    const devices = try db.all(arena, Device, "SELECT device_id,token,environment,public_key,auth_secret FROM devices WHERE device_id=?", .{device_id});
+    if (devices.len == 0) return false;
+    try deliver(arena, shared, db, devices, .{ .kind = .note, .site_id = 0, .site = "", .title = "Analytico", .body = "Test notification: notifications reach this device." });
+    return true;
+}
+
+const Device = struct { device_id: []const u8, token: []const u8, environment: []const u8, public_key: []const u8, auth_secret: []const u8 };
+
+fn deliver(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, devices: []const Device, message: Message) !void {
     if (devices.len == 0) return;
     const relay = (try data.setting(arena, db, .@"push.relay")) orelse default_relay;
     const url = try std.fmt.allocPrint(arena, "{s}/v1/apns", .{relay});

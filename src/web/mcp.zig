@@ -271,7 +271,7 @@ fn authorize(ctx: *Ctx) !void {
     } else {
         try render(w,
             \\<main class="login"><div class="login-card login-card-wide"><div class="row gap-12"><span class="mark" style="background:{color}">{letter}
-        , .{ .color = if (is_claude) "#C96442" else if (is_chatgpt) "#000" else "#6F625D", .letter = if (is_claude) "C" else if (is_chatgpt) "" else "A" });
+        , .{ .color = if (is_claude) "#C96442" else if (is_chatgpt) "var(--ink);color:var(--surface)" else "var(--ink-2)", .letter = if (is_claude) "C" else if (is_chatgpt) "" else "A" });
         if (is_chatgpt) try layout.icon(w, "chatgpt");
         try render(w,
             \\</span><span class="muted">→</span><img src="{logo}" width="36" height="36" alt=""></div>

@@ -65,11 +65,46 @@ pub fn sourceLabels(arena: std.mem.Allocator, keys: []const []const u8) ![]const
     return out;
 }
 
+/// Where a visit came from, by its source and medium: Direct, Within the
+/// site, Email, Paid, AI assistants, Search, Social or Referral.
+pub fn channel(key: []const u8, medium: []const u8) []const u8 {
+    if (std.mem.eql(u8, key, "direct")) return "Direct";
+    if (std.mem.eql(u8, key, self_referrer)) return "Within the site";
+    if (std.mem.indexOf(u8, medium, "email") != null or std.mem.indexOf(u8, medium, "newsletter") != null) return "Email";
+    if (std.mem.indexOf(u8, medium, "cpc") != null or std.mem.indexOf(u8, medium, "paid") != null or std.mem.indexOf(u8, medium, "ads") != null) return "Paid";
+    // Whole labels of the host ("chatgpt" in chatgpt.com, never "t.co" inside it).
+    const has = struct {
+        fn label(host: []const u8, names: []const []const u8) bool {
+            var parts = std.mem.splitScalar(u8, host, '.');
+            while (parts.next()) |part| for (names) |name| if (std.mem.eql(u8, part, name)) return true;
+            return false;
+        }
+    };
+    if (has.label(key, &.{ "chatgpt", "openai", "perplexity", "claude", "gemini", "copilot" })) return "AI assistants";
+    if (has.label(key, &.{ "google", "bing", "duckduckgo", "ecosia", "yandex", "baidu", "search", "qwant", "startpage", "kagi" })) return "Search";
+    if (std.mem.eql(u8, key, "t.co") or std.mem.eql(u8, key, "x.com") or has.label(key, &.{ "facebook", "instagram", "twitter", "linkedin", "lnkd", "reddit", "ycombinator", "mastodon", "bsky", "youtube", "tiktok", "pinterest", "threads" })) return "Social";
+    if (has.label(key, &.{ "mail", "newsletter" })) return "Email";
+    return "Referral";
+}
+
+/// Each channel keeps its colour on every chart, list and app: Search blue,
+/// Email brand, Social violet, Referral teal, Paid amber, Direct ink.
+pub fn channelTone(name: []const u8) Tone {
+    const pairs = [_]struct { []const u8, Tone }{
+        .{ "Search", tones[1] },
+        .{ "Email", tones[0] },
+        .{ "Social", tones[2] },
+        .{ "Referral", tones[3] },
+        .{ "Paid", tones[4] },
+        .{ "AI assistants", .{ .color = "var(--muted)", .wash = "var(--subtle)" } },
+        .{ "Within the site", .{ .color = "var(--border-strong)", .wash = "var(--subtle)" } },
+    };
+    for (pairs) |pair| if (std.mem.eql(u8, pair[0], name)) return pair[1];
+    return .{ .color = "var(--ink-2)", .wash = "var(--subtle)" };
+}
+
 pub fn toneFor(key: []const u8) Tone {
-    if (std.mem.indexOf(u8, key, "google") != null) return tones[1];
-    if (std.mem.indexOf(u8, key, "instagram") != null or std.mem.indexOf(u8, key, "facebook") != null) return tones[2];
-    if (std.mem.indexOf(u8, key, "newsletter") != null or std.mem.indexOf(u8, key, "mail") != null) return tones[0];
-    return tones[@intCast(std.hash.Wyhash.hash(7, key) % tones.len)];
+    return channelTone(channel(key, ""));
 }
 
 pub fn sourceRow(ctx: *Ctx, w: *std.Io.Writer, key: []const u8, label: []const u8, value: i64, total: i64, largest: i64, href: []const u8) !void {
@@ -285,8 +320,8 @@ pub fn metricStrip(ctx: *Ctx, view: data.View, base: []const u8, current: data.T
     for (metrics) |metric| {
         // Full mode remembers visitors: show who came back instead of visitor-days.
         if (metric == .visitor_days and view.site.mode == .full) {
-            const now_share = try returningShare(ctx, view, range.start_ms, range.end_ms);
-            const before_share = try returningShare(ctx, view, range.prev_start_ms, range.prev_end_ms);
+            const now_share = try data.returningShare(ctx.arena, ctx.db, view, range.start_ms, range.end_ms);
+            const before_share = try data.returningShare(ctx.arena, ctx.db, view, range.prev_start_ms, range.prev_end_ms);
             const delta = ((now_share orelse 0) - (before_share orelse 0)) * 100;
             try ui.metric(w, arena, .{
                 .href = try view.href(arena, try std.fmt.allocPrint(arena, "/{s}/retention", .{view.site.slug}), &.{.{ "m", "" }}),
@@ -326,15 +361,6 @@ fn metricText(arena: std.mem.Allocator, metric: data.Metric, value: f64, active_
     if (metric == .active) return std.fmt.allocPrint(arena, "{f}", .{html.duration(active_ms)});
     if (value < 10 and value != @round(value)) return std.fmt.allocPrint(arena, "{d:.1}", .{value});
     return std.fmt.allocPrint(arena, "{f}", .{html.int(@intFromFloat(@round(value)))});
-}
-
-/// Share of remembered visitor-days whose visitor was first seen on an
-/// earlier day.
-fn returningShare(ctx: *Ctx, view: data.View, start: i64, end: i64) !?f64 {
-    const sums = try data.keySums(ctx.arena, ctx.db, view, "visitor_type", start, end, 10);
-    const returning = data.keySum(sums, "returning").visitors;
-    const total = returning + data.keySum(sums, "new").visitors;
-    return if (total == 0) null else @as(f64, @floatFromInt(returning)) / @as(f64, @floatFromInt(total));
 }
 
 /// Where visitors are: countries when places are known, devices otherwise.

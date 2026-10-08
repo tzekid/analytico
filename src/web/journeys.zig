@@ -479,20 +479,11 @@ pub fn live(ctx: *Ctx, site: data.Site) !void {
         if (last != 0) try render(w, "<p class=\"hint\">The last page view was {ago}. This updates by itself.</p>", .{ .ago = data.ago(last, now) });
     }
     // Page views per minute over the last half hour; the newest minute is still filling.
-    var minutes: [30]i64 = @splat(0);
-    const start = now - @mod(now, 60_000) - 29 * 60_000;
-    var per_minute = try ctx.db.prepare(arena, "SELECT (received_at_ms-?2)/60000,count(*) FROM page_views WHERE site_id=?1 AND received_at_ms>=?2 AND internal=0 AND traffic_class IN ('human_like','unknown') GROUP BY 1");
-    defer per_minute.deinit();
-    try per_minute.bindInt(1, site.id);
-    try per_minute.bindInt(2, start);
+    const last_minutes = try data.lastMinutes(arena, ctx.db, site.id, now);
     var busiest: i64 = 1;
-    while (try per_minute.step() == .row) {
-        const index = per_minute.columnInt(0);
-        if (index >= 0 and index < 30) minutes[@intCast(index)] = per_minute.columnInt(1);
-        busiest = @max(busiest, per_minute.columnInt(1));
-    }
+    for (last_minutes.counts) |count| busiest = @max(busiest, count);
     try w.writeAll("<p class=\"hint live-minutes-label\">Page views per minute · last 30 minutes</p><div class=\"live-minutes\" aria-hidden=\"true\">");
-    for (minutes, 0..) |count, index| try render(w, "<span{!class} style=\"height:{height:.0}%\"></span>", .{ .class = if (count == 0) " class=\"zero\"" else if (index == 29) " class=\"now\"" else "", .height = if (count == 0) 2 else @max(6, @as(f64, @floatFromInt(count)) / @as(f64, @floatFromInt(busiest)) * 100) });
+    for (last_minutes.counts, 0..) |count, index| try render(w, "<span{!class} style=\"height:{height:.0}%\"></span>", .{ .class = if (count == 0) " class=\"zero\"" else if (index == 29) " class=\"now\"" else "", .height = if (count == 0) 2 else @max(6, @as(f64, @floatFromInt(count)) / @as(f64, @floatFromInt(busiest)) * 100) });
     try w.writeAll("</div></section><section class=\"card\">");
     try ui.cardHead(w, "On these pages now", "");
     var pages = try ctx.db.prepare(arena, "SELECT path,count(DISTINCT visitor_day_id) n FROM page_views WHERE site_id=? AND received_at_ms>=? AND internal=0 AND traffic_class IN ('human_like','unknown') GROUP BY path ORDER BY n DESC,path LIMIT 6");
@@ -741,13 +732,12 @@ pub const Samples = struct {
 /// Every vital sample of the view's range, overall and per page, sorted by
 /// value: the daily summaries (rounded up to two significant figures) where
 /// they cover an unfiltered view, raw rows for the rest.
-pub fn loadSamples(ctx: *Ctx, view: data.View) !Samples {
-    const arena = ctx.arena;
+pub fn loadSamples(arena: std.mem.Allocator, db: *db_mod.Db, view: data.View) !Samples {
     const range = view.range;
     var out: Samples = .{};
-    const split = if (view.filters.len == 0) try data.rollupSplit(arena, ctx.db, view, range.start_ms, range.end_ms) else range.start_ms;
+    const split = if (view.filters.len == 0) try data.rollupSplit(arena, db, view, range.start_ms, range.end_ms) else range.start_ms;
     if (split > range.start_ms) {
-        var rolled = try ctx.db.prepare(arena, "SELECT path,metric,value,sum(samples) FROM vitals_daily WHERE site_id=? AND metric IN ('lcp','inp','cls','ttfb','fcp') AND day>=? AND day<=? GROUP BY metric,path,value");
+        var rolled = try db.prepare(arena, "SELECT path,metric,value,sum(samples) FROM vitals_daily WHERE site_id=? AND metric IN ('lcp','inp','cls','ttfb','fcp') AND day>=? AND day<=? GROUP BY metric,path,value");
         defer rolled.deinit();
         const first = data.dateText(range.start_ms);
         const last = data.dateText(split - 1);
@@ -764,7 +754,7 @@ pub fn loadSamples(ctx: *Ctx, view: data.View) !Samples {
     try raw.add("SELECT pv.path,ps.lcp_ms,ps.inp_ms,ps.cls_milli,ps.ttfb_ms,ps.fcp_ms FROM page_views pv JOIN page_summaries ps ON ps.site_id=pv.site_id AND ps.page_id=pv.page_id WHERE ");
     try raw.pageViews(view, split, range.end_ms);
     try raw.add(" AND (ps.lcp_ms IS NOT NULL OR ps.inp_ms IS NOT NULL OR ps.cls_milli IS NOT NULL OR ps.ttfb_ms IS NOT NULL OR ps.fcp_ms IS NOT NULL)");
-    var statement = try raw.prepare(ctx.db);
+    var statement = try raw.prepare(db);
     defer statement.deinit();
     while (try statement.step() == .row) {
         for (0..columns) |column| {
@@ -817,7 +807,7 @@ pub fn performance(ctx: *Ctx, site: data.Site) !void {
     const view = try analyze.start(ctx, site, .performance, "Performance");
     const w = ctx.w();
     const path = try std.fmt.allocPrint(arena, "/{s}/performance", .{site.slug});
-    const loaded = try loadSamples(ctx, view);
+    const loaded = try loadSamples(ctx.arena, ctx.db, view);
     var results: [vitals.len]Distribution = undefined;
     for (vitals, 0..) |vital, index| results[index] = summarize(vital, loaded.all[index].items);
     try layout.head(ctx, .{ .title = "Performance", .subtitle = try std.fmt.allocPrint(arena, "Real-user measurements · {f} · {f} samples · p75", .{ view.range, html.int(@intCast(results[0].samples)) }), .view = view, .path = path, .compare = false });

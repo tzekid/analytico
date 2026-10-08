@@ -1169,6 +1169,30 @@ pub fn dimExpression(name: []const u8) []const u8 {
 
 pub const KeySum = struct { key: []const u8, sums: RollupSums };
 
+/// Page views per minute over the last 30 minutes, oldest first, and the
+/// first minute's start; the newest minute is still filling.
+pub fn lastMinutes(arena: std.mem.Allocator, db: *db_mod.Db, site_id: i64, now_ms: i64) !struct { start: i64, counts: [30]i64 } {
+    const start = now_ms - @mod(now_ms, 60_000) - 29 * 60_000;
+    var counts: [30]i64 = @splat(0);
+    var statement = try db.prepare(arena, "SELECT (received_at_ms-?2)/60000,count(*) FROM page_views WHERE site_id=?1 AND received_at_ms>=?2 AND internal=0 AND traffic_class IN ('human_like','unknown') GROUP BY 1");
+    defer statement.deinit();
+    try statement.bindAll(.{ site_id, start });
+    while (try statement.step() == .row) {
+        const index = statement.columnInt(0);
+        if (index >= 0 and index < 30) counts[@intCast(index)] = statement.columnInt(1);
+    }
+    return .{ .start = start, .counts = counts };
+}
+
+/// Share of remembered visitor-days whose visitor was first seen on an
+/// earlier day, or null when nobody came.
+pub fn returningShare(arena: std.mem.Allocator, db: *db_mod.Db, view: View, start: i64, end: i64) !?f64 {
+    const sums = try keySums(arena, db, view, "visitor_type", start, end, 10);
+    const returning = keySum(sums, "returning").visitors;
+    const total = returning + keySum(sums, "new").visitors;
+    return if (total == 0) null else @as(f64, @floatFromInt(returning)) / @as(f64, @floatFromInt(total));
+}
+
 /// Per-value totals of one rolled-up dimension over [start, end): rollups for
 /// whole past days of unfiltered views, raw rows for everything else.
 pub fn keySums(arena: std.mem.Allocator, db: *db_mod.Db, view: View, dim: []const u8, start: i64, end: i64, limit: usize) ![]KeySum {

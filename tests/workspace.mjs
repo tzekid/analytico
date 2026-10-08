@@ -273,6 +273,10 @@ await journey("workspace", async (t) => {
   assert.equal(opened.at(-1), 2);
   assert.deepEqual(JSON.parse(opened.subarray(0, -1)), { title: shopSite.name, body: "Goal reached: Signed up", site: "shop", kind: "goal" });
   assert.doesNotMatch(JSON.stringify(delivered), /Signed up|shop/);
+  // The app's settings: who is signed in, and a test notification to this device alone.
+  assert.deepEqual(await (await app("/me")).json(), { email: "owner@example.test", role: "owner" });
+  assert.equal((await app("/device/test", { method: "POST" })).status, 204);
+  assert.equal((await t.until(() => pushes[1], "test push")).token, "ab".repeat(32));
   // The app is a device under Settings → Sign-in, not an AI connector; signing it out ends its access.
   await page.goto(`${origin}/settings/ai?site=shop`);
   assert.equal(await page.getByText("Analytico for Mac, iPhone and iPad").count(), 0);

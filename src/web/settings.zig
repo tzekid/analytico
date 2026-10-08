@@ -331,11 +331,11 @@ fn backupsSection(ctx: *Ctx) !void {
     const next = now - @mod(now, data.day_ms) + 3 * data.hour_ms + (if (@mod(now, data.day_ms) >= 3 * data.hour_ms) data.day_ms else 0);
     try render(w,
         \\<form class="card row-between mb-16" method="post" action="/settings/backups/daily"><div><strong>Automatic daily backup</strong><div class="hint">Every day at 03:00 UTC · keeps the last 14{next}</div></div><span class="switch"><input type="checkbox" name="enabled" value="1" data-autosubmit aria-label="Automatic daily backup"{!checked}></span></form>
-        \\<section class="card card-flush"><div class="table-wrap"><table class="table"><thead><tr><th>Backup</th><th class="r">Size</th><th>Status</th><th></th></tr></thead><tbody>
+        \\<section class="card card-flush"><div class="table-wrap"><table class="table"><thead><tr><th>Backup</th><th class="r hide-m">Size</th><th>Status</th><th></th></tr></thead><tbody>
     , .{ .next = if (daily) try std.fmt.allocPrint(arena, " · next in {d} h", .{@divFloor(next - now + data.hour_ms - 1, data.hour_ms)}) else "", .checked = if (daily) " checked" else "" });
     const files = try listBackups(arena, ctx.shared.io, ctx.shared.data);
     for (files[0..@min(files.len, 30)]) |file| try render(w,
-        \\<tr><td class="strong mono t-13">{name}</td><td class="r secondary">{megabytes:.1} MB</td><td><span class="pill pill-good">✓ Verified</span></td><td class="r"><button class="link" type="button" data-dialog="restore-dialog" data-restore="{name}">Restore…</button></td></tr>
+        \\<tr><td class="strong mono t-13">{name}</td><td class="r secondary hide-m">{megabytes:.1} MB</td><td><span class="pill pill-good">✓ Verified</span></td><td class="r"><button class="link" type="button" data-dialog="restore-dialog" data-restore="{name}">Restore…</button></td></tr>
     , .{ .name = file.name, .megabytes = @as(f64, @floatFromInt(file.size)) / 1_048_576.0 });
     try w.writeAll("</tbody></table></div>");
     if (files.len == 0) try ui.empty(w, "No backups yet", "Back up now, or keep automatic daily backups on. Each copy is integrity-checked before it’s listed.", "");
@@ -481,7 +481,7 @@ fn aiSection(ctx: *Ctx, site: ?data.Site) !void {
     const connections = try db.all(arena, Connection, "SELECT c.name,max(coalesce(g.last_used_at_ms,g.created_at_ms)),(SELECT count(*) FROM ai_log l WHERE l.origin=c.name AND l.at_ms>=?) FROM oauth_grants g JOIN oauth_clients c ON c.client_id=g.client_id WHERE g.kind='refresh' AND g.expires_at_ms>? AND g.client_id NOT LIKE 'analytico-%' GROUP BY c.name", .{ ctx.now() - 7 * data.day_ms, ctx.now() });
     const providers = [_]struct { []const u8, []const u8, []const u8, []const u8, ai.Provider, []const u8 }{
         .{ "Claude", "by Anthropic", "#C96442", "C", .anthropic, "claude" },
-        .{ "ChatGPT", "by OpenAI", "#000", "", .openai, "chatgpt" },
+        .{ "ChatGPT", "by OpenAI", "var(--ink);color:var(--surface)", "", .openai, "chatgpt" },
     };
     try w.writeAll("<div class=\"grid grid-2\">");
     for (providers) |provider| {

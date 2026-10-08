@@ -577,7 +577,7 @@ pub fn people(ctx: *Ctx, site: data.Site) !void {
     try sql.add(" ORDER BY p.l DESC LIMIT 100");
     var statement = try sql.prepare(ctx.db);
     defer statement.deinit();
-    try w.writeAll("<section class=\"card card-flush\"><div class=\"table-wrap\"><table class=\"table\"><thead><tr><th>Person</th><th class=\"hide-m\">First seen</th><th>Last seen</th><th class=\"r\">Sessions</th><th class=\"r hide-m\">Devices</th><th class=\"r\">Revenue</th><th class=\"hide-m\">First source</th><th class=\"hide-m\">Signals</th></tr></thead><tbody>");
+    try w.writeAll("<section class=\"card card-flush\"><div class=\"table-wrap\"><table class=\"table\"><thead><tr><th>Person</th><th class=\"hide-m\">First seen</th><th>Last seen</th><th class=\"r hide-m\">Sessions</th><th class=\"r hide-m\">Devices</th><th class=\"r\">Revenue</th><th class=\"hide-m\">First source</th><th class=\"hide-m\">Signals</th></tr></thead><tbody>");
     var any = false;
     while (try statement.step() == .row) {
         any = true;
@@ -588,7 +588,7 @@ pub fn people(ctx: *Ctx, site: data.Site) !void {
         const first = statement.columnInt(2);
         const sessions_count = statement.columnInt(6);
         const revenue_value = statement.columnInt(7);
-        try render(w, "<tr data-href=\"{href}\"><td><a href=\"{href}\" class=\"row nowrap\"><span class=\"person-avatar{!anonymous}\">{initials}</span><span><strong class=\"block\">{label}</strong><small class=\"secondary\">{kind} · {systems}</small></span></a></td><td class=\"hide-m secondary\">{first}</td><td class=\"secondary\">{last}</td><td class=\"r\">{sessions}</td><td class=\"r hide-m\">{devices}</td><td class=\"r\">", .{
+        try render(w, "<tr data-href=\"{href}\"><td><a href=\"{href}\" class=\"row nowrap\"><span class=\"person-avatar{!anonymous}\">{initials}</span><span><strong class=\"block\">{label}</strong><small class=\"secondary\">{kind} · {systems}</small></span></a></td><td class=\"hide-m secondary\">{first}</td><td class=\"secondary\">{last}</td><td class=\"r hide-m\">{sessions}</td><td class=\"r hide-m\">{devices}</td><td class=\"r\">", .{
             .href = href,
             .anonymous = if (user.len == 0) " anonymous" else "",
             .initials = if (user.len == 0) "··" else user[0..2],

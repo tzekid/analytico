@@ -72,7 +72,7 @@ await journey("cli", async (t) => {
     avg_visible_ms: 12000, avg_active_ms: 10000, avg_first_interaction_ms: 0,
     avg_scroll: 75, copies: 0, outbound_clicks: 0, downloads: 0, form_attempts: 1,
   }]);
-  assert.deepEqual(report("acquisition"), [{ source: "search", medium: "", views: 1, visitors: 1 }]);
+  assert.deepEqual(report("acquisition"), [{ source: "search", medium: "", views: 1, visitors: 1, label: "Search", channel: "Search" }]);
   assert.deepEqual(report("campaigns"), [{ source: "search", campaign: "launch", content: "hero", views: 1, visitors: 1, sessions: 1 }]);
   assert.deepEqual(report("sections"), [{ section: "hero", exposures: 1, exposure_percent: 100, final_section: 1 }]);
   // The browser journey separately checks an actual click produces an action.
@@ -106,16 +106,32 @@ await journey("cli", async (t) => {
   writer.prepare("INSERT INTO users(email,role,created_at_ms) VALUES('owner@example.test','owner',?)").run(now);
   writer.prepare("INSERT INTO api_keys(name,token_hash,prefix,user_id,site_id,created_at_ms) VALUES('cli',?,'dddd',(SELECT min(id) FROM users),NULL,?)").run(createHash("sha256").update(token).digest("hex"), now);
   writer.close();
-  const values = { dimension: "page", name: "registration-to-paid", from_path: "/landing", id: sessionId, flow: "registration" };
+  const values = { dimension: "page", name: "registration-to-paid", from_path: "/landing", to_path: "/landing", id: sessionId, flow: "registration" };
   const help = execFileSync(t.app, ["help"], { encoding: "utf8" });
-  const catalog = [...help.split("Report names")[1].matchAll(/^ {2}(\w+) .*?(?:<(\w+)>)?$/gm)].map(([, name, param]) => ({ name, param }));
+  const catalog = [...help.split("Report names")[1].matchAll(/^ {2}(\w+) .*?(?:<(\w+)>.*)?$/gm)].map(([, name, param]) => ({ name, param }));
   assert.ok(catalog.length >= 20, help);
-  for (const { name, param } of catalog) {
+  const both = async (name, param) => {
     const cli = JSON.parse(t.cli("report", name, "example", ...(param ? [values[param]] : []), "--json"));
     const response = await fetch(`${base}/api/v1/sites/example/${name}?range=7d${param ? `&${param}=${encodeURIComponent(values[param])}` : ""}`, { headers: { authorization: `Bearer ${token}` } });
     assert.equal(response.status, 200, name);
-    assert.deepEqual((await response.json()).rows, cli, name);
+    return [cli, (await response.json()).rows];
+  };
+  for (const { name, param } of catalog) {
+    let [cli, api] = await both(name, param);
+    // The last 30 minutes move with the clock: ask again if a minute turned in between.
+    if (name === "minutes" && JSON.stringify(cli) !== JSON.stringify(api)) [cli, api] = await both(name, param);
+    assert.deepEqual(api, cli, name);
   }
+  // Page-view reports take every filter, as the workspace does.
+  for (const filter of ["source:direct", "page!:/landing", "country:DE"]) {
+    const filtered = await fetch(`${base}/api/v1/sites/example/pages?range=7d&f=${encodeURIComponent(filter)}`, { headers: { authorization: `Bearer ${token}` } });
+    assert.equal(filtered.status, 200, filter);
+    assert.ok(Array.isArray((await filtered.json()).rows), filter);
+  }
+  const minutes = JSON.parse(t.cli("report", "minutes", "example", "--json"));
+  assert.equal(minutes.length, 30);
+  assert.match(minutes[29].at, /^\d{4}-\d\d-\d\dT\d\d:\d\dZ$/);
+  assert.deepEqual(Object.keys(JSON.parse(t.cli("report", "recent", "example", "--json"))[0]), ["received_at_ms", "kind", "name", "path", "source", "session_id", "referrer", "country", "device", "referrer_label"]);
 
   // ---------------------------------------------------------------- operations
 

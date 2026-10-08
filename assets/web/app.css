@@ -299,7 +299,8 @@ table.table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .table th a:hover { color: var(--ink); }
 .table td { padding: 12px 16px; border-top: 1px solid var(--border); white-space: nowrap; }
 .table td.wrap { white-space: normal; overflow-wrap: anywhere; }
-@media (max-width: 720px) { .table td:first-child { white-space: normal; overflow-wrap: anywhere; } .table th, .table td { padding-left: 10px; padding-right: 10px; } }
+/* Phones: the first column wraps, but never narrower than a short word or two. */
+@media (max-width: 720px) { .table td:first-child { white-space: normal; overflow-wrap: anywhere; min-width: 9em; } .table td:first-child:has(.person-avatar) { min-width: 13em; } .table th, .table td { padding-left: 10px; padding-right: 10px; } }
 .table .r { text-align: right; } .table .strong { font-weight: 600; }
 .table tbody tr { transition: background .1s; }
 .table tbody tr[data-href] { cursor: pointer; }
@@ -596,7 +597,12 @@ dialog::backdrop { background: var(--scrim); }
   .metric-label { font-size: 13px; font-weight: 400; }
   .metric-delta { grid-row: 1; grid-column: 2; }
   .metric-delta .vs { display: none; }
-  .metric-value { grid-column: 1 / -1; font-size: 25px; line-height: 32px; margin-top: 4px; }
+  /* Sized to the card, so "€12,647.10" fits half a phone's width. */
+  .metric { container-type: inline-size; }
+  .metric-value { grid-column: 1 / -1; font-size: min(25px, 16cqi); line-height: 32px; margin-top: 4px; }
+  .row-between.top, .row-between:has(> .row > .seg) { flex-wrap: wrap; }
+  .row > .seg { max-width: 100%; overflow-x: auto; scrollbar-width: none; }
+  .seg a, .seg button, .seg span[data-seg] { white-space: nowrap; }
   .card { padding: 14px 16px; } .card-flush { padding: 0; } .chart { height: 180px; }
   .chart-x span:nth-child(even) { visibility: hidden; }
   .vitals, .grid-4, .option-cards { grid-template-columns: minmax(0, 1fr); }
@@ -865,6 +871,7 @@ tr[aria-selected="true"] .bars i { background: var(--error); }
 @media (max-width: 720px) {
   .player-stage { height: 360px; }
   .barchart { height: 160px; gap: 4px; }
+  .barchart-col:nth-child(even) small { visibility: hidden; }
   .key-row { grid-template-columns: minmax(0, 1fr) auto; }
   .key-row .hint { display: none; }
   .player-controls { flex-wrap: wrap; }
@@ -918,7 +925,7 @@ tr[aria-selected="true"] .bars i { background: var(--error); }
 .card-head.side-head { padding: 16px 18px 6px; }
 .metric-value.metric-value-path { font-size: 22px; line-height: 44px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row-between.top { align-items: flex-start; }
-.mark.mark-chatgpt { background: #000; }
+.mark.mark-chatgpt { background: var(--ink); color: var(--surface); }
 .brand.flush-pad { padding: 0; }
 .dialog.dialog-narrow { width: min(420px, calc(100vw - 32px)); }
 .dialog-foot.dialog-foot-plain { justify-content: flex-start; border: 0; padding-top: 0; }
