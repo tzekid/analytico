@@ -54,6 +54,14 @@ public struct PeriodWording: Sendable {
         return "vs " + previous
     }
 
+    /// After the title, as the workspace says it: "compared with 2–31 Aug",
+    /// "compared with yesterday until 14:40", "compared with the previous 24 hours".
+    public var compared: String {
+        if rolling { return "compared with the previous 24 hours" }
+        if isToday { return "compared with yesterday until \(clock(now))" }
+        return "compared with " + previous
+    }
+
     /// Legend for this period: "Today", "Wed 30 Sep", "1–30 Sep".
     public var this: String {
         if rolling { return "Last 24 hours" }

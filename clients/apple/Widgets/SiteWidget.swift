@@ -11,15 +11,16 @@ struct AnalyticoWidgets: WidgetBundle {
     }
 }
 
-/// Today's visitors on one website, with the last seven days.
+/// Today's visitors on one website against yesterday by the same time,
+/// with the last six full days.
 struct SiteWidget: Widget {
     var body: some WidgetConfiguration {
         AppIntentConfiguration(kind: "site", intent: SiteWidgetIntent.self, provider: Provider()) { entry in
             SiteWidgetView(entry: entry)
-                .containerBackground(.fill.tertiary, for: .widget)
+                .containerBackground(Theme.canvas, for: .widget)
         }
         .configurationDisplayName("Visitors today")
-        .description("Today’s visitors so far, and the six days before.")
+        .description("Today’s visitors so far against yesterday by now, and the six days before.")
         #if os(iOS)
         .supportedFamilies([.systemSmall, .systemMedium, .accessoryRectangular, .accessoryInline])
         #else
@@ -29,8 +30,17 @@ struct SiteWidget: Widget {
 }
 
 struct SiteEntry: TimelineEntry {
+    struct Today {
+        var name: String
+        var visitors: Int
+        var pageViews: Int
+        /// Against yesterday up to the same time of day.
+        var change: Format.Change
+        var week: [Int]
+    }
+
     enum State {
-        case ready(name: String, visitors: Int, pageViews: Int, week: [Int])
+        case ready(Today)
         case signedOut
         case unavailable
     }
@@ -42,7 +52,7 @@ struct SiteEntry: TimelineEntry {
 
 struct Provider: AppIntentTimelineProvider {
     func placeholder(in context: Context) -> SiteEntry {
-        SiteEntry(date: .now, state: .ready(name: "shop.example", visitors: 1284, pageViews: 3912, week: [920, 1010, 980, 1150, 1210, 1190, 1284]))
+        SiteEntry(date: .now, state: .ready(.init(name: "Field Notes", visitors: 412, pageViews: 1284, change: .init(text: "+8.0%", direction: .up), week: [920, 1010, 980, 1150, 1210, 1190])))
     }
 
     func snapshot(for configuration: SiteWidgetIntent, in context: Context) async -> SiteEntry {
@@ -61,9 +71,15 @@ struct Provider: AppIntentTimelineProvider {
             guard let site = sites.first(where: { $0.slug == configuration.site?.id }) ?? sites.first(where: { $0.slug == Shared.site }) ?? sites.first else {
                 return SiteEntry(date: .now, state: .unavailable)
             }
-            // Today is still running; its partial count would end the sparkline in a cliff.
-            let week = try await client.report("timeseries", site: site.slug, view: ViewState(period: .week), parameters: ["metric": "visitors"]).rows.map { Int($0["value"]?.number ?? 0) }.dropLast()
-            return SiteEntry(date: .now, state: .ready(name: site.name, visitors: site.today.visitors, pageViews: site.today.pageViews, week: Array(week)), site: site.slug)
+            let today = Date.now.formatted(.iso8601.year().month().day())
+            async let totals = client.report("overview", site: site.slug, view: .custom(from: today, to: today))
+            // Today is still running; its partial count would end the line in a cliff.
+            async let series = client.report("timeseries", site: site.slug, view: ViewState(period: .week), parameters: ["metric": "visitor_days"])
+            let row = try await totals.rows.first
+            let visitors = row?["visitor_days"]?.number ?? Double(site.today.visitors)
+            let week = try await series.rows.map { Int($0["value"]?.number ?? 0) }.dropLast()
+            return SiteEntry(date: .now, state: .ready(.init(name: site.name, visitors: Int(visitors), pageViews: Int(row?["page_views"]?.number ?? 0),
+                                                             change: Format.change(visitors, row?["previous_visitor_days"]?.number ?? 0), week: Array(week.suffix(6)))), site: site.slug)
         } catch {
             return SiteEntry(date: .now, state: .unavailable)
         }
@@ -77,55 +93,81 @@ struct SiteWidgetView: View {
     var body: some View {
         switch entry.state {
         case .signedOut:
-            Text("Open Analytico to sign in").font(.caption).foregroundStyle(.secondary)
+            Text("Open Analytico to sign in").font(.caption).foregroundStyle(Theme.ink2)
         case .unavailable:
-            Text("Couldn’t reach your Analytico").font(.caption).foregroundStyle(.secondary)
-        case .ready(let name, let visitors, let pageViews, let week):
+            Text("Couldn’t reach your Analytico").font(.caption).foregroundStyle(Theme.ink2)
+        case .ready(let today):
             switch family {
             case .accessoryInline:
-                Text("\(Format.count(visitors)) visitors today")
+                Text("\(Format.count(today.visitors)) visitors today")
             case .accessoryRectangular:
-                VStack(alignment: .leading) {
-                    Text(name).font(.caption).lineLimit(1)
-                    Text(Format.count(visitors)).font(.title2).monospacedDigit()
-                    Text("visitors today").font(.caption2)
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(today.name).font(.caption2).lineLimit(1)
+                    Text("\(Format.count(today.visitors)) today").font(.custom("Quando-Regular", size: 19, relativeTo: .title3)).lineLimit(1)
+                    change(today, short: false).font(.caption2)
                 }
             case .systemMedium:
-                HStack(alignment: .top, spacing: 16) {
-                    summary(name: name, visitors: visitors, pageViews: pageViews)
-                    sparkline(week).frame(maxWidth: .infinity)
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(alignment: .top, spacing: 16) {
+                        summary(today, short: false)
+                        line(today.week).frame(maxWidth: .infinity, maxHeight: 76)
+                    }
+                    Spacer(minLength: 0)
+                    HStack {
+                        Text("\(Format.count(today.pageViews)) page views").foregroundStyle(Theme.muted)
+                        Spacer()
+                        Text("Last 6 full days").foregroundStyle(Theme.muted)
+                    }
+                    .font(.caption2)
                 }
             default:
-                VStack(alignment: .leading, spacing: 6) {
-                    summary(name: name, visitors: visitors, pageViews: pageViews)
-                    sparkline(week).frame(height: 34)
+                VStack(alignment: .leading, spacing: 2) {
+                    summary(today, short: true)
+                    Spacer(minLength: 0)
+                    change(today, short: true).font(.caption.weight(.semibold))
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }
 
-    private func summary(name: String, visitors: Int, pageViews: Int) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(name).font(.caption.weight(.semibold)).lineLimit(1)
-            Text(Format.count(visitors))
-                .font(.custom("Quando-Regular", size: 30, relativeTo: .title))
+    private func summary(_ today: SiteEntry.Today, short: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(today.name).font(.caption.weight(.semibold)).foregroundStyle(Theme.ink2).lineLimit(1)
+            Text(Format.count(today.visitors))
+                .font(.custom("Quando-Regular", size: 40, relativeTo: .largeTitle))
+                .foregroundStyle(Theme.ink)
                 .monospacedDigit()
                 .minimumScaleFactor(0.5)
                 .lineLimit(1)
-            Text("visitors today").font(.caption).foregroundStyle(.secondary)
-            Text("\(Format.count(pageViews)) page views").font(.caption2).foregroundStyle(.secondary)
+            Text("visitors today").font(.caption).foregroundStyle(Theme.ink2)
+            if !short { change(today, short: false).font(.caption.weight(.semibold)).padding(.top, 2) }
         }
     }
 
-    private func sparkline(_ week: [Int]) -> some View {
+    /// "↑ 8% vs yesterday by now"; small widgets say "vs yesterday".
+    private func change(_ today: SiteEntry.Today, short: Bool) -> some View {
+        let arrow = today.change.direction == .up ? "↑" : today.change.direction == .down ? "↓" : ""
+        let text = today.change.text.trimmingCharacters(in: CharacterSet(charactersIn: "+−"))
+        return Text(today.change.text.isEmpty ? " " : "\(arrow) \(text) vs yesterday\(short ? "" : " by now")")
+            .foregroundStyle(today.change.direction == .up ? Theme.good : today.change.direction == .down ? Theme.bad : Theme.ink2)
+            .lineLimit(1)
+    }
+
+    private func line(_ week: [Int]) -> some View {
         Chart(Array(week.enumerated()), id: \.offset) { item in
             AreaMark(x: .value("Day", item.offset), y: .value("Visitors", item.element))
-                .foregroundStyle(LinearGradient(colors: [Color.accentColor.opacity(0.35), .clear], startPoint: .top, endPoint: .bottom))
+                .foregroundStyle(LinearGradient(colors: [Theme.brand.opacity(0.18), Theme.brand.opacity(0)], startPoint: .top, endPoint: .bottom))
             LineMark(x: .value("Day", item.offset), y: .value("Visitors", item.element))
-                .foregroundStyle(Color.accentColor)
+                .foregroundStyle(Theme.brand)
+                .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+            if item.offset == week.count - 1 {
+                PointMark(x: .value("Day", item.offset), y: .value("Visitors", item.element))
+                    .symbol { Circle().strokeBorder(Theme.brand, lineWidth: 2).background(Circle().fill(Theme.surface)).frame(width: 8, height: 8) }
+            }
         }
         .chartXAxis(.hidden)
         .chartYAxis(.hidden)
-        .accessibilityLabel("Visitors over the last seven days")
+        .accessibilityLabel("Visitors over the last six full days")
     }
 }

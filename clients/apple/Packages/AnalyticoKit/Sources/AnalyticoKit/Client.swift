@@ -113,6 +113,12 @@ public struct Retention: Codable, Sendable {
     }
 }
 
+/// Who is signed in: their email and role on the instance.
+public struct Me: Codable, Hashable, Sendable {
+    public var email: String
+    public var role: String
+}
+
 /// What the live stream reports every few seconds.
 public struct LiveUpdate: Codable, Sendable, Equatable {
     public var online: Int
@@ -149,6 +155,16 @@ public actor Client {
     }
 
     /// A catalog report for a site and view, plus report-specific parameters.
+    /// The signed-in person, for the apps' settings.
+    public func me() async throws -> Me {
+        try await get(Me.self, "me")
+    }
+
+    /// Asks the instance to send this device a test notification.
+    public func sendTestNotification() async throws {
+        _ = try await send("POST", "device/test")
+    }
+
     public func report(_ name: String, site: String, view: ViewState, parameters: [String: String] = [:]) async throws -> Report {
         try await get(Report.self, "sites/\(site)/\(name)", query: view.queryItems + parameters.sorted { $0.key < $1.key }.map { URLQueryItem(name: $0.key, value: $0.value) })
     }

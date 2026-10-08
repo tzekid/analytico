@@ -56,6 +56,15 @@ import Testing
         #expect(ViewState(url: url) == view)
     }
 
+    @Test func comparisonOffAndAnyConditionRoundTrip() {
+        var view = ViewState(period: .week, filters: [.init(dimension: "source", value: "google"), .init(dimension: "country", value: "DE")])
+        view.compare = false
+        view.any = true
+        let url = view.workspaceURL(origin: URL(string: "https://analytics.example.com")!, site: "shop")
+        #expect(url.absoluteString == "https://analytics.example.com/shop?range=7d&cmp=0&fm=any&f=source:google&f=country:DE")
+        #expect(ViewState(url: url) == view)
+    }
+
     @Test func previousPeriod() {
         let before = ViewState(period: .week).previous(from: "2026-10-01", to: "2026-10-07")
         #expect(before?.queryItems.map(\.value) == ["custom", "2026-09-24", "2026-09-30"])
@@ -142,6 +151,7 @@ import Testing
         #expect(today.isToday && today.running)
         #expect(today.title == "Today so far, until 14:40")
         #expect(today.versus == "vs yesterday by 14:40")
+        #expect(today.compared == "compared with yesterday until 14:40")
         #expect(today.this == "Today" && today.previous == "Yesterday")
         #expect(abs(today.elapsedDays - 1) < 0.0001)
     }
@@ -152,6 +162,7 @@ import Testing
         #expect(squeeze(month.this) == "1–30Sep")
         #expect(squeeze(month.previous) == "2–31Aug")
         #expect(squeeze(month.versus) == "vs2–31Aug")
+        #expect(squeeze(month.compared) == "comparedwith2–31Aug")
         let week = try #require(PeriodWording(from: "2026-10-02", to: "2026-10-08", now: Self.now, locale: Self.english))
         #expect(abs(week.elapsedDays - (6 + 14.0 / 24 + 40.0 / 1440)) < 0.001)
     }

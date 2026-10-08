@@ -2,222 +2,387 @@ import AnalyticoKit
 import Charts
 import SwiftUI
 
-/// The site at a glance, as on the workspace Overview: four metrics with
-/// their change, the trend against the previous period, the top lists and
-/// the period's notes.
+/// The site at a glance, as on the workspace Overview: four metric cards
+/// (each switches the chart or opens its report), the trend against the
+/// period before, where visitors come from, where they are and what sells.
 struct OverviewView: View {
+    @Environment(SiteState.self) private var state
+    @Environment(\.horizontalSizeClass) private var sizeClass
     @Environment(\.openURL) private var openURL
-    let client: Client
-    let site: Site
-    @Binding var view: ViewState
-    @State private var data: OverviewData?
-    @State private var failure: String?
-    @State private var addingNote = false
+    @State private var data = Loaded<OverviewData>()
+    @State private var metric: ChartMetric = .visitors
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                if let failure { Problem(title: "The overview didn’t load", detail: failure) }
-                if let data, data.pageViews == 0 {
-                    nothingHere(data)
-                } else if let data {
-                    notes(data)
-                    tiles(data)
-                    VStack(alignment: .leading, spacing: 10) {
-                        if let wording = data.wording { ChartLegend(wording: wording, compared: !data.previousTrend.isEmpty) }
-                        TrendChart(current: data.trend, previous: data.previousTrend, notes: data.notes.filter { !$0.draft }, running: data.wording?.running ?? false, hourly: data.hourly)
-                            .frame(height: 220)
-                    }
-                    .padding(16)
-                    .background(.background, in: .rect(cornerRadius: 12))
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 300), spacing: 16)], alignment: .leading, spacing: 16) {
-                        TopList(title: "Sources", dimension: "source", rows: data.sources, view: $view)
-                        TopList(title: "Pages", dimension: "page", rows: data.pages, view: $view)
-                        TopList(title: "Countries", dimension: "country", rows: data.countries, view: $view)
-                        TopList(title: "Devices", dimension: "device", rows: data.devices, view: $view)
-                    }
-                } else if failure == nil {
-                    ProgressView().frame(maxWidth: .infinity, minHeight: 300)
+        let waiting = state.site.firstDay == nil && data.value?.pageViews == 0
+        ScreenScaffold(screen: .overview, wording: data.value?.wording, stale: data.stale, waiting: waiting, reload: load) {
+            if let overview = data.value {
+                if overview.pageViews == 0 {
+                    nothingHere(overview)
+                } else {
+                    notes(overview)
+                    tiles(overview)
+                    chart(overview)
+                    cards(overview)
                 }
-            }
-            .padding()
-        }
-        .background(Color.secondary.opacity(0.06))
-        .navigationTitle("Overview")
-        .navigationSubtitle(data?.wording.map { "\($0.title) · \($0.versus)" } ?? "")
-        .task(id: view) { await load() }
-        .refreshable { await load() }
-        .toolbar {
-            ToolbarItem {
-                Button { addingNote = true } label: { Label("Add note", systemImage: "note.text.badge.plus") }
+            } else {
+                LoadingOrProblem(failure: data.failure, title: "The overview didn’t load")
             }
         }
-        .sheet(isPresented: $addingNote) {
-            AddNoteSheet { day, label in
-                try await client.addNote(site: site.slug, day: day, label: label)
-                await load()
-            }
-        }
+        .task(id: LoadKey(view: state.view, metric: metric)) { await load() }
     }
 
     private func load() async {
-        do {
-            data = try await OverviewData.load(client: client, site: site, view: view)
-            failure = nil
-        } catch is CancellationError {
-        } catch {
-            failure = "Check the connection and pull to try again."
-        }
+        data.apply(await fetch { try await OverviewData.load(client: state.client, site: state.site, view: state.view, metric: metric) })
     }
+
+    // MARK: Metrics
 
     private func tiles(_ data: OverviewData) -> some View {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 160), spacing: 12)], spacing: 12) {
-            ForEach(data.tiles) { tile in
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(tile.label).font(.subheadline).foregroundStyle(.secondary)
-                    Text(tile.value).font(Theme.display(26, relativeTo: .title)).monospacedDigit().minimumScaleFactor(0.6).lineLimit(1)
-                    ChangeLabel(change: tile.change, suffix: tile.change.text.isEmpty ? "" : data.wording?.versus ?? "")
+        let compare = state.view.compare
+        let one = data.wording?.oneDay == true
+        return MetricGrid {
+            Button { metric = .visitors } label: {
+                MetricCard(label: one ? "Visitors" : "Visitors / day", value: average(data.number("visitor_days") / data.days),
+                           change: compare ? Format.change(data.number("visitor_days"), data.number("previous_visitor_days")) : nil,
+                           versus: "vs \(average(data.number("previous_visitor_days") / data.days))", selected: metric == .visitors)
+            }
+            .buttonStyle(.plain)
+            if state.site.mode == "full" {
+                Button { state.show(.retention) } label: {
+                    let now = data.totals["returning_share"]?.number
+                    let before = data.totals["previous_returning_share"]?.number
+                    MetricCard(label: "Returning visitors", value: now.map { $0.formatted(.percent.precision(.fractionLength(0))) } ?? "—",
+                               change: compare ? pointsChange(now, before) : nil,
+                               versus: before.map { "vs \($0.formatted(.percent.precision(.fractionLength(0))))" } ?? "")
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(14)
-                .background(.background, in: .rect(cornerRadius: 12))
-                .accessibilityElement(children: .combine)
+                .buttonStyle(.plain)
+            } else {
+                MetricCard(label: state.site.mode == "lite" ? "Visitor-days" : "Visits",
+                           value: Format.count(Int(data.number(state.site.mode == "lite" ? "visitor_days" : "sessions"))),
+                           change: compare ? Format.change(data.number(state.site.mode == "lite" ? "visitor_days" : "sessions"), data.number(state.site.mode == "lite" ? "previous_visitor_days" : "previous_sessions")) : nil,
+                           versus: "vs \(Format.count(Int(data.number(state.site.mode == "lite" ? "previous_visitor_days" : "previous_sessions"))))")
+            }
+            Button { metric = .views } label: {
+                MetricCard(label: "Page views", value: Format.count(Int(data.number("page_views"))),
+                           change: compare ? Format.change(data.number("page_views"), data.number("previous_page_views")) : nil,
+                           versus: "vs \(Format.count(Int(data.number("previous_page_views"))))", selected: metric == .views)
+            }
+            .buttonStyle(.plain)
+            if data.number("orders") > 0 {
+                Button { state.show(.revenue) } label: {
+                    MetricCard(label: "Revenue", value: data.money("revenue_minor"),
+                               change: compare ? Format.change(data.number("revenue_minor"), data.number("previous_revenue_minor")) : nil,
+                               versus: "vs \(data.money("previous_revenue_minor"))")
+                }
+                .buttonStyle(.plain)
+            } else {
+                Button { metric = .active } label: {
+                    MetricCard(label: "Active time", value: Format.duration(milliseconds: data.number("active_ms")),
+                               change: compare ? Format.change(data.number("active_ms"), data.number("previous_active_ms")) : nil,
+                               versus: "vs \(Format.duration(milliseconds: data.number("previous_active_ms")))", selected: metric == .active)
+                }
+                .buttonStyle(.plain)
             }
         }
     }
+
+    // MARK: Chart
+
+    private func chart(_ data: OverviewData) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(metric.title(oneDay: data.wording?.oneDay == true)).font(Theme.cardTitle).foregroundStyle(Theme.ink)
+                Spacer()
+                if let wording = data.wording { ChartLegend(wording: wording, compared: !data.previousTrend.isEmpty) }
+            }
+            if let insight = data.insight {
+                Text(insight).font(sizeClass == .compact ? .footnote : .callout).foregroundStyle(Theme.ink2)
+            }
+            TrendChart(current: data.trend, previous: data.previousTrend, notes: data.notes.filter { !$0.draft }, running: data.wording?.running ?? false, hourly: data.hourly, metric: metric, compact: sizeClass == .compact)
+                .frame(height: sizeClass == .compact ? 190 : 230)
+        }
+        .card()
+    }
+
+    // MARK: Cards
+
+    @ViewBuilder private func cards(_ data: OverviewData) -> some View {
+        let columns = sizeClass == .compact ? [GridItem(.flexible())] : [GridItem(.flexible(), spacing: 16, alignment: .top), GridItem(.flexible(), spacing: 16, alignment: .top), GridItem(.flexible(), spacing: 16, alignment: .top)]
+        LazyVGrid(columns: columns, alignment: .leading, spacing: sizeClass == .compact ? 12 : 16) {
+            sources(data)
+            places(data)
+            if !data.products.isEmpty { products(data) } else { pages(data) }
+        }
+    }
+
+    private func sources(_ data: OverviewData) -> some View {
+        SectionCard(title: "Where visitors come from") {
+            Text("Tap to filter")
+        } content: {
+            let top = data.sources.map { $0["page_views"]?.number ?? 0 }.max() ?? 1
+            VStack(spacing: 8) {
+                ForEach(Array(data.sources.enumerated()), id: \.offset) { _, row in
+                    let tone = Theme.channel(row["channel"]?.text)
+                    Button { state.filter("source", row["value"]?.text ?? "") } label: {
+                        ShareRow(title: row["label"]?.text ?? row["value"]?.text ?? "", value: Format.count(Int(row["page_views"]?.number ?? 0)),
+                                 share: share(row["page_views"]?.number ?? 0, top) * 0.85, color: tone.color, wash: tone.wash)
+                            .contentShape(.rect)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("Filters every report by this source")
+                }
+                if data.sources.isEmpty { Text("Nothing yet in this period").font(.callout).foregroundStyle(Theme.ink2) }
+            }
+            footerLink("All sources") { state.show(.sources) }
+        }
+    }
+
+    private func places(_ data: OverviewData) -> some View {
+        SectionCard(title: "Where they are") {
+            Text("Page views")
+        } content: {
+            let total = data.number("page_views")
+            VStack(spacing: 12) {
+                ForEach(Array(data.countries.prefix(5).enumerated()), id: \.offset) { _, row in
+                    let code = row["value"]?.text ?? ""
+                    Button { state.filter("country", code) } label: {
+                        MeterRow(code: code == "unknown" ? "?" : code, title: row["label"]?.text ?? code, value: Format.share(row["page_views"]?.number ?? 0, of: total), share: share(row["page_views"]?.number ?? 0, total))
+                            .contentShape(.rect)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            Text("Country from the IP at collection · IP never stored").font(.caption).foregroundStyle(Theme.muted)
+        }
+    }
+
+    private func products(_ data: OverviewData) -> some View {
+        SectionCard(title: "What sells") {
+            Text("Revenue")
+        } content: {
+            VStack(spacing: 10) {
+                ForEach(Array(data.products.prefix(4).enumerated()), id: \.offset) { index, row in
+                    HStack(spacing: 12) {
+                        Text("\(index + 1)").font(.caption.weight(.semibold)).foregroundStyle(Theme.ink2)
+                            .frame(width: 24, height: 24).background(Theme.subtle, in: .rect(cornerRadius: 6))
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(row["product"]?.text ?? "").foregroundStyle(Theme.ink).lineLimit(1)
+                            Text(plural(Int(row["orders"]?.number ?? 0), "order")).font(.caption).foregroundStyle(Theme.ink2)
+                        }
+                        Spacer()
+                        Text(Format.money(minor: Int(row["revenue_minor"]?.number ?? 0), currency: state.site.currency)).monospacedDigit().foregroundStyle(Theme.ink)
+                    }
+                }
+            }
+            footerLink("Open revenue") { state.show(.revenue) }
+        }
+    }
+
+    private func pages(_ data: OverviewData) -> some View {
+        SectionCard(title: "Top pages") {
+            Text("Page views")
+        } content: {
+            let top = data.pages.map { $0["page_views"]?.number ?? 0 }.max() ?? 1
+            VStack(spacing: 8) {
+                ForEach(Array(data.pages.enumerated()), id: \.offset) { _, row in
+                    Button { state.inspect(row["value"]?.text ?? "") } label: {
+                        ShareRow(title: row["value"]?.text ?? "", value: Format.count(Int(row["page_views"]?.number ?? 0)), share: share(row["page_views"]?.number ?? 0, top) * 0.85, rule: false)
+                            .contentShape(.rect)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            footerLink("All pages") { state.show(.pages) }
+        }
+    }
+
+    private func footerLink(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                Text(title)
+                Image(systemName: "arrow.right").font(.caption.weight(.semibold))
+            }
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(Theme.brandDark)
+        }
+        .buttonStyle(.plain)
+        .padding(.top, 4)
+    }
+
+    // MARK: States
 
     /// No visits in this view: a site still waiting for its first visit,
-    /// filters that match nothing, or a period without data. Each says which.
+    /// filters that match nothing, or dates without data. Each says which.
     @ViewBuilder private func nothingHere(_ data: OverviewData) -> some View {
         let between = data.wording?.between ?? "in this period"
-        if site.firstDay == nil {
-            ContentUnavailableView {
-                Label("Waiting for your first visit", systemImage: "hourglass")
-            } description: {
-                Text("Charts appear here once the tracker on \(site.host) reports a page view. Dates and filters become useful then.")
-            } actions: {
-                Button("Open setup in the workspace") { openURL(client.instance.origin.appending(path: "\(site.slug)/setup")) }
-                    .buttonStyle(.borderedProminent)
-            }
-        } else if !view.filters.isEmpty {
-            ContentUnavailableView {
-                Label("No visits match these filters", systemImage: "line.3.horizontal.decrease.circle")
-            } description: {
-                Text("Nothing matched \(view.filters.map { "\(Labels.dimension($0.dimension)) \($0.negated ? "is not" : "is") \(Labels.value($0.value, dimension: $0.dimension))" }.joined(separator: " and ")) \(between).")
-            } actions: {
-                Button("Clear filters") { view.filters = [] }
-                    .buttonStyle(.borderedProminent)
-            }
+        if state.site.firstDay == nil {
+            StageView(art: "waiting", title: "Waiting for your first visit",
+                      text: "Charts appear here once the tracker on \(state.site.host) reports a page view. Dates and filters become useful then.",
+                      primary: ("Open setup in the workspace", { openURL(state.client.instance.origin.appending(path: "\(state.site.slug)/setup")) }),
+                      secondary: ("Check again", { Task { await load() } }))
+        } else if !state.view.filters.isEmpty {
+            StageView(art: "filter", title: "No visits match these filters",
+                      text: "Nothing matched \(state.view.filters.map { "\(Labels.dimension($0.dimension)) \($0.negated ? "is not" : "is") \(Labels.value($0.value, dimension: $0.dimension))" }.joined(separator: state.view.any ? " or " : " and ")) \(between).",
+                      primary: ("Clear filters", { state.view.filters = [] }),
+                      secondary: ("Show the last 30 days", { state.view = ViewState(period: .month, filters: state.view.filters) }))
         } else {
-            let first = site.firstDay.flatMap(Dates.parse)
+            let first = state.site.firstDay.flatMap(Dates.parse)
             let before = if let first, let wording = data.wording { wording.end < first } else { false }
-            ContentUnavailableView {
-                Label(data.wording?.isToday == true ? "No visits yet today" : "No visits \(between)", systemImage: "calendar")
-            } description: {
-                if before, let first {
-                    Text("\(site.name) has data from \(first.formatted(Dates.style.day().month(.abbreviated).year())). These dates are before tracking started, so there is nothing to show yet.")
-                } else if data.wording?.isToday == true {
-                    Text("Nothing has arrived since midnight (UTC). Data health in the workspace shows whether collection stopped.")
-                } else {
-                    Text("The tracker reported nothing \(data.wording?.oneDay == true ? "that day" : "in these dates"). Data health in the workspace shows whether collection stopped.")
-                }
-            } actions: {
-                Button("Show the last 30 days") { view = ViewState(period: .month, filters: view.filters) }
-                    .buttonStyle(.borderedProminent)
-            }
+            StageView(art: "calendar",
+                      title: data.wording?.isToday == true ? "No visits yet today" : before ? "Before tracking started" : "No visits \(between)",
+                      text: before && first != nil
+                        ? "\(state.site.name) has data from \(first!.formatted(Dates.style.day().month(.abbreviated).year())). These dates are before tracking started, so there is nothing to show yet."
+                        : data.wording?.isToday == true
+                            ? "Nothing has arrived since midnight (UTC). Data health in the workspace shows whether collection stopped."
+                            : "The tracker reported nothing \(data.wording?.oneDay == true ? "that day" : "in these dates"). Data health in the workspace shows whether collection stopped.",
+                      primary: ("Show the last 30 days", { state.view = ViewState(period: .month, filters: state.view.filters) }),
+                      secondary: data.wording?.isToday == true ? ("Open data health", { openURL(state.client.instance.origin.appending(path: "\(state.site.slug)/health")) }) : nil)
         }
     }
 
+    /// Notes the daily check drafted, to keep or dismiss.
     @ViewBuilder private func notes(_ data: OverviewData) -> some View {
         ForEach(data.notes.filter(\.draft)) { note in
-            HStack(spacing: 10) {
-                Text("Noticed on \(Dates.short(note.day)): ").foregroundStyle(.secondary) + Text(note.label).fontWeight(.semibold)
-                Spacer()
-                Button("Keep as a note") {
-                    Task { try? await client.keepNote(site: site.slug, id: note.id); await load() }
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 6) {
+                    Icon("sparkles", size: 14)
+                    Text("Noticed on \(Dates.dayName(note.day))").font(.caption.weight(.semibold))
                 }
-                Button("Dismiss") {
-                    Task { try? await client.deleteNote(site: site.slug, id: note.id); await load() }
+                .foregroundStyle(Theme.brandDark)
+                Text(note.label).foregroundStyle(Theme.ink)
+                HStack(spacing: 14) {
+                    Button("Keep as a note") {
+                        Task { try? await state.client.keepNote(site: state.site.slug, id: note.id); await load() }
+                    }
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 14)
+                    .frame(height: 30)
+                    .background(Theme.primary, in: .capsule)
+                    Button("Dismiss") {
+                        Task { try? await state.client.deleteNote(site: state.site.slug, id: note.id); await load() }
+                    }
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(Theme.brandDark)
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(.plain)
             }
-            .font(.callout)
             .padding(14)
-            .background(Theme.brand.opacity(0.08), in: .rect(cornerRadius: 12))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Theme.brandWash, in: .rect(cornerRadius: Theme.cardRadius))
+            .overlay(RoundedRectangle(cornerRadius: Theme.cardRadius).strokeBorder(Theme.brand.opacity(0.25)))
+        }
+    }
+}
+
+private struct LoadKey: Hashable {
+    var view: ViewState
+    var metric: ChartMetric
+}
+
+/// What the trend chart shows; the metric cards switch it.
+enum ChartMetric: String, Hashable {
+    case visitors, views, active
+
+    var series: String {
+        switch self {
+        case .visitors: "visitor_days"
+        case .views: "views"
+        case .active: "active"
+        }
+    }
+
+    func title(oneDay: Bool) -> String {
+        switch self {
+        case .visitors: oneDay ? "Visitors" : "Visitors / day"
+        case .views: "Page views"
+        case .active: "Active time"
+        }
+    }
+
+    func noun(_ value: Double) -> String {
+        switch self {
+        case .visitors: "\(Format.count(Int(value))) visitors"
+        case .views: "\(Format.count(Int(value))) page views"
+        case .active: Format.duration(milliseconds: value)
         }
     }
 }
 
 struct OverviewData {
-    struct Tile: Identifiable {
-        var label: String
-        var value: String
-        var change: AnalyticoKit.Format.Change
-        var id: String { label }
-    }
-
-    var tiles: [Tile]
+    var totals: Report.Row
+    var currency: String
     /// What the period is called, for labels and comparisons.
     var wording: PeriodWording?
-    var pageViews: Double
+    var days: Double
     var hourly: Bool
     var trend: [Point]
     var previousTrend: [Point]
     var sources: [Report.Row]
-    var pages: [Report.Row]
     var countries: [Report.Row]
-    var devices: [Report.Row]
+    var pages: [Report.Row]
+    var products: [Report.Row]
     var notes: [Note]
+    var metric: ChartMetric
 
-    static func load(client: Client, site: Site, view: ViewState) async throws -> OverviewData {
+    var pageViews: Double { number("page_views") }
+
+    func number(_ key: String) -> Double { totals[key]?.number ?? 0 }
+
+    func money(_ key: String) -> String { Format.money(minor: Int(number(key)), currency: currency) }
+
+    /// "Tue 6 Oct was the busiest day — 2,796 visitors (3.3× the same day before)."
+    var insight: String? {
+        let complete = wording?.running == true ? Array(trend.dropLast()) : trend
+        guard complete.count > 1, let best = complete.indices.max(by: { complete[$0].value < complete[$1].value }), complete[best].value > 0 else { return nil }
+        let point = complete[best]
+        let when = hourly ? point.at.formatted(Dates.style.hour().minute()) : point.at.formatted(Dates.style.weekday(.abbreviated).day().month(.abbreviated))
+        var text = "\(when) was the busiest \(hourly ? "hour" : "day") — \(metric.noun(point.value))"
+        if best < previousTrend.count, previousTrend[best].value > 0 {
+            let change = Format.change(point.value, previousTrend[best].value)
+            text += " (\(change.text.hasSuffix("×") ? "\(change.text) the same \(hourly ? "hour" : "day") before" : "\(change.text) on the same \(hourly ? "hour" : "day") before"))"
+        }
+        return text + "."
+    }
+
+    static func load(client: Client, site: Site, view: ViewState, metric: ChartMetric) async throws -> OverviewData {
         let slug = site.slug
         async let overview = client.report("overview", site: slug, view: view)
-        async let series = client.report("timeseries", site: slug, view: view, parameters: ["metric": "visitors"])
+        async let series = client.report("timeseries", site: slug, view: view, parameters: ["metric": metric.series])
         async let sources = client.report("breakdown", site: slug, view: view, parameters: ["dimension": "source", "limit": "5"])
+        async let countries = client.report("breakdown", site: slug, view: view, parameters: ["dimension": "country", "limit": "5"])
         async let pages = client.report("breakdown", site: slug, view: view, parameters: ["dimension": "page", "limit": "5"])
-        async let countries = client.report("breakdown", site: slug, view: view, parameters: ["dimension": "country", "limit": "6"])
-        async let devices = client.report("breakdown", site: slug, view: view, parameters: ["dimension": "device", "limit": "4"])
         async let notes = client.notes(site: slug, view: view)
         let report = try await overview
         let totals = report.rows.first ?? [:]
-        let number = { (key: String) in totals[key]?.number ?? 0 }
         let rolling = !view.isCustom && view.period == .day
         let wording = PeriodWording(from: report.from, to: report.to, rolling: rolling)
-        // A running period averages over the days so far, like the workspace.
-        let days = wording?.elapsedDays ?? 1
-        var tiles = [
-            Tile(label: wording?.oneDay == true ? "Visitors" : "Visitors / day", value: average(number("visitor_days") / days), change: Format.change(number("visitor_days"), number("previous_visitor_days"))),
-            Tile(label: "Page views", value: Format.count(Int(number("page_views"))), change: Format.change(number("page_views"), number("previous_page_views"))),
-            // Lite mode has no visits; like the workspace, it shows visitor-days.
-            site.mode == "lite"
-                ? Tile(label: "Visitor-days", value: Format.count(Int(number("visitor_days"))), change: Format.change(number("visitor_days"), number("previous_visitor_days")))
-                : Tile(label: "Visits", value: Format.count(Int(number("sessions"))), change: Format.change(number("sessions"), number("previous_sessions"))),
-            Tile(label: "Active time", value: Format.duration(milliseconds: number("active_ms")), change: Format.change(number("active_ms"), number("previous_active_ms"))),
-        ]
-        if number("orders") > 0 {
-            tiles.append(Tile(label: "Revenue", value: Format.money(minor: Int(number("revenue_minor")), currency: totals["currency"]?.text ?? site.currency), change: Format.Change(text: "\(Int(number("orders"))) orders", direction: .flat)))
-        }
-        // The previous period's series, shifted onto the current one.
         let current = try await series.rows.map(Point.init(row:))
         var previous: [Point] = []
-        if !rolling, let before = view.previous(from: report.from, to: report.to) {
-            previous = (try? await client.report("timeseries", site: slug, view: before, parameters: ["metric": "visitors"]).rows.map(Point.init(row:))) ?? []
+        if view.compare, !rolling, let before = view.previous(from: report.from, to: report.to) {
+            previous = (try? await client.report("timeseries", site: slug, view: before, parameters: ["metric": metric.series]).rows.map(Point.init(row:))) ?? []
+        }
+        var products: [Report.Row] = []
+        if (totals["orders"]?.number ?? 0) > 0 {
+            products = (try? await client.report("revenue", site: slug, view: view, parameters: ["limit": "4"]).rows) ?? []
         }
         return try await OverviewData(
-            tiles: tiles,
+            totals: totals,
+            currency: totals["currency"]?.text ?? site.currency,
             wording: wording,
-            pageViews: number("page_views"),
+            days: wording?.elapsedDays ?? 1,
             hourly: rolling || wording?.oneDay == true,
             trend: current,
             previousTrend: zip(current, previous).map { Point(at: $0.at, value: $1.value) },
-            sources: sources.rows, pages: pages.rows, countries: countries.rows, devices: devices.rows,
-            notes: notes
+            sources: sources.rows, countries: countries.rows, pages: pages.rows, products: products,
+            notes: notes,
+            metric: metric
         )
     }
 }
 
 /// Small averages keep a decimal, as in the workspace: 0.5, not 0.
-private func average(_ value: Double) -> String {
+func average(_ value: Double) -> String {
     value < 10 && value != value.rounded() ? value.formatted(.number.precision(.fractionLength(1))) : Format.count(Int(value.rounded()))
 }
 
@@ -233,11 +398,11 @@ struct Point: Identifiable {
 
     init(row: Report.Row) {
         at = Dates.parse(row["at"]?.text ?? "") ?? .distantPast
-        value = row["value"]?.number ?? 0
+        value = row["value"]?.number ?? row["page_views"]?.number ?? 0
     }
 }
 
-/// Visitors over the period, the previous period dashed, notes as rules.
+/// The metric over the period, the previous period dashed, notes as rules.
 /// A running period's last bucket is a "now" band, never a drop.
 struct TrendChart: View {
     let current: [Point]
@@ -245,8 +410,20 @@ struct TrendChart: View {
     let notes: [Note]
     let running: Bool
     let hourly: Bool
+    var metric: ChartMetric = .visitors
+    /// iPhone: only the first and last day are named, at the chart's edges.
+    var compact = false
 
     private var complete: [Point] { running ? Array(current.dropLast()) : current }
+    private var labelFormat: Date.FormatStyle {
+        if hourly { return Dates.style.hour() }
+        return compact || current.count > 8 ? Dates.style.day().month(.abbreviated) : Dates.style.weekday(.abbreviated).day()
+    }
+
+    private var ticks: [Date] {
+        let step = max(1, Int((Double(current.count) / 7).rounded(.up)))
+        return stride(from: 0, to: current.count, by: step).map { current[$0].at }
+    }
     private var partial: Point? { running ? current.last : nil }
     private var bucket: TimeInterval { hourly ? 3600 : 86_400 }
 
@@ -254,110 +431,99 @@ struct TrendChart: View {
         Chart {
             if let partial {
                 RectangleMark(xStart: .value("Now", partial.at - bucket / 2), xEnd: .value("Now", partial.at + bucket / 2))
-                    .foregroundStyle(Theme.brand.opacity(0.1))
+                    .foregroundStyle(Theme.brandWash)
                     .annotation(position: .overlay, alignment: .top) {
-                        Text("now").font(.caption2.weight(.semibold)).foregroundStyle(Theme.brand).padding(.top, 4)
+                        Text("now").font(.caption2.weight(.semibold)).foregroundStyle(Theme.brandDark).padding(.top, 4)
                     }
             }
             ForEach(previous) { point in
-                LineMark(x: .value("Time", point.at), y: .value("Visitors", point.value), series: .value("Period", "Before"))
-                    .foregroundStyle(.secondary)
+                LineMark(x: .value("Time", point.at), y: .value("Value", point.value), series: .value("Period", "Before"))
+                    .foregroundStyle(Theme.muted)
                     .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4, 4]))
+                    .interpolationMethod(.monotone)
             }
             ForEach(complete) { point in
-                AreaMark(x: .value("Time", point.at), y: .value("Visitors", point.value))
-                    .foregroundStyle(LinearGradient(colors: [Theme.brand.opacity(0.25), Theme.brand.opacity(0)], startPoint: .top, endPoint: .bottom))
-                LineMark(x: .value("Time", point.at), y: .value("Visitors", point.value), series: .value("Period", "Now"))
+                AreaMark(x: .value("Time", point.at), y: .value("Value", point.value))
+                    .foregroundStyle(LinearGradient(colors: [Theme.brand.opacity(0.18), Theme.brand.opacity(0)], startPoint: .top, endPoint: .bottom))
+                    .interpolationMethod(.monotone)
+                LineMark(x: .value("Time", point.at), y: .value("Value", point.value), series: .value("Period", "Now"))
                     .foregroundStyle(Theme.brand)
-                    .lineStyle(StrokeStyle(lineWidth: 2))
+                    .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
+                    .interpolationMethod(.monotone)
+            }
+            if let last = complete.last {
+                PointMark(x: .value("Time", last.at), y: .value("Value", last.value))
+                    .symbol { Circle().strokeBorder(Theme.brand, lineWidth: 2).background(Circle().fill(Theme.surface)).frame(width: 9, height: 9) }
             }
             ForEach(notes) { note in
                 if let day = Dates.parse(note.day) {
                     RuleMark(x: .value("Note", day))
-                        .foregroundStyle(.secondary.opacity(0.5))
+                        .foregroundStyle(Theme.muted.opacity(0.5))
                         .annotation(position: .top, alignment: .leading) {
-                            Text(note.label).font(.caption2).foregroundStyle(.secondary)
+                            Text(note.label).font(.caption2).foregroundStyle(Theme.ink2)
                         }
                 }
             }
         }
-        .chartYAxis { AxisMarks(position: .leading) }
+        .chartYAxis {
+            AxisMarks(position: .leading, values: .automatic(desiredCount: 4)) { value in
+                AxisGridLine().foregroundStyle(Theme.subtle)
+                AxisValueLabel {
+                    if let number = value.as(Double.self) {
+                        Text(metric == .active ? Format.duration(milliseconds: number) : number.formatted(.number.notation(.compactName))).foregroundStyle(Theme.muted)
+                    }
+                }
+            }
+        }
+        .chartXAxis {
+            if compact, let first = current.first, let last = current.last {
+                AxisMarks(values: [first.at]) { _ in
+                    AxisValueLabel(format: labelFormat, anchor: .topLeading).foregroundStyle(Theme.muted)
+                }
+                AxisMarks(values: [last.at]) { _ in
+                    AxisValueLabel(format: labelFormat, anchor: .topTrailing).foregroundStyle(Theme.muted)
+                }
+            } else {
+                // Labels sit under the points they name, at most seven of them.
+                AxisMarks(values: ticks) { _ in
+                    AxisValueLabel(format: labelFormat, anchor: .top).foregroundStyle(Theme.muted)
+                }
+            }
+        }
         .environment(\.timeZone, .gmt)
-        .accessibilityLabel(hourly ? "Visitors hour by hour" : "Visitors over the period")
+        .accessibilityLabel(hourly ? "\(metric.title(oneDay: true)) hour by hour" : "\(metric.title(oneDay: false)) over the period")
     }
 }
 
-/// Which line is which, by its dates: "● Wed 30 Sep  – – Tue 29 Sep".
+/// Which line is which, by its dates: "● 2–8 Oct  – – 25 Sep–1 Oct".
 struct ChartLegend: View {
     let wording: PeriodWording
     let compared: Bool
 
     var body: some View {
-        HStack(spacing: 14) {
-            Text("Visitors").font(.headline)
-            Spacer()
-            HStack(spacing: 6) {
+        HStack(spacing: 12) {
+            HStack(spacing: 5) {
                 Circle().fill(Theme.brand).frame(width: 8, height: 8)
-                Text(wording.this).fontWeight(.semibold)
+                Text(wording.this).fontWeight(.semibold).foregroundStyle(Theme.ink)
             }
             if compared {
-                HStack(spacing: 6) {
-                    Capsule().fill(.secondary).frame(width: 12, height: 2)
-                    Text(wording.previous).foregroundStyle(.secondary)
+                HStack(spacing: 5) {
+                    Capsule().fill(Theme.muted).frame(width: 12, height: 2)
+                    Text(wording.previous).foregroundStyle(Theme.ink2)
                 }
             }
         }
         .font(.caption)
+        .lineLimit(1)
         .accessibilityElement(children: .combine)
     }
 }
 
-/// A top-five card; tapping a row filters every report by it.
-struct TopList: View {
-    let title: String
-    let dimension: String
-    let rows: [Report.Row]
-    @Binding var view: ViewState
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(title).font(.headline)
-            let top = rows.map { $0["page_views"]?.number ?? 0 }.max() ?? 1
-            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                let key = row["value"]?.text ?? ""
-                let views = row["page_views"]?.number ?? 0
-                Button {
-                    view.filters.removeAll { $0.dimension == dimension }
-                    view.filters.append(.init(dimension: dimension, value: key))
-                } label: {
-                    HStack {
-                        Text(Labels.value(key, dimension: dimension)).lineLimit(1).truncationMode(.middle)
-                        Spacer()
-                        Text(Format.count(Int(views))).monospacedDigit().foregroundStyle(.secondary)
-                    }
-                    .padding(.vertical, 6)
-                    .padding(.horizontal, 8)
-                    .background(alignment: .leading) {
-                        GeometryReader { geometry in
-                            RoundedRectangle(cornerRadius: 6).fill(Theme.brand.opacity(0.1)).frame(width: geometry.size.width * views / max(top, 1))
-                        }
-                    }
-                    .contentShape(.rect)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("\(Labels.value(key, dimension: dimension)), \(Int(views)) page views. Filter by it.")
-            }
-            if rows.isEmpty { Text("Nothing yet in this period").foregroundStyle(.secondary).font(.callout) }
-        }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.background, in: .rect(cornerRadius: 12))
-    }
-}
-
+/// Adds a note to the chart: a day and a short label.
 struct AddNoteSheet: View {
     @Environment(\.dismiss) private var dismiss
-    let save: (String, String) async throws -> Void
+    let client: Client
+    let site: Site
     @State private var day = Date()
     @State private var label = ""
     @State private var failure: String?
@@ -365,10 +531,15 @@ struct AddNoteSheet: View {
     var body: some View {
         NavigationStack {
             Form {
-                DatePicker("Day", selection: $day, in: ...Date(), displayedComponents: .date)
-                TextField("Note", text: $label, prompt: Text("Launch, newsletter, outage…"))
+                Section {
+                    DatePicker("Day", selection: $day, in: ...Date(), displayedComponents: .date)
+                    TextField("Note", text: $label, prompt: Text("Launch, newsletter, outage…"))
+                } footer: {
+                    Text("Notes show on every chart of \(site.name), for everyone on the team. Up to 60 characters.")
+                }
                 if let failure { Text(failure).foregroundStyle(Theme.bad) }
             }
+            .formStyle(.grouped)
             .navigationTitle("Add a note")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
@@ -376,7 +547,7 @@ struct AddNoteSheet: View {
                     Button("Add") {
                         Task {
                             do {
-                                try await save(Dates.iso(day), label.trimmingCharacters(in: .whitespaces))
+                                try await client.addNote(site: site.slug, day: Dates.iso(day), label: label.trimmingCharacters(in: .whitespaces))
                                 dismiss()
                             } catch {
                                 failure = "The note wasn’t saved. Notes need a short label, up to 60 characters, and the editor role."
@@ -387,12 +558,14 @@ struct AddNoteSheet: View {
                 }
             }
         }
-        .frame(minWidth: 360, minHeight: 220)
+        .tint(Theme.brand)
+        .presentationDetents([.medium])
+        .frame(minWidth: 380, minHeight: 240)
     }
 }
 
 enum Dates {
-    /// "2026-09-30", "2026-09-30T14:00Z" (hourly rows) or a full timestamp.
+    /// "2026-09-30", "2026-09-30T14:00Z" (hourly rows), "2026-09-30T14:05Z" (minutes) or a full timestamp.
     static func parse(_ text: String) -> Date? {
         if text.count == 10 { return try? Date(text + "T00:00:00Z", strategy: .iso8601) }
         if text.count == 17, text.hasSuffix("Z") { return try? Date(text.dropLast() + ":00Z", strategy: .iso8601) }
@@ -410,9 +583,13 @@ enum Dates {
     }
 
     static func short(_ day: String) -> String {
-        parse(day)?.formatted(.dateTime.day().month(.abbreviated)) ?? day
+        parse(day)?.formatted(style.day().month(.abbreviated)) ?? day
     }
 
+    /// "Sat 5 Oct".
+    static func dayName(_ day: String) -> String {
+        parse(day)?.formatted(style.weekday(.abbreviated).day().month(.abbreviated)) ?? day
+    }
 }
 
 extension Calendar {

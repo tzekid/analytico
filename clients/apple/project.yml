@@ -11,7 +11,7 @@ settings:
     CODE_SIGN_STYLE: Automatic
     SWIFT_VERSION: "6.0"
     SWIFT_STRICT_CONCURRENCY: complete
-    MARKETING_VERSION: "0.3.0"
+    MARKETING_VERSION: "0.3.1"
     CURRENT_PROJECT_VERSION: "1"
 packages:
   AnalyticoKit:
@@ -61,6 +61,7 @@ targets:
       - path: Widgets
       - path: Intents
       - path: App/Resources
+      - path: App/Theme.swift
     dependencies:
       - package: AnalyticoKit
     info:
@@ -70,15 +71,12 @@ targets:
         UIAppFonts: [Quando-Regular.ttf]
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
-    entitlements:
-      path: Widgets/AnalyticoWidgets.entitlements
-      properties:
-        com.apple.security.app-sandbox: true
-        com.apple.security.network.client: true
-        com.apple.security.application-groups: [group.ru.plosca.analytico]
-        keychain-access-groups: [$(AppIdentifierPrefix)ru.plosca.analytico]
     settings:
       base:
+        # The Mac's app group is team-prefixed; see Shared.appGroup.
+        CODE_SIGN_ENTITLEMENTS[sdk=iphoneos*]: Widgets/AnalyticoWidgets-iOS.entitlements
+        CODE_SIGN_ENTITLEMENTS[sdk=iphonesimulator*]: Widgets/AnalyticoWidgets-iOS.entitlements
+        CODE_SIGN_ENTITLEMENTS[sdk=macosx*]: Widgets/AnalyticoWidgets-macOS.entitlements
         PRODUCT_BUNDLE_IDENTIFIER: ru.plosca.analytico.widgets
         PRODUCT_NAME: AnalyticoWidgets
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
@@ -96,14 +94,11 @@ targets:
         NSExtension:
           NSExtensionPointIdentifier: com.apple.usernotifications.service
           NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).NotificationService
-    entitlements:
-      path: Notifications/AnalyticoNotifications.entitlements
-      properties:
-        com.apple.security.app-sandbox: true
-        com.apple.security.application-groups: [group.ru.plosca.analytico]
-        keychain-access-groups: [$(AppIdentifierPrefix)ru.plosca.analytico]
     settings:
       base:
+        CODE_SIGN_ENTITLEMENTS[sdk=iphoneos*]: Notifications/AnalyticoNotifications-iOS.entitlements
+        CODE_SIGN_ENTITLEMENTS[sdk=iphonesimulator*]: Notifications/AnalyticoNotifications-iOS.entitlements
+        CODE_SIGN_ENTITLEMENTS[sdk=macosx*]: Notifications/AnalyticoNotifications-macOS.entitlements
         PRODUCT_BUNDLE_IDENTIFIER: ru.plosca.analytico.notifications
         PRODUCT_NAME: AnalyticoNotifications
 schemes:

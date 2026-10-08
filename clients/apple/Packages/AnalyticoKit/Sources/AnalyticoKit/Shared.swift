@@ -3,7 +3,13 @@ import Foundation
 /// What the app and its widgets share: the signed-in instance in the app
 /// group's defaults, and its tokens in the shared Keychain access group.
 public enum Shared {
+    /// A sandboxed Mac app may use a team-prefixed group without a profile
+    /// that lists it; iOS needs the registered `group.` one.
+    #if os(macOS)
+    public static let appGroup = "JVVN972Y79.ru.plosca.analytico"
+    #else
     public static let appGroup = "group.ru.plosca.analytico"
+    #endif
     public static let keychainGroup = "JVVN972Y79.ru.plosca.analytico"
 
     static var defaults: UserDefaults { UserDefaults(suiteName: appGroup) ?? .standard }

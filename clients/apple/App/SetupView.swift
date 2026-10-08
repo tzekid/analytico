@@ -26,7 +26,7 @@ struct SetupView: View {
                         .font(Theme.display(30))
                         .fixedSize(horizontal: false, vertical: true)
                     Text(signingIn ? "Sign in on \(check?.instance?.host ?? "your instance") with \(check?.instance?.signInSummary ?? "your account"). You come back here as soon as you’re done." : "Enter the address you open Analytico at in your browser. The app checks it before you sign in.")
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Theme.ink2)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 if !signingIn { field }
@@ -38,15 +38,22 @@ struct SetupView: View {
             .frame(maxWidth: .infinity)
         }
         .scrollBounceBehavior(.basedOnSize)
+        .background(Theme.canvas)
         .task(id: address) { await checkAddress() }
-        .onAppear { focused = true }
+        .onAppear {
+            if let host = model.prefill {
+                address = host
+                model.prefill = nil
+            }
+            focused = true
+        }
     }
 
     private var field: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Your Analytico address").font(.subheadline.weight(.medium))
             HStack(spacing: 2) {
-                if !address.contains("://") { Text("https://").foregroundStyle(.secondary) }
+                if !address.contains("://") { Text("https://").foregroundStyle(Theme.ink2) }
                 TextField("analytics.example.com", text: $address)
                     .textContentType(.URL)
                     .autocorrectionDisabled()
@@ -61,7 +68,7 @@ struct SetupView: View {
             }
             .padding(.horizontal, 14)
             .frame(height: 50)
-            .background(.background, in: .rect(cornerRadius: 10))
+            .background(Theme.surface, in: .rect(cornerRadius: 10))
             .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(borderColor, lineWidth: borderColor == .clear ? 0 : 1.5))
         }
     }
@@ -113,23 +120,20 @@ struct SetupView: View {
             if signingIn {
                 HStack {
                     ProgressView().controlSize(.small)
-                    Text("Waiting for the sign-in page…").foregroundStyle(.secondary)
+                    Text("Waiting for the sign-in page…").foregroundStyle(Theme.ink2)
                 }
                 .frame(maxWidth: .infinity, minHeight: 48)
-                .background(.background, in: .rect(cornerRadius: 10))
+                .background(Theme.surface, in: .rect(cornerRadius: 10))
                 .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.secondary.opacity(0.3)))
             } else {
-                Button {
+                Button("Continue in browser") {
                     Task { await signIn() }
-                } label: {
-                    Text("Continue in browser").fontWeight(.semibold).frame(maxWidth: .infinity, minHeight: 34)
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
+                .buttonStyle(PrimaryButtonStyle(wide: true))
                 .disabled(check?.instance == nil)
                 Text("You sign in on your instance’s own page, with your passkey or Google. The app only receives a token you can revoke in Settings → Sign-in.")
                     .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.ink2)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -186,7 +190,7 @@ struct InstanceCard: View {
                     .background(Theme.brand.opacity(0.12), in: .rect(cornerRadius: 10))
                 VStack(alignment: .leading, spacing: 2) {
                     Text(instance.host).font(.headline)
-                    Text("Analytico \(instance.version)").font(.subheadline).foregroundStyle(.secondary)
+                    Text("Analytico \(instance.version)").font(.subheadline).foregroundStyle(Theme.ink2)
                 }
                 Spacer()
                 Text(signingIn ? "Signing in" : "Ready")
@@ -202,7 +206,7 @@ struct InstanceCard: View {
                 Label("Sign in with \(instance.signInSummary)", systemImage: "checkmark")
             }
             .font(.subheadline)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(Theme.ink2)
             .labelStyle(CheckLabelStyle())
         }
         .padding(18)
@@ -229,7 +233,7 @@ struct Problem: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title).font(.headline).foregroundStyle(Theme.bad)
-            Text(detail).font(.subheadline).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Text(detail).font(.subheadline).foregroundStyle(Theme.ink2).fixedSize(horizontal: false, vertical: true)
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)

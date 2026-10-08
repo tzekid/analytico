@@ -65,6 +65,10 @@ public struct ViewState: Hashable, Sendable, Codable {
 
     public var period: Period
     public var filters: [Filter]
+    /// Changes against the period before; off hides them everywhere.
+    public var compare = true
+    /// Filters match when any condition holds, instead of every one.
+    public var any = false
     /// Explicit days instead of the period, "2026-09-24"…"2026-09-30", for
     /// the previous period's series.
     public var from: String?
@@ -82,7 +86,10 @@ public struct ViewState: Hashable, Sendable, Codable {
         } else {
             [URLQueryItem(name: "range", value: period.rawValue)]
         }
-        return range + filters.map { URLQueryItem(name: "f", value: $0.query) }
+        var items = range
+        if !compare { items.append(URLQueryItem(name: "cmp", value: "0")) }
+        if any && !filters.isEmpty { items.append(URLQueryItem(name: "fm", value: "any")) }
+        return items + filters.map { URLQueryItem(name: "f", value: $0.query) }
     }
 
     /// The same view over the days just before "from"…"to" (inclusive dates).
@@ -121,6 +128,8 @@ public struct ViewState: Hashable, Sendable, Codable {
         let value = { (name: String) in items.first { $0.name == name }?.value }
         period = value("range").flatMap { Period(rawValue: $0) } ?? .week
         filters = items.filter { $0.name == "f" }.compactMap { Filter(query: $0.value ?? "") }
+        compare = value("cmp") != "0"
+        any = value("fm") == "any"
         if value("range") == "custom", let from = value("from"), let to = value("to") {
             self.from = from
             self.to = to

@@ -48,6 +48,13 @@ final class AppModel {
 
     /// A view opened from an `analytico://` or workspace link, applied once.
     var pendingLink: URL?
+    /// Who is signed in, for Settings.
+    private(set) var me: Me?
+    /// The instance whose sign-in ended (revoked or expired), until the
+    /// person signs in again or chooses another address.
+    private(set) var signedOutFrom: String?
+    /// The address setup starts with after "Sign in again".
+    var prefill: String?
 
     let store = Shared.store
 
@@ -70,7 +77,10 @@ final class AppModel {
         phase = .signedIn(Client(instance: instance, tokens: tokens, store: store))
     }
 
-    func signOut() {
+    /// Signs out; `ended` when the instance ended the sign-in, which is said.
+    func signOut(ended: Bool = false) {
+        signedOutFrom = ended ? client?.instance.host : nil
+        me = nil
         if let client {
             // The instance forgets this device; its tokens still work until the request is sent.
             Task { try? await client.unregisterDevice() }
@@ -164,10 +174,25 @@ final class AppModel {
                 followLive()
             }
         } catch ClientError.signedOut {
-            signOut()
+            signOut(ended: true)
         } catch {
             sitesError = "Couldn’t load your sites. Check the connection and try again."
         }
+    }
+
+    func loadMe() async {
+        guard let client else { return }
+        do {
+            me = try await client.me()
+        } catch ClientError.signedOut {
+            signOut(ended: true)
+        } catch {}
+    }
+
+    /// After "Your sign-in ended": the same address again, or a new one.
+    func reconnect(to host: String?) {
+        prefill = host
+        signedOutFrom = nil
     }
 
     /// Opens `analytico://<host>/<site>/<page>?range=…` or a workspace link.
