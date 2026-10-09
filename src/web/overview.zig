@@ -381,7 +381,8 @@ pub fn placesCard(ctx: *Ctx, view: data.View, base: []const u8, total_views: i64
             .href = try view.href(arena, base, &.{.{ "f+", try std.fmt.allocPrint(arena, "device:{s}", .{row.key}) }}),
             .width = @as(f64, @floatFromInt(row.value)) / @as(f64, @floatFromInt(@max(total_views, 1))) * 80 + 8,
             .bar = "var(--brand-wash)",
-            .name = row.key,
+            // "Desktop", as Audience names it.
+            .name = @import("journeys.zig").capitalized(arena, row.key),
             .value = try std.fmt.allocPrint(arena, "{f}", .{html.int(row.value)}),
             .pct = try std.fmt.allocPrint(arena, "{f}", .{html.share(row.value, total_views)}),
         });

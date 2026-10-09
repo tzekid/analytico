@@ -110,7 +110,7 @@ struct OverviewView: View {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     VStack(alignment: .leading, spacing: 1) {
                         Text(day.formatted(data.hourly ? Dates.style.weekday(.abbreviated).hour().minute() : Dates.style.weekday(.abbreviated).day().month(.abbreviated)) + (data.wording?.running == true && day == data.trend.last?.at ? " · so far" : ""))
-                            .font(.caption).foregroundStyle(Theme.ink2)
+                            .font(Theme.caption).foregroundStyle(Theme.ink2)
                         HStack(spacing: 6) {
                             Text(data.metric.noun(point.value)).fontWeight(.semibold).foregroundStyle(Theme.ink)
                             if let change, !change.text.isEmpty { ChangeLabel(change: change, versus: "vs \(data.metric == .active ? Format.duration(milliseconds: before!.value) : Format.count(Int(before!.value)))") }
@@ -120,16 +120,16 @@ struct OverviewView: View {
                     if !data.hourly {
                         Button("Open this day →") { open(day) }
                             .buttonStyle(.plain)
-                            .font(.footnote.weight(.semibold))
+                            .font(Theme.footnote.weight(.semibold))
                             .foregroundStyle(Theme.brandDark)
                     }
-                    Button { pinned = nil } label: { Image(systemName: "xmark").font(.caption.weight(.bold)).foregroundStyle(Theme.ink2).frame(width: 28, height: 28).background(Theme.subtle, in: .circle) }
+                    Button { pinned = nil } label: { Image(systemName: "xmark").font(Theme.caption.weight(.bold)).foregroundStyle(Theme.ink2).frame(width: 28, height: 28).background(Theme.subtle, in: .circle) }
                         .buttonStyle(.plain)
                         .accessibilityLabel("Clear the selected day")
                 }
-                .font(sizeClass == .compact ? .footnote : .callout)
+                .font(sizeClass == .compact ? Theme.footnote : Theme.callout)
             } else if let insight = data.insight {
-                Text(insight).font(sizeClass == .compact ? .footnote : .callout).foregroundStyle(Theme.ink2)
+                Text(insight).font(sizeClass == .compact ? Theme.footnote : Theme.callout).foregroundStyle(Theme.ink2)
             }
             TrendChart(current: data.trend, previous: data.previousTrend, notes: data.notes.filter { !$0.draft }, running: data.wording?.running ?? false, hourly: data.hourly, metric: data.metric, compact: sizeClass == .compact, pinned: $pinned, open: open)
                 .frame(height: sizeClass == .compact ? 190 : 230)
@@ -150,7 +150,7 @@ struct OverviewView: View {
 
     private func sources(_ data: OverviewData) -> some View {
         SectionCard(title: "Where visitors come from") {
-            Text("Tap to filter")
+            Text("\(press) to filter")
         } content: {
             let top = data.sources.map { $0["page_views"]?.number ?? 0 }.max() ?? 1
             VStack(spacing: 8) {
@@ -165,13 +165,41 @@ struct OverviewView: View {
                     .rowMenu("source", row["value"]?.text ?? "", label: row["label"]?.text)
                     .accessibilityHint("Filters every report by this source")
                 }
-                if data.sources.isEmpty { Text("Nothing yet in this period").font(.callout).foregroundStyle(Theme.ink2) }
+                if data.sources.isEmpty { Text("Nothing yet in this period").font(Theme.callout).foregroundStyle(Theme.ink2) }
             }
             footerLink("All sources") { state.show(.sources) }
         }
     }
 
-    private func places(_ data: OverviewData) -> some View {
+    /// Without a location database every country is "unknown": devices
+    /// instead, and how to get places, as the workspace does.
+    @ViewBuilder private func places(_ data: OverviewData) -> some View {
+        if data.countries.allSatisfy({ $0["value"]?.text == "unknown" }) {
+            SectionCard(title: "Devices") {
+                Text("Page views")
+            } content: {
+                let total = data.number("page_views")
+                VStack(spacing: 6) {
+                    ForEach(Array(data.devices.prefix(4).enumerated()), id: \.offset) { _, row in
+                        let key = row["value"]?.text ?? ""
+                        let label = Labels.value(key, dimension: "device")
+                        let views = row["page_views"]?.number ?? 0
+                        Button { state.filter("device", key, label: label) } label: {
+                            ShareRow(title: label, value: "\(Format.count(Int(views))) · \(Format.share(views, of: total))", share: max(share(views, total) * 0.75, 0.04), rule: false)
+                                .contentShape(.rect)
+                        }
+                        .buttonStyle(.plain)
+                        .rowMenu("device", key, label: label)
+                    }
+                }
+                Text("Countries appear once a location database is installed (`analytico geo import`).").font(Theme.caption).foregroundStyle(Theme.muted)
+            }
+        } else {
+            countries(data)
+        }
+    }
+
+    private func countries(_ data: OverviewData) -> some View {
         SectionCard(title: "Where they are") {
             Text("Page views")
         } content: {
@@ -187,7 +215,7 @@ struct OverviewView: View {
                     .rowMenu("country", code, label: row["label"]?.text)
                 }
             }
-            Text("Country from the IP at collection · IP never stored").font(.caption).foregroundStyle(Theme.muted)
+            Text("Country from the IP at collection · IP never stored").font(Theme.caption).foregroundStyle(Theme.muted)
         }
     }
 
@@ -198,11 +226,11 @@ struct OverviewView: View {
             VStack(spacing: 10) {
                 ForEach(Array(data.products.prefix(4).enumerated()), id: \.offset) { index, row in
                     HStack(spacing: 12) {
-                        Text("\(index + 1)").font(.caption.weight(.semibold)).foregroundStyle(Theme.ink2)
+                        Text("\(index + 1)").font(Theme.caption.weight(.semibold)).foregroundStyle(Theme.ink2)
                             .frame(width: 24, height: 24).background(Theme.subtle, in: .rect(cornerRadius: 6))
                         VStack(alignment: .leading, spacing: 1) {
                             Text(row["product"]?.text ?? "").foregroundStyle(Theme.ink).lineLimit(1)
-                            Text(plural(Int(row["orders"]?.number ?? 0), "order")).font(.caption).foregroundStyle(Theme.ink2)
+                            Text(plural(Int(row["orders"]?.number ?? 0), "order")).font(Theme.caption).foregroundStyle(Theme.ink2)
                         }
                         Spacer()
                         Text(Format.money(minor: Int(row["revenue_minor"]?.number ?? 0), currency: state.site.currency)).monospacedDigit().foregroundStyle(Theme.ink)
@@ -236,9 +264,9 @@ struct OverviewView: View {
         Button(action: action) {
             HStack(spacing: 4) {
                 Text(title)
-                Image(systemName: "arrow.right").font(.caption.weight(.semibold))
+                Image(systemName: "arrow.right").font(Theme.caption.weight(.semibold))
             }
-            .font(.subheadline.weight(.semibold))
+            .font(Theme.subheadline.weight(.semibold))
             .foregroundStyle(Theme.brandDark)
         }
         .buttonStyle(.plain)
@@ -282,7 +310,7 @@ struct OverviewView: View {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 6) {
                     Icon("sparkles", size: 14)
-                    Text("Noticed on \(Dates.dayName(note.day))").font(.caption.weight(.semibold))
+                    Text("Noticed on \(Dates.dayName(note.day))").font(Theme.caption.weight(.semibold))
                 }
                 .foregroundStyle(Theme.brandDark)
                 Text(note.label).foregroundStyle(Theme.ink)
@@ -290,7 +318,7 @@ struct OverviewView: View {
                     Button("Keep as a note") {
                         Task { try? await state.client.keepNote(site: state.site.slug, id: note.id); await load() }
                     }
-                    .font(.subheadline.weight(.semibold))
+                    .font(Theme.subheadline.weight(.semibold))
                     .foregroundStyle(.white)
                     .padding(.horizontal, 14)
                     .frame(height: 30)
@@ -298,7 +326,7 @@ struct OverviewView: View {
                     Button("Dismiss") {
                         Task { try? await state.client.deleteNote(site: state.site.slug, id: note.id); await load() }
                     }
-                    .font(.subheadline.weight(.medium))
+                    .font(Theme.subheadline.weight(.medium))
                     .foregroundStyle(Theme.brandDark)
                 }
                 .buttonStyle(.plain)
@@ -356,6 +384,7 @@ struct OverviewData {
     var previousTrend: [Point]
     var sources: [Report.Row]
     var countries: [Report.Row]
+    var devices: [Report.Row]
     var pages: [Report.Row]
     var products: [Report.Row]
     var notes: [Note]
@@ -388,6 +417,7 @@ struct OverviewData {
         async let sources = client.report("breakdown", site: slug, view: view, parameters: ["dimension": "source", "limit": "5"])
         async let countries = client.report("breakdown", site: slug, view: view, parameters: ["dimension": "country", "limit": "5"])
         async let pages = client.report("breakdown", site: slug, view: view, parameters: ["dimension": "page", "limit": "5"])
+        async let devices = client.report("breakdown", site: slug, view: view, parameters: ["dimension": "device", "limit": "4"])
         async let notes = client.notes(site: slug, view: view)
         let report = try await overview
         let totals = report.rows.first ?? [:]
@@ -410,7 +440,7 @@ struct OverviewData {
             hourly: rolling || wording?.oneDay == true,
             trend: current,
             previousTrend: zip(current, previous).map { Point(at: $0.at, value: $1.value) },
-            sources: sources.rows, countries: countries.rows, pages: pages.rows, products: products,
+            sources: sources.rows, countries: countries.rows, devices: devices.rows, pages: pages.rows, products: products,
             notes: notes,
             metric: metric
         )
@@ -485,7 +515,7 @@ struct TrendChart: View {
                 RectangleMark(xStart: .value("Now", partial.at - bucket / 2), xEnd: .value("Now", partial.at + bucket / 2))
                     .foregroundStyle(Theme.brandWash)
                     .annotation(position: .overlay, alignment: .top) {
-                        Text("now").font(.caption2.weight(.semibold)).foregroundStyle(Theme.brandDark).padding(.top, 4)
+                        Text("now").font(Theme.caption2.weight(.semibold)).foregroundStyle(Theme.brandDark).padding(.top, 4)
                     }
             }
             ForEach(previous) { point in
@@ -532,7 +562,7 @@ struct TrendChart: View {
                     RuleMark(x: .value("Note", day))
                         .foregroundStyle(Theme.muted.opacity(0.5))
                         .annotation(position: .top, alignment: .leading) {
-                            Text(note.label).font(.caption2).foregroundStyle(Theme.ink2)
+                            Text(note.label).font(Theme.caption2).foregroundStyle(Theme.ink2)
                         }
                 }
             }
@@ -618,9 +648,9 @@ private struct ChartTooltip: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(point.at.formatted(hourly ? Dates.style.weekday(.abbreviated).hour().minute() : Dates.style.weekday(.abbreviated).day().month(.abbreviated)) + (running ? " · so far" : ""))
-                .font(.caption2.weight(.semibold))
+                .font(Theme.caption2.weight(.semibold))
                 .foregroundStyle(.white.opacity(0.7))
-            Text(metric.noun(point.value)).font(.caption.weight(.semibold)).foregroundStyle(.white)
+            Text(metric.noun(point.value)).font(Theme.caption.weight(.semibold)).foregroundStyle(.white)
             if let before {
                 let change = Format.change(point.value, before.value)
                 HStack(spacing: 4) {
@@ -631,7 +661,7 @@ private struct ChartTooltip: View {
                             .foregroundStyle(change.direction == .up ? Color(red: 0.48, green: 0.83, blue: 0.63) : change.direction == .down ? Color(red: 0.95, green: 0.63, blue: 0.63) : .white)
                     }
                 }
-                .font(.caption2)
+                .font(Theme.caption2)
             }
         }
         .monospacedDigit()
@@ -659,7 +689,7 @@ struct ChartLegend: View {
                 }
             }
         }
-        .font(.caption)
+        .font(Theme.caption)
         .lineLimit(1)
         .accessibilityElement(children: .combine)
     }

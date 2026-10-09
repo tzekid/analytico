@@ -16,7 +16,15 @@ struct AnalyticoApp: App {
         WindowGroup(id: "main") {
             RootView()
                 .environment(model)
-                .onOpenURL { model.open($0) }
+                .onOpenURL { url in
+                    #if DEBUG && os(macOS)
+                    if DebugSnapshot.handle(url) { return }
+                    #endif
+                    model.open(url)
+                }
+                // Links (widgets, notifications, the workspace) go to the open
+                // window instead of opening another each time.
+                .handlesExternalEvents(preferring: ["*"], allowing: ["*"])
                 .tint(Theme.brand)
         }
         #if os(macOS)
@@ -44,6 +52,41 @@ struct AnalyticoApp: App {
         #endif
     }
 }
+
+#if DEBUG && os(macOS)
+/// Development only: `analytico://debug/snapshot?name=pages` renders the main
+/// window and posts it as a PNG to a collector on 127.0.0.1:8125, to check
+/// screens side by side with the workspace without screen-recording access;
+/// `analytico://debug/appearance?mode=dark` switches the app's appearance and
+/// `analytico://debug/size?w=1000&h=760` resizes the window.
+@MainActor enum DebugSnapshot {
+    static func handle(_ url: URL) -> Bool {
+        guard url.host == "debug" else { return false }
+        let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        // analytico://debug/appearance?mode=dark|light|system
+        if url.path == "/appearance" {
+            let mode = query.first { $0.name == "mode" }?.value
+            NSApp.appearance = mode == "dark" ? NSAppearance(named: .darkAqua) : mode == "light" ? NSAppearance(named: .aqua) : nil
+            return true
+        }
+        // analytico://debug/size?w=1000&h=760
+        if url.path == "/size", let window = NSApp.windows.first(where: { $0.isVisible && $0.frame.width > 600 }) {
+            let width = Double(query.first { $0.name == "w" }?.value ?? "") ?? 1280, height = Double(query.first { $0.name == "h" }?.value ?? "") ?? 800
+            window.setContentSize(NSSize(width: width, height: height))
+            return true
+        }
+        let name = query.first { $0.name == "name" }?.value ?? "window"
+        guard let view = NSApp.windows.first(where: { $0.isVisible && $0.frame.width > 600 })?.contentView,
+              let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return true }
+        view.cacheDisplay(in: view.bounds, to: rep)
+        guard let png = rep.representation(using: .png, properties: [:]), let target = URL(string: "http://127.0.0.1:8125/\(name).png") else { return true }
+        var request = URLRequest(url: target)
+        request.httpMethod = "POST"
+        URLSession.shared.uploadTask(with: request, from: png).resume()
+        return true
+    }
+}
+#endif
 
 /// "How many visitors today on shop?" from Siri, Spotlight and Shortcuts.
 struct AnalyticoShortcuts: AppShortcutsProvider {
@@ -121,7 +164,7 @@ struct MenuBarPanel: View {
             } else if let slug = model.selectedSite, let site = model.sites.first(where: { $0.slug == slug }) {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack {
-                        Text(site.name).font(.subheadline.weight(.semibold)).foregroundStyle(Theme.ink2)
+                        Text(site.name).font(Theme.subheadline.weight(.semibold)).foregroundStyle(Theme.ink2)
                         Spacer()
                         Circle().fill((model.online ?? 0) > 0 ? Theme.good : Theme.muted).frame(width: 8, height: 8)
                     }
@@ -140,13 +183,13 @@ struct MenuBarPanel: View {
                     .frame(height: 44, alignment: .bottom)
                     if let today {
                         Text("\(Format.count(Int(today.visitors))) visitors today\(today.change.text.isEmpty ? "" : " · \(today.change.text) vs yesterday by now")")
-                            .font(.caption.weight(.medium))
+                            .font(Theme.caption.weight(.medium))
                             .foregroundStyle(today.change.direction == .down ? Theme.bad : Theme.good)
                     }
                 }
                 .padding(16)
                 Divider().padding(.horizontal, 16)
-                Text("YOUR SITES · TODAY").font(.caption2.weight(.semibold)).tracking(0.5).foregroundStyle(Theme.muted).padding(.horizontal, 16).padding(.top, 12).padding(.bottom, 4)
+                Text("YOUR SITES · TODAY").font(Theme.caption2.weight(.semibold)).tracking(0.5).foregroundStyle(Theme.muted).padding(.horizontal, 16).padding(.top, 12).padding(.bottom, 4)
                 ForEach(model.sites) { other in
                     Button { model.selectedSite = other.slug } label: {
                         HStack(spacing: 10) {

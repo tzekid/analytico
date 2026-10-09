@@ -56,10 +56,10 @@ struct SectionCard<Aside: View, Content: View>: View {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title).font(Theme.cardTitle).foregroundStyle(Theme.ink)
-                    if let subtitle { Text(subtitle).font(.footnote).foregroundStyle(Theme.ink2) }
+                    if let subtitle { Text(subtitle).font(Theme.footnote).foregroundStyle(Theme.ink2) }
                 }
                 Spacer(minLength: 8)
-                aside.font(.caption).foregroundStyle(Theme.muted)
+                aside.font(Theme.caption).foregroundStyle(Theme.muted)
             }
             content
         }
@@ -83,31 +83,66 @@ struct MetricCard: View {
     var change: Format.Change?
     var versus: String = ""
     var selected = false
+    /// A line under the value when there is no change to show ("0 new this period").
+    var note: String?
+
+    // The web's .metric on the Mac: a 12 px semibold label over a 28 px value.
+    #if os(macOS)
+    private var labelFont: Font { Theme.label }
+    private let valueSize: CGFloat = 28
+    #else
+    private var labelFont: Font { sizeClass == .compact ? .footnote : .subheadline }
+    private let valueSize: CGFloat = 30
+    #endif
 
     var body: some View {
-        VStack(alignment: .leading, spacing: sizeClass == .compact ? 6 : 4) {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text(label).font(sizeClass == .compact ? .footnote : .subheadline).foregroundStyle(Theme.ink2).lineLimit(1)
-                Spacer(minLength: 4)
-                if sizeClass == .compact, let change, !change.text.isEmpty { ChangeLabel(change: change) }
-            }
-            Text(value)
-                .font(Theme.display(sizeClass == .compact ? 28 : 30, relativeTo: .title))
-                .foregroundStyle(Theme.ink)
-                .monospacedDigit()
-                .lineLimit(1)
-                .minimumScaleFactor(0.55)
-            if sizeClass != .compact {
-                if let change, !change.text.isEmpty {
-                    ChangeLabel(change: change, versus: versus)
-                } else {
-                    Text(" ").font(.caption)
+        Group {
+            if sizeClass == .compact {
+                // iPhone: the change beside the label while both fit; under the
+                // value once they don't, so values in a row stay level.
+                ViewThatFits(in: .horizontal) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(alignment: .firstTextBaseline, spacing: 6) {
+                            labelText.fixedSize()
+                            Spacer(minLength: 4)
+                            if let change, !change.text.isEmpty { ChangeLabel(change: change).fixedSize() }
+                        }
+                        valueText
+                    }
+                    VStack(alignment: .leading, spacing: 6) {
+                        labelText
+                        valueText
+                        if let change, !change.text.isEmpty { ChangeLabel(change: change) }
+                    }
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 4) {
+                    labelText
+                    valueText
+                    if let change, !change.text.isEmpty {
+                        ChangeLabel(change: change, versus: versus)
+                    } else {
+                        Text(note ?? " ").font(Theme.caption).foregroundStyle(Theme.ink2).lineLimit(1)
+                    }
                 }
             }
         }
         .card(padding: 14, selected: selected)
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    private var labelText: some View {
+        Text(label).font(labelFont).foregroundStyle(Theme.ink2).lineLimit(1)
+    }
+
+    private var valueText: some View {
+        Text(value)
+            .font(Theme.display(sizeClass == .compact ? 28 : valueSize, relativeTo: .title))
+            .foregroundStyle(Theme.ink)
+            .monospacedDigit()
+            .lineLimit(1)
+            .minimumScaleFactor(0.55)
     }
 }
 
@@ -137,7 +172,7 @@ struct ShareRow: View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 1) {
                 Text(title).foregroundStyle(Theme.ink).lineLimit(1).truncationMode(.middle)
-                if let detail { Text(detail).font(.caption).foregroundStyle(Theme.ink2).lineLimit(1) }
+                if let detail { Text(detail).font(Theme.caption).foregroundStyle(Theme.ink2).lineLimit(1) }
             }
             .padding(.horizontal, 10)
             .padding(.vertical, detail == nil ? 7 : 5)
@@ -168,7 +203,7 @@ struct MeterRow: View {
     var body: some View {
         HStack(spacing: 12) {
             if let code {
-                Text(code).font(.caption2.weight(.semibold)).foregroundStyle(Theme.ink2)
+                Text(code).font(Theme.caption2.weight(.semibold)).foregroundStyle(Theme.ink2)
                     .frame(width: 28, height: 22)
                     .background(Theme.subtle, in: .rect(cornerRadius: 5))
             }
@@ -200,12 +235,12 @@ struct ValueRow: View {
         HStack(alignment: .center, spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).foregroundStyle(Theme.ink).lineLimit(2)
-                if let detail { Text(detail).font(.caption).foregroundStyle(Theme.ink2).lineLimit(1) }
+                if let detail { Text(detail).font(Theme.caption).foregroundStyle(Theme.ink2).lineLimit(1) }
             }
             Spacer(minLength: 8)
             VStack(alignment: .trailing, spacing: 1) {
                 Text(value).monospacedDigit().foregroundStyle(Theme.ink)
-                if let note { Text(note).font(.caption.weight(.semibold)).foregroundStyle(noteColor).monospacedDigit() }
+                if let note { Text(note).font(Theme.caption.weight(.semibold)).foregroundStyle(noteColor).monospacedDigit() }
             }
         }
         .padding(.vertical, 6)
@@ -224,20 +259,49 @@ struct StageView: View {
 
     var body: some View {
         VStack(spacing: 12) {
-            Image("Art/\(art)").resizable().scaledToFit().frame(width: 200, height: 120).accessibilityHidden(true)
-            Text(title).font(Theme.display(22, relativeTo: .title2)).foregroundStyle(Theme.ink).multilineTextAlignment(.center)
-            Text(text).font(.subheadline).foregroundStyle(Theme.ink2).multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
+            Group {
+                if art == "bars" { EmptyBars() } else { Image("Art/\(art)").resizable().scaledToFit() }
+            }
+            .frame(width: 200, height: 120)
+            .accessibilityHidden(true)
+            Text(title).font(Theme.display(art == "bars" ? 20 : 22, relativeTo: .title2)).foregroundStyle(Theme.ink).multilineTextAlignment(.center)
+            // Markdown, for `code` as the workspace shows it.
+            Text(LocalizedStringKey(text)).font(Theme.subheadline).foregroundStyle(Theme.ink2).multilineTextAlignment(.center).frame(maxWidth: 460).fixedSize(horizontal: false, vertical: true)
             if let primary {
+                #if os(macOS)
+                Button(primary.0, action: primary.1).buttonStyle(PrimaryButtonStyle()).padding(.top, 4)
+                #else
                 Button(primary.0, action: primary.1).buttonStyle(PrimaryButtonStyle(wide: true)).frame(maxWidth: 300).padding(.top, 8)
+                #endif
             }
             if let secondary {
-                Button(secondary.0, action: secondary.1).buttonStyle(.plain).font(.callout.weight(.medium)).foregroundStyle(Theme.brandDark)
+                Button(secondary.0, action: secondary.1).buttonStyle(.plain).font(Theme.callout.weight(.medium)).foregroundStyle(Theme.brandDark)
             }
         }
         .padding(.vertical, 28)
         .padding(.horizontal, 20)
         .frame(maxWidth: .infinity)
         .card()
+    }
+}
+
+/// The workspace's "nothing in this period" art: four rising bars, the last in brand.
+struct EmptyBars: View {
+    var body: some View {
+        Canvas { context, size in
+            let scale = min(size.width / 200, size.height / 120)
+            func bar(_ x: CGFloat, _ y: CGFloat, _ height: CGFloat, _ color: Color) {
+                context.fill(Path(roundedRect: CGRect(x: x * scale, y: y * scale, width: 24 * scale, height: height * scale), cornerRadius: 5 * scale), with: .color(color))
+            }
+            bar(20, 70, 34, Theme.subtle)
+            bar(56, 52, 52, Theme.subtle)
+            bar(92, 34, 70, Theme.brandWash)
+            bar(128, 18, 86, Theme.brand.opacity(0.85))
+            var base = Path()
+            base.move(to: CGPoint(x: 14 * scale, y: 108 * scale))
+            base.addLine(to: CGPoint(x: 186 * scale, y: 108 * scale))
+            context.stroke(base, with: .color(Theme.border), style: StrokeStyle(lineWidth: 2 * scale, lineCap: .round))
+        }
     }
 }
 
@@ -270,7 +334,138 @@ func share(_ part: Double, _ whole: Double) -> Double {
     whole == 0 ? 0 : part / whole
 }
 
+/// "Tap" on a touch screen, "Click" with a pointer: "Click to filter".
+#if os(macOS)
+let press = "Click"
+#else
+let press = "Tap"
+#endif
+
 /// "1 order", "18 orders".
 func plural(_ count: Int, _ noun: String) -> String {
     "\(Format.count(count)) \(noun)\(count == 1 ? "" : "s")"
+}
+
+// MARK: - Tables (Mac, iPad)
+
+/// The workspace's table: a card with a header band, rows split by
+/// hairlines and a footer line, at the web's sizes (13 px rows, 12 px heads).
+struct TableCard<Top: View, Head: View, Rows: View>: View {
+    var footer: String?
+    var hint: String?
+    @ViewBuilder var top: Top
+    @ViewBuilder var head: Head
+    @ViewBuilder var rows: Rows
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            top
+            HStack(spacing: 0) { head }
+                .font(Theme.tableHead)
+                .foregroundStyle(Theme.ink2)
+                .padding(.horizontal, 16)
+                .frame(height: 36)
+                .background(Theme.canvas)
+            rows
+            if footer != nil || hint != nil {
+                HStack {
+                    if let footer { Text(footer) }
+                    Spacer(minLength: 12)
+                    if let hint { Text(hint) }
+                }
+                .font(Theme.tableText)
+                .foregroundStyle(Theme.ink2)
+                .padding(.horizontal, 20)
+                .frame(height: 44)
+                .overlay(alignment: .top) { Rectangle().fill(Theme.border).frame(height: 1) }
+            }
+        }
+        .background(Theme.surface, in: .rect(cornerRadius: Theme.cardRadius))
+        .clipShape(.rect(cornerRadius: Theme.cardRadius))
+        .overlay(RoundedRectangle(cornerRadius: Theme.cardRadius).strokeBorder(Theme.border))
+    }
+}
+
+extension TableCard where Top == EmptyView {
+    init(footer: String? = nil, hint: String? = nil, @ViewBuilder head: () -> Head, @ViewBuilder rows: () -> Rows) {
+        self.init(footer: footer, hint: hint, top: { EmptyView() }, head: head, rows: rows)
+    }
+}
+
+/// A column head; a sortable one names its order with an arrow.
+struct TableHead: View {
+    let title: String
+    var sorted = false
+    var action: (() -> Void)?
+
+    var body: some View {
+        Button { action?() } label: {
+            HStack(spacing: 3) {
+                Text(title)
+                if sorted { Image(systemName: "arrow.down").font(Theme.caption2.weight(.bold)) }
+            }
+            .foregroundStyle(sorted ? Theme.ink : Theme.ink2)
+            .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .disabled(action == nil)
+    }
+}
+
+/// A table row: 13 px, a hairline above, the brand wash when selected or under the pointer.
+struct TableRowStyle: ViewModifier {
+    var selected = false
+    @State private var hovering = false
+
+    func body(content: Content) -> some View {
+        content
+            .font(Theme.tableText)
+            .monospacedDigit()
+            .foregroundStyle(Theme.ink)
+            .padding(.horizontal, 16)
+            .frame(minHeight: 44)
+            .background(selected || hovering ? Theme.brandWash : .clear)
+            .overlay(alignment: .top) { Rectangle().fill(Theme.border).frame(height: 1) }
+            .contentShape(.rect)
+            .onHover { hovering = $0 }
+    }
+}
+
+extension View {
+    func tableRow(selected: Bool = false) -> some View { modifier(TableRowStyle(selected: selected)) }
+}
+
+/// A change as the workspace's tables show it: a small tinted badge.
+struct ChangeBadge: View {
+    let change: Format.Change
+
+    var body: some View {
+        let up = change.direction == .up, down = change.direction == .down
+        Text(change.text)
+            .font(Theme.caption2.weight(.semibold))
+            .monospacedDigit()
+            .foregroundStyle(up ? Theme.good : down ? Theme.bad : Theme.ink2)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(up ? Theme.goodWash : down ? Theme.bad.opacity(0.09) : Theme.subtle, in: .rect(cornerRadius: 5))
+    }
+}
+
+/// The filter field above a table, as on the workspace: a bordered field with a search icon.
+struct TableFilterField: View {
+    let prompt: String
+    @Binding var text: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Icon("search", size: 15).foregroundStyle(Theme.muted)
+            TextField(prompt, text: $text).textFieldStyle(.plain)
+        }
+        .font(Theme.tableText)
+        .padding(.horizontal, 12)
+        .frame(width: 320, height: 36)
+        .background(Theme.surface, in: .rect(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Theme.border))
+        .padding(16)
+    }
 }

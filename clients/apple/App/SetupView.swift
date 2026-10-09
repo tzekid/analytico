@@ -51,7 +51,7 @@ struct SetupView: View {
 
     private var field: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Your Analytico address").font(.subheadline.weight(.medium))
+            Text("Your Analytico address").font(Theme.subheadline.weight(.medium))
             HStack(spacing: 2) {
                 if !address.contains("://") { Text("https://").foregroundStyle(Theme.ink2) }
                 TextField("analytics.example.com", text: $address)
@@ -132,7 +132,7 @@ struct SetupView: View {
                 .buttonStyle(PrimaryButtonStyle(wide: true))
                 .disabled(check?.instance == nil)
                 Text("You sign in on your instance’s own page, with your passkey or Google. The app only receives a token you can revoke in Settings → Sign-in.")
-                    .font(.footnote)
+                    .font(Theme.footnote)
                     .foregroundStyle(Theme.ink2)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -190,11 +190,11 @@ struct InstanceCard: View {
                     .background(Theme.brand.opacity(0.12), in: .rect(cornerRadius: 10))
                 VStack(alignment: .leading, spacing: 2) {
                     Text(instance.host).font(.headline)
-                    Text("Analytico \(instance.version)").font(.subheadline).foregroundStyle(Theme.ink2)
+                    Text("Analytico \(instance.version)").font(Theme.subheadline).foregroundStyle(Theme.ink2)
                 }
                 Spacer()
                 Text(signingIn ? "Signing in" : "Ready")
-                    .font(.caption.weight(.semibold))
+                    .font(Theme.caption.weight(.semibold))
                     .padding(.horizontal, 10)
                     .padding(.vertical, 4)
                     .foregroundStyle(signingIn ? Theme.warning : Theme.good)
@@ -205,7 +205,7 @@ struct InstanceCard: View {
                 Label("Works with this app", systemImage: "checkmark")
                 Label("Sign in with \(instance.signInSummary)", systemImage: "checkmark")
             }
-            .font(.subheadline)
+            .font(Theme.subheadline)
             .foregroundStyle(Theme.ink2)
             .labelStyle(CheckLabelStyle())
         }
@@ -233,7 +233,7 @@ struct Problem: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title).font(.headline).foregroundStyle(Theme.bad)
-            Text(detail).font(.subheadline).foregroundStyle(Theme.ink2).fixedSize(horizontal: false, vertical: true)
+            Text(detail).font(Theme.subheadline).foregroundStyle(Theme.ink2).fixedSize(horizontal: false, vertical: true)
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)

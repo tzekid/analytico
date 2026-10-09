@@ -75,8 +75,8 @@ pub const common = [_]Param{
 const limit_param: Param = .{ .name = "limit", .description = "Maximum rows (1–1000, default 100)", .kind = .integer };
 
 pub const reports = [_]Report{
-    .{ .name = "overview", .title = "Overview", .description = "Totals for the period and the previous period: page views, visitor-days, sessions, active time, orders, revenue and the share of returning visitors (Full mode).", .run = overviewReport },
-    .{ .name = "breakdown", .title = "Breakdown", .description = "Page views and visitor-days per value of one dimension, with the previous period; label names the value as the workspace does, and channel classifies sources.", .reveals = .paths_and_sources, .params = &.{ .{ .name = "dimension", .description = "Dimension", .values = &dim_names, .required = true }, limit_param }, .run = breakdownReport },
+    .{ .name = "overview", .title = "Overview", .description = "Totals for the period and the previous period: page views, visitor-days, sessions, active time, orders, revenue, the share of returning visitors (Full mode) and engaged views (at least 10 s active, half the page scrolled, or an interaction).", .run = overviewReport },
+    .{ .name = "breakdown", .title = "Breakdown", .description = "Page views and visitor-days per value of one dimension, with the previous period; label names the value as the workspace does, and channel classifies sources.", .reveals = .paths_and_sources, .params = &.{ .{ .name = "dimension", .description = "Dimension", .values = &breakdown_dims, .required = true }, limit_param }, .run = breakdownReport },
     .{ .name = "timeseries", .title = "Time series", .description = "One metric per day (per hour for 24h).", .params = &.{.{ .name = "metric", .description = "Metric", .values = &.{ "views", "visitor_days", "active" } }}, .run = timeseriesReport },
     .{ .name = "pages", .title = "Pages", .description = "Every page with views, visitors, engagement, scroll and clicks out.", .reveals = .paths, .params = &.{limit_param}, .run = pagesReport },
     .{ .name = "acquisition", .title = "Acquisition", .description = "Sources and mediums with views and visitors, each source's label and channel (Search, Social, Email, Paid, AI assistants, Referral, Direct, Within the site).", .reveals = .sources, .params = &.{limit_param}, .run = acquisitionReport },
@@ -109,6 +109,9 @@ const dim_names = blk: {
     for (&names, @typeInfo(data.Dim).@"enum".field_names) |*name, field| name.* = field;
     break :blk names;
 };
+/// Breakdowns also cover what the workspace's Audience shows beside the
+/// dimensions a filter can use: browser language and viewport class.
+const breakdown_dims = dim_names ++ [_][]const u8{ "language", "viewport" };
 
 pub fn find(name: []const u8) ?*const Report {
     for (&reports) |*report| if (std.mem.eql(u8, report.name, name)) return report;
@@ -323,15 +326,30 @@ fn overviewReport(input: Input) !Table {
     const full = view_value.site.mode == .full;
     const returning = if (full) try data.returningShare(input.arena, input.db, view_value, range.start_ms, range.end_ms) else null;
     const returning_before = if (full) try data.returningShare(input.arena, input.db, view_value, range.prev_start_ms, range.prev_end_ms) else null;
-    var table: TableBuilder = .{ .arena = input.arena, .columns = &.{ "from", "to", "page_views", "visitor_days", "sessions", "active_ms", "orders", "revenue_minor", "currency", "returning_share", "previous_page_views", "previous_visitor_days", "previous_sessions", "previous_active_ms", "previous_orders", "previous_revenue_minor", "previous_returning_share" } };
-    try table.add(.{ try input.arena.dupe(u8, &data.dateText(range.start_ms)), try input.arena.dupe(u8, &data.dateText(range.end_ms - 1)), current.views, current.visitor_days, current.sessions, current.active_ms, sold.orders, sold.revenue, view_value.site.currency, returning, previous.views, previous.visitor_days, previous.sessions, previous.active_ms, sold_before.orders, sold_before.revenue, returning_before });
+    // Engaged: at least 10 s active, half the page scrolled, or an interaction.
+    const engaged = data.keySum(try data.keySums(input.arena, input.db, view_value, "total", range.start_ms, range.end_ms, 1), "").engaged;
+    const engaged_before = data.keySum(try data.keySums(input.arena, input.db, view_value, "total", range.prev_start_ms, range.prev_end_ms, 1), "").engaged;
+    var table: TableBuilder = .{ .arena = input.arena, .columns = &.{ "from", "to", "page_views", "visitor_days", "sessions", "active_ms", "orders", "revenue_minor", "currency", "returning_share", "previous_page_views", "previous_visitor_days", "previous_sessions", "previous_active_ms", "previous_orders", "previous_revenue_minor", "previous_returning_share", "engaged_views", "previous_engaged_views" } };
+    try table.add(.{ try input.arena.dupe(u8, &data.dateText(range.start_ms)), try input.arena.dupe(u8, &data.dateText(range.end_ms - 1)), current.views, current.visitor_days, current.sessions, current.active_ms, sold.orders, sold.revenue, view_value.site.currency, returning, previous.views, previous.visitor_days, previous.sessions, previous.active_ms, sold_before.orders, sold_before.revenue, returning_before, engaged, engaged_before });
     return table.done();
 }
 
 fn breakdownReport(input: Input) !Table {
-    const dim = std.meta.stringToEnum(data.Dim, input.get("dimension") orelse "page") orelse return error.InvalidParameter;
+    const name = input.get("dimension") orelse "page";
     // label: what the workspace calls the value; channel: a source's channel, which keeps its colour.
     var table: TableBuilder = .{ .arena = input.arena, .columns = &.{ "value", "page_views", "visitor_days", "previous_page_views", "label", "channel" } };
+    if (std.mem.eql(u8, name, "language") or std.mem.eql(u8, name, "viewport")) {
+        const journeys = @import("journeys.zig");
+        const range = input.view.range;
+        const limit: usize = @intCast(input.int("limit", 100, 1, 1000));
+        const before = try data.keySums(input.arena, input.db, input.view, name, range.prev_start_ms, range.prev_end_ms, 1000);
+        for (try data.keySums(input.arena, input.db, input.view, name, range.start_ms, range.end_ms, limit)) |entry| {
+            const label = if (std.mem.eql(u8, name, "language")) try journeys.languageName(input.arena, entry.key) else journeys.capitalized(input.arena, entry.key);
+            try table.add(.{ entry.key, entry.sums.views, entry.sums.visitors, data.keySum(before, entry.key).views, label, @as(?[]const u8, null) });
+        }
+        return table.done();
+    }
+    const dim = std.meta.stringToEnum(data.Dim, name) orelse return error.InvalidParameter;
     for (try data.top(input.arena, input.db, input.view, dim, @intCast(input.int("limit", 100, 1, 1000)))) |row| {
         const label = switch (dim) {
             .source => try overview.sourceLabel(input.arena, row.key),

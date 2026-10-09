@@ -666,7 +666,7 @@ fn columnBreakdown(ctx: *Ctx, view: data.View, dim: []const u8, total: i64) !voi
 }
 
 /// "de-AT" → "German (AT)"; codes without a name stay as they are.
-fn languageName(arena: std.mem.Allocator, code: []const u8) ![]const u8 {
+pub fn languageName(arena: std.mem.Allocator, code: []const u8) ![]const u8 {
     const names = [_][2][]const u8{
         .{ "en", "English" },   .{ "de", "German" },     .{ "fr", "French" },    .{ "es", "Spanish" },   .{ "it", "Italian" },
         .{ "nl", "Dutch" },     .{ "pt", "Portuguese" }, .{ "sv", "Swedish" },   .{ "da", "Danish" },    .{ "nb", "Norwegian" },
@@ -682,7 +682,7 @@ fn languageName(arena: std.mem.Allocator, code: []const u8) ![]const u8 {
     return code;
 }
 
-fn capitalized(arena: std.mem.Allocator, value: []const u8) []const u8 {
+pub fn capitalized(arena: std.mem.Allocator, value: []const u8) []const u8 {
     return data.prettyLabel(arena, value);
 }
 
@@ -810,7 +810,7 @@ pub fn performance(ctx: *Ctx, site: data.Site) !void {
     const loaded = try loadSamples(ctx.arena, ctx.db, view);
     var results: [vitals.len]Distribution = undefined;
     for (vitals, 0..) |vital, index| results[index] = summarize(vital, loaded.all[index].items);
-    try layout.head(ctx, .{ .title = "Performance", .subtitle = try std.fmt.allocPrint(arena, "Real-user measurements · {f} · {f} samples · p75", .{ view.range, html.int(@intCast(results[0].samples)) }), .view = view, .path = path, .compare = false });
+    try layout.head(ctx, .{ .title = "Performance", .subtitle = try std.fmt.allocPrint(arena, "Real-user measurements · {f} · {f} sample{s} · p75", .{ view.range, html.int(@intCast(results[0].samples)), if (results[0].samples == 1) "" else "s" }), .view = view, .path = path, .compare = false });
     if (results[0].samples == 0 and results[3].samples == 0) {
         try w.writeAll("<div class=\"card\">");
         try ui.empty(w, "No performance data yet", "Use the <strong>RUM</strong> variant of the tracker to measure Core Web Vitals from real visits. It adds about 1 KB and never records content.", try html.print(arena, "<a class=\"btn btn-primary\" href=\"/{slug}/setup?rum=1\">Get the RUM snippet</a>", .{ .slug = site.slug }));
@@ -838,7 +838,7 @@ pub fn performance(ctx: *Ctx, site: data.Site) !void {
     try w.writeAll("</div>");
     const vital = vitals[selected];
     const chosen = results[selected];
-    try render(w, "<section class=\"card\"><div class=\"card-head\"><h2>{name}</h2><span class=\"meta\">{samples} samples · good ≤ {good} · poor &gt; {poor}</span></div><div class=\"grid grid-3\">", .{ .name = vital.name, .samples = html.int(@intCast(chosen.samples)), .good = VitalValue{ .vital = vital, .value = vital.good }, .poor = VitalValue{ .vital = vital, .value = vital.poor } });
+    try render(w, "<section class=\"card\"><div class=\"card-head\"><h2>{name}</h2><span class=\"meta\">{samples} sample{plural} · good ≤ {good} · poor &gt; {poor}</span></div><div class=\"grid grid-3\">", .{ .name = vital.name, .samples = html.int(@intCast(chosen.samples)), .plural = if (chosen.samples == 1) "" else "s", .good = VitalValue{ .vital = vital, .value = vital.good }, .poor = VitalValue{ .vital = vital, .value = vital.poor } });
     const percentiles = [_]struct { []const u8, i64 }{ .{ "p50", chosen.p50 }, .{ "p75", chosen.p75 }, .{ "p95", chosen.p95 } };
     for (percentiles) |entry| try render(w, "<div><div class=\"hint\">{label}</div><div class=\"metric-value metric-value-l\">{value}</div></div>", .{ .label = entry[0], .value = VitalValue{ .vital = vital, .value = entry[1] } });
     try w.writeAll("</div>");

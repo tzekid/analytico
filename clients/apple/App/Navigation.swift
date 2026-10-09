@@ -13,7 +13,7 @@ enum Screen: String, CaseIterable, Identifiable, Hashable {
         case .live: "Live"
         case .pages: "Pages"
         case .paths: "Paths"
-        case .sources: "Sources"
+        case .sources: "Acquisition"
         case .campaigns: "Campaigns"
         case .search: "Site search"
         case .audience: "Audience"
@@ -24,6 +24,9 @@ enum Screen: String, CaseIterable, Identifiable, Hashable {
         case .retention: "Retention"
         }
     }
+
+    /// The iPhone tab bar's shorter name, as on the web's phone tab bar.
+    var tabTitle: String { self == .sources ? "Sources" : title }
 
     /// The workspace icon (`Icons/<name>`).
     var icon: String {
@@ -62,6 +65,21 @@ enum Screen: String, CaseIterable, Identifiable, Hashable {
         }
     }
 
+    /// What the report is, before its period in the subtitle, as on the web.
+    var lead: String? {
+        switch self {
+        case .sources: "Where visitors come from, and what campaigns earn"
+        case .campaigns: "What each campaign brings"
+        case .search: "What visitors searched for on the site"
+        case .audience: "Who visits"
+        case .errors: "JavaScript errors visitors ran into, grouped"
+        case .performance: "Real-user measurements"
+        case .revenue: "Orders and products"
+        case .paths: "Where visitors go from each page"
+        default: nil
+        }
+    }
+
     /// Live and Retention cover their own period and say so instead.
     var fixedPeriod: (text: String, why: String)? {
         switch self {
@@ -71,12 +89,13 @@ enum Screen: String, CaseIterable, Identifiable, Hashable {
         }
     }
 
+    /// As in the workspace's sidebar; campaigns are a tab of Acquisition there too.
     static let groups: [(String, [Screen])] = [
         ("", [.overview, .live]),
-        ("Traffic", [.pages, .paths, .sources, .campaigns, .search]),
-        ("Audience", [.audience]),
-        ("Behaviour", [.events, .errors, .performance]),
+        ("Traffic", [.pages, .paths, .sources, .search, .audience]),
+        ("Behaviour", [.events]),
         ("Customers", [.revenue, .retention]),
+        ("Quality", [.performance, .errors]),
     ]
 
     /// iPhone: the screens with a tab of their own; More lists the rest.
@@ -110,6 +129,11 @@ final class SiteState {
     }
 
     /// Opens a screen wherever this layout keeps it.
+    /// The workspace's settings for this site, where its tracking mode is chosen.
+    var siteSettingsURL: URL {
+        client.instance.origin.appending(path: "settings/sites").appending(queryItems: [URLQueryItem(name: "site", value: site.slug)])
+    }
+
     func show(_ target: Screen) {
         screen = target
         if Screen.tabs.contains(target) {
@@ -195,6 +219,8 @@ struct SiteRoot: View {
             state.view = ViewState(url: link)
             let page = link.pathComponents.filter { $0 != "/" }.dropFirst().first
             state.show(Screen.allCases.first { $0.workspacePage == page && $0 != .search } ?? .overview)
+            // A workspace link to a page's details opens them here too.
+            state.page = page == "pages" ? URLComponents(url: link, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "page" }?.value : nil
             model.pendingLink = nil
         }
     }
@@ -228,7 +254,7 @@ struct PhoneShell: View {
         @Bindable var state = state
         TabView(selection: $state.tab) {
             ForEach(Screen.tabs) { screen in
-                Tab(screen.title, image: "Icons/\(screen.icon)", value: Optional(screen)) {
+                Tab(screen.tabTitle, image: "Icons/\(screen.icon)", value: Optional(screen)) {
                     NavigationStack {
                         ScreenView(screen: screen)
                             .phoneRootBar()
@@ -329,11 +355,11 @@ struct SiteSwitcherLabel: View {
         HStack(spacing: 10) {
             Mark(size: 30)
             VStack(alignment: .leading, spacing: 0) {
-                Text(state.site.name).font(.subheadline.weight(.semibold)).foregroundStyle(Theme.ink)
-                Text(state.site.host).font(.caption).foregroundStyle(Theme.ink2)
+                Text(state.site.name).font(Theme.subheadline.weight(.semibold)).foregroundStyle(Theme.ink)
+                Text(state.site.host).font(Theme.caption).foregroundStyle(Theme.ink2)
             }
             .lineLimit(1)
-            Image(systemName: "chevron.up.chevron.down").font(.caption.weight(.semibold)).foregroundStyle(Theme.ink2)
+            Image(systemName: "chevron.up.chevron.down").font(Theme.caption.weight(.semibold)).foregroundStyle(Theme.ink2)
         }
         .padding(.trailing, 4)
     }
@@ -350,7 +376,7 @@ struct MoreView: View {
                     let rest = group.1.filter { !Screen.tabs.contains($0) }
                     if !rest.isEmpty {
                         if !group.0.isEmpty {
-                            Text(group.0.uppercased()).font(.caption.weight(.semibold)).tracking(0.6).foregroundStyle(Theme.ink2)
+                            Text(group.0.uppercased()).font(Theme.caption.weight(.semibold)).tracking(0.6).foregroundStyle(Theme.ink2)
                                 .padding(.leading, 14).padding(.top, 10)
                         }
                         VStack(spacing: 0) {
@@ -361,7 +387,7 @@ struct MoreView: View {
                                         Icon(screen.icon, size: 20).foregroundStyle(Theme.ink2)
                                         Text(screen == .audience ? "Audience · countries and devices" : screen.title).foregroundStyle(Theme.ink)
                                         Spacer()
-                                        Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(Theme.muted)
+                                        Image(systemName: "chevron.right").font(Theme.footnote.weight(.semibold)).foregroundStyle(Theme.muted)
                                     }
                                     .padding(.horizontal, 14)
                                     .frame(minHeight: 48)
@@ -435,18 +461,19 @@ struct Sidebar: View {
         VStack(alignment: .leading, spacing: 0) {
             Button { switching = true } label: {
                 HStack(spacing: 10) {
-                    Mark(size: 30)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(state.site.name).font(.callout.weight(.semibold)).foregroundStyle(Theme.ink)
-                        Text(state.site.host).font(.caption).foregroundStyle(Theme.ink2)
+                    SiteAvatar(name: state.site.name)
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(state.site.name).font(rowStrong).foregroundStyle(Theme.ink)
+                        Text(state.site.host).font(rowSmall).foregroundStyle(Theme.ink2)
                     }
                     .lineLimit(1)
                     Spacer()
-                    Image(systemName: "chevron.up.chevron.down").font(.caption.weight(.semibold)).foregroundStyle(Theme.ink2)
+                    Image(systemName: "chevron.up.chevron.down").font(Theme.caption.weight(.semibold)).foregroundStyle(Theme.muted)
                 }
-                .padding(10)
-                .background(Theme.surface, in: .rect(cornerRadius: 10))
-                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Theme.border))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .background(Theme.surface, in: .rect(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Theme.border))
                 .contentShape(.rect)
             }
             .buttonStyle(.plain)
@@ -463,13 +490,13 @@ struct Sidebar: View {
                         if let first = matches.first?.1.first { state.screen = first }
                         query = ""
                     }
-                Text("⌘K").font(.caption2.weight(.semibold)).foregroundStyle(Theme.muted)
+                Text("⌘K").font(Theme.caption2.weight(.semibold)).foregroundStyle(Theme.muted)
                     .padding(.horizontal, 5).padding(.vertical, 2)
                     .background(Theme.subtle, in: .rect(cornerRadius: 4))
             }
-            .font(.callout)
+            .font(rowText)
             .padding(.horizontal, 10)
-            .frame(height: 30)
+            .frame(height: 32)
             .background(Theme.surface, in: .rect(cornerRadius: 8))
             .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Theme.border))
             .padding(.top, 10)
@@ -478,8 +505,8 @@ struct Sidebar: View {
                 VStack(alignment: .leading, spacing: 1) {
                     ForEach(matches, id: \.0) { group in
                         if !group.0.isEmpty {
-                            Text(group.0.uppercased()).font(.caption2.weight(.semibold)).tracking(0.6).foregroundStyle(Theme.muted)
-                                .padding(.leading, 10).padding(.top, 14).padding(.bottom, 4)
+                            Text(group.0.uppercased()).font(groupFont).tracking(0.66).foregroundStyle(Theme.muted)
+                                .padding(.leading, 10).padding(.top, 14).padding(.bottom, 6)
                         }
                         ForEach(group.1) { screen in
                             SidebarRow(screen: screen, selected: state.screen == screen, online: screen == .live ? state.online : nil) {
@@ -499,12 +526,25 @@ struct Sidebar: View {
             .scrollIndicators(.never)
             Divider().padding(.vertical, 8)
             settingsRow
-            Text("\(state.client.instance.host)").font(.caption2).foregroundStyle(Theme.muted)
+            Text("\(state.client.instance.host)").font(Theme.caption2).foregroundStyle(Theme.muted)
                 .padding(.leading, 10).padding(.top, 6)
         }
         .padding(12)
         .sheet(isPresented: $settings) { SettingsSheet() }
     }
+
+    // The web's sidebar: 13 px site name, 12 px host, 11 px group labels.
+    #if os(macOS)
+    private let rowStrong = Theme.strong
+    private let rowSmall = Theme.small
+    private let rowText = Theme.text
+    private let groupFont = Font.system(size: 11, weight: .semibold)
+    #else
+    private let rowStrong = Font.callout.weight(.semibold)
+    private let rowSmall = Font.caption
+    private let rowText = Font.callout
+    private let groupFont = Font.caption2.weight(.semibold)
+    #endif
 
     private func step(_ by: Int) -> KeyPress.Result {
         let screens = matches.flatMap(\.1)
@@ -538,7 +578,7 @@ private struct SidebarRow: View {
         Button(action: action) {
             SidebarRowLabel(icon: screen.icon, title: screen.title, selected: selected) {
                 if let online {
-                    Text(Format.count(online)).font(.caption.weight(.semibold)).monospacedDigit()
+                    Text(Format.count(online)).font(Theme.caption.weight(.semibold)).monospacedDigit()
                         .foregroundStyle(online > 0 ? Theme.good : Theme.muted)
                 }
             }
@@ -553,17 +593,25 @@ struct SidebarRowLabel<Trailing: View>: View {
     let title: String
     let selected: Bool
     @ViewBuilder var trailing: Trailing
+    // The web's .nav: 13.5 px in a 34 px row.
+    #if os(macOS)
+    private let rowFont = Font.system(size: 13.5)
+    private let rowHeight: CGFloat = 34
+    #else
+    private let rowFont = Font.callout
+    private let rowHeight: CGFloat = 30
+    #endif
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 11) {
             Icon(icon, size: 16).foregroundStyle(selected ? Theme.brand : Theme.ink2)
             Text(title).foregroundStyle(selected ? Theme.brandDark : Theme.ink).fontWeight(selected ? .semibold : .regular)
             Spacer()
             trailing
         }
-        .font(.callout)
+        .font(rowFont)
         .padding(.horizontal, 10)
-        .frame(height: 30)
+        .frame(height: rowHeight)
         .background(selected ? Theme.brandWash : .clear, in: .rect(cornerRadius: 7))
         .contentShape(.rect)
     }
@@ -608,14 +656,14 @@ struct NoticeBar: View {
         if let notice = state.notice {
             HStack(spacing: 12) {
                 Icon("filter", size: 16).foregroundStyle(Color(red: 0.48, green: 0.83, blue: 0.63))
-                Text(notice.text).font(.subheadline).foregroundStyle(.white).lineLimit(2)
+                Text(notice.text).font(Theme.subheadline).foregroundStyle(.white).lineLimit(2)
                 Spacer(minLength: 4)
                 Button("Undo") {
                     state.view = notice.undo
                     state.notice = nil
                 }
                 .buttonStyle(.plain)
-                .font(.subheadline.weight(.semibold))
+                .font(Theme.subheadline.weight(.semibold))
                 .foregroundStyle(Color(red: 1, green: 0.71, blue: 0.66))
             }
             .padding(.horizontal, 16)
@@ -631,5 +679,20 @@ struct NoticeBar: View {
                 if state.notice?.id == notice.id { withAnimation { state.notice = nil } }
             }
         }
+    }
+}
+
+/// A site's initial on the brand tile, as the workspace marks a site.
+struct SiteAvatar: View {
+    let name: String
+    var size: CGFloat = 28
+
+    var body: some View {
+        Text(name.first.map { String($0).uppercased() } ?? "·")
+            .font(Theme.display(size * 0.54, relativeTo: .body))
+            .foregroundStyle(.white)
+            .frame(width: size, height: size)
+            .background(Theme.brand, in: .rect(cornerRadius: size * 0.22))
+            .accessibilityHidden(true)
     }
 }

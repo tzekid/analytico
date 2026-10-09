@@ -17,6 +17,9 @@ struct ScreenScaffold<Content: View>: View {
     var stale: Date?
     /// A site still waiting for its first visit: no period, no controls.
     var waiting = false
+    /// Around the period in the subtitle, as on the web: "3 pages · 3–9 Oct", "… · EUR".
+    var lead: String?
+    var trail: String?
     let reload: () async -> Void
     @ViewBuilder var content: Content
 
@@ -29,12 +32,15 @@ struct ScreenScaffold<Content: View>: View {
     @State private var headerHeight: CGFloat = 0
     private var headerAway: Bool { headerHeight > 0 && scrolled > headerHeight + (compact ? 2 : 14) }
 
+    /// Paths on a Lite site can't run, whatever the period: nothing to set.
+    private var idle: Bool { waiting || (screen == .paths && state.site.mode == "lite") }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: compact ? 12 : 16) {
                 header
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { headerHeight = $0 }
-                if filters && !waiting && screen.fixedPeriod == nil { FilterChips() }
+                if filters && !idle && screen.fixedPeriod == nil { FilterChips() }
                 if let stale { StaleNotice(since: stale) { Task { await reload() } } }
                 content
             }
@@ -46,7 +52,7 @@ struct ScreenScaffold<Content: View>: View {
         .onScrollGeometryChange(for: CGFloat.self) { $0.contentOffset.y + $0.contentInsets.top } action: { _, offset in scrolled = offset }
         .background(Theme.canvas)
         .overlay(alignment: .top) {
-            if headerAway && !waiting && screen.fixedPeriod == nil {
+            if headerAway && !idle && screen.fixedPeriod == nil {
                 PeriodPill(wording: wording, filters: filters)
                     .padding(.top, 6)
                     .transition(.opacity.combined(with: .move(edge: .top)))
@@ -61,43 +67,69 @@ struct ScreenScaffold<Content: View>: View {
     }
 
     @ViewBuilder private var header: some View {
-        if waiting {
+        if idle {
             titleBlock
         } else if compact {
             VStack(alignment: .leading, spacing: 12) {
                 titleBlock
                 if let fixed = screen.fixedPeriod {
-                    FixedPeriodTag(text: fixed.text, why: fixed.why, live: screen == .live)
+                    FixedPeriodTag(text: fixed.text, why: fixed.why, live: screen == .live, quiet: (state.online ?? 0) == 0)
                 } else {
                     PeriodBar(wording: wording)
                     ControlsRow(screen: screen, filters: filters, compare: compare)
                 }
             }
         } else {
-            HStack(alignment: .top, spacing: 12) {
-                titleBlock
-                Spacer(minLength: 12)
-                if let fixed = screen.fixedPeriod {
-                    FixedPeriodTag(text: fixed.text, why: fixed.why, live: screen == .live)
-                    ActionsMenu(screen: screen)
+            // Beside the title, the subtitle wrapping if it must, while the
+            // title keeps room; under it once it doesn't (an open inspector,
+            // a narrow window), as the web wraps them.
+            Group {
+                if headerWidth == 0 || headerWidth - controlsWidth - 24 >= 300 {
+                    HStack(alignment: .top, spacing: 24) {
+                        titleBlock.frame(maxWidth: .infinity, alignment: .leading)
+                        controls
+                    }
                 } else {
-                    PeriodBar(wording: wording)
-                        .fixedSize()
-                    ControlsRow(screen: screen, filters: filters, compare: compare)
+                    VStack(alignment: .leading, spacing: 12) {
+                        titleBlock
+                        controls
+                    }
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { headerWidth = $0 }
         }
+    }
+
+    @State private var headerWidth: CGFloat = 0
+    @State private var controlsWidth: CGFloat = 0
+
+    @ViewBuilder private var controls: some View {
+        HStack(spacing: 8) {
+            if let fixed = screen.fixedPeriod {
+                FixedPeriodTag(text: fixed.text, why: fixed.why, live: screen == .live, quiet: (state.online ?? 0) == 0)
+                // Live has nothing to share or note: it is always now.
+                if screen != .live { ActionsMenu(screen: screen) }
+            } else {
+                PeriodBar(wording: wording)
+                    .fixedSize()
+                ControlsRow(screen: screen, filters: filters, compare: compare)
+                    .fixedSize()
+            }
+        }
+        .fixedSize()
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { controlsWidth = $0 }
     }
 
     private var titleBlock: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(screen.title)
-                .font(Theme.display(compact ? 30 : 28, relativeTo: .largeTitle))
+                .font(Theme.display(compact ? 30 : titleSize, relativeTo: .largeTitle))
                 .foregroundStyle(Theme.ink)
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
             Text(subtitle)
-                .font(compact ? .subheadline : .callout)
+                .font(compact ? .subheadline : subtitleFont)
                 .foregroundStyle(Theme.ink2)
                 .lineLimit(2)
         }
@@ -105,13 +137,23 @@ struct ScreenScaffold<Content: View>: View {
         .accessibilityAddTraits(.isHeader)
     }
 
+    #if os(macOS)
+    private let titleSize: CGFloat = 25
+    private let subtitleFont = Theme.text
+    #else
+    private let titleSize: CGFloat = 28
+    private let subtitleFont = Font.callout
+    #endif
+
     private var subtitle: String {
         if waiting { return "No visits yet" }
         if screen == .live { return "\(state.site.host) · updates by itself" }
         if screen == .retention { return "Who comes back, and what brought them" }
-        if screen == .paths && state.site.mode == "lite" { return "Paths need Session or Full mode" }
+        if screen == .paths && state.site.mode == "lite" { return screen.lead ?? " " }
         guard let wording else { return " " }
-        return state.view.compare && compare ? "\(wording.title) · \(wording.compared)" : wording.title
+        // Only the overview spells out what it is compared with, as on the web.
+        if screen == .overview { return state.view.compare && compare ? "\(wording.title) · \(wording.compared)" : wording.title }
+        return [lead ?? screen.lead, wording.title, trail].compactMap { $0 }.joined(separator: " · ")
     }
 }
 
@@ -171,7 +213,7 @@ struct PeriodPill: View {
             }
         }
         .buttonStyle(.plain)
-        .font(.subheadline.weight(.semibold))
+        .font(Theme.subheadline.weight(.semibold))
         .foregroundStyle(Theme.ink)
         .padding(3)
         .background(.regularMaterial, in: .capsule)
@@ -189,16 +231,16 @@ struct FilterChips: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
                     if state.view.any && state.view.filters.count > 1 {
-                        Text("Any of").font(.footnote).foregroundStyle(Theme.ink2)
+                        Text("Any of").font(Theme.footnote).foregroundStyle(Theme.ink2)
                     }
                     ForEach(state.view.filters) { filter in
                         Button { state.view.filters.removeAll { $0 == filter } } label: {
                             HStack(spacing: 6) {
                                 (Text("\(Labels.dimension(filter.dimension)) \(filter.negated ? "is not" : "is") ") + Text(Labels.value(filter.value, dimension: filter.dimension)).fontWeight(.semibold))
                                     .lineLimit(1)
-                                Image(systemName: "xmark").font(.caption2.weight(.bold))
+                                Image(systemName: "xmark").font(Theme.caption2.weight(.bold))
                             }
-                            .font(.footnote)
+                            .font(Theme.footnote)
                             .foregroundStyle(Theme.brandDark)
                             .padding(.horizontal, 10)
                             .frame(height: 30)
@@ -211,7 +253,7 @@ struct FilterChips: View {
                     if state.view.filters.count > 1 {
                         Button("Clear all") { state.view.filters = [] }
                             .buttonStyle(.plain)
-                            .font(.footnote.weight(.semibold))
+                            .font(Theme.footnote.weight(.semibold))
                             .foregroundStyle(Theme.brandDark)
                             .padding(.horizontal, 6)
                     }
@@ -231,11 +273,11 @@ struct StaleNotice: View {
         HStack(spacing: 12) {
             Icon("refresh", size: 18)
             VStack(alignment: .leading, spacing: 1) {
-                Text("Couldn’t refresh").font(.subheadline.weight(.semibold))
-                Text("Figures from \(since.formatted(date: .omitted, time: .shortened)) · check the connection").font(.caption)
+                Text("Couldn’t refresh").font(Theme.subheadline.weight(.semibold))
+                Text("Figures from \(since.formatted(date: .omitted, time: .shortened)) · check the connection").font(Theme.caption)
             }
             Spacer()
-            Button("Try again", action: retry).buttonStyle(.plain).font(.subheadline.weight(.semibold))
+            Button("Try again", action: retry).buttonStyle(.plain).font(Theme.subheadline.weight(.semibold))
         }
         .foregroundStyle(Theme.warning)
         .padding(12)
@@ -249,20 +291,29 @@ struct FixedPeriodTag: View {
     let text: String
     let why: String
     var live = false
+    /// Live with nobody online: grey, as on the web.
+    var quiet = false
+    #if os(macOS)
+    private let tagFont = Theme.strong
+    private let tagHeight: CGFloat = 32
+    #else
+    private let tagFont = Font.subheadline.weight(.semibold)
+    private let tagHeight: CGFloat = 30
+    #endif
 
     var body: some View {
         HStack(spacing: 7) {
             if live {
-                Circle().fill(Theme.good).frame(width: 8, height: 8)
+                Circle().fill(quiet ? Theme.muted : Theme.good).frame(width: 8, height: 8)
             } else {
                 Icon("calendar", size: 14)
             }
-            Text(text).font(.subheadline.weight(.semibold))
+            Text(text).font(tagFont)
         }
-        .foregroundStyle(live ? Theme.good : Theme.ink2)
+        .foregroundStyle(live && !quiet ? Theme.good : Theme.ink2)
         .padding(.horizontal, 12)
-        .frame(height: 30)
-        .background(live ? Theme.goodWash : Theme.subtle, in: .capsule)
+        .frame(height: tagHeight)
+        .background(live && !quiet ? Theme.goodWash : Theme.subtle, in: .capsule)
         .help(why)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(text). \(why)")
@@ -299,9 +350,18 @@ struct PeriodBar: View {
                         .presentationDragIndicator(.visible)
                 }
         }
-        .padding(3)
-        .background(Theme.subtle, in: .rect(cornerRadius: sizeClass == .compact ? 11 : 9))
+        .padding(sizeClass == .compact ? 3 : 2)
+        .background(Theme.subtle, in: .rect(cornerRadius: sizeClass == .compact ? 11 : 8))
     }
+
+    // The web's .seg on the Mac: 28 px items, 13 px text.
+    #if os(macOS)
+    private let regularFont = Theme.text
+    private let regularHeight: CGFloat = 28
+    #else
+    private let regularFont = Font.callout
+    private let regularHeight: CGFloat = 24
+    #endif
 
     private var customLabel: String {
         if state.view.isCustom, let from = state.view.from, let to = state.view.to, let chosen = PeriodWording(from: from, to: to) { return chosen.button }
@@ -314,12 +374,13 @@ struct PeriodBar: View {
                 if let icon { Icon(icon, size: 14) }
                 Text(title).lineLimit(1)
             }
-            .font(sizeClass == .compact ? .subheadline : .callout)
+            .font(sizeClass == .compact ? .subheadline : regularFont)
             .fontWeight(selected ? .semibold : .regular)
             .foregroundStyle(selected ? Theme.ink : Theme.ink2)
-            .padding(.horizontal, sizeClass == .compact ? 8 : 12)
+            .padding(.horizontal, sizeClass == .compact ? 8 : 10)
+            .frame(minWidth: sizeClass == .compact ? nil : 44)
             .frame(maxWidth: icon == nil && sizeClass == .compact ? .infinity : nil)
-            .frame(height: sizeClass == .compact ? 32 : 24)
+            .frame(height: sizeClass == .compact ? 32 : regularHeight)
             .background {
                 if selected {
                     RoundedRectangle(cornerRadius: sizeClass == .compact ? 8 : 6).fill(Theme.surface)
@@ -407,7 +468,7 @@ struct PeriodPicker: View {
                             .foregroundStyle(QuickRange.allCases.contains(where: isChosen) ? Theme.ink2 : Theme.brandDark)
                             .fontWeight(.semibold)
                     }
-                    .font(.callout)
+                    .font(Theme.callout)
                     .padding(10)
                     .frame(width: 150)
                     .frame(maxHeight: .infinity, alignment: .top)
@@ -446,7 +507,7 @@ struct PeriodPicker: View {
 
     private var note: some View {
         Text("Your data starts on \(first.formatted(Dates.style.day().month(.abbreviated).year())). Days after today can’t be picked. One day shows hours; longer ranges show days.")
-            .font(.caption)
+            .font(Theme.caption)
             .foregroundStyle(Theme.ink2)
             .padding(compact ? 0 : 10)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -508,7 +569,7 @@ private struct DateField: View {
     var body: some View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(label).font(.caption).foregroundStyle(Theme.ink2)
+                Text(label).font(Theme.caption).foregroundStyle(Theme.ink2)
                 Text(date.formatted(Dates.style.weekday(.abbreviated).day().month(.abbreviated).year())).foregroundStyle(Theme.ink)
             }
             .padding(.horizontal, 12)
@@ -564,7 +625,7 @@ struct MonthCalendar: View {
             let columns = Array(repeating: GridItem(.flexible(), spacing: 0), count: 7)
             LazyVGrid(columns: columns, spacing: 2) {
                 ForEach(["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"], id: \.self) { day in
-                    Text(day).font(.caption2.weight(.medium)).foregroundStyle(Theme.ink2)
+                    Text(day).font(Theme.caption2.weight(.medium)).foregroundStyle(Theme.ink2)
                 }
                 ForEach(Array(cells.enumerated()), id: \.offset) { _, day in
                     if let day { cell(day) } else { Color.clear.frame(height: 40) }
@@ -656,14 +717,14 @@ struct ControlsRow: View {
         HStack(spacing: 8) {
             if compare {
                 Button { state.view.compare.toggle() } label: {
-                    Label(state.view.compare ? "Comparing" : "Compare", image: "Icons/compare")
+                    IconLabel(state.view.compare ? "Comparing" : "Compare", icon: "compare")
                 }
                 .buttonStyle(ControlStyle(on: state.view.compare, grow: sizeClass == .compact))
                 .accessibilityValue(state.view.compare ? "On" : "Off")
             }
             if filters {
                 Button { filtering = true } label: {
-                    Label(state.view.filters.isEmpty ? "Filter" : "Filter · \(state.view.filters.count)", image: "Icons/filter")
+                    IconLabel(state.view.filters.isEmpty ? "Filter" : "Filter · \(state.view.filters.count)", icon: "filter")
                 }
                 .buttonStyle(ControlStyle(on: !state.view.filters.isEmpty, grow: sizeClass == .compact))
                 .popover(isPresented: $filtering, arrowEdge: .bottom) {
@@ -675,12 +736,6 @@ struct ControlsRow: View {
                 }
             }
             ActionsMenu(screen: screen)
-            #if os(macOS)
-            Button { NSWorkspace.shared.open(state.workspaceURL(screen)) } label: { Icon("external", size: 15) }
-                .buttonStyle(ControlStyle(on: false, square: true))
-                .help("Open this view in the workspace")
-                .accessibilityLabel("Open in the workspace")
-            #endif
         }
     }
 }
@@ -844,11 +899,11 @@ struct FilterEditor: View {
             ForEach(draft.filters) { filter in
                 HStack {
                     VStack(alignment: .leading, spacing: 1) {
-                        Text("\(Labels.dimension(filter.dimension)) \(filter.negated ? "is not" : "is")").font(.caption).foregroundStyle(Theme.ink2)
+                        Text("\(Labels.dimension(filter.dimension)) \(filter.negated ? "is not" : "is")").font(Theme.caption).foregroundStyle(Theme.ink2)
                         Text(Labels.value(filter.value, dimension: filter.dimension)).foregroundStyle(Theme.ink).lineLimit(1)
                     }
                     Spacer()
-                    Button { draft.filters.removeAll { $0 == filter } } label: { Image(systemName: "xmark").font(.footnote.weight(.semibold)) }
+                    Button { draft.filters.removeAll { $0 == filter } } label: { Image(systemName: "xmark").font(Theme.footnote.weight(.semibold)) }
                         .buttonStyle(.plain)
                         .foregroundStyle(Theme.ink2)
                         .accessibilityLabel("Remove \(Labels.dimension(filter.dimension)) \(filter.value)")
@@ -868,7 +923,7 @@ struct FilterEditor: View {
                 Button { adding = true } label: {
                     VStack(alignment: .leading, spacing: 2) {
                         Label("Add condition", systemImage: "plus").fontWeight(.medium)
-                        Text("Page, source, campaign, country, device, browser, OS").font(.caption).foregroundStyle(Theme.ink2)
+                        Text("Page, source, campaign, country, device, browser, OS").font(Theme.caption).foregroundStyle(Theme.ink2)
                     }
                 }
                 .buttonStyle(.plain)
@@ -876,7 +931,7 @@ struct FilterEditor: View {
             }
             if let match, !draft.filters.isEmpty {
                 Text("\(Format.count(Int(match.visitors))) visitors match · \(Format.share(match.visitors, of: match.everyone)) of everyone in these dates")
-                    .font(.subheadline)
+                    .font(Theme.subheadline)
                     .foregroundStyle(Theme.brandDark)
                     .padding(12)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -933,7 +988,7 @@ private struct ConditionBuilder: View {
                 .labelsHidden()
                 .fixedSize()
                 Spacer()
-                Button("Cancel", action: cancel).buttonStyle(.plain).foregroundStyle(Theme.ink2).font(.subheadline)
+                Button("Cancel", action: cancel).buttonStyle(.plain).foregroundStyle(Theme.ink2).font(Theme.subheadline)
             }
             TextField(placeholder, text: $value)
                 .textFieldStyle(.roundedBorder)
@@ -993,22 +1048,31 @@ private struct ConditionBuilder: View {
 
 // MARK: - Buttons
 
-/// The controls row's buttons: 36 pt on iPhone, 28 pt on Mac; on is the brand wash.
+/// The controls row's buttons: 36 pt on iPhone, 32 pt on Mac; on is the brand wash.
 struct ControlStyle: ButtonStyle {
     var on: Bool
     var grow = false
     var square = false
 
+    #if os(macOS)
+    /// The web's .btn: 13 px semibold, 6 px corners.
+    private func font(_ on: Bool) -> Font { Theme.strong }
+    private let radius: CGFloat = 6
+    #else
+    private func font(_ on: Bool) -> Font { .subheadline.weight(on ? .semibold : .medium) }
+    private let radius: CGFloat = 8
+    #endif
+
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .labelStyle(ControlLabelStyle())
-            .font(.subheadline.weight(on ? .semibold : .medium))
+            .font(font(on))
             .foregroundStyle(on ? Theme.brandDark : Theme.ink)
             .padding(.horizontal, square ? 0 : grow ? 8 : 12)
             .frame(width: square ? Theme.controlHeight : nil, height: Theme.controlHeight)
             .frame(maxWidth: grow ? .infinity : nil)
-            .background(on ? Theme.brandWash : Theme.surface, in: .rect(cornerRadius: 8))
-            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(on ? Theme.brand : Theme.border, lineWidth: on ? 1.2 : 1))
+            .background(on ? Theme.brandWash : Theme.surface, in: .rect(cornerRadius: radius))
+            .overlay(RoundedRectangle(cornerRadius: radius).strokeBorder(on ? Theme.brand : Theme.border, lineWidth: 1))
             .opacity(configuration.isPressed ? 0.7 : 1)
             .contentShape(.rect)
     }
@@ -1026,6 +1090,11 @@ private struct ControlLabelStyle: LabelStyle {
 /// A capsule button in a row of actions (page details): the primary in brand, the rest quiet.
 struct ActionCapsuleStyle: ButtonStyle {
     var primary: Bool
+    #if os(macOS)
+    private let capsuleFont = Theme.strong
+    #else
+    private let capsuleFont = Font.subheadline.weight(.semibold)
+    #endif
     /// iPhone: an equal tile with the icon over the label, as in Maps' place cards.
     var tile = false
 
@@ -1034,14 +1103,14 @@ struct ActionCapsuleStyle: ButtonStyle {
             if tile {
                 configuration.label
                     .labelStyle(.tileLabel)
-                    .font(.footnote.weight(.semibold))
+                    .font(Theme.footnote.weight(.semibold))
                     .frame(maxWidth: .infinity)
                     .frame(height: 58)
                     .background(primary ? Theme.primary : Theme.brandWash, in: .rect(cornerRadius: 14))
             } else {
                 configuration.label
                     .labelStyle(ControlLabelStyle())
-                    .font(.subheadline.weight(.semibold))
+                    .font(capsuleFont)
                     .padding(.horizontal, 14)
                     .frame(height: 34)
                     .background(primary ? Theme.primary : Theme.brandWash, in: .capsule)
@@ -1073,12 +1142,12 @@ struct PrimaryButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(wide ? .body.weight(.semibold) : .callout.weight(.semibold))
+            .font(wide ? .body.weight(.semibold) : Theme.callout.weight(.semibold))
             .foregroundStyle(.white)
             .padding(.horizontal, 16)
             .frame(maxWidth: wide ? .infinity : nil)
             .frame(height: wide ? 50 : Theme.controlHeight)
-            .background(Theme.primary.opacity(enabled ? (configuration.isPressed ? 0.8 : 1) : 0.4), in: .rect(cornerRadius: wide ? 25 : 8))
+            .background(Theme.primary.opacity(enabled ? (configuration.isPressed ? 0.8 : 1) : 0.4), in: .rect(cornerRadius: wide ? 25 : Theme.buttonRadius))
             .contentShape(.rect)
     }
 }
@@ -1088,13 +1157,13 @@ struct SecondaryButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.callout.weight(.medium))
+            .font(Theme.callout.weight(.medium))
             .foregroundStyle(Theme.ink)
             .padding(.horizontal, 16)
             .frame(maxWidth: wide ? .infinity : nil)
             .frame(height: wide ? 50 : Theme.controlHeight)
-            .background(Theme.surface, in: .rect(cornerRadius: wide ? 25 : 8))
-            .overlay(RoundedRectangle(cornerRadius: wide ? 25 : 8).strokeBorder(Theme.border))
+            .background(Theme.surface, in: .rect(cornerRadius: wide ? 25 : Theme.buttonRadius))
+            .overlay(RoundedRectangle(cornerRadius: wide ? 25 : Theme.buttonRadius).strokeBorder(Theme.border))
             .opacity(configuration.isPressed ? 0.7 : 1)
             .contentShape(.rect)
     }
@@ -1105,7 +1174,7 @@ struct ChipStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.footnote.weight(.medium))
+            .font(Theme.footnote.weight(.medium))
             .foregroundStyle(selected ? Theme.brandDark : Theme.ink)
             .padding(.horizontal, 12)
             .frame(height: 34)

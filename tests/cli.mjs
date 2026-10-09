@@ -73,6 +73,12 @@ await journey("cli", async (t) => {
     avg_scroll: 75, copies: 0, outbound_clicks: 0, downloads: 0, form_attempts: 1,
   }]);
   assert.deepEqual(report("acquisition"), [{ source: "search", medium: "", views: 1, visitors: 1, label: "Search", channel: "Search" }]);
+  // What the workspace's Audience shows, for the apps: engagement, languages and screen sizes.
+  const [totals] = report("overview");
+  assert.equal(totals.engaged_views, 1);
+  assert.equal(totals.previous_engaged_views, 0);
+  assert.deepEqual(report("breakdown", "--dimension", "language"), [{ value: "en", page_views: 1, visitor_days: 1, previous_page_views: 0, label: "English", channel: null }]);
+  assert.deepEqual(report("breakdown", "--dimension", "viewport"), [{ value: "desktop", page_views: 1, visitor_days: 1, previous_page_views: 0, label: "Desktop", channel: null }]);
   assert.deepEqual(report("campaigns"), [{ source: "search", campaign: "launch", content: "hero", views: 1, visitors: 1, sessions: 1 }]);
   assert.deepEqual(report("sections"), [{ section: "hero", exposures: 1, exposure_percent: 100, final_section: 1 }]);
   // The browser journey separately checks an actual click produces an action.

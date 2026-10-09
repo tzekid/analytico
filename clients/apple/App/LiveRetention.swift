@@ -50,10 +50,10 @@ struct LiveView: View {
                 Text("Nobody is on \(state.site.host) right now").foregroundStyle(Theme.ink2)
                 // The stream knows the newest page view, even one older than a day.
                 if let last = state.last.flatMap({ $0 > 0 ? Date(timeIntervalSince1970: Double($0) / 1000) : nil }) ?? live.last {
-                    Text("The last page view was \(last.formatted(.relative(presentation: .named))). This updates by itself.").font(.caption).foregroundStyle(Theme.muted)
+                    Text("The last page view was \(last.formatted(.relative(presentation: .named))). This updates by itself.").font(Theme.caption).foregroundStyle(Theme.muted)
                 }
             }
-            Text("Page views per minute · last 30 minutes").font(.caption).foregroundStyle(Theme.muted).padding(.top, 14)
+            Text("Page views per minute · last 30 minutes").font(Theme.caption).foregroundStyle(Theme.muted).padding(.top, 14)
             MinuteBars(minutes: live.minutes)
                 .frame(height: 80)
         }
@@ -72,7 +72,7 @@ struct LiveView: View {
                     .buttonStyle(.plain)
                     .rowMenu("page", path)
                 }
-                if live.reading.isEmpty { Text("No one is reading a page right now. Pages appear here the moment someone arrives.").font(.callout).foregroundStyle(Theme.ink2) }
+                if live.reading.isEmpty { Text("No one is reading a page right now. Pages appear here the moment someone arrives.").font(Theme.callout).foregroundStyle(Theme.ink2) }
             }
         }
     }
@@ -88,7 +88,7 @@ struct LiveView: View {
                     Text("Country").frame(width: 150, alignment: .leading)
                     Text("Device").frame(width: 90, alignment: .leading)
                 }
-                .font(.caption.weight(.semibold))
+                .font(Theme.caption.weight(.semibold))
                 .foregroundStyle(Theme.ink2)
                 .padding(.horizontal, 16)
                 .frame(height: 28)
@@ -102,10 +102,10 @@ struct LiveView: View {
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(view.path).foregroundStyle(Theme.ink).lineLimit(1).truncationMode(.middle)
-                            Text([view.source, view.country].filter { !$0.isEmpty }.joined(separator: " · ")).font(.caption).foregroundStyle(Theme.ink2)
+                            Text([view.source, view.country].filter { !$0.isEmpty }.joined(separator: " · ")).font(Theme.caption).foregroundStyle(Theme.ink2)
                         }
                         Spacer()
-                        Text(when).font(.caption.weight(fresh ? .semibold : .regular)).foregroundStyle(fresh ? Theme.good : Theme.muted)
+                        Text(when).font(Theme.caption.weight(fresh ? .semibold : .regular)).foregroundStyle(fresh ? Theme.good : Theme.muted)
                     }
                     .padding(.horizontal, 16)
                     .padding(.vertical, 10)
@@ -117,7 +117,7 @@ struct LiveView: View {
                         Text(view.country).foregroundStyle(Theme.ink).frame(width: 150, alignment: .leading)
                         Text(view.device).foregroundStyle(Theme.ink2).frame(width: 90, alignment: .leading)
                     }
-                    .font(.callout)
+                    .font(Theme.callout)
                     .lineLimit(1)
                     .padding(.horizontal, 16)
                     .frame(height: 40)
@@ -164,7 +164,7 @@ struct MinuteBars: View {
                     .foregroundStyle(.clear)
                     .annotation(position: .top, spacing: 0, overflowResolution: .init(x: .fit(to: .chart), y: .fit(to: .chart))) {
                         Text("\(minute.at.formatted(date: .omitted, time: .shortened)) · \(plural(minute.count, "page view"))")
-                            .font(.caption2.weight(.semibold))
+                            .font(Theme.caption2.weight(.semibold))
                             .foregroundStyle(.white)
                             .padding(.horizontal, 8).padding(.vertical, 4)
                             .background(Color(light: 0x282421, dark: 0x3A3330), in: .rect(cornerRadius: 6))
@@ -227,12 +227,14 @@ struct LiveData {
 struct RetentionView: View {
     @Environment(SiteState.self) private var state
     @Environment(\.horizontalSizeClass) private var sizeClass
+    @Environment(\.openURL) private var openURL
     @State private var data = Loaded<Retention>()
 
     var body: some View {
         ScreenScaffold(screen: .retention, stale: data.stale, reload: load) {
             if state.site.mode != "full" {
-                StageView(art: "calendar", title: "Retention needs Full mode", text: "Lite and Session modes never follow visitors across days. Switch the site to Full in the workspace under Settings → Websites.")
+                StageView(art: "bars", title: "Returning visitors and cohorts need Full mode", text: "Lite and Session never remember a visitor from one day to the next. Full mode does — only for visitors who consent, or don’t need to under your consent policy.",
+                          primary: ("Switch to Full mode", { openURL(state.siteSettingsURL) }))
             } else if let retention = data.value {
                 if sizeClass == .compact {
                     cohorts(retention)
@@ -268,7 +270,7 @@ struct RetentionView: View {
                     Text("New")
                     ForEach(1..<8, id: \.self) { Text(compact ? "\($0)" : "Wk \($0)").gridColumnAlignment(.center) }
                 }
-                .font(.caption)
+                .font(Theme.caption)
                 .foregroundStyle(Theme.ink2)
                 ForEach(0..<min(8, retention.cohorts.count), id: \.self) { cohort in
                     let row = retention.cohorts[cohort]
@@ -281,7 +283,7 @@ struct RetentionView: View {
                             } else {
                                 let rate = Double(row[offset]) / Double(row[0])
                                 Text(compact ? "\(Int((rate * 100).rounded()))" : rate.formatted(.percent.precision(.fractionLength(0))))
-                                    .font(.caption.weight(.medium))
+                                    .font(Theme.caption.weight(.medium))
                                     .monospacedDigit()
                                     .foregroundStyle(rate > 0.3 ? .white : Theme.ink)
                                     .frame(maxWidth: .infinity)
@@ -290,24 +292,24 @@ struct RetentionView: View {
                             }
                         }
                     }
-                    .font(.callout)
+                    .font(Theme.callout)
                 }
             }
-            Text("Percent of each week’s new visitors seen again in a later week.").font(.caption).foregroundStyle(Theme.muted)
+            Text("Percent of each week’s new visitors seen again in a later week.").font(Theme.caption).foregroundStyle(Theme.muted)
         }
     }
 
     private func sources(_ retention: Retention) -> some View {
         SectionCard(title: "Came back, by first source") {
             if retention.sources.isEmpty {
-                Text("Shows once visitors first seen at least 4 weeks ago have had time to come back.").font(.callout).foregroundStyle(Theme.ink2)
+                Text("Shows once visitors first seen at least 4 weeks ago have had time to come back.").font(Theme.callout).foregroundStyle(Theme.ink2)
             }
             ForEach(retention.sources, id: \.self) { source in
                 HStack(alignment: .firstTextBaseline) {
                     Text(source.label).foregroundStyle(Theme.ink)
                     Spacer()
                     Text(Format.share(Double(source.back), of: Double(source.total))).font(Theme.display(20, relativeTo: .title3)).foregroundStyle(Theme.ink).monospacedDigit()
-                    Text("of \(Format.count(source.total))").font(.caption).foregroundStyle(Theme.muted).frame(minWidth: 56, alignment: .trailing)
+                    Text("of \(Format.count(source.total))").font(Theme.caption).foregroundStyle(Theme.muted).frame(minWidth: 56, alignment: .trailing)
                 }
                 .padding(.vertical, 4)
                 .accessibilityElement(children: .combine)

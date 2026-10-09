@@ -39,16 +39,45 @@ enum Theme {
     #if os(iOS)
     static let cardRadius: CGFloat = 12
     static let controlHeight: CGFloat = 36
+    static let buttonRadius: CGFloat = 8
     #else
-    static let cardRadius: CGFloat = 10
-    static let controlHeight: CGFloat = 28
+    /// The web's desktop sizes: 12 px cards, 32 px buttons with 6 px corners.
+    static let cardRadius: CGFloat = 12
+    static let controlHeight: CGFloat = 32
+    static let buttonRadius: CGFloat = 6
     #endif
 
-    /// Card titles: SF 15 semibold on iPhone and iPad, the Mac's headline.
+    /// Type. The Mac follows the web's desktop scale (13 px text and
+    /// controls, 12 px labels, 15 px card titles, which its text styles run
+    /// a size or two under); iPhone and iPad keep Dynamic Type's styles.
     #if os(iOS)
     static let cardTitle = Font.subheadline.weight(.semibold)
+    static let tableText = Font.callout
+    static let tableHead = Font.caption.weight(.semibold)
     #else
-    static let cardTitle = Font.headline
+    static let tableText = Font.system(size: 13)
+    static let tableHead = Font.system(size: 12, weight: .semibold)
+    static let cardTitle = Font.system(size: 15, weight: .semibold)
+    static let text = Font.system(size: 13)
+    static let strong = Font.system(size: 13, weight: .semibold)
+    static let small = Font.system(size: 12)
+    static let label = Font.system(size: 12, weight: .semibold)
+    #endif
+
+    /// The text styles the screens use: Dynamic Type's on iPhone and iPad;
+    /// on the Mac the web's sizes, a size or two above the Mac's own styles.
+    #if os(iOS)
+    static let callout = Font.callout
+    static let subheadline = Font.subheadline
+    static let footnote = Font.footnote
+    static let caption = Font.caption
+    static let caption2 = Font.caption2
+    #else
+    static let callout = Font.system(size: 13)
+    static let subheadline = Font.system(size: 13)
+    static let footnote = Font.system(size: 12)
+    static let caption = Font.system(size: 12)
+    static let caption2 = Font.system(size: 11)
     #endif
 
     /// Quando, the workspace's display face, for titles and numbers.
@@ -119,6 +148,27 @@ struct Icon: View {
     }
 }
 
+/// A label with one of the workspace's icons. On the Mac it is drawn at
+/// the web's 16 pt: an asset in `Label(_:image:)` keeps its 24 pt size in a
+/// custom button style, twice the height of the text beside it.
+struct IconLabel: View {
+    let title: String
+    let icon: String
+
+    init(_ title: String, icon: String) {
+        self.title = title
+        self.icon = icon
+    }
+
+    var body: some View {
+        #if os(macOS)
+        Label { Text(title) } icon: { Icon(icon, size: 16) }
+        #else
+        Label(title, image: "Icons/\(icon)")
+        #endif
+    }
+}
+
 /// A white card with a warm 1 pt border, the workspace's container.
 struct CardStyle: ViewModifier {
     var padding: CGFloat = 16
@@ -175,7 +225,7 @@ struct ChangeLabel: View {
                 .fontWeight(.semibold)
             if !versus.isEmpty { Text(versus).foregroundStyle(Theme.muted) }
         }
-        .font(.caption)
+        .font(Theme.caption)
         .monospacedDigit()
         .lineLimit(1)
     }

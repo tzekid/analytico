@@ -33,18 +33,18 @@ struct SiteRows: View {
                         SiteBadge(site: site)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(site.name).font(.body.weight(.semibold)).foregroundStyle(Theme.ink)
-                            Text(site.host).font(.subheadline).foregroundStyle(Theme.ink2)
+                            Text(site.host).font(Theme.subheadline).foregroundStyle(Theme.ink2)
                         }
                         .lineLimit(1)
                         Spacer()
                         VStack(alignment: .trailing, spacing: 0) {
                             Text(Format.count(site.today.visitors)).font(Theme.display(20, relativeTo: .title3)).foregroundStyle(Theme.ink).monospacedDigit()
-                            Text("today").font(.caption).foregroundStyle(Theme.ink2)
+                            Text("today").font(Theme.caption).foregroundStyle(Theme.ink2)
                         }
                         if chevrons {
-                            Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(Theme.muted)
+                            Image(systemName: "chevron.right").font(Theme.footnote.weight(.semibold)).foregroundStyle(Theme.muted)
                         } else {
-                            Image(systemName: "checkmark").font(.footnote.weight(.semibold)).foregroundStyle(Theme.brand)
+                            Image(systemName: "checkmark").font(Theme.footnote.weight(.semibold)).foregroundStyle(Theme.brand)
                                 .opacity(site.slug == model.selectedSite ? 1 : 0)
                         }
                     }
@@ -77,9 +77,9 @@ struct SiteSwitcherSheet: View {
                 }
                 if let client = model.client {
                     VStack(spacing: 6) {
-                        Text("Signed in to \(client.instance.host)\(model.me.map { " as \($0.email)" } ?? "")").font(.caption).foregroundStyle(Theme.ink2)
+                        Text("Signed in to \(client.instance.host)\(model.me.map { " as \($0.email)" } ?? "")").font(Theme.caption).foregroundStyle(Theme.ink2)
                         Button("Sign in to a different Analytico") { model.signOut() }
-                            .buttonStyle(.plain).font(.subheadline.weight(.medium)).foregroundStyle(Theme.brandDark)
+                            .buttonStyle(.plain).font(Theme.subheadline.weight(.medium)).foregroundStyle(Theme.brandDark)
                     }
                     .frame(maxWidth: .infinity)
                 }
@@ -126,7 +126,7 @@ struct SitesList: View {
                     Text("·")
                     Button("Use a different address") { model.signOut() }.buttonStyle(.plain).foregroundStyle(Theme.brandDark)
                 }
-                .font(.caption)
+                .font(Theme.caption)
                 .foregroundStyle(Theme.ink2)
                 .frame(maxWidth: .infinity)
             }
@@ -150,7 +150,7 @@ struct SignedOutView: View {
             VStack(alignment: .leading, spacing: 16) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Signed out").font(Theme.display(30, relativeTo: .largeTitle)).foregroundStyle(Theme.ink)
-                    Text(host).font(.subheadline).foregroundStyle(Theme.ink2)
+                    Text(host).font(Theme.subheadline).foregroundStyle(Theme.ink2)
                 }
                 StageView(art: "waiting", title: "Your sign-in ended",
                           text: "This \(Device.kind) was signed out — it was removed under Settings → Sign-in, or its sign-in expired. Your notes and views are safe.",
@@ -207,7 +207,7 @@ struct GroupLabel: View {
     init(_ text: String) { self.text = text }
 
     var body: some View {
-        Text(text.uppercased()).font(.caption.weight(.semibold)).tracking(0.5).foregroundStyle(Theme.ink2).padding(.leading, 14)
+        Text(text.uppercased()).font(Theme.caption.weight(.semibold)).tracking(0.5).foregroundStyle(Theme.ink2).padding(.leading, 14)
     }
 }
 
@@ -235,7 +235,7 @@ struct AccountSection: View {
                         .frame(width: 48, height: 48).background(Theme.brandWash, in: .circle)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(model.me?.email ?? "…").font(.headline).foregroundStyle(Theme.ink)
-                        Text(model.me.map { $0.role.prefix(1).uppercased() + $0.role.dropFirst() } ?? " ").font(.subheadline).foregroundStyle(Theme.ink2)
+                        Text(model.me.map { $0.role.prefix(1).uppercased() + $0.role.dropFirst() } ?? " ").font(Theme.subheadline).foregroundStyle(Theme.ink2)
                     }
                     .lineLimit(1)
                 }
@@ -289,7 +289,7 @@ struct NotificationsSection: View {
                     })) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(kind.title).foregroundStyle(Theme.ink)
-                            Text(kind.detail).font(.caption).foregroundStyle(Theme.ink2)
+                            Text(kind.detail).font(Theme.caption).foregroundStyle(Theme.ink2)
                         }
                     }
                     .toggleStyle(.switch)
@@ -314,8 +314,8 @@ struct NotificationsSection: View {
                 .disabled(testing || model.pushStatus == .denied)
             }
             Text(tested ?? "Notifications are encrypted for this \(Device.kind); only it can read them. Alerts themselves are set up in the workspace.")
-                .font(.caption).foregroundStyle(Theme.ink2).padding(.horizontal, 14)
-            if let problem = model.pushProblem { Text(problem).font(.caption).foregroundStyle(Theme.bad).padding(.horizontal, 14) }
+                .font(Theme.caption).foregroundStyle(Theme.ink2).padding(.horizontal, 14)
+            if let problem = model.pushProblem { Text(problem).font(Theme.caption).foregroundStyle(Theme.bad).padding(.horizontal, 14) }
         }
         .task { await model.enablePush() }
     }
@@ -364,7 +364,7 @@ struct WorkspaceLinks: View {
             HStack {
                 Text(title).foregroundStyle(Theme.ink)
                 Spacer()
-                Image(systemName: "arrow.up.right").font(.footnote.weight(.semibold)).foregroundStyle(Theme.muted)
+                Image(systemName: "arrow.up.right").font(Theme.footnote.weight(.semibold)).foregroundStyle(Theme.muted)
             }
             .padding(14)
             .contentShape(.rect)
@@ -402,7 +402,7 @@ struct SettingsWindow: View {
                         Toggle(isOn: $menuBar) {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("Show Analytico in the menu bar").foregroundStyle(Theme.ink)
-                                Text("People online now on the site you have open").font(.caption).foregroundStyle(Theme.ink2)
+                                Text("People online now on the site you have open").font(Theme.caption).foregroundStyle(Theme.ink2)
                             }
                         }
                         .toggleStyle(.switch)
@@ -433,7 +433,7 @@ private struct SitesPane: View {
         VStack(alignment: .leading, spacing: 8) {
             GroupLabel("Open in the main window")
             SiteRows { model.selectedSite = $0.slug }
-            Text("Each site’s numbers come from \(model.client?.instance.host ?? "your Analytico"). Add sites in the workspace.").font(.caption).foregroundStyle(Theme.ink2).padding(.horizontal, 14)
+            Text("Each site’s numbers come from \(model.client?.instance.host ?? "your Analytico"). Add sites in the workspace.").font(Theme.caption).foregroundStyle(Theme.ink2).padding(.horizontal, 14)
         }
         .task { await model.loadSites() }
     }

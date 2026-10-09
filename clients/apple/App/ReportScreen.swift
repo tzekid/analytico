@@ -14,17 +14,42 @@ private func previous(_ client: Client, _ site: Site, _ name: String, _ view: Vi
 
 private func number(_ row: Report.Row?, _ key: String) -> Double { row?[key]?.number ?? 0 }
 
-/// Segments under the controls, as on the workspace's tabbed reports.
+/// The views of a tabbed report, under the controls. On the Mac they are
+/// the workspace's tabs: words with a red rule under the current one.
 struct Segments<Value: Hashable & Identifiable & RawRepresentable>: View where Value.RawValue == String {
     let all: [Value]
     @Binding var selection: Value
+    var label: (Value) -> String = { $0.rawValue }
 
     var body: some View {
+        #if os(macOS)
+        HStack(spacing: 24) {
+            ForEach(all) { value in
+                let current = value == selection
+                Button { selection = value } label: {
+                    Text(label(value))
+                        .font(current ? Theme.strong : Theme.text)
+                        .foregroundStyle(current ? Theme.ink : Theme.ink2)
+                        .padding(.horizontal, 2)
+                        .padding(.bottom, 10)
+                        .overlay(alignment: .bottom) {
+                            if current { Capsule().fill(Theme.brand).frame(height: 2) }
+                        }
+                        .contentShape(.rect)
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(current ? .isSelected : [])
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(alignment: .bottom) { Rectangle().fill(Theme.border).frame(height: 1) }
+        #else
         Picker("Show", selection: $selection) {
-            ForEach(all) { Text($0.rawValue).tag($0) }
+            ForEach(all) { Text(label($0)).tag($0) }
         }
         .pickerStyle(.segmented)
         .labelsHidden()
+        #endif
     }
 }
 
@@ -33,11 +58,12 @@ struct Segments<Value: Hashable & Identifiable & RawRepresentable>: View where V
 /// Channels, sources and campaigns; each source keeps its channel's colour.
 struct SourcesView: View {
     @Environment(SiteState.self) private var state
+    @Environment(\.horizontalSizeClass) private var sizeClass
     @State private var tab: Tab = .sources
     @State private var data = Loaded<SourcesData>()
 
     enum Tab: String, CaseIterable, Identifiable {
-        case channels = "Channels", sources = "Sources", campaigns = "Campaigns"
+        case sources = "Sources", campaigns = "Campaigns", channels = "Channels"
         var id: String { rawValue }
     }
 
@@ -61,7 +87,45 @@ struct SourcesView: View {
         data.apply(await fetch { try await SourcesData.load(client: state.client, site: state.site, view: state.view) })
     }
 
-    private func list(_ sources: SourcesData) -> some View {
+    @ViewBuilder private func list(_ sources: SourcesData) -> some View {
+        if sizeClass == .compact { rows(sources) } else { table(sources) }
+    }
+
+    /// Mac and iPad: the workspace's sources table.
+    private func table(_ sources: SourcesData) -> some View {
+        TableCard(hint: sources.rows.isEmpty ? nil : "Click a source to filter every report") {
+            TableHead(title: "Source").frame(maxWidth: .infinity, alignment: .leading)
+            TableHead(title: "Page views").frame(width: 110, alignment: .trailing)
+            TableHead(title: "Visitors").frame(width: 100, alignment: .trailing)
+            if state.view.compare { TableHead(title: "Change").frame(width: 100, alignment: .trailing) }
+        } rows: {
+            ForEach(Array(sources.rows.enumerated()), id: \.offset) { _, row in
+                let value = row["value"]?.text ?? ""
+                Button { state.filter("source", value, label: row["label"]?.text) } label: {
+                    HStack(spacing: 0) {
+                        HStack(spacing: 10) {
+                            Circle().fill(Theme.channel(row["channel"]?.text).color).frame(width: 8, height: 8)
+                            Text(row["label"]?.text ?? value).fontWeight(.semibold).lineLimit(1)
+                            Text(row["channel"]?.text ?? "").foregroundStyle(Theme.muted).lineLimit(1)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        Text(Format.count(Int(number(row, "page_views")))).frame(width: 110, alignment: .trailing)
+                        Text(Format.count(Int(number(row, "visitor_days")))).frame(width: 100, alignment: .trailing)
+                        if state.view.compare {
+                            ChangeBadge(change: Format.change(number(row, "page_views"), number(row, "previous_page_views"))).frame(width: 100, alignment: .trailing)
+                        }
+                    }
+                    .tableRow()
+                }
+                .buttonStyle(.plain)
+                .rowMenu("source", value, label: row["label"]?.text)
+                .accessibilityHint("Filters every report by this source")
+            }
+            if sources.rows.isEmpty { Text("No visits in this period.").foregroundStyle(Theme.ink2).tableRow() }
+        }
+    }
+
+    private func rows(_ sources: SourcesData) -> some View {
         SectionCard(title: "Source", padding: 14) {
             Text("Visitors")
         } content: {
@@ -106,11 +170,11 @@ struct SourcesView: View {
                         Text(Format.count(Int(channel.views))).monospacedDigit().foregroundStyle(Theme.ink)
                         Text(Format.share(channel.views, of: total)).monospacedDigit().foregroundStyle(Theme.muted).frame(width: 44, alignment: .trailing)
                     }
-                    .font(.callout)
+                    .font(Theme.callout)
                     .padding(.vertical, 6)
                 }
             }
-            Text("Search, social and AI assistants by referrer; email and paid by utm_medium.").font(.caption).foregroundStyle(Theme.muted)
+            Text("Search, social and AI assistants by referrer; email and paid by utm_medium.").font(Theme.caption).foregroundStyle(Theme.muted)
         }
     }
 }
@@ -136,11 +200,38 @@ struct SourcesData {
 /// UTM campaigns: source, campaign and content with views, visitors and visits.
 struct CampaignList: View {
     @Environment(SiteState.self) private var state
+    @Environment(\.horizontalSizeClass) private var sizeClass
     let rows: [Report.Row]
 
     var body: some View {
         if rows.isEmpty {
             StageView(art: "calendar", title: "No tagged campaigns", text: "Add utm_campaign to the links you share — newsletters, ads, posts — and each campaign appears here with its visits.")
+        } else if sizeClass != .compact {
+            TableCard(hint: "Click a campaign to filter every report") {
+                TableHead(title: "Campaign").frame(maxWidth: .infinity, alignment: .leading)
+                TableHead(title: "Source").frame(width: 160, alignment: .leading)
+                TableHead(title: "Visitors").frame(width: 100, alignment: .trailing)
+                TableHead(title: "Visits").frame(width: 100, alignment: .trailing)
+            } rows: {
+                ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                    Button { state.filter("campaign", row["campaign"]?.text ?? "") } label: {
+                        HStack(spacing: 0) {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(row["campaign"]?.text ?? "").fontWeight(.semibold).lineLimit(1)
+                                if let content = row["content"]?.text, !content.isEmpty { Text(content).font(Theme.tableHead).foregroundStyle(Theme.muted).lineLimit(1) }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            Text(row["source"]?.text ?? "").foregroundStyle(Theme.ink2).lineLimit(1).frame(width: 160, alignment: .leading)
+                            Text(Format.count(Int(number(row, "visitors")))).frame(width: 100, alignment: .trailing)
+                            Text(Format.count(Int(number(row, "sessions")))).frame(width: 100, alignment: .trailing)
+                        }
+                        .padding(.vertical, 6)
+                        .tableRow()
+                    }
+                    .buttonStyle(.plain)
+                    .rowMenu("campaign", row["campaign"]?.text ?? "")
+                }
+            }
         } else {
             SectionCard(title: "Campaigns") {
                 Text("Visitors · visits")
@@ -209,7 +300,7 @@ struct SiteSearchView: View {
                                         let missed = Int(number(row, "no_results"))
                                         if missed > 0 {
                                             Text(missed == Int(number(row, "searches")) ? "No results" : "\(Format.count(missed)) with no results")
-                                                .font(.caption2.weight(.semibold)).foregroundStyle(Theme.warning)
+                                                .font(Theme.caption2.weight(.semibold)).foregroundStyle(Theme.warning)
                                                 .padding(.horizontal, 7).padding(.vertical, 2)
                                                 .background(Theme.amberWash, in: .capsule)
                                         }
@@ -221,7 +312,7 @@ struct SiteSearchView: View {
                             }
                         }
                     }
-                    Text("Searches with no results are worth a page or a product.").font(.caption).foregroundStyle(Theme.muted)
+                    Text("Searches with no results are worth a page or a product.").font(Theme.caption).foregroundStyle(Theme.muted)
                 }
             } else {
                 LoadingOrProblem(failure: data.failure, title: "Site search didn’t load")
@@ -240,54 +331,158 @@ struct SiteSearchView: View {
 
 // MARK: - Audience
 
-/// Countries, devices and browsers as shares of page views.
+/// Who visits, as the workspace's Audience: four headline figures, then
+/// technology, languages, screen sizes and places, each tapped or clicked to filter.
 struct AudienceView: View {
     @Environment(SiteState.self) private var state
-    @State private var tab: Tab = .countries
-    @State private var data = Loaded<(Report, PeriodWording?)>()
+    @Environment(\.horizontalSizeClass) private var sizeClass
+    @State private var tech: Tech = .devices
+    @State private var place: Place = .countries
+    @State private var data = Loaded<AudienceData>()
 
-    enum Tab: String, CaseIterable, Identifiable {
-        case countries = "Countries", devices = "Devices", browsers = "Browsers"
+    enum Tech: String, CaseIterable, Identifiable {
+        case devices = "Devices", browsers = "Browsers", systems = "Operating systems"
         var id: String { rawValue }
-        var dimension: String { self == .countries ? "country" : self == .devices ? "device" : "browser" }
+        var dimension: String { self == .devices ? "device" : self == .browsers ? "browser" : "os" }
+    }
+
+    enum Place: String, CaseIterable, Identifiable {
+        case countries = "Countries", regions = "Regions", cities = "Cities"
+        var id: String { rawValue }
+        var dimension: String { self == .countries ? "country" : self == .regions ? "region" : "city" }
     }
 
     var body: some View {
-        ScreenScaffold(screen: .audience, wording: data.value?.1, stale: data.stale, reload: load) {
-            Segments(all: Tab.allCases, selection: $tab)
-            if let report = data.value?.0 {
-                let total = report.rows.reduce(0) { $0 + number($1, "page_views") }
-                VStack(alignment: .leading, spacing: 14) {
-                    ForEach(Array(report.rows.enumerated()), id: \.offset) { _, row in
-                        let key = row["value"]?.text ?? ""
-                        Button { state.filter(tab.dimension, key, label: tab == .countries ? row["label"]?.text : nil) } label: {
-                            MeterRow(code: tab == .countries ? (key == "unknown" ? "?" : key) : nil,
-                                     title: tab == .countries ? (row["label"]?.text ?? key) : Labels.value(key, dimension: tab.dimension),
-                                     value: Format.share(number(row, "page_views"), of: total), share: share(number(row, "page_views"), total))
-                                .contentShape(.rect)
-                        }
-                        .buttonStyle(.plain)
-                        .rowMenu(tab.dimension, key, label: tab == .countries ? row["label"]?.text : Labels.value(key, dimension: tab.dimension))
+        ScreenScaffold(screen: .audience, wording: data.value?.wording, stale: data.stale, reload: load) {
+            if let audience = data.value {
+                figures(audience)
+                let columns = Array(repeating: GridItem(.flexible(), spacing: 16, alignment: .top), count: sizeClass == .compact ? 1 : 2)
+                LazyVGrid(columns: columns, alignment: .leading, spacing: 16) {
+                    SectionCard(title: "Technology") {
+                        Segments(all: Tech.allCases, selection: $tech)
+                        ranks(audience.tech, dimension: tech.dimension, total: audience.views)
                     }
-                    if report.rows.isEmpty { Text("No visits in this period.").foregroundStyle(Theme.ink2) }
-                    if tab == .countries { Text("Country from the IP at collection · the IP is never stored").font(.caption).foregroundStyle(Theme.muted) }
+                    SectionCard(title: "Languages") { Text("Browser language") } content: {
+                        ranks(audience.languages, dimension: nil, total: audience.views)
+                    }
+                    SectionCard(title: "Screen sizes") { Text("Viewport class") } content: {
+                        ranks(audience.viewports, dimension: nil, total: audience.views)
+                    }
+                    SectionCard(title: "Where they are") { Text("IP used once, never stored") } content: {
+                        places(audience)
+                    }
                 }
-                .card()
             } else {
                 LoadingOrProblem(failure: data.failure, title: "Audience didn’t load")
             }
         }
-        .task(id: AudienceKey(view: state.view, tab: tab)) { await load() }
+        .task(id: AudienceKey(view: state.view, tech: tech, place: place)) { await load() }
+    }
+
+    private func figures(_ audience: AudienceData) -> some View {
+        let now = audience.now, before = audience.before
+        let compare = state.view.compare
+        func ratio(_ a: Double, _ b: Double) -> Double { b == 0 ? 0 : a / b }
+        let pages = ratio(now.views, now.visitors), pagesBefore = ratio(before.views, before.visitors)
+        let engaged = ratio(now.engaged, now.views), engagedBefore = ratio(before.engaged, before.views)
+        let active = ratio(now.active, now.visitors), activeBefore = ratio(before.active, before.visitors)
+        return MetricGrid {
+            MetricCard(label: "Visitor-days", value: Format.count(Int(now.visitors)), change: compare ? Format.change(now.visitors, before.visitors) : nil, versus: "vs \(Format.count(Int(before.visitors)))")
+            MetricCard(label: "Pages per visitor", value: pages.formatted(.number.precision(.fractionLength(1))), change: compare ? Format.change(pages, pagesBefore) : nil, versus: "vs \(pagesBefore.formatted(.number.precision(.fractionLength(1))))")
+            MetricCard(label: "Engaged views", value: engaged.formatted(.percent.precision(.fractionLength(0))), change: compare ? Format.change(engaged, engagedBefore) : nil, versus: "vs \(engagedBefore.formatted(.percent.precision(.fractionLength(0))))")
+            MetricCard(label: "Active time per visitor", value: Format.duration(milliseconds: active), change: compare ? Format.change(active, activeBefore) : nil, versus: "vs \(Format.duration(milliseconds: activeBefore))")
+        }
+    }
+
+    /// The workspace's rank rows: a wash as long as the share, "3 · 100.0%".
+    private func ranks(_ rows: [Report.Row], dimension: String?, total: Double) -> some View {
+        VStack(spacing: 6) {
+            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                let key = row["value"]?.text ?? ""
+                let label = dimension.map { Labels.value(key, dimension: $0) } ?? (row["label"]?.text ?? key)
+                let views = number(row, "page_views")
+                let part = share(views, total)
+                let line = ShareRow(title: label, value: "\(Format.count(Int(views))) · \((part).formatted(.percent.precision(.fractionLength(1))))", share: max(part * 0.75, 0.04), rule: false)
+                if let dimension {
+                    Button { state.filter(dimension, key, label: label) } label: { line.contentShape(.rect) }
+                        .buttonStyle(.plain)
+                        .rowMenu(dimension, key, label: label)
+                } else {
+                    line
+                }
+            }
+            if rows.isEmpty { Text("No visits in this period.").font(Theme.callout).foregroundStyle(Theme.ink2).frame(maxWidth: .infinity, alignment: .leading) }
+        }
+    }
+
+    @ViewBuilder private func places(_ audience: AudienceData) -> some View {
+        if audience.located {
+            Segments(all: Place.allCases, selection: $place)
+            VStack(spacing: 12) {
+                ForEach(Array(audience.places.enumerated()), id: \.offset) { _, row in
+                    let key = row["value"]?.text ?? ""
+                    let label = key == "unknown" ? "Unknown" : (row["label"]?.text ?? key)
+                    Button { state.filter(place.dimension, key, label: label) } label: {
+                        MeterRow(code: place == .countries && key.count == 2 ? key : "··", title: label,
+                                 value: share(number(row, "page_views"), audience.views).formatted(.percent.precision(.fractionLength(0))),
+                                 share: share(number(row, "page_views"), audience.views))
+                            .contentShape(.rect)
+                    }
+                    .buttonStyle(.plain)
+                    .rowMenu(place.dimension, key, label: label)
+                }
+            }
+        } else {
+            HStack(alignment: .top, spacing: 10) {
+                Icon("lock", size: 16).foregroundStyle(Theme.ink2)
+                Text("No location yet. Install the free DB-IP Lite database with `analytico geo import` to see countries, regions and cities. The address is used for the lookup and then discarded.")
+                    .font(Theme.callout).foregroundStyle(Theme.ink).fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Theme.subtle, in: .rect(cornerRadius: 8))
+        }
     }
 
     private func load() async {
-        data.apply(await fetch {
-            let report = try await state.client.report("breakdown", site: state.site.slug, view: state.view, parameters: ["dimension": tab.dimension, "limit": "12"])
-            return (report, periodWording(report, state.view))
-        })
+        data.apply(await fetch { try await AudienceData.load(client: state.client, site: state.site, view: state.view, tech: tech.dimension, place: place.dimension) })
     }
 
-    private struct AudienceKey: Hashable { var view: ViewState; var tab: Tab }
+    private struct AudienceKey: Hashable { var view: ViewState; var tech: Tech; var place: Place }
+}
+
+struct AudienceData {
+    struct Figures { var visitors = 0.0, views = 0.0, engaged = 0.0, active = 0.0 }
+    var now: Figures
+    var before: Figures
+    var tech: [Report.Row]
+    var languages: [Report.Row]
+    var viewports: [Report.Row]
+    var places: [Report.Row]
+    var wording: PeriodWording?
+
+    var views: Double { now.views }
+    /// No location database: every view is "unknown".
+    var located: Bool { places.contains { $0["value"]?.text != "unknown" } }
+
+    static func load(client: Client, site: Site, view: ViewState, tech: String, place: String) async throws -> AudienceData {
+        async let overview = client.report("overview", site: site.slug, view: view)
+        async let techRows = client.report("breakdown", site: site.slug, view: view, parameters: ["dimension": tech, "limit": "8"])
+        async let languages = client.report("breakdown", site: site.slug, view: view, parameters: ["dimension": "language", "limit": "6"])
+        async let viewports = client.report("breakdown", site: site.slug, view: view, parameters: ["dimension": "viewport", "limit": "6"])
+        async let places = client.report("breakdown", site: site.slug, view: view, parameters: ["dimension": place, "limit": "12"])
+        let report = try await overview
+        let row = report.rows.first
+        return AudienceData(
+            now: Figures(visitors: number(row, "visitor_days"), views: number(row, "page_views"), engaged: number(row, "engaged_views"), active: number(row, "active_ms")),
+            before: Figures(visitors: number(row, "previous_visitor_days"), views: number(row, "previous_page_views"), engaged: number(row, "previous_engaged_views"), active: number(row, "previous_active_ms")),
+            tech: try await techRows.rows,
+            languages: try await languages.rows,
+            viewports: try await viewports.rows,
+            places: try await places.rows,
+            wording: periodWording(report, view)
+        )
+    }
 }
 
 // MARK: - Events and goals
@@ -295,49 +490,22 @@ struct AudienceView: View {
 struct EventsView: View {
     @Environment(SiteState.self) private var state
     @Environment(\.openURL) private var openURL
+    @Environment(\.horizontalSizeClass) private var sizeClass
     @State private var data = Loaded<EventsData>()
+    @State private var tab: Tab = .events
+
+    enum Tab: String, CaseIterable, Identifiable {
+        case events = "Events", goals = "Goals"
+        var id: String { rawValue }
+    }
 
     var body: some View {
-        ScreenScaffold(screen: .events, wording: data.value?.wording, stale: data.stale, reload: load) {
+        ScreenScaffold(screen: .events, wording: data.value?.wording, stale: data.stale, trail: "\(state.site.mode.prefix(1).uppercased())\(state.site.mode.dropFirst()) mode", reload: load) {
+            Segments(all: Tab.allCases, selection: $tab) { $0 == .goals ? "Goals · \(data.value?.goals.count ?? 0)" : $0.rawValue }
             if let events = data.value {
-                SectionCard(title: "Goals") {
-                    Text("Conversion")
-                } content: {
-                    if events.goals.isEmpty {
-                        Text("No goals yet. A goal is an event or a page that counts as success; add them in the workspace.").font(.callout).foregroundStyle(Theme.ink2)
-                        Button("Add a goal in the workspace") { openURL(state.client.instance.origin.appending(path: "\(state.site.slug)/events").appending(queryItems: [URLQueryItem(name: "tab", value: "goals")])) }
-                            .buttonStyle(.plain).font(.subheadline.weight(.semibold)).foregroundStyle(Theme.brandDark)
-                    }
-                    ForEach(Array(events.goals.enumerated()), id: \.offset) { _, goal in
-                        let rate = events.visitors == 0 ? 0 : number(goal, "visitor_days") / events.visitors
-                        let before = events.before.first { $0["goal"]?.text == goal["goal"]?.text }
-                        let previousRate = before.flatMap { row in events.visitorsBefore == 0 ? nil : number(row, "visitor_days") / events.visitorsBefore }
-                        let change = state.view.compare ? pointsChange(rate, previousRate, decimals: 1) : nil
-                        HStack(spacing: 12) {
-                            Icon("flag", size: 18).foregroundStyle(Theme.brand)
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text(goal["goal"]?.text ?? "").foregroundStyle(Theme.ink)
-                                Text(plural(Int(number(goal, "completions")), "completion")).font(.caption).foregroundStyle(Theme.ink2)
-                            }
-                            Spacer()
-                            VStack(alignment: .trailing, spacing: 0) {
-                                Text(rate.formatted(.percent.precision(.fractionLength(1)))).font(Theme.display(20, relativeTo: .title3)).foregroundStyle(Theme.ink).monospacedDigit()
-                                if let change { Text(change.text).font(.caption.weight(.semibold)).foregroundStyle(change.direction == .up ? Theme.good : change.direction == .down ? Theme.bad : Theme.ink2) }
-                            }
-                        }
-                        .padding(.vertical, 4)
-                    }
-                }
-                SectionCard(title: "Events") {
-                    Text("Times · visits")
-                } content: {
-                    VStack(spacing: 0) {
-                        ForEach(Array(events.events.enumerated()), id: \.offset) { index, row in
-                            if index > 0 { Divider() }
-                            ValueRow(title: row["name"]?.text ?? "", detail: source(row["source"]?.text), value: "\(Format.count(Int(number(row, "occurrences")))) · \(Format.count(Int(number(row, "sessions"))))")
-                        }
-                        if events.events.isEmpty { Text("No events in this period.").font(.callout).foregroundStyle(Theme.ink2) }
-                    }
+                switch tab {
+                case .events: eventList(events)
+                case .goals: goals(events)
                 }
             } else {
                 LoadingOrProblem(failure: data.failure, title: "Events didn’t load")
@@ -346,11 +514,87 @@ struct EventsView: View {
         .task(id: state.view) { await load() }
     }
 
+    @ViewBuilder private func eventList(_ events: EventsData) -> some View {
+        let lite = state.site.mode == "lite"
+        if events.events.isEmpty {
+            StageView(art: "bars", title: "No events in this period", text: "Send custom events with `analytico.track('signup')` in the browser, or signed server events to `/i`.")
+        } else if sizeClass != .compact {
+            TableCard {
+                TableHead(title: "Event").frame(maxWidth: .infinity, alignment: .leading)
+                TableHead(title: "Source").frame(width: 150, alignment: .leading)
+                TableHead(title: "Count").frame(width: 90, alignment: .trailing)
+                if !lite { TableHead(title: "Sessions").frame(width: 90, alignment: .trailing) }
+                TableHead(title: "Goal").frame(width: 150, alignment: .leading).padding(.leading, 24)
+            } rows: {
+                ForEach(Array(events.events.enumerated()), id: \.offset) { _, row in
+                    let name = row["name"]?.text ?? ""
+                    HStack(spacing: 0) {
+                        Text(name).font(.system(size: 13, weight: .semibold, design: .monospaced)).lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
+                        Text(source(row["source"]?.text)).foregroundStyle(Theme.ink2).frame(width: 150, alignment: .leading)
+                        Text(Format.count(Int(number(row, "occurrences")))).frame(width: 90, alignment: .trailing)
+                        if !lite { Text(Format.count(Int(number(row, "sessions")))).frame(width: 90, alignment: .trailing) }
+                        Group {
+                            if let goal = events.goals.first(where: { $0["kind"]?.text == "event" && $0["match"]?.text == name })?["goal"]?.text {
+                                Text(goal).font(Theme.caption2.weight(.semibold)).foregroundStyle(Theme.good)
+                                    .padding(.horizontal, 8).padding(.vertical, 2)
+                                    .background(Theme.goodWash, in: .capsule)
+                            }
+                        }
+                        .frame(width: 150, alignment: .leading)
+                        .padding(.leading, 24)
+                    }
+                    .tableRow()
+                }
+            }
+        } else {
+            SectionCard(title: "Events") {
+                Text("Times · visits")
+            } content: {
+                VStack(spacing: 0) {
+                    ForEach(Array(events.events.enumerated()), id: \.offset) { index, row in
+                        if index > 0 { Divider() }
+                        ValueRow(title: row["name"]?.text ?? "", detail: source(row["source"]?.text), value: "\(Format.count(Int(number(row, "occurrences")))) · \(Format.count(Int(number(row, "sessions"))))")
+                    }
+                }
+            }
+        }
+    }
+
+    private func goals(_ events: EventsData) -> some View {
+        SectionCard(title: "Goals") {
+            Text("Conversion")
+        } content: {
+            if events.goals.isEmpty {
+                Text("No goals yet. A goal is an event or a page that counts as success; add them in the workspace.").font(Theme.callout).foregroundStyle(Theme.ink2)
+                Button("Add a goal in the workspace") { openURL(state.client.instance.origin.appending(path: "\(state.site.slug)/events").appending(queryItems: [URLQueryItem(name: "tab", value: "goals")])) }
+                    .buttonStyle(.plain).font(Theme.subheadline.weight(.semibold)).foregroundStyle(Theme.brandDark)
+            }
+            ForEach(Array(events.goals.enumerated()), id: \.offset) { _, goal in
+                let rate = events.visitors == 0 ? 0 : number(goal, "visitor_days") / events.visitors
+                let before = events.before.first { $0["goal"]?.text == goal["goal"]?.text }
+                let previousRate = before.flatMap { row in events.visitorsBefore == 0 ? nil : number(row, "visitor_days") / events.visitorsBefore }
+                let change = state.view.compare ? pointsChange(rate, previousRate, decimals: 1) : nil
+                HStack(spacing: 12) {
+                    Icon("flag", size: 18).foregroundStyle(Theme.brand)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(goal["goal"]?.text ?? "").foregroundStyle(Theme.ink)
+                        Text(plural(Int(number(goal, "completions")), "completion")).font(Theme.caption).foregroundStyle(Theme.ink2)
+                    }
+                    Spacer()
+                    VStack(alignment: .trailing, spacing: 0) {
+                        Text(rate.formatted(.percent.precision(.fractionLength(1)))).font(Theme.display(20, relativeTo: .title3)).foregroundStyle(Theme.ink).monospacedDigit()
+                        if let change { Text(change.text).font(Theme.caption.weight(.semibold)).foregroundStyle(change.direction == .up ? Theme.good : change.direction == .down ? Theme.bad : Theme.ink2) }
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+        }
+    }
+
     private func source(_ text: String?) -> String {
         switch text {
-        case "server": "From your server"
-        case "auto": "Automatic"
-        default: "Tracker"
+        case "server": "Server"
+        default: "Browser"
         }
     }
 
@@ -384,41 +628,30 @@ struct EventsData {
 
 struct ErrorsView: View {
     @Environment(SiteState.self) private var state
+    @Environment(\.horizontalSizeClass) private var sizeClass
     @State private var data = Loaded<(Report, PeriodWording?)>()
 
     var body: some View {
         ScreenScaffold(screen: .errors, wording: data.value?.1, stale: data.stale, reload: load) {
             if let report = data.value?.0 {
+                figures(report)
                 if report.rows.isEmpty {
-                    StageView(art: "waiting", title: "No JavaScript errors \(data.value?.1?.between ?? "in this period")", text: "Errors visitors run into appear here, grouped, with where and since when.")
+                    StageView(art: "bars", title: "No errors in this period", text: "The tracker reports uncaught JavaScript errors and rejected promises — message, file and line only, never what visitors typed.")
                 } else {
-                    let times = report.rows.reduce(0) { $0 + number($1, "occurrences") }
-                    HStack(spacing: 12) {
-                        Icon("bug", size: 20)
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text("\(plural(report.rows.count, "error")) happened \(plural(Int(times), "time"))").font(.subheadline.weight(.semibold))
-                            Text("Most often on \(report.rows.first?["path"]?.text ?? "")").font(.caption)
-                        }
-                        Spacer()
-                    }
-                    .foregroundStyle(Theme.bad)
-                    .padding(14)
-                    .background(Theme.brandWash, in: .rect(cornerRadius: Theme.cardRadius))
-                    .overlay(RoundedRectangle(cornerRadius: Theme.cardRadius).strokeBorder(Theme.bad.opacity(0.2)))
                     VStack(spacing: 0) {
                         ForEach(Array(report.rows.enumerated()), id: \.offset) { index, row in
                             if index > 0 { Divider() }
                             VStack(alignment: .leading, spacing: 6) {
                                 Text(row["message"]?.text ?? "").foregroundStyle(Theme.ink).lineLimit(3)
-                                Text([row["path"]?.text, row["browsers"]?.text].compactMap { $0?.isEmpty == false ? $0 : nil }.joined(separator: " · ")).font(.caption).foregroundStyle(Theme.ink2).lineLimit(1)
+                                Text([row["path"]?.text, row["browsers"]?.text].compactMap { $0?.isEmpty == false ? $0 : nil }.joined(separator: " · ")).font(Theme.caption).foregroundStyle(Theme.ink2).lineLimit(1)
                                 HStack {
                                     Text("\(plural(Int(number(row, "occurrences")), "time")) · \(plural(Int(number(row, "visits")), "visit"))")
-                                        .font(.caption.weight(.semibold)).foregroundStyle(Theme.bad)
+                                        .font(Theme.caption.weight(.semibold)).foregroundStyle(Theme.bad)
                                         .padding(.horizontal, 10).padding(.vertical, 3)
                                         .background(Theme.brandWash, in: .capsule)
                                     Spacer()
                                     if let last = row["last_seen_ms"]?.number {
-                                        Text("last \(Date(timeIntervalSince1970: last / 1000).formatted(.relative(presentation: .named)))").font(.caption).foregroundStyle(Theme.muted)
+                                        Text("last \(Date(timeIntervalSince1970: last / 1000).formatted(.relative(presentation: .named)))").font(Theme.caption).foregroundStyle(Theme.muted)
                                     }
                                 }
                             }
@@ -436,6 +669,20 @@ struct ErrorsView: View {
         .task(id: state.view) { await load() }
     }
 
+    /// As the workspace heads its errors: how many kinds, how often, and where most.
+    private func figures(_ report: Report) -> some View {
+        let start = (Dates.parse(report.from).map { $0.timeIntervalSince1970 * 1000 }) ?? 0
+        let fresh = report.rows.filter { number($0, "first_seen_ms") >= start }.count
+        let times = Int(report.rows.reduce(0) { $0 + number($1, "occurrences") })
+        let top = report.rows.max { number($0, "visits") < number($1, "visits") }
+        let columns = Array(repeating: GridItem(.flexible(), spacing: sizeClass == .compact ? 10 : 16, alignment: .top), count: sizeClass == .compact ? 2 : 3)
+        return LazyVGrid(columns: columns, spacing: sizeClass == .compact ? 10 : 16) {
+            MetricCard(label: "Distinct errors", value: Format.count(report.rows.count), note: "\(Format.count(fresh)) new this period")
+            MetricCard(label: "Occurrences", value: Format.count(times), note: "every time one was thrown")
+            MetricCard(label: "Most affected page", value: top?["path"]?.text ?? "—", note: "by visits with an error")
+        }
+    }
+
     private func load() async {
         data.apply(await fetch {
             let report = try await state.client.report("errors", site: state.site.slug, view: state.view, parameters: ["limit": "50"])
@@ -446,21 +693,38 @@ struct ErrorsView: View {
 
 // MARK: - Performance
 
+/// Core Web Vitals from real visits, as the workspace shows them: the four
+/// vitals at p75 side by side; the chosen one's p50, p75 and p95 below.
 struct PerformanceView: View {
     @Environment(SiteState.self) private var state
-    @State private var data = Loaded<(Report, Report?, PeriodWording?)>()
+    @Environment(\.horizontalSizeClass) private var sizeClass
+    @State private var data = Loaded<(Report, PeriodWording?)>()
+    @State private var chosen = "lcp"
+    @State private var width: CGFloat = 0
 
     var body: some View {
-        ScreenScaffold(screen: .performance, wording: data.value?.2, stale: data.stale, reload: load) {
-            if let (report, before, _) = data.value {
-                let rows = report.rows.filter { $0["metric"]?.text != "ttfb" }
+        let report = data.value?.0
+        let samples = Int(report?.rows.first.map { number($0, "samples") } ?? 0)
+        // Percentiles of one period; there is no comparing them, as on the web.
+        ScreenScaffold(screen: .performance, wording: data.value?.1, compare: false, stale: data.stale, trail: report == nil ? nil : "\(plural(samples, "sample")) · p75", reload: load) {
+            if let report {
                 if report.rows.allSatisfy({ number($0, "samples") == 0 }) {
                     StageView(art: "waiting", title: "No performance data yet", text: "Use the RUM variant of the tracker to measure Core Web Vitals from real visits. It adds about 1 KB and never records content.")
                 } else {
-                    ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                        VitalCard(row: row, before: before?.rows.first { $0["metric"]?.text == row["metric"]?.text })
+                    // Four across where they have room, two by two where they don't, as on the web.
+                    let across = sizeClass != .compact && width >= 860 ? 4 : 2
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: sizeClass == .compact ? 10 : 16, alignment: .top), count: across), spacing: sizeClass == .compact ? 10 : 16) {
+                        ForEach(Array(report.rows.enumerated()), id: \.offset) { _, row in
+                            let key = row["metric"]?.text ?? ""
+                            Button { chosen = key } label: { VitalTile(row: row, selected: key == chosen) }
+                                .buttonStyle(.plain)
+                                .accessibilityAddTraits(key == chosen ? .isSelected : [])
+                        }
                     }
-                    Text("From \(Format.count(Int(report.rows.map { number($0, "samples") }.max() ?? 0))) page loads measured by the RUM tracker. p75: three in four loads were at least this fast.").font(.caption).foregroundStyle(Theme.muted)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
+                    if let row = report.rows.first(where: { $0["metric"]?.text == chosen }) {
+                        VitalDetail(row: row)
+                    }
                 }
             } else {
                 LoadingOrProblem(failure: data.failure, title: "Performance didn’t load")
@@ -472,61 +736,99 @@ struct PerformanceView: View {
     private func load() async {
         data.apply(await fetch {
             let report = try await state.client.report("vitals", site: state.site.slug, view: state.view)
-            return (report, await previous(state.client, state.site, "vitals", state.view, report), periodWording(report, state.view))
+            return (report, periodWording(report, state.view))
         })
     }
 }
 
-/// One Web Vital: p75 and its rating, and the good · needs work · poor split.
-private struct VitalCard: View {
+/// A vital's rating at its p75: good, needs work or poor.
+private func vitalRating(_ row: Report.Row) -> (label: String, color: Color, wash: Color) {
+    let p75 = number(row, "p75")
+    if p75 <= number(row, "good_below") { return ("Good", Theme.good, Theme.goodWash) }
+    if p75 <= number(row, "poor_above") { return ("Needs work", Theme.warning, Theme.amberWash) }
+    return ("Poor", Theme.bad, Theme.brandWash)
+}
+
+private func vitalValue(_ row: Report.Row, _ key: String) -> String {
+    Format.vital(number(row, key), layoutShift: row["metric"]?.text == "cls")
+}
+
+/// Good · needs work · poor as one bar, and the same in words.
+private struct VitalSplit: View {
     let row: Report.Row
-    let before: Report.Row?
 
     var body: some View {
-        let key = row["metric"]?.text ?? ""
-        let cls = key == "cls"
-        let p75 = number(row, "p75")
-        let rating = p75 <= number(row, "good_below") ? ("Good", Theme.good, Theme.goodWash) : p75 <= number(row, "poor_above") ? ("Needs work", Theme.warning, Theme.amberWash) : ("Poor", Theme.bad, Theme.brandWash)
         let samples = max(1, number(row, "samples"))
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text((row["name"]?.text ?? "").capitalizedFirst).font(.headline).foregroundStyle(Theme.ink)
-                    Text("\(key.uppercased()) · p75").font(.caption).foregroundStyle(Theme.ink2)
-                }
-                Spacer()
-                VStack(alignment: .trailing, spacing: 2) {
-                    Text(number(row, "samples") == 0 ? "—" : Format.vital(p75, layoutShift: cls)).font(Theme.display(26, relativeTo: .title)).foregroundStyle(Theme.ink)
-                    if let before, number(before, "samples") > 0, number(row, "samples") > 0 {
-                        let change = Format.change(p75, number(before, "p75"))
-                        // Faster is better: a drop is good news.
-                        Text(change.text).font(.caption.weight(.semibold)).foregroundStyle(change.direction == .down ? Theme.good : change.direction == .up ? Theme.bad : Theme.ink2)
-                    }
+        VStack(alignment: .leading, spacing: 8) {
+            GeometryReader { geometry in
+                HStack(spacing: 2) {
+                    if number(row, "good") > 0 { Capsule().fill(Theme.good).frame(width: geometry.size.width * number(row, "good") / samples) }
+                    if number(row, "needs_work") > 0 { Capsule().fill(Theme.amber).frame(width: geometry.size.width * number(row, "needs_work") / samples) }
+                    if number(row, "poor") > 0 { Capsule().fill(Theme.bad).frame(width: geometry.size.width * number(row, "poor") / samples) }
                 }
             }
-            if number(row, "samples") > 0 {
-                Text(rating.0).font(.caption.weight(.semibold)).foregroundStyle(rating.1)
-                    .padding(.horizontal, 10).padding(.vertical, 3)
-                    .background(rating.2, in: .capsule)
-                GeometryReader { geometry in
-                    HStack(spacing: 3) {
-                        Capsule().fill(Theme.good).frame(width: geometry.size.width * number(row, "good") / samples)
-                        Capsule().fill(Theme.amber).frame(width: geometry.size.width * number(row, "needs_work") / samples)
-                        Capsule().fill(Theme.bad).frame(width: max(4, geometry.size.width * number(row, "poor") / samples))
-                    }
-                }
-                .frame(height: 6)
-                Text("\(Format.share(number(row, "good"), of: samples)) good · \(Format.share(number(row, "needs_work"), of: samples)) needs work · \(Format.share(number(row, "poor"), of: samples)) poor")
-                    .font(.caption).foregroundStyle(Theme.ink2)
-            }
+            .frame(height: 6)
+            Text("\(Format.share(number(row, "good"), of: samples)) good · \(Format.share(number(row, "needs_work"), of: samples)) needs work · \(Format.share(number(row, "poor"), of: samples)) poor")
+                .font(Theme.caption).foregroundStyle(Theme.ink2).fixedSize(horizontal: false, vertical: true)
         }
-        .card()
+    }
+}
+
+/// One vital: its name, p75 with its rating, the split; the chosen one outlined.
+private struct VitalTile: View {
+    let row: Report.Row
+    let selected: Bool
+
+    var body: some View {
+        let measured = number(row, "samples") > 0
+        VStack(alignment: .leading, spacing: 8) {
+            Text(row["name"]?.text ?? "").font(Theme.caption).foregroundStyle(Theme.ink2).lineLimit(1)
+            HStack(alignment: .firstTextBaseline) {
+                Text(measured ? vitalValue(row, "p75") : "—").font(Theme.display(26, relativeTo: .title)).foregroundStyle(Theme.ink).lineLimit(1).minimumScaleFactor(0.6)
+                Spacer(minLength: 6)
+                if measured {
+                    let rating = vitalRating(row)
+                    Text(rating.label).font(Theme.caption2.weight(.semibold)).foregroundStyle(rating.color)
+                        .padding(.horizontal, 7).padding(.vertical, 2)
+                        .background(rating.wash, in: .capsule)
+                }
+            }
+            if measured { VitalSplit(row: row) } else { Text("No samples").font(Theme.caption).foregroundStyle(Theme.ink2) }
+        }
+        .card(padding: 14, selected: selected)
+        .contentShape(.rect)
         .accessibilityElement(children: .combine)
     }
 }
 
-private extension String {
-    var capitalizedFirst: String { prefix(1).uppercased() + dropFirst().lowercased() }
+/// The chosen vital: how many samples, its thresholds, and p50 · p75 · p95.
+private struct VitalDetail: View {
+    @Environment(\.horizontalSizeClass) private var sizeClass
+    let row: Report.Row
+
+    var body: some View {
+        let cls = row["metric"]?.text == "cls"
+        let meta = "\(plural(Int(number(row, "samples")), "sample")) · good ≤ \(Format.vital(number(row, "good_below"), layoutShift: cls)) · poor > \(Format.vital(number(row, "poor_above"), layoutShift: cls))"
+        // iPhone: the thresholds under the name, where there is room for both.
+        SectionCard(title: row["name"]?.text ?? "", subtitle: sizeClass == .compact ? meta : nil) {
+            if sizeClass != .compact { Text(meta) }
+        } content: {
+            if number(row, "samples") == 0 {
+                Text("No samples in this period.").font(Theme.callout).foregroundStyle(Theme.ink2)
+            } else {
+                HStack(alignment: .top) {
+                    ForEach(["p50", "p75", "p95"], id: \.self) { key in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(key).font(Theme.caption).foregroundStyle(Theme.ink2)
+                            Text(vitalValue(row, key)).font(Theme.display(30, relativeTo: .title)).foregroundStyle(Theme.ink).lineLimit(1).minimumScaleFactor(0.6)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                VitalSplit(row: row)
+            }
+        }
+    }
 }
 
 // MARK: - Revenue
@@ -536,10 +838,10 @@ struct RevenueView: View {
     @State private var data = Loaded<RevenueData>()
 
     var body: some View {
-        ScreenScaffold(screen: .revenue, wording: data.value?.wording, stale: data.stale, reload: load) {
+        ScreenScaffold(screen: .revenue, wording: data.value?.wording, stale: data.stale, trail: data.value?.currency, reload: load) {
             if let revenue = data.value {
                 if revenue.orders == 0 {
-                    StageView(art: "calendar", title: "No orders \(revenue.wording?.between ?? "in this period")", text: "Orders appear here when your shop sends purchase events — from the tracker or, confirmed, from your server.")
+                    StageView(art: "bars", title: "No orders yet", text: "Send a `purchase` event with an amount and items — from the browser with `analytico.track('purchase', {}, {value_minor, currency, order_id, items})`, or authoritatively from your backend to `/i`. Server orders win when both arrive.")
                 } else {
                     let compare = state.view.compare
                     MetricGrid {
@@ -554,11 +856,11 @@ struct RevenueView: View {
                         VStack(spacing: 10) {
                             ForEach(Array(revenue.products.enumerated()), id: \.offset) { index, row in
                                 HStack(spacing: 12) {
-                                    Text("\(index + 1)").font(.caption.weight(.semibold)).foregroundStyle(Theme.ink2)
+                                    Text("\(index + 1)").font(Theme.caption.weight(.semibold)).foregroundStyle(Theme.ink2)
                                         .frame(width: 24, height: 24).background(Theme.subtle, in: .rect(cornerRadius: 6))
                                     VStack(alignment: .leading, spacing: 1) {
                                         Text(row["product"]?.text ?? "").foregroundStyle(Theme.ink).lineLimit(1)
-                                        Text(plural(Int(number(row, "orders")), "order")).font(.caption).foregroundStyle(Theme.ink2)
+                                        Text(plural(Int(number(row, "orders")), "order")).font(Theme.caption).foregroundStyle(Theme.ink2)
                                     }
                                     Spacer()
                                     Text(revenue.money(number(row, "revenue_minor"))).monospacedDigit().foregroundStyle(Theme.ink)
@@ -620,6 +922,7 @@ struct RevenueData {
 /// Where visitors go next from a page; tap a step to follow it.
 struct PathsView: View {
     @Environment(SiteState.self) private var state
+    @Environment(\.openURL) private var openURL
     @State private var pages: [String] = []
     @State private var from: String?
     @State private var data = Loaded<(Report, PeriodWording?)>()
@@ -627,10 +930,11 @@ struct PathsView: View {
     var body: some View {
         ScreenScaffold(screen: .paths, wording: data.value?.1, stale: data.stale, reload: load) {
             if state.site.mode == "lite" {
-                StageView(art: "filter", title: "Paths need visits", text: "Lite mode never links page views into visits. Switch the site to Session or Full in the workspace to see where visitors go next.")
+                StageView(art: "bars", title: "Paths need Full or Session mode", text: "Lite mode never links page views together, so there are no visits to follow. Full mode links them for visitors who consent; Session mode uses an anonymous per-tab ID.",
+                          primary: ("Change the tracking mode", { openURL(state.siteSettingsURL) }))
             } else {
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("After visiting").font(.caption).foregroundStyle(Theme.ink2)
+                    Text("After visiting").font(Theme.caption).foregroundStyle(Theme.ink2)
                     Picker("After visiting", selection: $from) {
                         ForEach(pages, id: \.self) { Text($0).tag(Optional($0)) }
                     }
@@ -642,7 +946,7 @@ struct PathsView: View {
                     .background(Theme.subtle, in: .rect(cornerRadius: 10))
                     if let report = data.value?.0 {
                         let total = report.rows.reduce(0) { $0 + number($1, "transitions") }
-                        Text("\(Format.count(Int(total))) visits went on from \(from ?? ""). Next, they opened:").font(.subheadline).foregroundStyle(Theme.ink2)
+                        Text("\(Format.count(Int(total))) visits went on from \(from ?? ""). Next, they opened:").font(Theme.subheadline).foregroundStyle(Theme.ink2)
                         ForEach(Array(report.rows.enumerated()), id: \.offset) { _, row in
                             let next = row["next_path"]?.text ?? ""
                             Button { if !next.isEmpty { from = next } } label: {
@@ -656,7 +960,7 @@ struct PathsView: View {
                             .disabled(next.isEmpty)
                         }
                         if report.rows.isEmpty { Text("Nobody went on from this page in this period.").foregroundStyle(Theme.ink2) }
-                        Text("Tap a page to follow the path one step further.").font(.caption).foregroundStyle(Theme.muted)
+                        Text("\(press) a page to follow the path one step further.").font(Theme.caption).foregroundStyle(Theme.muted)
                     } else {
                         LoadingOrProblem(failure: data.failure, title: "Paths didn’t load")
                     }
