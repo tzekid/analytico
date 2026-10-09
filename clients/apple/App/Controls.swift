@@ -21,14 +21,19 @@ struct ScreenScaffold<Content: View>: View {
     @ViewBuilder var content: Content
 
     private var compact: Bool { sizeClass == .compact }
-    /// Whether the header's period bar is on screen; when it isn't, the pill stands in.
-    @State private var headerInSight = true
+    /// How far the page is scrolled and how tall its header is: the pill
+    /// stands in once the header has scrolled past. By position, not by
+    /// visibility, which reads "hidden" for every tab that isn't on screen
+    /// and flashed the pill when switching tabs.
+    @State private var scrolled: CGFloat = 0
+    @State private var headerHeight: CGFloat = 0
+    private var headerAway: Bool { headerHeight > 0 && scrolled > headerHeight + (compact ? 2 : 14) }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: compact ? 12 : 16) {
                 header
-                    .onScrollVisibilityChange(threshold: 0.01) { headerInSight = $0 }
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { headerHeight = $0 }
                 if filters && !waiting && screen.fixedPeriod == nil { FilterChips() }
                 if let stale { StaleNotice(since: stale) { Task { await reload() } } }
                 content
@@ -38,15 +43,16 @@ struct ScreenScaffold<Content: View>: View {
             .padding(.bottom, 32)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .onScrollGeometryChange(for: CGFloat.self) { $0.contentOffset.y + $0.contentInsets.top } action: { _, offset in scrolled = offset }
         .background(Theme.canvas)
         .overlay(alignment: .top) {
-            if !headerInSight && !waiting && screen.fixedPeriod == nil {
+            if headerAway && !waiting && screen.fixedPeriod == nil {
                 PeriodPill(wording: wording, filters: filters)
                     .padding(.top, 6)
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
-        .animation(.easeOut(duration: 0.15), value: headerInSight)
+        .animation(.easeOut(duration: 0.15), value: headerAway)
         .refreshable { await reload() }
         #if os(macOS)
         // One report shows at a time on the Mac; iPhone tabs keep several alive.
