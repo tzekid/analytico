@@ -21,11 +21,14 @@ struct ScreenScaffold<Content: View>: View {
     @ViewBuilder var content: Content
 
     private var compact: Bool { sizeClass == .compact }
+    /// Whether the header's period bar is on screen; when it isn't, the pill stands in.
+    @State private var headerInSight = true
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: compact ? 12 : 16) {
                 header
+                    .onScrollVisibilityChange(threshold: 0.01) { headerInSight = $0 }
                 if filters && !waiting && screen.fixedPeriod == nil { FilterChips() }
                 if let stale { StaleNotice(since: stale) { Task { await reload() } } }
                 content
@@ -36,6 +39,14 @@ struct ScreenScaffold<Content: View>: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(Theme.canvas)
+        .overlay(alignment: .top) {
+            if !headerInSight && !waiting && screen.fixedPeriod == nil {
+                PeriodPill(wording: wording, filters: filters)
+                    .padding(.top, 6)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+        .animation(.easeOut(duration: 0.15), value: headerInSight)
         .refreshable { await reload() }
         #if os(macOS)
         // One report shows at a time on the Mac; iPhone tabs keep several alive.
@@ -95,6 +106,71 @@ struct ScreenScaffold<Content: View>: View {
         if screen == .paths && state.site.mode == "lite" { return "Paths need Session or Full mode" }
         guard let wording else { return " " }
         return state.view.compare && compare ? "\(wording.title) · \(wording.compared)" : wording.title
+    }
+}
+
+/// Once the period bar scrolls away: the period and the filters in a small
+/// glass pill at the top; each part opens the same picker as the bar.
+struct PeriodPill: View {
+    @Environment(SiteState.self) private var state
+    @Environment(\.horizontalSizeClass) private var sizeClass
+    /// The period on screen, so the picker opens on it.
+    var wording: PeriodWording?
+    var filters = true
+    @State private var choosing = false
+    @State private var filtering = false
+
+    private var label: String {
+        if state.view.isCustom, let from = state.view.from, let to = state.view.to, let chosen = PeriodWording(from: from, to: to) { return chosen.button }
+        return state.view.period.short
+    }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Button { choosing = true } label: {
+                HStack(spacing: 6) {
+                    Icon("calendar", size: 15)
+                    Text(label).lineLimit(1)
+                }
+                .padding(.horizontal, 14)
+                .frame(height: sizeClass == .compact ? 36 : 30)
+                .contentShape(.rect)
+            }
+            .accessibilityLabel("Period: \(label)")
+            .popover(isPresented: $choosing, arrowEdge: .top) {
+                PeriodPicker(wording: wording)
+                    .presentationCompactAdaptation(.sheet)
+                    .presentationDragIndicator(.visible)
+            }
+            if filters {
+                Divider().frame(height: 18)
+                Button { filtering = true } label: {
+                    HStack(spacing: 5) {
+                        Icon("filter", size: 15)
+                        if !state.view.filters.isEmpty { Text("\(state.view.filters.count)") }
+                    }
+                    .foregroundStyle(state.view.filters.isEmpty ? Theme.ink : Theme.brandDark)
+                    .padding(.horizontal, 12)
+                    .frame(height: sizeClass == .compact ? 36 : 30)
+                    .contentShape(.rect)
+                }
+                .accessibilityLabel("Filters: \(state.view.filters.count)")
+                .popover(isPresented: $filtering, arrowEdge: .top) {
+                    FilterEditor()
+                        .presentationCompactAdaptation(.sheet)
+                        .presentationDetents([.medium, .large])
+                        .presentationBackground(Theme.canvas)
+                        .presentationDragIndicator(.visible)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .font(.subheadline.weight(.semibold))
+        .foregroundStyle(Theme.ink)
+        .padding(3)
+        .background(.regularMaterial, in: .capsule)
+        .overlay(Capsule().strokeBorder(Theme.border.opacity(0.6)))
+        .shadow(color: .black.opacity(0.12), radius: 10, y: 4)
     }
 }
 

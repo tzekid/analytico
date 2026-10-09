@@ -654,6 +654,11 @@
     }
   }, true);
 
+  // The button that opened a popover anchors it, so the period pill's
+  // sheets open by the pill, not by the period bar scrolled out of sight.
+  let invoker = null;
+  document.addEventListener("click", (event) => { invoker = event.target.closest?.("[popovertarget]") || invoker; }, true);
+
   document.addEventListener("toggle", (event) => {
     const pop = event.target;
     if (!(pop instanceof HTMLElement) || !pop.hasAttribute("popover") || event.newState !== "open") return;
@@ -665,7 +670,8 @@
       if (pop.matches("#filter-pop")) setupFilter(pop);
       return;
     }
-    const anchor = pop.dataset.anchor ? $(pop.dataset.anchor) : null;
+    const opener = invoker?.getAttribute("popovertarget") === pop.id && invoker.getBoundingClientRect().height ? invoker : null;
+    const anchor = opener || (pop.dataset.anchor ? $(pop.dataset.anchor) : null);
     if (!anchor) return;
     const rect = anchor.getBoundingClientRect();
     pop.style.position = "fixed";
@@ -957,6 +963,28 @@
       }
     });
   }
+
+  // Looked up on every check: the page swaps its nodes as it updates.
+  let pillQueued = false;
+  function watchPeriodBar() {
+    if (pillQueued) return;
+    pillQueued = true;
+    requestAnimationFrame(() => {
+      pillQueued = false;
+      const pill = $("[data-period-pill]");
+      const bar = $(".head .seg");
+      if (!pill || !bar) return;
+      // Gone means out of sight: above the window, or under the phone's floating header.
+      const header = $(".phone-bar");
+      const top = header && getComputedStyle(header).display !== "none" ? header.getBoundingClientRect().bottom : 0;
+      const away = bar.getBoundingClientRect().bottom <= top;
+      if (pill.classList.contains("shown") === away) return;
+      pill.classList.toggle("shown", away);
+      pill.inert = !away;
+      pill.toggleAttribute("aria-hidden", !away);
+    });
+  }
+  addEventListener("scroll", watchPeriodBar, { passive: true });
 
   document.addEventListener("keydown", (event) => {
     const sheet = $("dialog.sheet[open]:not(:modal)");
@@ -1576,6 +1604,7 @@
 
   function init() {
     selected = -1;
+    watchPeriodBar();
     $$(".chart[data-chart]").forEach(setupChart);
     $$("[data-range-form]").forEach(setupRangeForm);
     openDatesFromHash();

@@ -246,6 +246,7 @@ pub const Head = struct {
 
 pub fn head(ctx: *Ctx, options: Head) !void {
     const w = ctx.w();
+    if (options.view) |view| if (options.fixed_period.len == 0) try periodPill(ctx, view, options);
     try render(w, "<header class=\"head\"><div class=\"head-text\"><div class=\"title-row\"><h1 class=\"title\">{title}</h1>{!badge}</div>", .{ .title = options.title, .badge = options.badge });
     if (options.subtitle.len != 0) try render(w, "<p class=\"subtitle\">{subtitle}</p>", .{ .subtitle = options.subtitle });
     try w.writeAll("</div><div class=\"controls\">");
@@ -253,6 +254,29 @@ pub fn head(ctx: *Ctx, options: Head) !void {
     if (options.view) |view| try controls(ctx, view, options);
     try w.writeAll("</div></header>");
     if (options.view) |view| try chips(ctx, view, options.path);
+}
+
+/// Once the period bar scrolls away, a small pill at the top keeps the
+/// period and the filters in reach; it opens the same sheets.
+fn periodPill(ctx: *Ctx, view: data.View, options: Head) !void {
+    const w = ctx.w();
+    const label = switch (view.range.kind) {
+        .@"24h" => "24 hours",
+        .@"7d" => "7 days",
+        .@"30d" => "30 days",
+        .@"90d" => "90 days",
+        else => try std.fmt.allocPrint(ctx.arena, "{f}", .{view.range.text(.button)}),
+    };
+    try render(w, "<div class=\"pill-dock\"><div class=\"period-pill glass\" data-period-pill inert aria-hidden=\"true\"><button type=\"button\" popovertarget=\"range-pop\" aria-label=\"Period: {label}\">", .{ .label = label });
+    try icon(w, "calendar");
+    try render(w, "<span>{label}</span></button>", .{ .label = label });
+    if (options.filter) {
+        try render(w, "<button type=\"button\" popovertarget=\"filter-pop\" aria-label=\"Filters: {count}\"{!on}>", .{ .count = view.filters.len, .on = if (view.filters.len != 0) " class=\"on\"" else "" });
+        try icon(w, "filter");
+        if (view.filters.len != 0) try render(w, "<span>{count}</span>", .{ .count = view.filters.len });
+        try w.writeAll("</button>");
+    }
+    try w.writeAll("</div></div>");
 }
 
 fn controls(ctx: *Ctx, view: data.View, options: Head) !void {

@@ -288,6 +288,15 @@ await journey("ux", async (t) => {
     await phone.evaluate(() => scrollTo(0, 600));
     await phone.locator(".tabbar a[aria-current]").click();
     await t.until(() => phone.evaluate(() => scrollY === 0), "scrolled to the top");
+    // Once the period bar scrolls away, a pill keeps the period in reach.
+    await phone.goto(`${base}/spike?range=30d`);
+    const pill = phone.locator("[data-period-pill]");
+    assert.equal(await pill.evaluate((node) => node.classList.contains("shown")), false);
+    await phone.evaluate(() => scrollTo(0, 900));
+    await t.until(() => pill.evaluate((node) => node.classList.contains("shown")), "period pill shown");
+    await pill.getByRole("button", { name: /^Period: / }).click();
+    assert.equal(await phone.locator("#range-pop.as-sheet:popover-open").count(), 1);
+    await phone.keyboard.press("Escape");
   }
   await touchContext.close();
 
