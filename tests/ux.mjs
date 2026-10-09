@@ -250,10 +250,19 @@ await journey("ux", async (t) => {
     await phone.locator("tbody tr a").first().click();
     const sheet = phone.locator("dialog.sheet[open]");
     await sheet.waitFor();
+    // Page details open at half height over the list, which stays usable.
+    const height = async () => (await sheet.boundingBox()).height / 844;
+    assert.ok(Math.abs((await height()) - 0.56) < 0.03, String(await height()));
+    assert.equal(await sheet.evaluate((node) => node.matches(":modal")), false);
     const head = await phone.locator("dialog.sheet .sheet-head").boundingBox();
     await drag([head.x + head.width / 2, head.y + 20], [head.x + head.width / 2, head.y + 60], 4);
     await delay(300);
     assert.equal(await sheet.isVisible(), true);
+    await drag([head.x + head.width / 2, head.y + 30], [head.x + head.width / 2, head.y - 220], 10);
+    await t.until(async () => Math.abs((await height()) - 0.92) < 0.03, "sheet expanded");
+    const top = await phone.locator("dialog.sheet .sheet-head").boundingBox();
+    await drag([top.x + top.width / 2, top.y + 20], [top.x + top.width / 2, top.y + 180], 8);
+    await t.until(async () => Math.abs((await height()) - 0.56) < 0.03, "sheet back to half");
     await drag([head.x + head.width / 2, head.y + 20], [head.x + head.width / 2, head.y + 560]);
     await phone.waitForURL((url) => !url.searchParams.has("page"));
     assert.equal(await phone.locator("dialog.sheet[open]").count(), 0);
@@ -261,6 +270,24 @@ await journey("ux", async (t) => {
     await phone.goBack();
     await phone.waitForURL((url) => !url.pathname.endsWith("/pages"));
     assert.equal(await phone.locator("dialog.sheet[open]").count(), 0);
+    // A filter from a row out of sight of its chip says so, and Undo takes it back.
+    await phone.goto(`${base}/spike?range=30d`);
+    const source = phone.locator(".rank-row").first();
+    await source.scrollIntoViewIfNeeded();
+    await phone.evaluate(() => scrollBy(0, 200));
+    const spot = await source.boundingBox();
+    await touch("touchStart", [[spot.x + spot.width / 2, spot.y + spot.height / 2]]);
+    await touch("touchEnd", []);
+    const notice = phone.locator("#toasts .toast[data-filter]");
+    await notice.waitFor();
+    assert.match(await notice.textContent(), /^Every report now shows source is /);
+    await notice.getByRole("button", { name: "Undo" }).click();
+    await phone.waitForURL((url) => !url.searchParams.has("f"));
+    // The tab you're on, tapped again, scrolls to the top.
+    await phone.goto(`${base}/spike/pages?range=30d`);
+    await phone.evaluate(() => scrollTo(0, 600));
+    await phone.locator(".tabbar a[aria-current]").click();
+    await t.until(() => phone.evaluate(() => scrollY === 0), "scrolled to the top");
   }
   await touchContext.close();
 

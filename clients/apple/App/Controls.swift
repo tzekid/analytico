@@ -291,14 +291,20 @@ struct PeriodPicker: View {
                     MonthCalendar(month: $month, from: from, to: to, first: first, pick: pick)
                     Divider()
                     note
-                    Button(showLabel) { apply() }
-                        .buttonStyle(PrimaryButtonStyle(wide: true))
                 }
                 .padding(.horizontal, 16)
                 .padding(.top, 18)
                 .padding(.bottom, 8)
                 }
-                .presentationDetents([.large])
+                // The button that names the range stays in reach on any phone.
+                .safeAreaInset(edge: .bottom) {
+                    Button(showLabel) { apply() }
+                        .buttonStyle(PrimaryButtonStyle(wide: true))
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                        .background(Theme.canvas)
+                }
+                .presentationDetents([.fraction(0.78), .large])
                 .presentationBackground(Theme.canvas)
             } else {
                 HStack(alignment: .top, spacing: 0) {
@@ -659,11 +665,8 @@ private struct RowMenu: ViewModifier {
 
     func body(content: Content) -> some View {
         content.contextMenu {
-            Button { state.filter(dimension, value) } label: { Label("Filter by \(label)", image: "Icons/filter") }
-            Button {
-                state.view.filters.removeAll { $0.dimension == dimension }
-                state.view.filters.append(.init(dimension: dimension, value: value, negated: true))
-            } label: { Label("Leave out \(label)", image: "Icons/x") }
+            Button { state.filter(dimension, value, label: label) } label: { Label("Filter by \(label)", image: "Icons/filter") }
+            Button { state.filter(dimension, value, negated: true, label: label) } label: { Label("Leave out \(label)", image: "Icons/x") }
             if dimension == "page" {
                 Divider()
                 Button { state.inspect(value) } label: { Label("Page details", image: "Icons/pages") }
@@ -693,6 +696,48 @@ struct FilterEditor: View {
 
     var body: some View {
         let compact = sizeClass == .compact
+        if compact {
+            // On iPhone the conditions scroll and the button that applies them stays in reach.
+            ScrollView { form(compact: true) }
+                .scrollBounceBehavior(.basedOnSize)
+                .safeAreaInset(edge: .bottom) {
+                    applyButton(compact: true)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                        .background(Theme.canvas)
+                }
+                .background(Theme.canvas)
+                .onAppear { draft = state.view }
+                .task(id: draft) { await count() }
+        } else {
+            VStack(alignment: .leading, spacing: 14) {
+                form(compact: false)
+                applyButton(compact: false)
+            }
+            .padding(18)
+            .frame(width: 380)
+            .background(Theme.surface)
+            .onAppear { draft = state.view }
+            .task(id: draft) { await count() }
+        }
+    }
+
+    private func applyButton(compact: Bool) -> some View {
+        HStack {
+            if !compact {
+                Spacer()
+                Button("Cancel") { dismiss() }.buttonStyle(SecondaryButtonStyle())
+            }
+            Button(applyLabel) {
+                state.view.filters = draft.filters
+                state.view.any = draft.any
+                dismiss()
+            }
+            .buttonStyle(PrimaryButtonStyle(wide: compact))
+        }
+    }
+
+    @ViewBuilder private func form(compact: Bool) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
                 if compact {
@@ -755,25 +800,9 @@ struct FilterEditor: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(Theme.brandWash, in: .rect(cornerRadius: 10))
             }
-            Spacer(minLength: 0)
-            HStack {
-                if !compact {
-                    Spacer()
-                    Button("Cancel") { dismiss() }.buttonStyle(SecondaryButtonStyle())
-                }
-                Button(applyLabel) {
-                    state.view.filters = draft.filters
-                    state.view.any = draft.any
-                    dismiss()
-                }
-                .buttonStyle(PrimaryButtonStyle(wide: compact))
-            }
         }
-        .padding(compact ? 16 : 18)
-        .frame(width: compact ? nil : 380)
-        .background(compact ? Theme.canvas : Theme.surface)
-        .onAppear { draft = state.view }
-        .task(id: draft) { await count() }
+        .padding(.horizontal, compact ? 16 : 0)
+        .padding(.top, compact ? 16 : 0)
     }
 
     private var applyLabel: String {
@@ -910,6 +939,49 @@ private struct ControlLabelStyle: LabelStyle {
             configuration.title.lineLimit(1)
         }
     }
+}
+
+/// A capsule button in a row of actions (page details): the primary in brand, the rest quiet.
+struct ActionCapsuleStyle: ButtonStyle {
+    var primary: Bool
+    /// iPhone: an equal tile with the icon over the label, as in Maps' place cards.
+    var tile = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        Group {
+            if tile {
+                configuration.label
+                    .labelStyle(.tileLabel)
+                    .font(.footnote.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 58)
+                    .background(primary ? Theme.primary : Theme.brandWash, in: .rect(cornerRadius: 14))
+            } else {
+                configuration.label
+                    .labelStyle(ControlLabelStyle())
+                    .font(.subheadline.weight(.semibold))
+                    .padding(.horizontal, 14)
+                    .frame(height: 34)
+                    .background(primary ? Theme.primary : Theme.brandWash, in: .capsule)
+            }
+        }
+        .foregroundStyle(primary ? .white : Theme.brandDark)
+        .opacity(configuration.isPressed ? 0.75 : 1)
+        .contentShape(.rect)
+    }
+}
+
+private struct TileLabelStyle: LabelStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        VStack(spacing: 4) {
+            configuration.icon.frame(width: 20, height: 20)
+            configuration.title.lineLimit(1)
+        }
+    }
+}
+
+extension LabelStyle where Self == TileLabelStyle {
+    fileprivate static var tileLabel: TileLabelStyle { TileLabelStyle() }
 }
 
 /// Primary: the brand's dark red, 50 pt capsule on iPhone.

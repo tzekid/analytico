@@ -52,7 +52,7 @@ struct PagesView: View {
     private func list(_ pages: PagesData) -> some View {
         let rows = sorted(pages)
         let top = rows.map(\.views).max() ?? 1
-        return VStack(alignment: .leading, spacing: 10) {
+        return ScrollViewReader { proxy in VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Text("\(Format.count(pages.rows.count)) pages").font(.subheadline).foregroundStyle(Theme.ink2)
                 Spacer()
@@ -96,15 +96,25 @@ struct PagesView: View {
                         }
                         .padding(.horizontal, 14)
                         .padding(.vertical, 10)
+                        .background(state.page == row.path ? Theme.brandWash : .clear)
                         .contentShape(.rect)
                     }
                     .buttonStyle(.plain)
                     .rowMenu("page", row.path)
                     .accessibilityHint("Opens the page’s details")
+                    .id(row.path)
                 }
             }
             .background(Theme.surface, in: .rect(cornerRadius: Theme.cardRadius))
             .overlay(RoundedRectangle(cornerRadius: Theme.cardRadius).strokeBorder(Theme.border))
+            // Every row can scroll clear of the half-height page sheet.
+            Color.clear.frame(height: state.page == nil ? 0 : 400)
+        }
+        // The row whose details open scrolls into the part the sheet leaves visible.
+        .onChange(of: state.page) { _, page in
+            guard let page else { return }
+            withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo(page, anchor: UnitPoint(x: 0.5, y: 0.22)) }
+        }
         }
     }
 
@@ -290,6 +300,21 @@ struct PageDetail: View {
                             .accessibilityLabel("Close")
                     }
                 }
+                // What to do with the page, where a half-height sheet shows it.
+                HStack(spacing: 8) {
+                    Button {
+                        state.filter("page", path)
+                        state.page = nil
+                    } label: {
+                        Label(sizeClass == .compact ? "Filter by page" : "Filter by this page", image: "Icons/filter")
+                    }
+                    .buttonStyle(ActionCapsuleStyle(primary: true, tile: sizeClass == .compact))
+                    if let url = URL(string: "https://\(state.site.host)\(path)") {
+                        Button { openURL(url) } label: { Label("Open page", image: "Icons/external") }
+                            .buttonStyle(ActionCapsuleStyle(primary: false, tile: sizeClass == .compact))
+                    }
+                    if sizeClass != .compact { Spacer(minLength: 0) }
+                }
                 Picker("Show", selection: $tab) {
                     ForEach(Tab.allCases) { Text($0.rawValue).tag($0) }
                 }
@@ -303,24 +328,6 @@ struct PageDetail: View {
                     }
                 } else {
                     LoadingOrProblem(failure: data.failure, title: "The page didn’t load")
-                }
-                Button("Filter every report by this page") {
-                    state.filter("page", path)
-                    state.page = nil
-                }
-                .buttonStyle(PrimaryButtonStyle(wide: true))
-                .padding(.top, 6)
-                if let url = URL(string: "https://\(state.site.host)\(path)") {
-                    Button { openURL(url) } label: {
-                        HStack(spacing: 4) {
-                            Text("Open the page on \(state.site.host)")
-                            Image(systemName: "arrow.up.right").font(.caption.weight(.semibold))
-                        }
-                        .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.plain)
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(Theme.brandDark)
                 }
             }
             .padding(16)

@@ -69,7 +69,7 @@ struct SourcesView: View {
             VStack(spacing: 8) {
                 ForEach(Array(sources.rows.enumerated()), id: \.offset) { _, row in
                     let tone = Theme.channel(row["channel"]?.text)
-                    Button { state.filter("source", row["value"]?.text ?? "") } label: {
+                    Button { state.filter("source", row["value"]?.text ?? "", label: row["label"]?.text) } label: {
                         ShareRow(title: row["label"]?.text ?? "", detail: row["channel"]?.text, value: Format.count(Int(number(row, "visitor_days"))),
                                  share: share(number(row, "visitor_days"), top) * 0.8, color: tone.color, wash: tone.wash)
                             .contentShape(.rect)
@@ -260,7 +260,7 @@ struct AudienceView: View {
                 VStack(alignment: .leading, spacing: 14) {
                     ForEach(Array(report.rows.enumerated()), id: \.offset) { _, row in
                         let key = row["value"]?.text ?? ""
-                        Button { state.filter(tab.dimension, key) } label: {
+                        Button { state.filter(tab.dimension, key, label: tab == .countries ? row["label"]?.text : nil) } label: {
                             MeterRow(code: tab == .countries ? (key == "unknown" ? "?" : key) : nil,
                                      title: tab == .countries ? (row["label"]?.text ?? key) : Labels.value(key, dimension: tab.dimension),
                                      value: Format.share(number(row, "page_views"), of: total), share: share(number(row, "page_views"), total))

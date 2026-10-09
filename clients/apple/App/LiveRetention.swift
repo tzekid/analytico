@@ -176,6 +176,7 @@ struct MinuteBars: View {
         // Scaled to the busiest minute, so an empty half hour shows stubs, not full bars.
         .chartYScale(domain: 0...Double(busiest))
         .pointerSelection($selection)
+        .sensoryFeedback(.selection, trigger: selected?.at)
         .accessibilityLabel("\(minutes.reduce(0) { $0 + $1.count }) page views in the last 30 minutes")
     }
 }

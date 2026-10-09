@@ -310,7 +310,9 @@ table.table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .table td { padding: 12px 16px; border-top: 1px solid var(--border); white-space: nowrap; }
 .table td.wrap { white-space: normal; overflow-wrap: anywhere; }
 /* Phones: the first column wraps, but never narrower than a short word or two. */
-@media (max-width: 720px) { .table td:first-child { white-space: normal; overflow-wrap: anywhere; min-width: 9em; } .table td:first-child:has(.person-avatar) { min-width: 13em; } .table th, .table td { padding-left: 10px; padding-right: 10px; } }
+@media (max-width: 720px) { .table td:first-child { white-space: normal; overflow-wrap: anywhere; min-width: 9em; } .table td:first-child:has(.person-avatar) { min-width: 13em; } .table th, .table td { padding-left: 10px; padding-right: 10px; }
+  /* A long path keeps two lines; the whole of it is in the details. */
+  .table td.strong:first-child > a { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; } }
 .table .r { text-align: right; } .table .strong { font-weight: 600; }
 .table tbody tr { transition: background .1s; }
 .table tbody tr[data-href] { cursor: pointer; }
@@ -407,6 +409,8 @@ dialog::backdrop { background: var(--scrim); }
 /* Wide screens: an open sheet sits beside the page, like the apps' inspector; the table stays usable. */
 @media (min-width: 1100px) {
   dialog.sheet:not(:modal) { z-index: 30; }
+  /* Every row can scroll clear of a half-height sheet. */
+  html:has(dialog.sheet[data-detents][open]) .panel { padding-bottom: 60vh; }
   body:has(dialog.sheet[open]:not(:modal)) .main { padding-right: 476px; }
   /* The details show the selected page's time, scroll and change; the table keeps what fits. */
   body:has(dialog.sheet[open]:not(:modal)) .table .hide-m { display: none; }
@@ -434,9 +438,11 @@ dialog:focus { outline: none; }
 .metrics-sheet .metric-delta { grid-row: 1; grid-column: 2; }
 .metrics-sheet .metric-value { grid-column: 1 / -1; font-size: min(26px, 16cqi); line-height: 32px; margin-top: 4px; }
 .sheet .card .subhead { margin-top: 0; }
-.sheet-actions { display: grid; justify-items: center; gap: 14px; padding-top: 4px; }
-.sheet-actions .link { font-weight: 600; }
-.btn.btn-wide { width: 100%; height: 44px; justify-content: center; font-size: 15px; }
+.sheet-actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 24px 0; }
+.btn.btn-pill { height: 34px; padding: 0 14px; border-radius: 17px; }
+.btn.btn-wash { background: var(--brand-wash); border-color: transparent; color: var(--brand-dark); }
+.btn.btn-wash:hover { background: var(--brand-select); }
+.btn-wash .i { color: var(--brand-dark); }
 .mini-metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .mini { padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius-s); }
 .mini small { display: block; font-size: 12px; color: var(--ink-2); }
@@ -677,11 +683,20 @@ dialog:focus { outline: none; }
   /* A chart note's label: tap its pin. */
   .chart-mark.open b { display: inline; }
   .seg.seg-sheet { margin: 12px 16px 0; }
-  .btn.btn-wide { height: 50px; border-radius: 25px; font-size: 17px; }
+  /* One row of equal tiles, an icon over each label, as in Maps' place cards. */
+  .sheet-actions { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 8px; padding: 12px 16px 0; }
+  .sheet-actions .btn.btn-pill { flex-direction: column; gap: 4px; height: 58px; padding: 0 6px; border-radius: 14px; font-size: 13px; }
+  .sheet-actions .btn .i { width: 20px; height: 20px; }
+  /* Page details: half height over the list, which stays usable; pulled up, nearly all of it. */
+  dialog.sheet[data-detents] { height: 56vh; max-height: none; overflow-y: hidden; box-shadow: 0 -10px 36px var(--elev), 0 -1px 0 var(--border); transition: height .22s ease-out; }
+  dialog.sheet[data-detents].expanded { height: 92vh; overflow-y: auto; }
+  dialog.sheet:not(:modal) { z-index: 30; }
+  /* Every row can scroll clear of a half-height sheet. */
+  html:has(dialog.sheet[data-detents][open]) .panel { padding-bottom: 60vh; }
   .sheet-body { padding: 16px 16px 28px; }
   /* A sheet scrolls on its own; the page behind stays put. */
   .sheet, [popover].as-sheet, .dialog { overscroll-behavior: contain; }
-  html:has(dialog.sheet[open], dialog.dialog[open]) { overflow: hidden; }
+  html:has(dialog.sheet[open]:modal, dialog.dialog[open]:modal) { overflow: hidden; }
   .dialog { width: 100%; max-width: none; margin: auto 0 0; border-radius: 20px 20px 0 0; }
   .pop-wide { width: calc(100vw - 24px); }
   .table th, .table td { padding: 10px 12px; }
@@ -696,7 +711,8 @@ dialog:focus { outline: none; }
   .controls > .btn { flex: 1; }
   .settings .subnav { margin: 0 -16px; padding: 0 16px; }
   .toast { min-width: 0; }
-  #toasts { bottom: 96px; }
+  #toasts { bottom: calc(96px + env(safe-area-inset-bottom)); left: 16px; right: 16px; transform: none; }
+  .toast { min-width: 0; }
 }
 @media print {
   .sidebar, .tabbar, .controls, #toasts { display: none !important; }

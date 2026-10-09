@@ -32,7 +32,7 @@ pub fn sitePath(arena: std.mem.Allocator, site: data.Site, suffix: []const u8) !
 
 fn sheetOpen(w: *std.Io.Writer, overline: []const u8, title: []const u8, close_href: []const u8) !void {
     try render(w,
-        \\<dialog class="sheet" data-sheet data-close-href="{close}" autofocus><div class="sheet-head"><div class="min-0"><div class="overline">{overline}</div><h2>{title}</h2></div><a class="sheet-close" href="{close}" data-close aria-label="Close">
+        \\<dialog class="sheet" data-sheet data-detents data-close-href="{close}" autofocus><div class="sheet-head"><div class="min-0"><div class="overline">{overline}</div><h2>{title}</h2></div><a class="sheet-close" href="{close}" data-close aria-label="Close">
     , .{ .close = close_href, .overline = overline, .title = title });
     try icon(w, "x");
     try w.writeAll("</a></div>");
@@ -175,6 +175,19 @@ fn pageSheet(ctx: *Ctx, base_view: data.View, path: []const u8, page_path: []con
     view.any = false;
     const close = try base_view.href(arena, path, &.{ .{ "q", ctx.param("q") orelse "" }, .{ "sort", ctx.param("sort") orelse "" } });
     try sheetOpen(w, try std.fmt.allocPrint(arena, "Page · {f}", .{base_view.range.text(.this)}), page_path, close);
+    // What to do with the page comes first, where a half-height sheet shows it.
+    const filtered = try base_view.href(arena, path, &.{.{ "f+", try std.fmt.allocPrint(arena, "page:{s}", .{page_path}) }});
+    try render(w, "<div class=\"sheet-actions\"><a class=\"btn btn-primary btn-pill\" href=\"{filtered}\">", .{ .filtered = filtered });
+    try icon(w, "filter");
+    try render(w, "Filter by page</a><a class=\"btn btn-pill btn-wash\" href=\"{origin}{path}\" target=\"_blank\" rel=\"noopener\">", .{ .origin = base_view.site.origin, .path = page_path });
+    try icon(w, "external");
+    try w.writeAll("Open page</a>");
+    if (base_view.site.mode != .lite) {
+        try render(w, "<a class=\"btn btn-pill btn-wash\" href=\"{href}\">", .{ .href = try base_view.href(arena, try sitePath(arena, base_view.site, "/sessions"), &.{.{ "f+", try std.fmt.allocPrint(arena, "page:{s}", .{page_path}) }}) });
+        try icon(w, "play-circle");
+        try w.writeAll("Sessions</a>");
+    }
+    try w.writeAll("</div>");
     const tab = ctx.param("pt") orelse "overview";
     try w.writeAll("<nav class=\"seg seg-sheet\" aria-label=\"Page details\">");
     for ([_][2][]const u8{ .{ "overview", "Overview" }, .{ "sections", "Sections" }, .{ "actions", "Actions" }, .{ "paths", "Paths" } }) |item| try render(w, "<a href=\"{href}\"{!current}>{label}</a>", .{
@@ -218,13 +231,6 @@ fn pageSheet(ctx: *Ctx, base_view: data.View, path: []const u8, page_path: []con
         try sectionsList(ctx, view, 6);
         try w.writeAll("</div>");
     }
-    // The page's way out, on every tab: filter everything by it, then its sessions and the page itself.
-    const filtered = try base_view.href(arena, path, &.{.{ "f+", try std.fmt.allocPrint(arena, "page:{s}", .{page_path}) }});
-    try render(w, "<div class=\"sheet-actions\"><a class=\"btn btn-primary btn-wide\" href=\"{filtered}\">Filter every report by this page</a>", .{ .filtered = filtered });
-    if (view.site.mode != .lite) {
-        try render(w, "<a class=\"link\" href=\"{href}\">See sessions that viewed this page →</a>", .{ .href = try base_view.href(arena, try sitePath(arena, view.site, "/sessions"), &.{.{ "f+", try std.fmt.allocPrint(arena, "page:{s}", .{page_path}) }}) });
-    }
-    try render(w, "<a class=\"link\" href=\"{origin}{path}\" target=\"_blank\" rel=\"noopener\">Open the page on {host} ↗</a></div>", .{ .origin = base_view.site.origin, .path = page_path, .host = base_view.site.host() });
     try w.writeAll("</div></dialog>");
 }
 

@@ -62,6 +62,7 @@ final class AppModel {
         selectedSite = Shared.site
         if let client = Shared.client() {
             phase = .signedIn(client)
+            sites = Shared.sites
         }
     }
 
@@ -93,6 +94,7 @@ final class AppModel {
         online = nil
         selectedSite = nil
         sites = []
+        Shared.sites = []
         phase = .setup
     }
 
@@ -166,6 +168,7 @@ final class AppModel {
         guard let client else { return }
         do {
             sites = try await client.sites()
+            Shared.sites = sites
             sitesError = nil
             await enablePush()
             if selectedSite == nil || !sites.contains(where: { $0.slug == selectedSite }), sites.count == 1 {

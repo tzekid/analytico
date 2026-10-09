@@ -252,9 +252,10 @@
       openSheet.dataset.closeHref = nextSheet.dataset.closeHref || "";
       openSheet.scrollTop = 0;
       document.title = next.title;
-      // The row whose details are open stays marked.
+      // The row whose details are open stays marked, and in sight.
       const shown = new URL(url, location.href).searchParams.get("page");
       $$("tr[data-href]").forEach((row) => row.toggleAttribute("aria-selected", shown !== null && new URL(row.dataset.href, location.href).searchParams.get("page") === shown));
+      revealSelected(openSheet);
       if (mode === "push") history.pushState({}, "", url);
       else if (mode === "replace") history.replaceState({}, "", url);
       $$(".chart[data-chart]", openSheet).forEach(setupChart);
@@ -463,8 +464,16 @@
       if (!navigable(url)) return;
       event.preventDefault();
       if (link.closest("[popover]")) link.closest("[popover]").hidePopover?.();
+      // The tab you're on, tapped again, scrolls back to the top, as on iOS.
+      if (link.closest(".tabbar") && link.hasAttribute("aria-current") && url.pathname === location.pathname && scrollY > 0) {
+        scrollTo({ top: 0, behavior: "smooth" });
+        return;
+      }
       const keep = url.pathname === location.pathname && link.closest(".tabs, .sheet, .table, .metrics, .seg, .chips, .rank") !== null;
-      navigate(url.href, { keepScroll: keep });
+      const from = location.href;
+      // The name the row showed ("Google"), not the key behind it.
+      const name = link.title?.startsWith("Filter by ") ? link.title.slice(10) : link.querySelector(".rank-name")?.textContent.trim();
+      navigate(url.href, { keepScroll: keep }).then(() => filteredFrom(from, name));
       return;
     }
     const row = event.target.closest("tr[data-href]");
@@ -475,6 +484,42 @@
   window.addEventListener("popstate", (event) => navigate(location.href, { mode: "none", keepScroll: true, scrollTo: event.state?.scroll ?? 0 }));
 
   // ------------------------------------------------------------ dialogs, sheets, popovers
+
+  // Phones: the row whose details a half-height sheet shows scrolls into the
+  // part of the list the sheet leaves visible.
+  // A filter added from a row further down the page changes everything
+  // above it, where its chip is out of sight: say so, with a way back.
+  function filteredFrom(before, name) {
+    const was = new URL(before).searchParams.getAll("f");
+    const now = new URLSearchParams(location.search).getAll("f");
+    const added = now.filter((value) => !was.includes(value));
+    const chip = $(".chips .chip");
+    if (!added.length || !chip || chip.getBoundingClientRect().top >= 0) return;
+    $$("#toasts .toast[data-filter]").forEach((old) => old.remove());
+    const toast = document.createElement("div");
+    toast.className = "toast";
+    toast.dataset.filter = "";
+    toast.setAttribute("role", "status");
+    toast.innerHTML = '<span></span><button type="button">Undo</button>';
+    const [dim, ...rest] = added[0].split(":");
+    toast.firstChild.textContent = `Every report now shows ${dim.replace(/!$/, "")} ${dim.endsWith("!") ? "is not" : "is"} ${name || rest.join(":")}`;
+    $("#toasts")?.appendChild(toast);
+    const timer = setTimeout(() => toast.remove(), 5000);
+    toast.querySelector("button").addEventListener("click", () => {
+      clearTimeout(timer);
+      toast.remove();
+      navigate(before, { keepScroll: true });
+    });
+  }
+
+  function revealSelected(sheet) {
+    if (!sheet.matches("[data-detents]") || !matchMedia("(max-width: 720px)").matches) return;
+    const row = $("tr[aria-selected]");
+    if (!row) return;
+    const visibleTo = innerHeight - sheet.getBoundingClientRect().height;
+    const rect = row.getBoundingClientRect();
+    if (rect.top < 80 || rect.bottom > visibleTo - 12) scrollBy({ top: rect.top - Math.max(90, visibleTo * 0.45), behavior: "instant" });
+  }
 
   let sheetFrom = null;
   function closeDialog(dialog) {
@@ -488,32 +533,37 @@
   }
 
 
-  // Phones: a bottom sheet follows a finger pulling it down, from anywhere
-  // once its content is scrolled to the top, and closes past a third of its
-  // height or on a flick; otherwise it springs back. A form with unsaved
-  // input stays open, as on iOS.
+  // Phones: a bottom sheet follows the finger. Pulled down from the top of
+  // its content, it closes past a third of its height or on a flick, and
+  // springs back otherwise; a form with unsaved input stays open, as on iOS.
+  // Page details have two heights: half the screen, and nearly all of it.
+  // At half height any drag moves the sheet (up expands it); expanded, the
+  // content scrolls and a pull from its top brings it back to half.
   let pull = null;
   const sheetAt = (node) => node.closest?.("dialog.sheet[open], dialog.dialog[open], [popover].as-sheet:popover-open");
   const dismissSheet = (sheet) => {
     if (sheet.matches("[popover]")) sheet.hidePopover();
     else closeDialog(sheet);
   };
+  const heights = () => ({ half: Math.round(innerHeight * 0.56), full: Math.round(innerHeight * 0.92) });
   document.addEventListener("touchstart", (event) => {
     pull = null;
     if (event.touches.length !== 1 || !matchMedia("(max-width: 720px)").matches) return;
     const sheet = sheetAt(event.target);
     if (!sheet || event.target.closest("input, textarea, select, .chart-plot, pre")) return;
     const y = event.touches[0].clientY;
-    pull = { sheet, startY: y, lastY: y, lastAt: event.timeStamp, speed: 0, dy: 0, active: false, atTop: sheet.scrollTop <= 0 };
+    const detents = sheet.matches("[data-detents]");
+    pull = { sheet, detents, expanded: detents && sheet.classList.contains("expanded"), startY: y, lastY: y, lastAt: event.timeStamp, speed: 0, dy: 0, active: false, atTop: sheet.scrollTop <= 0 };
   }, { passive: true });
   document.addEventListener("touchmove", (event) => {
     if (!pull) return;
     const y = event.touches[0].clientY;
     const dy = y - pull.startY;
     if (!pull.active) {
-      // Only a pull down from the top moves the sheet; anything else scrolls it.
       if (Math.abs(dy) < 6) return;
-      if (dy < 0 || !pull.atTop || pull.sheet.scrollTop > 0) return void (pull = null);
+      // Expanded (or a sheet without heights): only a pull down from the top moves it.
+      const resizes = pull.detents && !pull.expanded;
+      if (!resizes && (dy < 0 || !pull.atTop || pull.sheet.scrollTop > 0)) return void (pull = null);
       pull.active = true;
       pull.sheet.style.transition = "none";
     }
@@ -521,22 +571,61 @@
     pull.speed = (y - pull.lastY) / Math.max(1, event.timeStamp - pull.lastAt);
     pull.lastY = y;
     pull.lastAt = event.timeStamp;
-    pull.dy = Math.max(0, dy - 6);
-    pull.sheet.style.transform = `translateY(${pull.dy}px)`;
+    pull.dy = dy;
+    if (pull.detents) {
+      const { half, full } = heights();
+      const height = Math.min(full, (pull.expanded ? full : half) - dy);
+      if (height >= half) {
+        pull.sheet.style.height = `${height}px`;
+        pull.sheet.style.transform = "";
+      } else {
+        pull.sheet.style.height = `${half}px`;
+        pull.sheet.style.transform = `translateY(${half - height}px)`;
+      }
+    } else {
+      pull.sheet.style.transform = `translateY(${Math.max(0, dy - 6)}px)`;
+    }
   }, { passive: false });
   const letGo = (cancelled) => {
     if (!pull?.active) return void (pull = null);
-    const { sheet, dy, speed } = pull;
+    const { sheet, dy, speed, detents, expanded } = pull;
     pull = null;
-    const close = !cancelled && !sheet.dataset.dirty && (dy > sheet.offsetHeight / 3 || (speed > 0.5 && dy > 30));
-    sheet.style.transition = "transform .18s ease-out";
-    sheet.style.transform = close ? `translateY(${sheet.offsetHeight}px)` : "";
+    const { half, full } = heights();
+    const flickDown = speed > 0.5 && dy > 30;
+    const flickUp = speed < -0.5 && dy < -30;
+    // Where the sheet ends up: closed, half, or full.
+    let to = detents ? (expanded ? "full" : "half") : "open";
+    if (!cancelled) {
+      if (!detents) {
+        if (!sheet.dataset.dirty && (dy > sheet.offsetHeight / 3 || flickDown)) to = "closed";
+      } else if (expanded) {
+        if (dy > full - half + half / 3 && !sheet.dataset.dirty) to = "closed";
+        else if (dy > 60 || flickDown) to = "half";
+      } else if (dy < -40 || flickUp) {
+        to = "full";
+      } else if ((dy > half / 3 || flickDown) && !sheet.dataset.dirty) {
+        to = "closed";
+      }
+    }
+    sheet.style.transition = "transform .2s ease-out, height .22s ease-out";
+    if (to === "closed") {
+      sheet.style.transform = `translateY(${sheet.offsetHeight}px)`;
+    } else {
+      sheet.style.transform = "";
+      if (detents) {
+        sheet.style.height = `${to === "full" ? full : half}px`;
+        sheet.classList.toggle("expanded", to === "full");
+        if (to === "half") sheet.scrollTop = 0;
+      }
+    }
     setTimeout(() => {
       sheet.style.transition = "";
-      if (!close) return;
+      sheet.style.height = "";
+      if (to !== "closed") return;
       sheet.style.transform = "";
+      sheet.classList.remove("expanded");
       dismissSheet(sheet);
-    }, 180);
+    }, 220);
   };
   document.addEventListener("touchend", () => letGo(false));
   document.addEventListener("touchcancel", () => letGo(true));
@@ -1496,8 +1585,12 @@
       dialog.autofocus = true;
       dialog.tabIndex = -1;
       // Wide screens keep the page beside a sheet usable, as an inspector.
-      if (dialog.matches("[data-sheet]") && matchMedia("(min-width: 1100px)").matches) dialog.show();
+      // Wide screens keep the page beside it usable; on phones, a half-height
+      // sheet keeps the list above it usable too.
+      const besidePage = matchMedia("(min-width: 1100px)").matches || (dialog.matches("[data-detents]") && matchMedia("(max-width: 720px)").matches);
+      if (dialog.matches("[data-sheet]") && besidePage) dialog.show();
       else dialog.showModal();
+      revealSelected(dialog);
       // Chrome focuses the first link despite autofocus on the dialog.
       dialog.focus({ preventScroll: true });
     });

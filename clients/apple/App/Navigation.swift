@@ -97,6 +97,8 @@ final class SiteState {
     var more: [Screen] = []
     /// The page shown in the inspector (Mac, iPad) or the page sheet (iPhone).
     var page: String?
+    /// iPhone: the page sheet opens at half height.
+    var pageDetent: PresentationDetent = .medium
     var addingNote = false
     /// People online now and the newest page view, from the live stream.
     var online: Int?
@@ -124,11 +126,22 @@ final class SiteState {
         screen = .pages
     }
 
-    /// Adds a filter, replacing one on the same dimension.
-    func filter(_ dimension: String, _ value: String) {
+    /// Adds a filter, replacing one on the same dimension. Said in a notice
+    /// with Undo, since its chip is at the top, often out of sight.
+    func filter(_ dimension: String, _ value: String, negated: Bool = false, label: String? = nil) {
+        let before = view
         view.filters.removeAll { $0.dimension == dimension }
-        view.filters.append(.init(dimension: dimension, value: value))
+        view.filters.append(.init(dimension: dimension, value: value, negated: negated))
+        notice = Notice(text: "Every report now shows \(Labels.dimension(dimension).lowercased()) \(negated ? "is not" : "is") \(label ?? Labels.value(value, dimension: dimension))", undo: before)
     }
+
+    /// A short message at the bottom of the window, with a way back.
+    struct Notice: Equatable {
+        let id = UUID()
+        var text: String
+        var undo: ViewState
+    }
+    var notice: Notice?
 
     func workspaceURL(_ screen: Screen) -> URL {
         view.workspaceURL(origin: client.instance.origin, site: site.slug, page: screen.workspacePage)
@@ -168,6 +181,8 @@ struct SiteRoot: View {
                 SplitShell()
             }
         }
+        .overlay(alignment: .bottom) { NoticeBar() }
+        .animation(.easeOut(duration: 0.2), value: state.notice)
         .environment(state)
         .focusedSceneValue(\.siteState, state)
         .tint(Theme.brand)
@@ -231,18 +246,23 @@ struct PhoneShell: View {
                 }
             }
         }
-        .sheet(item: Binding(get: { state.page.map(PageID.init) }, set: { state.page = $0?.path })) { page in
-            PageDetail(path: page.path)
-                .presentationDetents([.large])
-                .presentationDragIndicator(.visible)
-                .presentationBackground(Theme.canvas)
+        // Page details open at half height over the list, which stays usable:
+        // another row swaps the details in place; pull up for all of them,
+        // down to close.
+        .sheet(isPresented: Binding(get: { state.page != nil }, set: { if !$0 { state.page = nil } })) {
+            if let page = state.page {
+                PageDetail(path: page)
+                    .presentationDetents([.medium, .large], selection: $state.pageDetent)
+                    .presentationBackgroundInteraction(.enabled(upThrough: .medium))
+                    .presentationContentInteraction(.resizes)
+                    .presentationDragIndicator(.visible)
+                    .presentationBackground(Theme.canvas)
+            }
+        }
+        .onChange(of: state.page == nil) { _, closed in
+            if closed { state.pageDetent = .medium }
         }
     }
-}
-
-struct PageID: Identifiable {
-    var path: String
-    var id: String { path }
 }
 
 extension View {
@@ -574,6 +594,42 @@ struct ScreenView: View {
         case .performance: PerformanceView()
         case .revenue: RevenueView()
         case .retention: RetentionView()
+        }
+    }
+}
+
+/// The notice above the tab bar (iPhone) or at the bottom of the window:
+/// what changed, and Undo; it goes after five seconds.
+struct NoticeBar: View {
+    @Environment(SiteState.self) private var state
+    @Environment(\.horizontalSizeClass) private var sizeClass
+
+    var body: some View {
+        if let notice = state.notice {
+            HStack(spacing: 12) {
+                Icon("filter", size: 16).foregroundStyle(Color(red: 0.48, green: 0.83, blue: 0.63))
+                Text(notice.text).font(.subheadline).foregroundStyle(.white).lineLimit(2)
+                Spacer(minLength: 4)
+                Button("Undo") {
+                    state.view = notice.undo
+                    state.notice = nil
+                }
+                .buttonStyle(.plain)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Color(red: 1, green: 0.71, blue: 0.66))
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .frame(maxWidth: 520)
+            .background(Color(light: 0x282421, dark: 0x3A3330), in: .rect(cornerRadius: 14))
+            .shadow(color: .black.opacity(0.18), radius: 14, y: 6)
+            .padding(.horizontal, 16)
+            .padding(.bottom, sizeClass == .compact ? 92 : 20)
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+            .task(id: notice.id) {
+                try? await Task.sleep(for: .seconds(5))
+                if state.notice?.id == notice.id { withAnimation { state.notice = nil } }
+            }
         }
     }
 }

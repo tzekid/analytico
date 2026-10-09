@@ -109,10 +109,12 @@ struct SitesList: View {
                 }
                 .padding(.bottom, 12)
                 Text("Choose a site").font(Theme.display(30, relativeTo: .largeTitle)).foregroundStyle(Theme.ink)
-                Text(model.sites.isEmpty ? "Loading the sites you can see…" : "\(client.instance.host) has \(model.sites.count == 1 ? "one site" : "\(model.sites.count) sites") you can see. You can switch any time from the title bar.")
+                Text(model.sitesError != nil && model.sites.isEmpty ? "Couldn’t reach \(client.instance.host)." : model.sites.isEmpty ? "Loading the sites you can see…" : "\(client.instance.host) has \(model.sites.count == 1 ? "one site" : "\(model.sites.count) sites") you can see. You can switch any time from the title bar.")
                     .foregroundStyle(Theme.ink2)
-                if let error = model.sitesError {
+                if let error = model.sitesError, model.sites.isEmpty {
                     Problem(title: "Sites didn’t load", detail: error)
+                    Button("Try again") { Task { await model.loadSites() } }
+                        .buttonStyle(PrimaryButtonStyle(wide: true))
                 } else if model.sites.isEmpty {
                     ProgressView().frame(maxWidth: .infinity, minHeight: 120)
                 } else {

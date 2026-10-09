@@ -156,7 +156,7 @@ struct OverviewView: View {
             VStack(spacing: 8) {
                 ForEach(Array(data.sources.enumerated()), id: \.offset) { _, row in
                     let tone = Theme.channel(row["channel"]?.text)
-                    Button { state.filter("source", row["value"]?.text ?? "") } label: {
+                    Button { state.filter("source", row["value"]?.text ?? "", label: row["label"]?.text) } label: {
                         ShareRow(title: row["label"]?.text ?? row["value"]?.text ?? "", value: Format.count(Int(row["page_views"]?.number ?? 0)),
                                  share: share(row["page_views"]?.number ?? 0, top) * 0.85, color: tone.color, wash: tone.wash)
                             .contentShape(.rect)
@@ -179,7 +179,7 @@ struct OverviewView: View {
             VStack(spacing: 12) {
                 ForEach(Array(data.countries.prefix(5).enumerated()), id: \.offset) { _, row in
                     let code = row["value"]?.text ?? ""
-                    Button { state.filter("country", code) } label: {
+                    Button { state.filter("country", code, label: row["label"]?.text) } label: {
                         MeterRow(code: code == "unknown" ? "?" : code, title: row["label"]?.text ?? code, value: Format.share(row["page_views"]?.number ?? 0, of: total), share: share(row["page_views"]?.number ?? 0, total))
                             .contentShape(.rect)
                     }
@@ -538,6 +538,7 @@ struct TrendChart: View {
             }
         }
         .pointerSelection($selection, click: hourly ? nil : { date in if let point = nearest(date) { open?(point.at) } })
+        .sensoryFeedback(.selection, trigger: selection.flatMap(nearest)?.at)
         #if os(iOS)
         // The chosen bucket's value shows above the chart, and stays when the finger lifts.
         .onChange(of: selection) { _, now in

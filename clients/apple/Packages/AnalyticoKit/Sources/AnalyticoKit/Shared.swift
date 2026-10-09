@@ -21,6 +21,13 @@ public enum Shared {
         set { defaults.set(newValue.flatMap { try? JSONEncoder().encode($0) }, forKey: "instance") }
     }
 
+    /// The last list of sites, so the app opens straight to its site and
+    /// stays there when the instance can't be reached.
+    public static var sites: [Site] {
+        get { defaults.data(forKey: "sites").flatMap { try? JSONDecoder().decode([Site].self, from: $0) } ?? [] }
+        set { defaults.set(newValue.isEmpty ? nil : try? JSONEncoder().encode(newValue), forKey: "sites") }
+    }
+
     /// The site open in the app, the default for widgets and Siri.
     public static var site: String? {
         get { defaults.string(forKey: "site") }
