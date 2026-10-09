@@ -296,7 +296,34 @@ await journey("ux", async (t) => {
     await t.until(() => pill.evaluate((node) => node.classList.contains("shown")), "period pill shown");
     await pill.getByRole("button", { name: /^Period: / }).click();
     assert.equal(await phone.locator("#range-pop.as-sheet:popover-open").count(), 1);
-    await phone.keyboard.press("Escape");
+    // A tap on the dimmed page around it closes the sheet and presses nothing
+    // under it, here the site switcher.
+    const under = await phone.locator(".phone-site").boundingBox();
+    await touch("touchStart", [[under.x + under.width / 2, under.y + under.height / 2]]);
+    await touch("touchEnd", []);
+    await t.until(async () => (await phone.locator("[popover]:popover-open").count()) === 0, "period sheet closed");
+    await delay(200);
+    assert.equal(await phone.locator("#site-menu:popover-open").count(), 0);
+    // Another row, opened while a sheet shows one, takes its place and its
+    // mark; closing returns to the list and to where it was scrolled, and
+    // Back then leaves Pages: the sheet was one step, whatever it showed.
+    await phone.goto(`${base}/spike/pages?range=30d`);
+    const list = phone.url();
+    const rows = phone.locator("tbody tr[data-href]");
+    await rows.first().click();
+    const shown = phone.locator("dialog.sheet[open] h2");
+    await shown.waitFor();
+    const first = await shown.textContent();
+    await rows.nth(1).evaluate((row) => row.click());
+    await t.until(async () => (await shown.textContent()) !== first, "second row shown");
+    assert.equal(await rows.nth(1).getAttribute("aria-selected"), "true");
+    assert.equal(await rows.first().getAttribute("aria-selected"), null);
+    await phone.locator("dialog.sheet[open] .sheet-close").click();
+    await phone.waitForURL(list);
+    assert.equal(await phone.locator("dialog.sheet[open]").count(), 0);
+    await t.until(() => phone.evaluate(() => scrollY === 0), "scrolled back to where the list was");
+    await phone.goBack();
+    await phone.waitForURL((url) => !url.pathname.endsWith("/pages"));
   }
   await touchContext.close();
 

@@ -254,10 +254,14 @@
       document.title = next.title;
       // The row whose details are open stays marked, and in sight.
       const shown = new URL(url, location.href).searchParams.get("page");
-      $$("tr[data-href]").forEach((row) => row.toggleAttribute("aria-selected", shown !== null && new URL(row.dataset.href, location.href).searchParams.get("page") === shown));
-      revealSelected(openSheet);
-      if (mode === "push") history.pushState({}, "", url);
-      else if (mode === "replace") history.replaceState({}, "", url);
+      $$("tr[data-href]").forEach((row) => {
+        if (shown !== null && new URL(row.dataset.href, location.href).searchParams.get("page") === shown) row.setAttribute("aria-selected", "true");
+        else row.removeAttribute("aria-selected");
+      });
+      revealSelected(openSheet, 360);
+      // One history step per sheet, whatever row or tab it shows: closing it
+      // (or Back) returns to the list, not to the row before.
+      if (mode !== "none") history.replaceState(history.state, "", url);
       $$(".chart[data-chart]", openSheet).forEach(setupChart);
       return;
     }
@@ -357,6 +361,12 @@
   // ---- undo: a delete waits five seconds behind a toast before it is sent.
 
   let pendingUndo = null;
+  // A toast fades out rather than blinking away.
+  const fadeOut = (toast) => {
+    toast.classList.add("leaving");
+    setTimeout(() => toast.remove(), 160);
+  };
+
   function deferWithUndo(form, submitter) {
     flushUndo();
     form.closest("[popover]")?.hidePopover?.();
@@ -372,7 +382,7 @@
     const commit = () => {
       if (pendingUndo?.form !== form) return;
       pendingUndo = null;
-      toast.remove();
+      fadeOut(toast);
       form.dataset.undoing = "1";
       submit(form, submitter).finally(() => { delete form.dataset.undoing; });
     };
@@ -380,7 +390,7 @@
     toast.querySelector("button").addEventListener("click", () => {
       clearTimeout(pendingUndo?.timer);
       pendingUndo = null;
-      toast.remove();
+      fadeOut(toast);
       if (row) row.hidden = false;
     });
   }
@@ -481,7 +491,11 @@
   }
 
   history.scrollRestoration = "manual";
-  window.addEventListener("popstate", (event) => navigate(location.href, { mode: "none", keepScroll: true, scrollTo: event.state?.scroll ?? 0 }));
+  window.addEventListener("popstate", (event) => {
+    const scrollTo = returning ? null : event.state?.scroll ?? 0;
+    returning = false;
+    navigate(location.href, { mode: "none", keepScroll: true, scrollTo });
+  });
 
   // ------------------------------------------------------------ dialogs, sheets, popovers
 
@@ -504,31 +518,105 @@
     const [dim, ...rest] = added[0].split(":");
     toast.firstChild.textContent = `Every report now shows ${dim.replace(/!$/, "")} ${dim.endsWith("!") ? "is not" : "is"} ${name || rest.join(":")}`;
     $("#toasts")?.appendChild(toast);
-    const timer = setTimeout(() => toast.remove(), 5000);
+    const timer = setTimeout(() => fadeOut(toast), 5000);
     toast.querySelector("button").addEventListener("click", () => {
       clearTimeout(timer);
-      toast.remove();
+      fadeOut(toast);
       navigate(before, { keepScroll: true });
     });
   }
 
-  function revealSelected(sheet) {
-    if (!sheet.matches("[data-detents]") || !matchMedia("(max-width: 720px)").matches) return;
+  // Sheets rise on the curve iOS sheets rise on: quick, then settling. Sent
+  // away by a button, one drops on a smooth S, as from rest; let go of
+  // mid-drag, it carries on at the rising pace. When a sheet moves the page
+  // (to keep its row in sight, or back), the page glides on the same curve.
+  const RISE = [.32, .72, 0, 1], DROP = [.45, 0, .2, 1];
+  const bezier = ([a, b, c, d]) => `cubic-bezier(${a}, ${b}, ${c}, ${d})`;
+  const OPEN_MS = 420, CLOSE_MS = 340;
+  const still = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
+  function ease([x1, y1, x2, y2], t) {
+    const at = (u, p1, p2) => 3 * p1 * u * (1 - u) ** 2 + 3 * p2 * u * u * (1 - u) + u ** 3;
+    let lo = 0, hi = 1, u = t;
+    for (let i = 0; i < 20; i++) {
+      u = (lo + hi) / 2;
+      if (at(u, x1, x2) < t) lo = u; else hi = u;
+    }
+    return at(u, y1, y2);
+  }
+  let gliding = 0;
+  function glideTo(top, ms, curve = RISE) {
+    const from = scrollY, id = ++gliding;
+    if (Math.abs(top - from) < 1) return Promise.resolve();
+    if (still()) return Promise.resolve(scrollTo({ top, behavior: "instant" }));
+    const started = performance.now();
+    return new Promise((done) => {
+      const step = (now) => {
+        if (id !== gliding) return done();
+        const t = Math.min(1, (now - started) / ms);
+        scrollTo({ top: from + (top - from) * ease(curve, t), behavior: "instant" });
+        if (t < 1) requestAnimationFrame(step);
+        else done();
+      };
+      requestAnimationFrame(step);
+    });
+  }
+  // A finger or wheel on the page takes over from a glide.
+  addEventListener("wheel", () => gliding++, { passive: true });
+  addEventListener("touchstart", (event) => { if (!sheetAt(event.target)) gliding++; }, { passive: true });
+  const maxScroll = () => document.documentElement.scrollHeight - innerHeight;
+
+  // Where the last reveal moved the page from and to: closing the sheet
+  // undoes it, unless the page was scrolled since.
+  let reveal = null;
+  function revealSelected(sheet, ms) {
+    if (!sheet.matches("[data-detents]") || !phone()) return;
     const row = $("tr[aria-selected]");
     if (!row) return;
     const visibleTo = innerHeight - sheet.getBoundingClientRect().height;
     const rect = row.getBoundingClientRect();
-    if (rect.top < 80 || rect.bottom > visibleTo - 12) scrollBy({ top: rect.top - Math.max(90, visibleTo * 0.45), behavior: "instant" });
+    const to = rect.top < 80 || rect.bottom > visibleTo - 12 ? Math.max(0, Math.min(maxScroll(), scrollY + rect.top - Math.max(90, visibleTo * 0.45))) : scrollY;
+    // Row after row, the page still goes back to where it was before the first.
+    reveal = { from: reveal && Math.abs(scrollY - reveal.to) < 2 ? reveal.from : scrollY, to };
+    glideTo(to, ms);
   }
 
-  let sheetFrom = null;
-  function closeDialog(dialog) {
+  // A detent sheet adds room under the list; closing takes it away, so the
+  // page first glides to where it will rest without that room.
+  let sheetRoom = 0;
+  const panelPadding = () => parseFloat(getComputedStyle($(".panel") || document.body).paddingBottom);
+  const phone = () => matchMedia("(max-width: 720px)").matches;
+  const closeMs = () => phone() ? CLOSE_MS : 140;
+  function settle(curve) {
+    const back = reveal && Math.abs(scrollY - reveal.to) < 2 ? reveal.from : scrollY;
+    reveal = null;
+    return glideTo(Math.max(0, Math.min(back, maxScroll() - sheetRoom)), closeMs(), curve);
+  }
+
+  // A sheet leaves the way it came: down to the bottom edge on phones, a
+  // short fade elsewhere; it closes once it's out of sight.
+  function leave(dialog, curve) {
+    if (still()) return;
+    const away = phone() ? "translateY(calc(100% + 40px))" : dialog.matches(".sheet") ? "translateX(16px)" : "translateY(6px) scale(.99)";
+    const frames = [{ transform: getComputedStyle(dialog).transform }, { transform: away, ...(phone() ? {} : { opacity: 0 }) }];
+    return dialog.animate(frames, { duration: closeMs(), easing: phone() ? bezier(curve) : "ease-in", fill: "forwards" }).finished.catch(() => {});
+  }
+
+  let sheetFrom = null, returning = false;
+  async function closeDialog(dialog, { dragged = false } = {}) {
+    if (dialog.classList.contains("leaving")) return;
+    dialog.classList.add("leaving");
     const href = dialog.dataset.closeHref;
+    const curve = dragged ? RISE : DROP;
+    await Promise.all([leave(dialog, curve), dialog.matches("[data-detents]") && settle(curve)]);
     dialog.close();
+    dialog.classList.remove("leaving");
+    dialog.getAnimations().forEach((animation) => animation.cancel());
+    dialog.style.transform = dialog.style.height = dialog.style.transition = "";
     if (!href) return;
     const back = sheetFrom && new URL(sheetFrom).href === new URL(href, location.href).href && history.length > 1;
     sheetFrom = null;
-    if (back) history.back();
+    // The page is already where it should be; "back" doesn't move it again.
+    if (back) { returning = true; history.back(); }
     else navigate(href, { mode: "replace", keepScroll: true });
   }
 
@@ -543,12 +631,12 @@
   const sheetAt = (node) => node.closest?.("dialog.sheet[open], dialog.dialog[open], [popover].as-sheet:popover-open");
   const dismissSheet = (sheet) => {
     if (sheet.matches("[popover]")) sheet.hidePopover();
-    else closeDialog(sheet);
+    else closeDialog(sheet, { dragged: true });
   };
   const heights = () => ({ half: Math.round(innerHeight * 0.56), full: Math.round(innerHeight * 0.92) });
   document.addEventListener("touchstart", (event) => {
     pull = null;
-    if (event.touches.length !== 1 || !matchMedia("(max-width: 720px)").matches) return;
+    if (event.touches.length !== 1 || !phone()) return;
     const sheet = sheetAt(event.target);
     if (!sheet || event.target.closest("input, textarea, select, .chart-plot, pre")) return;
     const y = event.touches[0].clientY;
@@ -607,25 +695,24 @@
         to = "closed";
       }
     }
-    sheet.style.transition = "transform .2s ease-out, height .22s ease-out";
+    // Closing carries on from where the finger let go.
     if (to === "closed") {
-      sheet.style.transform = `translateY(${sheet.offsetHeight}px)`;
-    } else {
-      sheet.style.transform = "";
-      if (detents) {
-        sheet.style.height = `${to === "full" ? full : half}px`;
-        sheet.classList.toggle("expanded", to === "full");
-        if (to === "half") sheet.scrollTop = 0;
-      }
+      sheet.style.transition = "";
+      if (sheet.matches("[popover]")) sheet.style.transform = "";
+      return dismissSheet(sheet);
+    }
+    sheet.style.transition = `transform ${OPEN_MS}ms ${bezier(RISE)}, height ${OPEN_MS}ms ${bezier(RISE)}`;
+    sheet.style.transform = "";
+    if (detents) {
+      sheet.style.height = `${to === "full" ? full : half}px`;
+      sheet.classList.toggle("expanded", to === "full");
+      if (to === "half") sheet.scrollTop = 0;
     }
     setTimeout(() => {
+      if (pull?.active && pull.sheet === sheet) return;
       sheet.style.transition = "";
       sheet.style.height = "";
-      if (to !== "closed") return;
-      sheet.style.transform = "";
-      sheet.classList.remove("expanded");
-      dismissSheet(sheet);
-    }, 220);
+    }, OPEN_MS);
   };
   document.addEventListener("touchend", () => letGo(false));
   document.addEventListener("touchcancel", () => letGo(true));
@@ -654,19 +741,39 @@
     }
   }, true);
 
+  // Phones: a tap on the dimmed page around a popover sheet closes the sheet
+  // and nothing else, as on iOS; it doesn't also press what lies under it.
+  let scrimTap = false;
+  document.addEventListener("pointerdown", (event) => {
+    const open = $("[popover].as-sheet:popover-open");
+    scrimTap = !!open && !open.contains(event.target);
+  }, true);
+  document.addEventListener("mousedown", (event) => { if (scrimTap) event.preventDefault(); }, true);
+  for (const type of ["pointercancel", "keydown"]) document.addEventListener(type, () => { scrimTap = false; }, true);
+  document.addEventListener("click", (event) => {
+    if (!scrimTap) return;
+    scrimTap = false;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }, true);
+
   // The button that opened a popover anchors it, so the period pill's
   // sheets open by the pill, not by the period bar scrolled out of sight.
   let invoker = null;
   document.addEventListener("click", (event) => { invoker = event.target.closest?.("[popovertarget]") || invoker; }, true);
 
+  // Phones get popovers as sheets from the bottom of the screen, decided
+  // before one shows so that it rises into place rather than appearing.
+  document.addEventListener("beforetoggle", (event) => {
+    const pop = event.target;
+    if (!(pop instanceof HTMLElement) || !pop.hasAttribute("popover") || event.newState !== "open") return;
+    pop.classList.toggle("as-sheet", phone());
+    if (phone()) pop.style.left = pop.style.top = "";
+  }, true);
   document.addEventListener("toggle", (event) => {
     const pop = event.target;
     if (!(pop instanceof HTMLElement) || !pop.hasAttribute("popover") || event.newState !== "open") return;
-    // Phones get popovers as sheets from the bottom of the screen.
-    const sheet = matchMedia("(max-width: 720px)").matches;
-    pop.classList.toggle("as-sheet", sheet);
-    if (sheet) {
-      pop.style.left = pop.style.top = "";
+    if (pop.classList.contains("as-sheet")) {
       if (pop.matches("#filter-pop")) setupFilter(pop);
       return;
     }
@@ -1616,10 +1723,13 @@
       // Wide screens keep the page beside a sheet usable, as an inspector.
       // Wide screens keep the page beside it usable; on phones, a half-height
       // sheet keeps the list above it usable too.
-      const besidePage = matchMedia("(min-width: 1100px)").matches || (dialog.matches("[data-detents]") && matchMedia("(max-width: 720px)").matches);
+      const besidePage = matchMedia("(min-width: 1100px)").matches || (dialog.matches("[data-detents]") && phone());
+      const padding = panelPadding();
       if (dialog.matches("[data-sheet]") && besidePage) dialog.show();
       else dialog.showModal();
-      revealSelected(dialog);
+      sheetRoom = panelPadding() - padding;
+      reveal = null;
+      revealSelected(dialog, OPEN_MS);
       // Chrome focuses the first link despite autofocus on the dialog.
       dialog.focus({ preventScroll: true });
     });
@@ -1632,7 +1742,7 @@
       params.delete("dialog");
       history.replaceState({}, "", location.pathname + (params.toString() ? `?${params}` : ""));
     }
-    $$(".toast").forEach((toast) => setTimeout(() => toast.remove(), 6000));
+    $$(".toast").forEach((toast) => setTimeout(() => fadeOut(toast), 6000));
     // On phones the settings menu scrolls sideways; keep the current section in view.
     const subnav = $(".subnav");
     const current = subnav && $("[aria-current]", subnav);
@@ -1684,6 +1794,9 @@
       if (opener.dataset.noteDay) { const day = $("input[name=day]", dialog); if (day) day.value = opener.dataset.noteDay; }
       if (opener.dataset.connect) setupConnect(dialog, opener.dataset.connect);
       dialog.showModal();
+      // The dialog itself takes focus, not its close button (which Safari
+      // rings), unless something in it asks for focus.
+      if (!dialog.querySelector("[autofocus]")) { dialog.tabIndex = -1; dialog.focus({ preventScroll: true }); }
       if (dialog.matches("#alert-dialog")) alertPreview(dialog);
     }],
     ["[data-close]", (closer, event) => {

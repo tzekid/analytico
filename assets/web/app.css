@@ -5,6 +5,10 @@
 @font-face { font-family: "Quando fallback"; src: local("Georgia"), local("Times New Roman"), local("Liberation Serif"); ascent-override: 99.12%; descent-override: 25.88%; line-gap-override: 0%; }
 
 :root {
+  /* Sheets rise on the curve iOS sheets rise on, and drop on a smooth S, as
+     from rest; app.js moves sheets and the page on the same two (RISE, DROP). */
+  --sheet-ease: cubic-bezier(.32, .72, 0, 1);
+  --sheet-drop: cubic-bezier(.45, 0, .2, 1);
   --canvas: #f7f5f4; --surface: #fff; --subtle: #f3efed; --border: #e9e4e1; --border-strong: #ddd5d1;
   --ink: #282421; --ink-2: #6f625d; --muted: #766a64;
   --brand: #d64937; --brand-dark: #b53a2b; --brand-wash: #fbedea;
@@ -480,6 +484,7 @@ dialog:focus { outline: none; }
 .toast form, .toast a { margin-left: auto; }
 .toast button, .toast a { border: 0; background: none; color: var(--link-on-dark); font-weight: 600; font-size: 13px; padding: 0 0 0 12px; }
 @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } }
+.toast.leaving { opacity: 0; transform: translateY(8px); transition: opacity .16s ease-in, transform .16s ease-in; }
 
 /* Palette */
 .palette { width: min(640px, calc(100vw - 32px)); margin-top: 12vh; padding: 0; border: 0; border-radius: 14px; background: var(--surface); box-shadow: 0 24px 64px -12px #2824214d; }
@@ -670,6 +675,16 @@ dialog:focus { outline: none; }
   [popover].as-sheet.as-sheet { position: fixed; inset: auto 0 0 0; width: 100%; max-width: none; max-height: 88vh; overflow-y: auto; padding: 22px 8px calc(16px + env(safe-area-inset-bottom)); border: 0; border-radius: 28px 28px 0 0; background: var(--surface); box-shadow: 0 -8px 32px var(--elev); }
   [popover].as-sheet::before { content: ""; position: absolute; top: 8px; left: 50%; width: 37px; height: 5px; margin-left: -18px; border-radius: 3px; background: var(--border-strong); }
   [popover].as-sheet::backdrop { background: var(--scrim); }
+  /* Rise from the bottom edge and drop back to it, the backdrop fading along.
+     z-index matters only on the way out, where Safari has left the top layer. */
+  [popover].as-sheet { z-index: 40; transform: translateY(calc(100% + 40px)); transition: transform .34s var(--sheet-drop), display .34s allow-discrete, overlay .34s allow-discrete; }
+  [popover].as-sheet:popover-open { transform: none; transition-duration: .42s; transition-timing-function: var(--sheet-ease); }
+  @starting-style { [popover].as-sheet:popover-open { transform: translateY(calc(100% + 40px)); } }
+  [popover].as-sheet::backdrop { opacity: 0; transition: opacity .34s, display .34s allow-discrete, overlay .34s allow-discrete; }
+  [popover].as-sheet:popover-open::backdrop { opacity: 1; }
+  @starting-style { [popover].as-sheet:popover-open::backdrop { opacity: 0; } }
+  /* A tap on the dimmed page only closes the sheet (app.js), so nothing under it lights up as pressed. */
+  html:has([popover].as-sheet:popover-open) { -webkit-tap-highlight-color: transparent; }
   .as-sheet .menu-item { padding: 12px 14px; font-size: 16px; }
   .sheet { inset: auto 0 0 0; width: 100%; max-height: 92vh; border-radius: 28px 28px 0 0; border: 0; padding-bottom: env(safe-area-inset-bottom); }
   .sheet-head::before { content: ""; position: absolute; top: 8px; left: 50%; width: 37px; height: 5px; margin-left: -18px; border-radius: 3px; background: var(--border-strong); }
@@ -699,8 +714,9 @@ dialog:focus { outline: none; }
   .sheet-actions .btn.btn-pill { flex-direction: column; gap: 4px; height: 58px; padding: 0 6px; border-radius: 14px; font-size: 13px; }
   .sheet-actions .btn .i { width: 20px; height: 20px; }
   /* Page details: half height over the list, which stays usable; pulled up, nearly all of it. */
-  dialog.sheet[data-detents] { height: 56vh; max-height: none; overflow-y: hidden; box-shadow: 0 -10px 36px var(--elev), 0 -1px 0 var(--border); transition: height .22s ease-out; }
-  dialog.sheet[data-detents].expanded { height: 92vh; overflow-y: auto; }
+  /* dvh: the heights app.js works out from innerHeight, with Safari's toolbars shown or not. */
+  dialog.sheet[data-detents] { height: 56dvh; max-height: none; overflow-y: hidden; box-shadow: 0 -10px 36px var(--elev), 0 -1px 0 var(--border); transition: height .42s var(--sheet-ease); }
+  dialog.sheet[data-detents].expanded { height: 92dvh; overflow-y: auto; }
   dialog.sheet:not(:modal) { z-index: 30; }
   /* Every row can scroll clear of a half-height sheet. */
   html:has(dialog.sheet[data-detents][open]) .panel { padding-bottom: 60vh; }
@@ -746,9 +762,20 @@ html.loading::before { content: ""; position: fixed; top: 0; left: 0; right: 0; 
 .why { top: 40%; }
 dialog[open] { animation: dialog-in .16s ease-out; }
 dialog.sheet[open] { animation: sheet-in .2s ease-out; }
+dialog[open]::backdrop { animation: fade-in .3s ease-out; }
+/* app.js moves a closing dialog out; its backdrop fades meanwhile. */
+dialog.leaving { pointer-events: none; }
+dialog.leaving::backdrop { opacity: 0; transition: opacity .34s ease-out; }
 @keyframes dialog-in { from { opacity: 0; transform: translateY(6px) scale(.99); } }
 @keyframes sheet-in { from { opacity: 0; transform: translateX(16px); } }
-@media (max-width: 720px) { @keyframes sheet-in { from { opacity: 0; transform: translateY(24px); } } }
+@keyframes fade-in { from { opacity: 0; } }
+/* Phones: sheets and dialogs rise from the bottom edge. */
+@keyframes sheet-up { from { transform: translateY(calc(100% + 40px)); } }
+@media (max-width: 720px) { dialog.sheet[open], dialog.dialog[open] { animation: sheet-up .42s var(--sheet-ease); } }
+/* Popover menus fade in by their button, and out. */
+.pop { transition: opacity .12s ease-out, transform .12s ease-out, display .12s allow-discrete, overlay .12s allow-discrete; }
+.pop:not(:popover-open):not(.as-sheet) { opacity: 0; transform: translateY(-4px); }
+@starting-style { .pop:popover-open:not(.as-sheet) { opacity: 0; transform: translateY(-4px); } }
 /* A page shown from memory while its fresh copy loads. */
 html.refreshing::before { content: ""; position: fixed; top: 0; left: 0; right: 0; height: 2px; z-index: 100; background: linear-gradient(90deg, transparent, var(--brand-wash), transparent); background-size: 50% 100%; animation: loading 1.4s infinite linear; }
 .chart.drillable .chart-plot { cursor: pointer; }
@@ -1022,7 +1049,8 @@ tr[aria-selected="true"] .bars i { background: var(--error); }
 .row-between.top { align-items: flex-start; }
 .mark.mark-chatgpt { background: var(--ink); color: var(--surface); }
 .brand.flush-pad { padding: 0; }
-.dialog.dialog-narrow { width: min(420px, calc(100vw - 32px)); }
+/* Phones keep the full-width bottom sheet every dialog becomes there. */
+@media (min-width: 721px) { .dialog.dialog-narrow { width: min(420px, calc(100vw - 32px)); } }
 .dialog-foot.dialog-foot-plain { justify-content: flex-start; border: 0; padding-top: 0; }
 .site-avatar.site-avatar-s { width: 22px; height: 22px; font-size: 12px; }
 .link.add-condition { border: 0; background: none; padding: 12px 0 4px; display: inline-flex; gap: 6px; align-items: center; }
