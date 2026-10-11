@@ -255,23 +255,13 @@ pub fn apiPost(ctx: *Ctx, action: []const u8, page: anytype) !void {
     @import("../domain.zig").validateText(name, 60, false) catch return fail(ctx, "api", "Give the key a name.");
     const site_id: ?i64 = std.fmt.parseInt(i64, try ctx.field("site"), 10) catch null;
     if (site_id) |id| if (!try ctx.canSee(id)) return fail(ctx, "api", "Unknown website.");
-    const random = try auth.newToken(ctx.shared.io);
-    const token = try std.fmt.allocPrint(arena, "an_{s}", .{&random});
-    const hashed = auth.hashToken(token);
-    {
+    const token = blk: {
         const db = ctx.shared.lockWrite();
         defer ctx.shared.unlockWrite();
-        var statement = try db.prepare(arena, "INSERT INTO api_keys(name,token_hash,prefix,user_id,site_id,created_at_ms) VALUES(?,?,?,?,?,?)");
-        defer statement.deinit();
-        try statement.bindText(1, name);
-        try statement.bindText(2, &hashed);
-        try statement.bindText(3, token[token.len - 4 ..]);
-        try statement.bindInt(4, ctx.user.?.id);
-        try statement.bindOptionalInt(5, site_id);
-        try statement.bindInt(6, ctx.now());
-        _ = try statement.step();
+        const token = try auth.createApiKey(arena, ctx.shared.io, db, ctx.user.?.id, site_id, name, ctx.now());
         try audit.record(ctx, db, site_id, "api.created", try std.fmt.allocPrint(arena, "Created API key “{s}”", .{name}));
-    }
+        break :blk token;
+    };
     return page(ctx, "api", try shownOnce(arena, try std.fmt.allocPrint(arena, "Key “{s}” created", .{name}), "New API key", token, "Copy", "Shown once. It reads with your access."));
 }
 

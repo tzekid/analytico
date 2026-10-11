@@ -48,6 +48,8 @@ pub fn run(
     if (std.mem.eql(u8, args[1], "user") and args.len >= 4 and std.mem.eql(u8, args[2], "invite")) {
         return runInvite(allocator, io, output, args[3], data, option(args, "--origin") orelse return error.MissingOrigin);
     }
+    if (std.mem.eql(u8, args[1], "user") and args.len >= 4 and std.mem.eql(u8, args[2], "session")) return runUserSession(allocator, io, output, args[3], data);
+    if (std.mem.eql(u8, args[1], "user") and args.len >= 5 and std.mem.eql(u8, args[2], "key")) return runUserKey(allocator, io, output, args, data);
     if (std.mem.eql(u8, args[1], "vacuum") and args.len >= 3) {
         return ops.vacuum(allocator, io, output, args[2], option(args, "--backup") orelse return error.MissingBackup);
     }
@@ -100,6 +102,37 @@ fn runInvite(allocator: std.mem.Allocator, io: std.Io, output: *std.Io.Writer, e
     try pinOrigin(allocator, &store, origin);
     const token = try @import("web/auth.zig").createInvite(allocator, io, &store.database, email, domain.nowMs());
     try output.print("invite created email={s} expires_in_days=7\n{s}/invite/{s}\n", .{ email, origin, &token });
+}
+
+fn userId(allocator: std.mem.Allocator, store: *store_mod.Store, email_raw: []const u8) !i64 {
+    const email = try @import("web/auth.zig").normalizeEmail(allocator, email_raw);
+    const id = try store.database.scalar(allocator, i64, "SELECT id FROM users WHERE email=?", .{email});
+    return if (id == 0) error.UnknownUser else id;
+}
+
+/// Signs someone in from the shell, for scripts and tests: prints the `an_s`
+/// cookie value. Whoever runs the CLI already holds the database.
+fn runUserSession(allocator: std.mem.Allocator, io: std.Io, output: *std.Io.Writer, email: []const u8, data: []const u8) !void {
+    var store = try store_mod.Store.open(allocator, io, data, true);
+    defer store.close();
+    const token = try @import("web/auth.zig").createSession(allocator, io, &store.database, try userId(allocator, &store, email), domain.nowMs());
+    try output.print("{s}\n", .{&token});
+}
+
+/// A read API key, as Settings → API creates it: prints the key once.
+fn runUserKey(allocator: std.mem.Allocator, io: std.Io, output: *std.Io.Writer, args: []const []const u8, data: []const u8) !void {
+    const name = args[4];
+    if (std.mem.startsWith(u8, name, "--")) return error.MissingKeyName;
+    try domain.validateText(name, 60, false);
+    var store = try store_mod.Store.open(allocator, io, data, true);
+    defer store.close();
+    const user_id = try userId(allocator, &store, args[3]);
+    const site_id: ?i64 = if (option(args, "--site")) |slug| blk: {
+        var site = try store.siteBySlug(slug);
+        defer site.deinit(allocator);
+        break :blk site.id;
+    } else null;
+    try output.print("{s}\n", .{try @import("web/auth.zig").createApiKey(allocator, io, &store.database, user_id, site_id, name, domain.nowMs())});
 }
 
 /// Configures SMTP from the shell. The password comes from stdin so it never
@@ -349,6 +382,18 @@ fn runSite(
         try output.print("{s}\n", .{std.fmt.bytesToHex(site.internal_secret, .lower)});
         return;
     }
+    if (std.mem.eql(u8, args[2], "sign") and args.len >= 4) {
+        // The headers for a server batch read from stdin, signed now.
+        var site = try store.siteBySlug(args[3]);
+        defer site.deinit(allocator);
+        var buffer: [4096]u8 = undefined;
+        var stdin = std.Io.File.stdin().reader(io, &buffer);
+        const ingest = @import("collector.zig");
+        const body = try stdin.interface.allocRemaining(allocator, .limited(ingest.maximum_body_bytes));
+        const timestamp = @divFloor(domain.nowMs(), 1000);
+        try output.print("x-analytico-timestamp: {d}\nx-analytico-signature: {s}\n", .{ timestamp, &ingest.sign(site.internal_secret, timestamp, body) });
+        return;
+    }
     if (std.mem.eql(u8, args[2], "list")) {
         try output.writeAll("slug\tpublic_id\tmode\tenabled\n");
         var statement = try store.database.prepare(allocator, "SELECT slug,public_id,tracking_mode,enabled FROM sites ORDER BY slug");
@@ -448,10 +493,16 @@ pub fn writeUsage(output: *std.Io.Writer) !void {
         \\  analytico forget <site> --visitor <id> | --user <your-user-id> --data <dir>
         \\  analytico site origin-add <slug> <origin> [--data <dir>]
         \\  analytico site list|show|snippet|disable ... [--data <dir>]
+        \\  analytico site sign <slug> --data <dir> < batch.json
+        \\    prints the headers that sign a server batch for POST /i
         \\
         \\Workspace:
         \\  analytico user invite <email> --origin https://analytics.example.com --data <dir>
         \\    prints a one-time link to sign in (passkey, Google, ChatGPT or password)
+        \\  analytico user session <email> --data <dir>
+        \\    prints a sign-in cookie (an_s) for scripts and tests
+        \\  analytico user key <email> <name> [--site <slug>] --data <dir>
+        \\    prints a read API key with that person's access
         \\
         \\Operations:
         \\  analytico serve --data <dir> --listen 127.0.0.1:4318

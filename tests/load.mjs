@@ -8,7 +8,7 @@
 //    work dir seeded by an earlier run.
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
 import { createServer } from "node:http";
 import { join, resolve } from "node:path";
@@ -23,8 +23,6 @@ const data = join(work, "data");
 const origin = "https://load.example";
 
 const now = Date.now();
-const sessionToken = "a".repeat(64);
-const apiToken = `an_${"b".repeat(64)}`;
 const reservation = createServer();
 await new Promise((done) => reservation.listen(0, "127.0.0.1", done));
 const port = reservation.address().port;
@@ -128,13 +126,11 @@ if (!readsOnly) {
 
 // ---------------------------------------------------------------- reads
 
-// The workspace session and an API key, as the workspace would create them.
-const sha = (value) => createHash("sha256").update(value).digest("hex");
-const auth = new DatabaseSync(join(data, "analytico.db"));
-auth.prepare("INSERT OR IGNORE INTO users(id,email,role,created_at_ms) VALUES(1,'owner@load.example','owner',?)").run(now);
-auth.prepare("INSERT OR REPLACE INTO web_sessions(token_hash,user_id,created_at_ms,expires_at_ms) VALUES(?,1,?,?)").run(sha(sessionToken), now, now + 86_400_000);
-auth.prepare("INSERT OR IGNORE INTO api_keys(name,token_hash,prefix,user_id,site_id,created_at_ms) VALUES('load',?,'bbbb',1,NULL,?)").run(sha(apiToken), now);
-auth.close();
+// The workspace session and an API key, from the CLI as an operator would.
+const cli = (...args) => execFileSync(app, [...args, "--data", data], { encoding: "utf8" }).trim();
+cli("user", "invite", "owner@load.example", "--origin", "https://analytics.load.example");
+const sessionToken = cli("user", "session", "owner@load.example");
+const apiToken = cli("user", "key", "owner@load.example", "load");
 
 await start();
 // The background job summarises closed days and today up to a recent cut,

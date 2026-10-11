@@ -5,7 +5,7 @@
 // restore, in-place page morphing, remembered views, undoable deletes,
 // keyboard shortcuts and chart drill-down.
 import assert from "node:assert/strict";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { journey } from "./harness.mjs";
 
@@ -85,10 +85,11 @@ await journey("ux", async (t) => {
   await page.waitForURL(`${base}/ux`);
   // ---------------------------------------------------------------- headers
 
-  const apiToken = `an_${"c".repeat(64)}`;
-  const writer = t.db("analytico.db", {});
-  writer.prepare("INSERT INTO api_keys(name,token_hash,prefix,user_id,site_id,created_at_ms) VALUES('ux',?,'cccc',(SELECT min(id) FROM users),NULL,?)").run(createHash("sha256").update(apiToken).digest("hex"), Date.now());
-  writer.close();
+  // A read API key from Settings → API, shown once.
+  await page.goto(`${base}/settings/api`);
+  await page.locator("input[name=name]").fill("ux");
+  await page.locator("form[action='/settings/api/create'] button").click();
+  const apiToken = await page.locator("input[readonly][value^='an_']").inputValue();
   const bearer = { authorization: `Bearer ${apiToken}` };
   const first = await fetch(`${base}/api/v1/sites/ux/overview?range=7d`, { headers: bearer });
   assert.equal(first.status, 200);

@@ -120,6 +120,12 @@ same chooser: create a passkey, or use another allowed method. Sign-in failures
 are rate limited per client address. Sessions last thirty days; setting a new
 password signs out every other device.
 
+Scripts and tests sign in from the shell instead of forging rows: `analytico
+user session <email>` prints a session cookie (`an_s`) and `analytico user key
+<email> <name> [--site <slug>]` prints a read API key, both for an existing
+person (`user invite` creates one; the first becomes the owner). Like every
+CLI write, they run while the service is stopped.
+
 Google sign-in needs an OAuth client (Web application) from Google Cloud with
 the redirect URI `https://<your-origin>/auth/google/callback`; paste its ID and
 secret under Settings → Sign-in → Google. Sign in with ChatGPT (to Analytico itself) works the
@@ -229,8 +235,9 @@ Webhooks receive JSON signed like `/i`: lowercase hex
 `X-Analytico-Signature`, the Unix timestamp in `X-Analytico-Timestamp`. The
 secret is shown once when the webhook is added.
 
-The read API (`/api/v1/...`) uses keys from Settings → API & public links;
-each reads with its creator's access, optionally narrowed to one website.
+The read API (`/api/v1/...`) uses keys from Settings → API & public links
+(or `analytico user key`); each reads with its creator's access, optionally
+narrowed to one website.
 
 ## Administration
 
@@ -293,7 +300,8 @@ analytico vacuum ~/.local/share/analytico-sqlite \
 For exact body bytes `BODY` and Unix timestamp `T`, send lowercase hex
 `HMAC-SHA256(site_secret, T + "." + BODY)` in `X-Analytico-Signature` and `T`
 in `X-Analytico-Timestamp`. The body must use the site's public ID and arrive
-within five minutes.
+within five minutes. `analytico site sign <slug> < batch.json` prints both
+headers for a body, for scripts and tests that should not handle the secret.
 
 ## Deletion requests
 

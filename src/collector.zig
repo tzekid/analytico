@@ -1111,11 +1111,21 @@ pub fn verifySignature(secret: [32]u8, timestamp_text: []const u8, signature_tex
     if (signature_text.len != 64) return error.InvalidSignature;
     var candidate: [32]u8 = undefined;
     _ = std.fmt.hexToBytes(&candidate, signature_text) catch return error.InvalidSignature;
-    var writer: std.Io.Writer.Allocating = .init(std.heap.page_allocator);
-    defer writer.deinit();
-    try writer.writer.print("{d}.", .{timestamp});
-    try writer.writer.writeAll(body);
-    var expected: [32]u8 = undefined;
-    std.crypto.auth.hmac.sha2.HmacSha256.create(&expected, writer.writer.buffered(), &secret);
-    if (!std.crypto.timing_safe.eql([32]u8, expected, candidate)) return error.InvalidSignature;
+    if (!std.crypto.timing_safe.eql([32]u8, mac(secret, timestamp, body), candidate)) return error.InvalidSignature;
+}
+
+/// The `x-analytico-signature` of a server batch sent at `timestamp` (seconds).
+pub fn sign(secret: [32]u8, timestamp: i64, body: []const u8) [64]u8 {
+    return std.fmt.bytesToHex(mac(secret, timestamp, body), .lower);
+}
+
+/// HMAC-SHA256 of "<timestamp>.<body>" under the site's internal secret.
+fn mac(secret: [32]u8, timestamp: i64, body: []const u8) [32]u8 {
+    var hmac = std.crypto.auth.hmac.sha2.HmacSha256.init(&secret);
+    var prefix: [24]u8 = undefined;
+    hmac.update(std.fmt.bufPrint(&prefix, "{d}.", .{timestamp}) catch unreachable);
+    hmac.update(body);
+    var out: [32]u8 = undefined;
+    hmac.final(&out);
+    return out;
 }

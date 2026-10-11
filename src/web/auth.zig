@@ -103,13 +103,27 @@ pub fn currentUser(ctx: *Ctx) !?ctx_mod.User {
 
 /// Starts a session on `db`, which must be the write connection.
 pub fn startSession(ctx: *Ctx, db: *db_mod.Db, user_id: i64) !void {
-    const token = try newToken(ctx.shared.io);
-    const hashed = hashToken(&token);
-    const now = ctx.now();
-    try db.run(ctx.arena, "DELETE FROM web_sessions WHERE expires_at_ms<?", .{now});
-    try db.run(ctx.arena, "DELETE FROM auth_challenges WHERE expires_at_ms<?", .{now});
-    try db.run(ctx.arena, "INSERT INTO web_sessions(token_hash,user_id,created_at_ms,expires_at_ms) VALUES(?,?,?,?)", .{ &hashed, user_id, now, now + session_days * data.day_ms });
+    try db.run(ctx.arena, "DELETE FROM auth_challenges WHERE expires_at_ms<?", .{ctx.now()});
+    const token = try createSession(ctx.arena, ctx.shared.io, db, user_id, ctx.now());
     try ctx.setCookie(session_cookie, try ctx.arena.dupe(u8, &token), session_days * 86_400);
+}
+
+/// A new session for `user_id`. Returns its token, the `an_s` cookie value.
+pub fn createSession(arena: std.mem.Allocator, io: std.Io, db: *db_mod.Db, user_id: i64, now_ms: i64) ![64]u8 {
+    const token = try newToken(io);
+    const hashed = hashToken(&token);
+    try db.run(arena, "DELETE FROM web_sessions WHERE expires_at_ms<?", .{now_ms});
+    try db.run(arena, "INSERT INTO web_sessions(token_hash,user_id,created_at_ms,expires_at_ms) VALUES(?,?,?,?)", .{ &hashed, user_id, now_ms, now_ms + session_days * data.day_ms });
+    return token;
+}
+
+/// A read API key with `user_id`'s access, narrowed to `site_id` when set.
+/// Returns the key; only its hash is stored.
+pub fn createApiKey(arena: std.mem.Allocator, io: std.Io, db: *db_mod.Db, user_id: i64, site_id: ?i64, name: []const u8, now_ms: i64) ![]const u8 {
+    const random = try newToken(io);
+    const token = try std.fmt.allocPrint(arena, "an_{s}", .{&random});
+    try db.run(arena, "INSERT INTO api_keys(name,token_hash,prefix,user_id,site_id,created_at_ms) VALUES(?,?,?,?,?,?)", .{ name, &hashToken(token), token[token.len - 4 ..], user_id, site_id, now_ms });
+    return token;
 }
 
 pub fn hashPassword(ctx: *Ctx, password: []const u8) ![]const u8 {

@@ -8,7 +8,7 @@
 // tests/tour.mjs:
 //   node tests/tour-seed.mjs <analytico> <data-dir> <dbip-city-lite.csv.gz> <state.json>
 import { execFileSync, spawn } from "node:child_process";
-import { createHmac, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { createReadStream, rmSync, writeFileSync } from "node:fs";
 import { createServer, request } from "node:http";
 import { join } from "node:path";
@@ -50,7 +50,6 @@ const setupLink = execFileSync(binary, ["init", dir, "--origin", workspace], { e
 cli("geo", "import", geoCsv);
 const added = cli("site", "add", "fieldnotes", siteOrigin);
 const publicId = /public_id=(\S+)/.exec(added)[1];
-const secret = /internal_secret=([0-9a-f]+)/.exec(added)[1];
 const libraryId = /public_id=(\S+)/.exec(cli("site", "add", "seedlibrary", libraryOrigin, "--mode", "lite"))[1];
 for (const [name, kind, match] of [["newsletter-signup", "event", "newsletter_signup"], ["purchase", "event", "purchase"], ["workshop-page", "path", "/workshops"]]) cli("goal", "add", "fieldnotes", name, kind, match);
 cli("funnel", "add", "fieldnotes", "shop-to-purchase", "path:/shop", "event:add_to_cart", "event:begin_checkout", "event:purchase");
@@ -227,9 +226,8 @@ async function post(path, body, client, headers = {}) {
 const browserBatch = (site, origin, records, client) => post("/e", JSON.stringify({ v: 2, site, sent_at_ms: Date.now(), records }), client, { origin, ...(client.gpc ? { "sec-gpc": "1" } : {}) });
 async function serverBatch(records) {
   const body = JSON.stringify({ v: 2, site: publicId, sent_at_ms: Date.now(), records });
-  const stamp = String(Math.floor(Date.now() / 1000));
-  const signature = createHmac("sha256", Buffer.from(secret, "hex")).update(`${stamp}.${body}`).digest("hex");
-  await post("/i", body, { ip: "127.0.0.1", ua: "fieldnotes-shop/1.4" }, { "content-type": "application/json", "x-analytico-timestamp": stamp, "x-analytico-signature": signature });
+  const signed = Object.fromEntries(execFileSync(binary, ["site", "sign", "fieldnotes", "--data", dir], { input: body, encoding: "utf8" }).trim().split("\n").map((line) => line.split(": ")));
+  await post("/i", body, { ip: "127.0.0.1", ua: "fieldnotes-shop/1.4" }, { "content-type": "application/json", ...signed });
 }
 
 // ---------------------------------------------------------------- visits

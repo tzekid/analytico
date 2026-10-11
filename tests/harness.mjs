@@ -62,6 +62,8 @@ export async function journey(name, story) {
     /** Page errors matching this are expected by the story. */
     expectedErrors: null,
     cli: (...args) => execFileSync(app, [...args, "--data", data], { encoding: "utf8" }),
+    /** The headers that sign a server batch for /i, from `analytico site sign`. */
+    sign: (site, body) => Object.fromEntries(execFileSync(app, ["site", "sign", site, "--data", data], { input: body, encoding: "utf8" }).trim().split("\n").map((line) => line.split(": "))),
     /** Creates the data dir; returns the owner's setup link. */
     init: (origin) => execFileSync(app, ["init", data, ...(origin ? ["--origin", origin] : [])], { encoding: "utf8" }).trim().split("\n").at(-1),
     db: (file = "analytico.db", options = { readOnly: true }) => new DatabaseSync(join(data, file), options),

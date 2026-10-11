@@ -5,7 +5,6 @@
 // through the CLI and the read API; backup, restore and doctor.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { createHash, createHmac } from "node:crypto";
 import { join } from "node:path";
 import { Script } from "node:vm";
 import { journey } from "./harness.mjs";
@@ -14,11 +13,13 @@ await journey("cli", async (t) => {
   t.init();
   const added = t.cli("site", "add", "example", "https://example.test", "--mode", "session");
   const site = /public_id=([^ ]+)/.exec(added)[1];
-  const secret = /internal_secret=([0-9a-f]+)/.exec(added)[1];
   t.cli("campaign", "spend-add", "example", new Date().toISOString().slice(0, 10), "search", "launch", "hero", "1000", "EUR");
   t.cli("goal", "add", "example", "registration-start", "event", "registration_started");
   t.cli("goal", "add", "example", "paid", "event", "payment_confirmed");
   t.cli("funnel", "add", "example", "registration-to-paid", "registration-start", "paid");
+  // The owner and a read API key, made from the CLI before the server holds the database.
+  t.cli("user", "invite", "owner@example.test", "--origin", `http://127.0.0.1:${t.port}`);
+  const token = t.cli("user", "key", "owner@example.test", "cli").trim();
   await t.serve();
   const base = `http://127.0.0.1:${t.port}`;
 
@@ -52,9 +53,7 @@ await journey("cli", async (t) => {
   assert.equal(await collect([{ ...records[0], path: "/changed" }, ...records.slice(1)], "https://example.test", "198.51.100.10"), 409);
 
   const serverBatch = JSON.stringify({ v: 1, site, sent_at_ms: Date.now(), records: [{ ...common, event_id: "550e8400-e29b-41d4-a716-446655440005", type: "event", occurred_at_ms: Date.now(), consent_mode: "server", tracker_version: "backend-1", name: "payment_confirmed", value_minor: 4900, currency: "EUR", properties: { source: "search", campaign: "launch", content: "hero" } }] });
-  const stamp = String(Math.floor(Date.now() / 1000));
-  const signature = createHmac("sha256", Buffer.from(secret, "hex")).update(`${stamp}.${serverBatch}`).digest("hex");
-  const signed = await fetch(`${base}/i`, { method: "POST", headers: { "content-type": "application/json", "x-analytico-timestamp": stamp, "x-analytico-signature": signature }, body: serverBatch });
+  const signed = await fetch(`${base}/i`, { method: "POST", headers: { "content-type": "application/json", ...t.sign("example", serverBatch) }, body: serverBatch });
   assert.ok(signed.ok, await signed.text());
 
   // ---------------------------------------------------------------- reports
@@ -107,11 +106,6 @@ await journey("cli", async (t) => {
   assert.deepEqual([emptyCoverage.page_views, emptyCoverage.summaries, emptyCoverage.rum_samples], [0, 0, 0]);
 
   // Every report in the catalog answers the same through the CLI and the API.
-  const token = `an_${"d".repeat(64)}`;
-  const writer = t.db("analytico.db", {});
-  writer.prepare("INSERT INTO users(email,role,created_at_ms) VALUES('owner@example.test','owner',?)").run(now);
-  writer.prepare("INSERT INTO api_keys(name,token_hash,prefix,user_id,site_id,created_at_ms) VALUES('cli',?,'dddd',(SELECT min(id) FROM users),NULL,?)").run(createHash("sha256").update(token).digest("hex"), now);
-  writer.close();
   const values = { dimension: "page", name: "registration-to-paid", from_path: "/landing", to_path: "/landing", id: sessionId, flow: "registration" };
   const help = execFileSync(t.app, ["help"], { encoding: "utf8" });
   const catalog = [...help.split("Report names")[1].matchAll(/^ {2}(\w+) .*?(?:<(\w+)>.*)?$/gm)].map(([, name, param]) => ({ name, param }));

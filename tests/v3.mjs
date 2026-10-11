@@ -127,7 +127,6 @@ await journey("v3", async (t) => {
   const added = t.cli("site", "add", "shop", originA);
   assert.match(added, /mode=full/);
   const publicId = /public_id=([^ ]+)/.exec(added)[1];
-  const internalSecret = /internal_secret=([0-9a-f]+)/.exec(added)[1];
   t.cli("site", "origin-add", "shop", originB);
   t.cli("site", "add", "blog", "https://blog.example", "--mode", "lite");
   t.cli("goal", "add", "shop", "purchased", "event", "purchase");
@@ -252,9 +251,7 @@ await journey("v3", async (t) => {
   // The shop's server confirms the same order: counted once, server wins.
   const now = Date.now();
   const server = JSON.stringify({ v: 2, site: publicId, sent_at_ms: now, records: [{ event_id: "9a4f8f8e-1c2b-4d3e-8f00-000000000001", type: "event", occurred_at_ms: now, tracking_mode: "full", consent_mode: "server", tracker_version: "backend", release_id: "", internal: false, name: "purchase", value_minor: 4900, currency: "EUR", order_id: "A-1001", user_id: "user-42", properties: {} }] });
-  const stamp = String(Math.floor(now / 1000));
-  const signature = createHmac("sha256", Buffer.from(internalSecret, "hex")).update(`${stamp}.${server}`).digest("hex");
-  assert.equal((await fetch(`http://127.0.0.1:${t.port}/i`, { method: "POST", headers: { "content-type": "application/json", "x-analytico-timestamp": stamp, "x-analytico-signature": signature }, body: server })).status, 204);
+  assert.equal((await fetch(`http://127.0.0.1:${t.port}/i`, { method: "POST", headers: { "content-type": "application/json", ...t.sign("shop", server) }, body: server })).status, 204);
   assert.equal(row("SELECT count(*) n FROM visitor_links WHERE visitor_id=?", visitorA).n, 1);
 
   // Another device of the same person.
