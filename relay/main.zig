@@ -207,22 +207,17 @@ fn privateKey(arena: std.mem.Allocator, pem: []const u8) ![32]u8 {
     return der[at + marker.len ..][0..32].*;
 }
 
-test "PKCS#8 key and token signature" {
+test "PKCS#8 scalar and token signature" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    // A throwaway key from `openssl genpkey -algorithm EC -pkeyopt
-    // ec_paramgen_curve:P-256`, in the PKCS#8 form Apple issues.
-    const pem =
-        \\-----BEGIN PRIVATE KEY-----
-        \\MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgyazm87RyY3P+MqNO
-        \\98IamTbeuaPQCkZxAH+XZiwy4/ahRANCAAQDpX2eiiU+9gHAhGMl2hV+WELwZmfG
-        \\63vrBwQddYl6aZy89swEkKr3VvzbMRw/8q4lmrZVA6ruzgL33A2RpnRU
-        \\-----END PRIVATE KEY-----
-    ;
-    const secret = try privateKey(arena, pem);
-    try std.testing.expectEqualStrings("c9ace6f3b4726373fe32a34ef7c21a9936deb9a3d00a4671007f97662c32e3f6", &std.fmt.bytesToHex(secret, .lower));
-    config = .{ .key = try Ecdsa.KeyPair.fromSecretKey(try Ecdsa.SecretKey.fromBytes(secret)), .key_id = "KEY123", .team = "TEAM123", .topic = "test", .apns = null };
+    const generated = try Ecdsa.KeyPair.generateDeterministic(@splat(0x42));
+    const expected = generated.secret_key.toBytes();
+    const der = [_]u8{ 0x02, 0x01, 0x01, 0x04, 0x20 } ++ expected;
+    const encoded = try arena.alloc(u8, std.base64.standard.Encoder.calcSize(der.len));
+    const scalar = try privateKey(arena, std.base64.standard.Encoder.encode(encoded, &der));
+    try std.testing.expectEqualSlices(u8, &expected, &scalar);
+    config = .{ .key = try Ecdsa.KeyPair.fromSecretKey(try Ecdsa.SecretKey.fromBytes(scalar)), .key_id = "KEY123", .team = "TEAM123", .topic = "test", .apns = null };
     const jwt = try sign(arena, 1700000000);
     const dot = std.mem.findScalarLast(u8, jwt, '.').?;
     var signature: [64]u8 = undefined;

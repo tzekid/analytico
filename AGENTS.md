@@ -176,14 +176,16 @@ share links are written to the audit log.
 
 ## Review safety
 
-Security and privacy reviews must remain bounded defensive work on synthetic,
-loopback-only data. Prefer source analysis and the existing end-to-end journeys.
-Add a regression test for a confirmed defect without turning it into an attack
-harness. Do not mint reusable browser sessions or credentials, construct
-multi-step privilege-escalation scripts, intentionally crash a process, or
-persist secrets, bearer tokens, cookies, signed requests or crash stacks as
-review evidence. Redact security-sensitive values and describe the violated
-boundary and expected refusal instead.
+Reviews are source analysis plus the repository's existing tests. Run them only
+with disposable data and loopback stand-ins. Do not create standalone probe
+programs, request-sequencing scripts or persistent review dossiers. If source
+analysis suggests a defect that the existing suite cannot exercise safely,
+record the affected boundary and leave runtime reproduction for the fix.
+
+After a defect is fixed, add the smallest ordinary end-to-end regression that
+uses the public product interface and asserts the expected result. Keep review
+output to finding IDs, affected boundaries, user impact and test names. Never
+store runtime identity material or request authorization data in review output.
 
 ## Operations
 

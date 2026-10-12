@@ -31,6 +31,10 @@ Outbound connections are explicit operator features: configured identity and AI 
 
 ## Reporting a problem
 
-When reviewing a suspected issue, distinguish synthetic test credentials and local stand-ins from production access. A valid report should identify the entry point, the violated boundary and the smallest reproducible input. Do not include real visitor data, access tokens or private keys.
+Describe the affected product boundary, expected behavior, observed behavior and
+user impact. Omit live account data and runtime authorization material.
 
-Use bounded regression tests rather than exploit chains. Reviews must not mint reusable sessions or credentials, deliberately terminate the service, or save bearer tokens, cookies, signed requests or crash stacks in evidence artifacts. Verify malformed and extreme inputs through expected error responses and continued readiness.
+Repository reviews use source analysis and the existing test journeys with
+disposable data and loopback stand-ins. Keep detailed diagnostic output outside
+the repository. A confirmed fix should add a normal end-to-end regression for
+the expected product behavior.
