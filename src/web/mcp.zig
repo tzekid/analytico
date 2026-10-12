@@ -145,7 +145,7 @@ fn validRedirect(uri: []const u8) bool {
 test validRedirect {
     try std.testing.expect(validRedirect("https://chatgpt.com/connector_platform_oauth_redirect"));
     try std.testing.expect(validRedirect("http://localhost:6274/callback"));
-    for ([_][]const u8{ "http://localhost@evil.test/", "http://localhost.evil.test/", "http://evil.test/", "https://x\r\nset-cookie: a", "https://x/\\evil", "javascript:alert(1)" }) |bad| {
+    for ([_][]const u8{ "http://localhost@evil.test/", "http://localhost.evil.test/", "http://evil.test/", "https://x\r\ninvalid", "https://x/\\evil", "javascript:invalid" }) |bad| {
         try std.testing.expect(!validRedirect(bad));
     }
 }
@@ -442,13 +442,14 @@ fn rpcError(ctx: *Ctx, id: ?std.json.Value, code: i64, message: []const u8) !voi
     return ctx.json();
 }
 
-/// list_sites and site_overview, then every report in the catalog.
+/// list_sites and site_overview, then aggregate reports safe for AI clients.
 fn toolList(w: *std.Io.Writer) !void {
     try w.writeAll(
         \\[{"name":"list_sites","title":"List websites","description":"Websites this connection may read, with their slugs.","inputSchema":{"type":"object","properties":{}},"annotations":{"readOnlyHint":true}},
         \\{"name":"site_overview","title":"Website overview","description":"A summary of a website for a period in one call: totals vs the previous period, daily series, top pages, sources, devices, campaigns, events and goals.","inputSchema":{"type":"object","properties":{"site":{"type":"string","description":"Site slug from list_sites"},"range":{"type":"string","enum":["24h","7d","30d","90d"],"default":"7d"},"from":{"type":"string","description":"Custom start date YYYY-MM-DD (with to)"},"to":{"type":"string","description":"Custom end date YYYY-MM-DD, inclusive"},"filters":{"type":"array","items":{"type":"string"},"description":"Optional filters like source:google, page:/pricing, device:mobile, campaign:spring"}},"required":["site"]},"annotations":{"readOnlyHint":true}}
     );
     for (&catalog.reports) |*report| {
+        if (!agent.safeReport(report.name)) continue;
         try w.writeAll(",{\"name\":");
         try std.json.Stringify.value(report.name, .{}, w);
         try w.writeAll(",\"title\":");
@@ -569,7 +570,7 @@ fn runTool(ctx: *Ctx, grant: Grant, name: []const u8, arguments: std.json.Object
         }
         return .{ .text = out.written(), .used = "Website list", .site_id = null };
     }
-    if (!is(name, "site_overview") and catalog.find(name) == null) return error.UnknownTool;
+    if (!is(name, "site_overview") and (catalog.find(name) == null or !agent.safeReport(name))) return error.UnknownTool;
     const site = try toolSite(ctx, grant, arguments);
     const output = try agent.tool(arena, ctx.db, site, name, arguments, paths, sources, ctx.now());
     return .{ .text = output.text, .used = output.used, .site_id = site.id };

@@ -14,7 +14,9 @@ const Hkdf = std.crypto.kdf.hkdf.HkdfSha256;
 const Aes128Gcm = std.crypto.aead.aes_gcm.Aes128Gcm;
 const base64 = std.base64.url_safe_no_pad;
 
-pub const default_relay = "https://push.analytico.plosca.ru";
+/// The relay is deliberately loopback-only. A public unauthenticated relay
+/// would let arbitrary network clients spend the publisher's APNs authority.
+pub const default_relay = "http://127.0.0.1:4395";
 
 /// What a device asked to be told about.
 pub const Kind = enum { alert, goal, note };
@@ -65,7 +67,7 @@ fn deliver(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, devices: [
         const outcome: []const u8 = if (net.send(arena, url, .{ .method = .POST, .body = body.written() })) |response| switch (response.status) {
             .ok, .no_content => "",
             .gone => "gone",
-            else => try std.fmt.allocPrint(arena, "relay answered {d}", .{@intFromEnum(response.status)}),
+            else => try std.fmt.allocPrint(arena, "relay answered {d}", .{@backingInt(response.status)}),
         } else |_| "relay unreachable";
         const write = shared.lockWrite();
         defer shared.unlockWrite();

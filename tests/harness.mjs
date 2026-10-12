@@ -40,8 +40,8 @@ export function signer() {
       const signature = createSign("RSA-SHA256").update(`${head}.${body}`).sign(key).toString("base64url");
       return `${head}.${body}.${signature}`;
     },
-    /** A token signed by a different key, for refusal tests. */
-    forged(claims) {
+    /** A token signed by a different key, for signature-refusal tests. */
+    wrongKey(claims) {
       return this.sign(claims, generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey);
     },
   };

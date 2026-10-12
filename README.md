@@ -29,7 +29,7 @@ with the last release (Core Web Vitals from real visits).
 
 **For a shop or a product:** which campaign and which ad brought a
 visit and what it earned (with your ad spend, return on it), where
-checkout and forms lose people and on which field, which JavaScript
+checkout and explicitly marked forms lose people and on which field, which JavaScript
 errors and rage clicks got in the way and what that looked like in a
 masked session replay, where people click on a page, who comes back, and
 one customer's journey across devices.
@@ -48,7 +48,7 @@ catalog behind all four.
 <td><img src="docs/images/funnel.webp" alt="A four-step funnel from shop to purchase"><br><sub>Funnels from pages, events and goals, inside one visit.</sub></td>
 </tr>
 <tr>
-<td><img src="docs/images/errors.webp" alt="Grouped JavaScript errors with a detail panel"><br><sub>Errors grouped by message, with when they started and in which browsers.</sub></td>
+<td><img src="docs/images/errors.webp" alt="Grouped JavaScript error types with a detail panel"><br><sub>Error types grouped without arbitrary application messages, with when they started and in which browsers.</sub></td>
 <td><img src="docs/images/phone.webp" alt="The overview on a phone"><br><sub>The whole workspace works on a phone.</sub></td>
 </tr>
 </table>
@@ -62,11 +62,11 @@ every screen.
 Each website picks one. You can change it later; the data already
 collected stays.
 
-| | Lite | Session | Full (default) |
+| | Lite (default) | Session | Full |
 |---|---|---|---|
 | Stored in the browser | nothing | a random ID in `sessionStorage`, gone when the tab closes | after consent: a visitor ID and a 30-minute session in `localStorage` |
 | Consent banner | not needed | usually not needed | asked where your policy says (EU, UK and Switzerland by default); everyone else is counted as Lite until then |
-| You get | page views, sources and campaigns, places, devices, engagement, errors, Web Vitals, a per-day visitor count | plus visits: paths, funnels, landing and exit pages, rage clicks | plus returning visitors and retention, people and revenue per person, replays, heatmaps, form analytics, visits across your own domains |
+| You get | page views, sources and campaigns, places, devices, engagement, error types, Web Vitals, a per-day visitor count | plus visits: paths, funnels, landing and exit pages, rage clicks | plus returning visitors and retention, people and revenue per person, replays, heatmaps, opt-in form analytics, visits across your own domains |
 
 In every mode the IP address is used once, for the country and a per-day
 pseudonym, and never stored. Global Privacy Control and Do Not Track keep
@@ -123,13 +123,14 @@ retention and restores.
   confirmed payments, refunds, sign-ups, signed with a per-site secret.
   An order seen from both sides counts once, and the server's copy wins.
 - **AI is optional and narrow.** Ask a question in plain words, get
-  "why did this day change?", describe a filter, summarise a session. It
-  runs on your own ChatGPT plan, an Anthropic or OpenAI key, or any
-  OpenAI-compatible endpoint (a local model works). Only aggregates are
+  "why did this day change?", or describe a filter. It
+  runs on your own ChatGPT plan, an Anthropic or OpenAI key, or a
+  loopback OpenAI-compatible endpoint (a local model works). Only aggregates are
   sent, and every call is logged with what was sent. Claude and ChatGPT
   can also read your reports through the read-only MCP connector.
 
-[PRODUCT.md](PRODUCT.md) describes every feature;
+[PRODUCT.md](PRODUCT.md) describes every feature; [SECURITY.md](SECURITY.md)
+states the collection, authentication and AI trust boundaries;
 [docs/PROTOCOL.md](docs/PROTOCOL.md) the collection protocol.
 
 ## Numbers

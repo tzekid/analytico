@@ -43,7 +43,7 @@ pub fn addSitePage(ctx: *Ctx, address: []const u8, problem: []const u8) !void {
         \\<label class="field mt-10"><span class="hint regular">Display name (optional)</span><input class="input" name="name" maxlength="60" placeholder="Shown in the sidebar"></label>
         \\<div class="mt-14">
     , .{ .address = address });
-    try modeCards(w, .full);
+    try modeCards(w, .lite);
     try w.writeAll(
         \\</div><div class="stack-s mt-14"><div class="field">When does Full mode switch on?</div>
         \\<label class="radio-row"><input type="radio" name="policy" value="regional" checked><span><strong>Ask visitors in the EU, UK and Switzerland</strong><small>Everyone else gets Full right away. The country is decided at collection.</small></span></label>
@@ -79,7 +79,7 @@ pub fn addSitePost(ctx: *Ctx) !void {
     const after_scheme = (std.mem.find(u8, with_scheme, "://") orelse 0) + 3;
     const path_start = std.mem.findScalarPos(u8, with_scheme, after_scheme, '/') orelse with_scheme.len;
     const origin = domain.normalizeOrigin(ctx.arena, with_scheme[0..path_start]) catch return addSitePage(ctx, raw, "That doesn’t look like a website address. Try https://example.com.");
-    const mode = domain.parseMode(try ctx.field("mode")) catch .full;
+    const mode = domain.parseMode(try ctx.field("mode")) catch .lite;
     const policy = domain.parseConsentPolicy(try ctx.field("policy")) catch .regional;
     const banner = (try ctx.field("banner")).len != 0;
     const name = std.mem.trim(u8, try ctx.field("name"), " ");
@@ -112,7 +112,7 @@ pub fn modeCards(w: *std.Io.Writer, checked: domain.Mode) !void {
             .value = mode[0],
             .checked = if (mode[0] == checked) " checked" else "",
             .title = mode[1],
-            .recommended = if (mode[0] == .full) " <i class=\"pill pill-brand\">Recommended</i>" else "",
+            .recommended = if (mode[0] == .lite) " <i class=\"pill pill-brand\">Recommended</i>" else "",
             .help = mode[2],
         });
         for (mode[3]) |line| try render(w, "<li class=\"{class}\">{text}</li>", .{ .class = if (line[0][0] == '+') "yes" else "no", .text = line[1] });

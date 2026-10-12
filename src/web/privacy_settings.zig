@@ -168,16 +168,12 @@ pub fn recordingSection(ctx: *Ctx, maybe_site: ?data.Site) !void {
         \\<label class="check"><input type="checkbox" name="replay_triggers" value="1"{!triggers}>And always record sessions with a rage click, a JavaScript error, a goal or a purchase</label>
         \\<p class="hint">Sessions that aren’t sampled keep about two minutes in the visitor’s browser, sent only if one of those happens.</p>
         \\<h2 class="card-title mt-6">What is hidden</h2>
-        \\<label class="radio-row"><input type="radio" name="mask_text" value="1"{!mask_all}><span><strong>Mask all text</strong><small>Unmask safe areas with <code>data-analytico-unmask</code></small></span></label>
-        \\<label class="radio-row"><input type="radio" name="mask_text" value="0"{!mask_inputs}><span><strong>Mask inputs only</strong><small>Shows page text as-is</small></span></label>
-        \\<div class="callout"><span>Always hidden: every input value, passwords and card fields, images, video, canvases and embedded frames. Hide anything else with <code>data-analytico-block</code>.</span></div>
+        \\<div class="callout"><span>Always hidden: all text, every input and hidden-field value, URL queries and fragments, arbitrary element attributes, images, video, canvases and embedded frames. Hide whole regions with <code>data-analytico-block</code>.</span></div>
         \\<label class="field"><span class="row-between">Keep recordings for<select class="input input-s" name="retention">
     , .{
         .slug = site.slug,
         .percent = site.replay_percent,
         .triggers = if (site.replay_triggers) " checked" else "",
-        .mask_all = if (site.mask_text) " checked" else "",
-        .mask_inputs = if (!site.mask_text) " checked" else "",
     });
     for ([_][]const u8{ "7", "14", "30", "90" }) |days| try render(w, "<option value=\"{days}\"{!selected}>{days} days</option>", .{ .days = days, .selected = if (std.mem.eql(u8, days, retention)) " selected" else "" });
     try render(w,
@@ -223,7 +219,6 @@ pub fn recordingPost(ctx: *Ctx, action: []const u8) !void {
     if (!std.mem.eql(u8, action, "update")) return fail(ctx, "recording", site, "Unknown action.");
     const percent = std.math.clamp(std.fmt.parseInt(i64, try ctx.field("replay_percent"), 10) catch 0, 0, 100);
     const triggers = (try ctx.field("replay_triggers")).len != 0;
-    const mask_text = !std.mem.eql(u8, try ctx.field("mask_text"), "0");
     const exclude = std.mem.trim(u8, try ctx.field("record_exclude"), " \r\n");
     if (exclude.len > 2000) return fail(ctx, "recording", site, "Too many excluded pages.");
     var lines = std.mem.tokenizeAny(u8, exclude, "\r\n");
@@ -236,9 +231,9 @@ pub fn recordingPost(ctx: *Ctx, action: []const u8) !void {
     if (retention < 1 or retention > 365) return fail(ctx, "recording", site, "Pick how long to keep recordings.");
     const db = ctx.shared.lockWrite();
     defer ctx.shared.unlockWrite();
-    try db.run(arena, "UPDATE sites SET replay_percent=?,replay_triggers=?,mask_text=?,record_exclude=? WHERE id=?", .{ percent, @intFromBool(triggers), @intFromBool(mask_text), exclude, site.id });
+    try db.run(arena, "UPDATE sites SET replay_percent=?,replay_triggers=?,mask_text=1,record_exclude=? WHERE id=?", .{ percent, @intFromBool(triggers), exclude, site.id });
     try data.putSetting(arena, db, .@"replays.retention_days", try std.fmt.allocPrint(arena, "{d}", .{retention}));
-    try audit.record(ctx, db, site.id, "recording.changed", try std.fmt.allocPrint(arena, "Session replay at {d}%{s} · {s} · kept {d} days", .{ percent, if (triggers) " plus triggers" else "", if (mask_text) "all text masked" else "inputs masked", retention }));
+    try audit.record(ctx, db, site.id, "recording.changed", try std.fmt.allocPrint(arena, "Session replay at {d}%{s} · all text masked · kept {d} days", .{ percent, if (triggers) " plus triggers" else "", retention }));
     return ctx.done("Recording settings saved.", "/settings/recording?site={s}", .{site.slug});
 }
 

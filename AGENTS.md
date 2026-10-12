@@ -23,9 +23,9 @@ The workspace renders complete HTML in Zig. One small embedded script makes
 navigation, forms, dialogs and charts feel instant; every page also works as
 plain HTML. AI is optional: each person's own ChatGPT plan (Sign in with
 ChatGPT, OpenAI's open-source program, straight to the Responses API), an
-operator key for Anthropic, OpenAI or any OpenAI-compatible endpoint, or a
+operator key for Anthropic, OpenAI or a loopback OpenAI-compatible endpoint, or a
 read-only MCP connector for Claude and ChatGPT. `web/agent.zig` is the one
-loop for every provider: the report catalog is its tools, run in-process, and
+loop for every provider: its tools are the aggregate-only subset of the report catalog, run in-process, and
 answers stream to the browser. Plan errors stop; nothing falls back to another
 provider. Only aggregates leave the instance, and every AI call is logged with
 the exact text sent.
@@ -36,8 +36,8 @@ ORM, generic query language, plugin system, frontend framework, client-side
 rendering, or compatibility protocol.
 
 Three tracking modes are current. Lite stores nothing in the browser.
-Session adds a per-tab ID in `sessionStorage`. Full, the default for new
-websites, starts every visit as Lite and adds a first-party visitor ID only
+Session adds a per-tab ID in `sessionStorage`. Lite is the default for new
+websites. Full starts every visit as Lite and adds a first-party visitor ID only
 once consent is known: granted by the visitor, or not required under the
 site's policy for that visitor ("ask in the EU, UK and Switzerland" by
 default, "ask everyone", or "consent not required"). Global Privacy Control
@@ -132,7 +132,7 @@ and drops anything shaped like an email address or long number.
 
 DOM snapshots and mouse movement exist only as session replays: Full mode,
 consented visitors, sites that turn recording on, masked in the browser
-before they leave (all text unless explicitly unmasked, every input value
+before they leave (all text, every input value
 always, images and media replaced), capped per session, stored in the replay
 database with their own retention, and deleted with the visitor. Heatmaps
 store aggregated click cells, scroll reach and attention per page, never a

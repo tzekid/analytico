@@ -1,7 +1,7 @@
-//! The report catalog: every report Analytico answers outside its pages —
-//! for the CLI, the read API, MCP connectors and the AI — defined once.
-//! Each report declares its parameters (they become CLI flags, API query
-//! parameters and JSON Schema for tools) and returns one table; the
+//! The report catalog: every CLI and read API report, defined once. AI tools
+//! expose only the aggregate-safe subset selected in `agent.zig`. Each report
+//! declares its parameters (they become CLI flags, API query parameters and,
+//! when safe, JSON Schema for tools) and returns one table; the
 //! renderers turn a table into TSV, CSV, JSON or text.
 //!
 //! Two kinds of report: summaries from the workspace's data layer (rollups,
@@ -433,13 +433,13 @@ fn funnelReport(input: Input) !Table {
     const Progress = struct { next_step: usize, started_at_ms: i64 };
     var progress: std.StringHashMapUnmanaged(Progress) = .empty;
     var timeline = try input.db.prepare(input.arena,
-    \\SELECT session_id,occurred_at_ms,kind,value FROM (
-    \\ SELECT session_id,occurred_at_ms,'path' kind,path value FROM page_views
-    \\ WHERE internal=0 AND traffic_class IN ('human_like','unknown') AND site_id=?1 AND received_at_ms>=?2 AND received_at_ms<?3 AND session_id IS NOT NULL
-    \\ UNION ALL SELECT session_id,occurred_at_ms,'event',name FROM events
-    \\ WHERE internal=0 AND site_id=?1 AND received_at_ms>=?2 AND received_at_ms<?3 AND session_id IS NOT NULL
-    \\ AND (source='server' OR traffic_class IN ('human_like','unknown'))
-    \\) ORDER BY session_id,occurred_at_ms
+        \\SELECT session_id,occurred_at_ms,kind,value FROM (
+        \\ SELECT session_id,occurred_at_ms,'path' kind,path value FROM page_views
+        \\ WHERE internal=0 AND traffic_class IN ('human_like','unknown') AND site_id=?1 AND received_at_ms>=?2 AND received_at_ms<?3 AND session_id IS NOT NULL
+        \\ UNION ALL SELECT session_id,occurred_at_ms,'event',name FROM events
+        \\ WHERE internal=0 AND site_id=?1 AND received_at_ms>=?2 AND received_at_ms<?3 AND session_id IS NOT NULL
+        \\ AND (source='server' OR traffic_class IN ('human_like','unknown'))
+        \\) ORDER BY session_id,occurred_at_ms
     );
     defer timeline.deinit();
     try timeline.bindAll(.{ input.view.site.id, input.view.range.start_ms, input.view.range.end_ms });

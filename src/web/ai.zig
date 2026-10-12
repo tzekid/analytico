@@ -9,7 +9,6 @@ const ctx_mod = @import("ctx.zig");
 const data = @import("data.zig");
 const db_mod = @import("../db.zig");
 const html = @import("html.zig");
-const behaviour = @import("behaviour.zig");
 const layout = @import("layout.zig");
 const ui = @import("ui.zig");
 const net = @import("../net.zig");
@@ -499,72 +498,16 @@ fn jsonFailed(ctx: *Ctx, message: []const u8) !void {
     return ctx.json();
 }
 
-/// "What happened?" on a replay: the session's moments (pages, events,
-/// rage clicks, errors; never anything typed) become a few timestamped lines
-/// that seek the player.
-pub fn sessionSummary(ctx: *Ctx, site: data.Site, session_id: []const u8) !void {
-    const arena = ctx.arena;
-    @import("../domain.zig").validateUuid(session_id) catch return jsonFailed(ctx, "Session not found.");
-    const moments = try behaviour.momentsOf(ctx, site.id, session_id);
-    if (moments.len == 0) return jsonFailed(ctx, "Session not found.");
-    const started = try behaviour.startOf(ctx, site.id, session_id, moments);
-    const config = forPerson(arena, ctx.shared, ctx.db, ctx.user.?.id, ctx.now()) catch |err| return jsonFailed(ctx, errorText(err));
-    var namer = Namer.init(arena, config.share_paths, config.share_sources);
-    var timeline: std.Io.Writer.Allocating = .init(arena);
-    const w = &timeline.writer;
-    for (moments) |moment| {
-        try w.print("{f} ", .{behaviour.Offset{ .ms = moment.at - started }});
-        if (std.mem.eql(u8, moment.kind, "page")) {
-            try w.print("opened {s}\n", .{try namer.path(moment.title)});
-        } else if (std.mem.eql(u8, moment.kind, "rage")) {
-            try w.writeAll("rage click\n");
-        } else if (std.mem.eql(u8, moment.kind, "error")) {
-            try w.print("JavaScript error: {s}\n", .{moment.title[0..@min(moment.title.len, 120)]});
-        } else {
-            try w.print("{s} {s}\n", .{ if (std.mem.eql(u8, moment.kind, "money")) "payment" else "event", moment.title });
-        }
-    }
-    ctx.extendDeadline(60);
-    const reply = call(arena, ctx.shared.io, config, summary_system, timeline.written(), 300) catch |err| return jsonFailed(ctx, errorText(err));
-    {
-        const db = ctx.shared.lockWrite();
-        defer ctx.shared.unlockWrite();
-        _ = try log(arena, db, ctx.now(), .{ .origin = "Session summary", .site_id = site.id, .question = "What happened in this session?", .data_used = "The session’s pages, events and errors", .model = try logModel(arena, config), .input_tokens = reply.input_tokens, .output_tokens = reply.output_tokens, .cost_micro = cost(config, reply.input_tokens, reply.output_tokens), .payload = timeline.written(), .answer = reply.text });
-    }
-    const Line = struct { at: i64, time: []const u8, text: []const u8 };
-    var lines: std.ArrayList(Line) = .empty;
-    var rows = std.mem.tokenizeScalar(u8, reply.text, '\n');
-    while (rows.next()) |row| {
-        // "1:05 — Rage-clicked the Buy button": minutes, seconds, then the line.
-        const line = std.mem.trim(u8, row, " -*•");
-        const colon = std.mem.findScalar(u8, line, ':') orelse continue;
-        var end = colon + 1;
-        while (end < line.len and std.ascii.isDigit(line[end])) end += 1;
-        const minutes = std.fmt.parseInt(i64, line[0..colon], 10) catch continue;
-        const seconds = std.fmt.parseInt(i64, line[colon + 1 .. end], 10) catch continue;
-        const text = std.mem.trim(u8, line[end..], " —–-:");
-        if (text.len == 0 or lines.items.len == 4) continue;
-        const at = (minutes * 60 + seconds) * 1000;
-        try lines.append(arena, .{ .at = at, .time = try std.fmt.allocPrint(arena, "{f}", .{behaviour.Offset{ .ms = at }}), .text = text });
-    }
-    if (lines.items.len == 0) return jsonFailed(ctx, "Couldn’t summarise this session. Try again.");
-    try std.json.Stringify.value(.{ .lines = lines.items }, .{}, ctx.w());
-    return ctx.json();
-}
-
-const summary_system =
-    \\You summarise one visit to a website from its timeline (minutes:seconds from the start, then what happened).
-    \\Reply with two or three lines in order, each "m:ss — what happened" in plain words: where the visitor went, where they struggled (rage clicks, errors, going back and forth) and how the visit ended.
-    \\Use only the timeline; don't guess at intent.
-;
-
 /// The workspace screen a view address points at, such as "pages".
 fn screenOf(target: []const u8, slug: []const u8) []const u8 {
     const path = target[0 .. std.mem.findScalar(u8, target, '?') orelse target.len];
     if (path.len < slug.len + 2 or path[0] != '/' or !std.mem.eql(u8, path[1 .. slug.len + 1], slug) or path[slug.len + 1] != '/') return "overview";
     const rest = path[slug.len + 2 ..];
-    for (rest) |c| if (!std.ascii.isAlphanumeric(c) and c != '-' and c != '/') return "overview";
-    return if (rest.len == 0) "overview" else rest;
+    const screen = rest[0 .. std.mem.findScalar(u8, rest, '/') orelse rest.len];
+    inline for (.{ "pages", "acquisition", "events", "funnels", "sessions", "replays", "audience", "search", "heatmaps", "errors", "revenue", "retention", "people", "performance", "health", "live", "reports", "dashboards", "setup", "ask" }) |known| {
+        if (std.mem.eql(u8, screen, known)) return known;
+    }
+    return "overview";
 }
 
 /// An answer: paragraphs with links into this website, then follow-ups.

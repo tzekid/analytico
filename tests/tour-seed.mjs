@@ -48,7 +48,7 @@ const cli = (...args) => execFileSync(binary, [...args, "--data", dir], { encodi
 rmSync(dir, { recursive: true, force: true });
 const setupLink = execFileSync(binary, ["init", dir, "--origin", workspace], { encoding: "utf8" }).trim().split("\n").at(-1);
 cli("geo", "import", geoCsv);
-const added = cli("site", "add", "fieldnotes", siteOrigin);
+const added = cli("site", "add", "fieldnotes", siteOrigin, "--mode", "full");
 const publicId = /public_id=(\S+)/.exec(added)[1];
 const libraryId = /public_id=(\S+)/.exec(cli("site", "add", "seedlibrary", libraryOrigin, "--mode", "lite"))[1];
 for (const [name, kind, match] of [["newsletter-signup", "event", "newsletter_signup"], ["purchase", "event", "purchase"], ["workshop-page", "path", "/workshops"]]) cli("goal", "add", "fieldnotes", name, kind, match);
@@ -58,11 +58,6 @@ cli("goal", "add", "seedlibrary", "catalogue", "path", "/catalogue");
   const db = new DatabaseSync(join(dir, "analytico.db"));
   db.exec(`UPDATE sites SET name='Field Notes',consent_banner=1,privacy_url='https://fieldnotes.example/privacy',replay_percent=40,replay_triggers=1 WHERE slug='fieldnotes';
     UPDATE sites SET name='Seed Library' WHERE slug='seedlibrary';
-    UPDATE goals SET name='Newsletter signup' WHERE name='newsletter-signup';
-    UPDATE goals SET name='Purchase' WHERE name='purchase';
-    UPDATE goals SET name='Visited workshops' WHERE name='workshop-page';
-    UPDATE goals SET name='Opened the catalogue' WHERE name='catalogue';
-    UPDATE funnels SET name='Shop to purchase' WHERE name='shop-to-purchase';
     INSERT INTO settings(name,value) VALUES('collector_origin','https://analytics.fieldnotes.example');`);
   db.close();
 }
@@ -330,7 +325,7 @@ async function visit(p, source, at, ago, ip) {
     if (k === "checkout" && cart) {
       event("begin_checkout", { value_minor: cart.price_minor, currency: "EUR", items: [cart] });
       const buggy = ago <= 31 && ago > 18;
-      if (buggy && chance(0.11)) batch.push({ event_id: randomUUID(), type: "error", occurred_at_ms: time + 9000, ...records(page, {}), path, message: "TypeError: Cannot read properties of undefined (reading 'total')", file: "https://fieldnotes.example/assets/checkout.4f9c2e.js", line: 212, column: 18 });
+      if (buggy && chance(0.11)) batch.push({ event_id: randomUUID(), type: "error", occurred_at_ms: time + 9000, ...records(page, {}), path, message: "TypeError", file: "https://fieldnotes.example/assets/checkout.4f9c2e.js", line: 212, column: 18 });
       if (chance(0.72)) {
         event("add_shipping_info", { value_minor: cart.price_minor, currency: "EUR", items: [cart] });
         if (chance(buggy ? 0.48 : 0.66)) {
@@ -343,7 +338,7 @@ async function visit(p, source, at, ago, ip) {
       }
     }
     if (chance(0.0025)) batch.push({ event_id: randomUUID(), type: "error", occurred_at_ms: time + 3000, ...records(page, {}), path, message: "ResizeObserver loop completed with undelivered notifications.", file: "", line: 0, column: 0 });
-    if (k === "product" && p.ua.includes("Version/18") && chance(0.012)) batch.push({ event_id: randomUUID(), type: "error", occurred_at_ms: time + 5000, ...records(page, {}), path, message: "Unhandled Promise Rejection: TypeError: Load failed", file: "https://fieldnotes.example/assets/gallery.91ab0c.js", line: 48, column: 7 });
+    if (k === "product" && p.ua.includes("Version/18") && chance(0.012)) batch.push({ event_id: randomUUID(), type: "error", occurred_at_ms: time + 5000, ...records(page, {}), path, message: "PromiseRejection", file: "https://fieldnotes.example/assets/gallery.91ab0c.js", line: 48, column: 7 });
     await browserBatch(publicId, siteOrigin, batch, client);
     time += active + logn(9000, 0.6);
     path = cart && chance(0.5) ? "/checkout" : next(path);

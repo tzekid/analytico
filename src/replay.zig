@@ -94,7 +94,10 @@ pub fn addChunk(allocator: std.mem.Allocator, database: *db_mod.Db, chunk: Chunk
     // gzip, or a plain JSON array sent while the page was closing.
     const gzipped = chunk.data.len >= 2 and chunk.data[0] == 0x1f and chunk.data[1] == 0x8b;
     if (!gzipped and chunk.data[0] != '[') return error.InvalidChunkEncoding;
-    if (chunk.last_ms < chunk.first_ms) return error.InvalidChunkTime;
+    if (chunk.last_ms < chunk.first_ms or
+        chunk.first_ms < chunk.received_at_ms - maximum_session_ms - 5 * 60_000 or
+        chunk.last_ms > chunk.received_at_ms + 5 * 60_000 or
+        chunk.last_ms - chunk.first_ms > maximum_session_ms + 60_000) return error.InvalidChunkTime;
     try database.exec("BEGIN IMMEDIATE");
     errdefer database.exec("ROLLBACK") catch {};
     var existing = try database.prepare(allocator, "SELECT visitor_id,started_at_ms,bytes FROM replays WHERE site_id=? AND session_id=?");

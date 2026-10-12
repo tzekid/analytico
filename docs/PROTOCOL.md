@@ -30,7 +30,9 @@ with the fields they had in v1. Version 2 adds:
   (a cross-domain token);
 - `page_summary`: `clicks` (at most 32 cells of element selector, 5% grid
   position inside the element, count and rage clicks), `attention` (visible
-  milliseconds per tenth of the page) and `form_fields` (per field: time,
+  milliseconds per tenth of the page) and `form_fields` for forms explicitly
+  marked with `data-analytics-form` (per explicitly labelled or structural
+  non-sensitive field: time,
   validation errors, abandoned, submitted; never values), consented only;
 - `event`: `order_id`, `items` (at most 32 of `id`, `name`, `category`,
   `price_minor`, `quantity`) and, from `/i` only, `user_id`;

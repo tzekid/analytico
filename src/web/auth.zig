@@ -150,7 +150,7 @@ pub fn safeNext(next: []const u8) []const u8 {
 
 test safeNext {
     try std.testing.expectEqualStrings("/shop?range=30d", safeNext("/shop?range=30d"));
-    for ([_][]const u8{ "", "shop", "//evil.test", "/\\evil.test", "/\t/evil.test", "/x\r\nset-cookie: a=b", "https://evil.test" }) |bad| {
+    for ([_][]const u8{ "", "shop", "//evil.test", "/\\evil.test", "/\t/evil.test", "/x\r\ninvalid", "https://evil.test" }) |bad| {
         try std.testing.expectEqualStrings("/", safeNext(bad));
     }
 }

@@ -19,9 +19,9 @@ mid-sized business picks instead of Google Analytics in most cases:
   - Lite: cookieless, consent-free.
   - Session: per-tab, no cross-day identity.
 
-The full-featured mode becomes the default for new websites. The catch is
+The full-featured mode is an explicit choice for websites that need it. The catch is
 that most of these features need visitor consent in the EU and UK. So
-"default" has to mean full when allowed and a graceful fall back to Lite
+Full mode means full when allowed and a graceful fall back to Lite
 otherwise, never "always on regardless". Section 4 covers how.
 
 ## 2. Where Analytico stands today (exploration)
@@ -95,9 +95,9 @@ consented persistent ID instead (section 4).
 |---|---|---|---|---|
 | **Lite** (exists) | Site/day pseudonym, computed on the server | None | Exempt where CNIL-style exemptions apply | Traffic, sources, pages, RUM |
 | **Session** (exists) | Random per-tab ID | `sessionStorage` | Usually exempt | Paths, funnels, landing and exit pages |
-| **Full** (new default) | Random first-party visitor ID, optional `identify()` | First-party cookie or localStorage, 13 months | **Required** in EU/UK | Returning visitors, retention, replay, heatmaps, cross-domain, user explorer |
+| **Full** (explicit opt-in) | Random first-party visitor ID, optional `identify()` | First-party cookie or localStorage, 13 months | **Required** in EU/UK | Returning visitors, retention, replay, heatmaps, cross-domain, user explorer |
 
-How Full stays legal by default:
+How Full stays privacy-preserving when selected:
 
 - **It starts as Lite** on every page load. It upgrades to Full only once
   consent is known to be granted, and downgrades the moment it's withdrawn.
@@ -161,8 +161,7 @@ M is about a week, L is several weeks.
 | Feature | What it entails | Size |
 |---|---|---|
 | User explorer | Full plus `identify()`: one user's sessions, events, replays and revenue; delete-user action | M |
-| Form analytics | Field-level focus, abandon and error counts by field name, never values | M |
-| Daily warehouse export | Daily Parquet/CSV files of raw events for BigQuery, Snowflake or S3 | M |
+| Form analytics | Opt-in marked forms only; field-level focus, abandon and error counts by non-sensitive field name, never values | M |
 | Experiments | Read variant assignments from the site (`analytico.variant("x","b")`); conversion by variant with significance. No feature-flag service | M |
 | SSO domain rule | "Anyone signing in with Google at example.com joins as viewer" | S |
 | Load-tested scale | Prove 10M page views/month on one box; add rollups only if measured queries need them (doctrine) | M |
@@ -177,8 +176,7 @@ M is about a week, L is several weeks.
 - **Privacy defaults, stricter than Clarity or Hotjar:**
   - every input value masked, always; password and card fields are never
     captured, even if unmasked by mistake;
-  - all text masked by default; operators unmask safe regions with
-    `data-analytico-unmask`;
+  - all text is always masked; there is no unmask escape hatch;
   - images and media blocked by default;
   - no recording before consent.
 - **Sampling and triggers:**

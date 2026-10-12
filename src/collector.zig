@@ -134,7 +134,7 @@ pub fn decide(site: store_mod.Site, client: Client) Decision {
     };
 }
 
-pub const Identity = struct { visitor_id: []const u8, session_id: []const u8 };
+pub const Identity = struct { visitor_id: []const u8, session_id: []const u8, consent_mode: []const u8 };
 
 pub const Result = struct {
     accepted: usize = 0,
@@ -145,6 +145,8 @@ pub const Result = struct {
     identity: ?Identity = null,
     /// A consented identity was removed by the server (GPC, consent required).
     dropped: bool = false,
+    /// A cross-domain identity claim was authenticated on this request.
+    continued: bool = false,
     /// Visitors erased on request; their replays are removed after commit.
     forgotten: std.ArrayList([]const u8) = .empty,
 };
@@ -289,10 +291,12 @@ pub fn ingest(
             if (try enforceConsent(&record, result.decision, client.gpc)) result.dropped = true;
             // A visit continued from another of the site's domains must carry
             // a valid link for the identity it claims.
-            if (record.link) |token| if (!linkMatches(master_key, site.public_id, record, token, received_at_ms)) {
-                strip(&record, false);
-                result.dropped = true;
-            };
+            if (record.link) |token| {
+                if (!linkMatches(master_key, site.public_id, record, token, received_at_ms)) {
+                    strip(&record, false);
+                    result.dropped = true;
+                } else result.continued = true;
+            }
         }
         try validateRecord(allocator, record, site.mode, source, received_at_ms);
         const receipt = try receiptState(allocator, store, site.id, record.event_id, &digest);
@@ -330,7 +334,7 @@ pub fn ingest(
         } else unreachable;
         if (record.visitor_id) |visitor_id| if (record.session_id) |session_id| {
             if (!std.mem.eql(u8, kind, "forget") and !(std.mem.eql(u8, kind, "consent") and std.mem.eql(u8, record.state.?, "denied"))) {
-                result.identity = .{ .visitor_id = visitor_id, .session_id = session_id };
+                result.identity = .{ .visitor_id = visitor_id, .session_id = session_id, .consent_mode = record.consent_mode };
             }
         };
         try insertReceipt(allocator, store, site.id, record, &digest, received_at_ms);
@@ -390,14 +394,14 @@ fn strip(record: *Record, gpc: bool) void {
     if (consent_record) record.state = if (gpc) "gpc" else "pending";
 }
 
-pub fn linkPayload(buffer: []u8, site_public_id: []const u8, visitor_id: []const u8, session_id: []const u8) ![]const u8 {
-    return std.fmt.bufPrint(buffer, "{s}~{s}~{s}", .{ site_public_id, visitor_id, session_id });
+pub fn linkPayload(buffer: []u8, site_public_id: []const u8, visitor_id: []const u8, session_id: []const u8, consent_mode: []const u8) ![]const u8 {
+    return std.fmt.bufPrint(buffer, "{s}~{s}~{s}~{s}", .{ site_public_id, visitor_id, session_id, consent_mode });
 }
 
 fn linkMatches(master_key: [32]u8, site_public_id: []const u8, record: Record, token: []const u8, now_ms: i64) bool {
     const payload = domain.verifyToken(master_key, "link", token, now_ms) orelse return false;
     var buffer: [160]u8 = undefined;
-    const expected = linkPayload(&buffer, site_public_id, record.visitor_id orelse return false, record.session_id orelse return false) catch return false;
+    const expected = linkPayload(&buffer, site_public_id, record.visitor_id orelse return false, record.session_id orelse return false, record.consent_mode) catch return false;
     return std.mem.eql(u8, payload, expected);
 }
 

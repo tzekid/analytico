@@ -197,6 +197,10 @@ pub fn post(ctx: *Ctx, action: []const u8) !void {
             return std.mem.eql(u8, a, b);
         }
     }.eq;
+    // Provider credentials and instance-wide sign-in policy belong to
+    // administrators. Everyone may still manage only their own methods.
+    const global = is(action, "provider") or is(action, "toggle") or is(action, "primary");
+    if (global and !ctx.can(.admin)) return @import("app.zig").forbidden(ctx);
     if (is(action, "provider")) return saveProvider(ctx);
     // Argon2 takes a while; never hold the write lock for it.
     var new_hash: []const u8 = "";
@@ -232,6 +236,10 @@ pub fn post(ctx: *Ctx, action: []const u8) !void {
     } else if (is(action, "password")) {
         try db.run(arena, "UPDATE users SET password_hash=? WHERE id=?", .{ new_hash, user.id });
         try db.run(arena, "DELETE FROM web_sessions WHERE user_id=?", .{user.id});
+        // A password change is an account-wide sign-out. Native app and MCP
+        // grants must not outlive the browser sessions it promises to revoke.
+        try db.run(arena, "DELETE FROM oauth_grants WHERE user_id=?", .{user.id});
+        try db.run(arena, "DELETE FROM devices WHERE user_id=?", .{user.id});
         try auth.startSession(ctx, db, user.id);
         try ctx.flash("Password saved. Other devices were signed out.", "", "");
     } else if (is(action, "remove-password")) {

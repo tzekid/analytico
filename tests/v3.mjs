@@ -21,12 +21,13 @@ const google = signer();
 function pages(origin, other) {
   const page = (body, extra = "") => `<!doctype html><html><head><title>Fixture</title>${snippets[origin] || ""}${extra}</head><body>${body}</body></html>`;
   return {
-    "/home": page(`<h1 data-analytics-section="hero">Secret heading</h1><p>Visible text for the replay.</p>
+    "/home": page(`<style>.private{background-image:url('/pixel?token=stylesheet-secret')}</style><h1 data-analytics-section="hero">Secret heading</h1><p>Visible text for the replay.</p>
+      <input type="hidden" name="csrf" value="hidden-csrf-secret"><input id="private-choice" type="checkbox" checked><a href="/reset?token=url-token-secret#private">Reset</a><div id="person-email-example-test" class="private" style="background:url('/pixel?token=inline-style-secret')" data-private="attribute-secret" title="title-secret"></div>
       <a id="to-pricing" href="/pricing">Pricing</a> <a id="to-other" href="${other}/welcome">Our other shop</a>
       <a class="ext" href="https://partner.example/offer">Partner</a> <a href="/files/menu.pdf" class="ext">Menu</a>
       <script>document.addEventListener("click", (e) => { if (e.target.closest("a.ext")) e.preventDefault(); });</script>`),
-    "/pricing": page(`<h1>Plans</h1><div id="plans"><button id="basic" style="width:200px;height:60px">Basic</button><button data-analytics-action="buy" style="width:200px;height:60px">Buy</button></div>
-      <form name="signup" onsubmit="return false"><input name="email" id="email" type="email" required><input name="company" id="company"><button>Sign up</button></form>
+    "/pricing": page(`<h1>Plans</h1><div id="person-alice-example-test"><button id="basic" style="width:200px;height:60px">Basic</button><button data-analytics-action="buy" style="width:200px;height:60px">Buy</button></div>
+      <form name="signup" data-analytics-form="signup" onsubmit="return false"><input name="email" id="email" data-analytics-field="email" type="email" required><input name="private-person-identifier" id="alice-smith-private" data-analytics-field="company"><button>Sign up</button></form>
       <div style="height:2400px"></div>`),
     "/catalog": page(`<h1>Search</h1><div data-analytics-search-results="0">No results</div>`),
     "/spa": page(`<h1>App</h1><button id="next" onclick="history.pushState({}, '', '/spa/step-2')">Next</button>`),
@@ -124,7 +125,7 @@ await journey("v3", async (t) => {
   const setupLink = t.init(originA);
   assert.match(t.cli("geo", "import", csvPath), /geo imported ipv4_ranges=\d+/);
   // Full is the default mode; the regional policy asks EU visitors.
-  const added = t.cli("site", "add", "shop", originA);
+  const added = t.cli("site", "add", "shop", originA, "--mode", "full");
   assert.match(added, /mode=full/);
   const publicId = /public_id=([^ ]+)/.exec(added)[1];
   t.cli("site", "origin-add", "shop", originB);
@@ -166,6 +167,18 @@ await journey("v3", async (t) => {
   await page.getByRole("button", { name: "Save" }).click();
   await page.locator(".toast", { hasText: "Recording settings saved" }).waitFor();
 
+  // An unauthenticated cross-domain claim stays Lite and never reaches storage.
+  const plantedVisitor = randomUUID();
+  const plantedSession = randomUUID();
+  const planted = `${publicId}~${plantedVisitor}~${plantedSession}~granted.invalid`;
+  const claimContext = await newContext();
+  const claimPage = await claimContext.newPage();
+  const [claimResponse] = await Promise.all([claimPage.waitForResponse((response) => response.url().endsWith("/e") && response.status() === 200), claimPage.goto(`${originA}/home?_an=${encodeURIComponent(planted)}`)]);
+  assert.equal((await claimResponse.json()).continued, undefined);
+  assert.equal(await claimPage.evaluate(() => Object.keys(localStorage).length), 0);
+  assert.equal(row("SELECT count(*) n FROM page_views WHERE visitor_id=?", plantedVisitor).n, 0);
+  await claimContext.close();
+
   // ---------------------------------------------------------------- an EU visitor
 
   const visitorEU = await newContext();
@@ -182,6 +195,16 @@ await journey("v3", async (t) => {
   const visitorA = await eu.evaluate((site) => localStorage.getItem(`analytico:${site}:visitor`).split(".")[0], publicId);
   const pv = row("SELECT country,region,city,consent_mode FROM page_views WHERE visitor_id=?", visitorA);
   assert.deepEqual({ ...pv }, { country: "DE", region: "Berlin", city: "Berlin", consent_mode: "granted" });
+  await eu.evaluate(async () => {
+    if (!window.CSSStyleSheet || !("adoptedStyleSheets" in document)) return;
+    const sheet = new CSSStyleSheet();
+    document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
+    sheet.replaceSync(`.private{background:url('/pixel?token=replace-sync-secret')}`);
+    await sheet.replace(`.private{background:url('/pixel?token=replace-secret')}`);
+    sheet.cssRules[0].style.setProperty("--css-property-private", "css-property-value-secret");
+    sheet.cssRules[0].style.removeProperty("--css-property-private");
+  });
+  await eu.locator("#private-choice").uncheck();
 
   // A second page in the same session carries the identity from the start.
   await Promise.all([decision(eu), eu.locator("#to-pricing").click()]);
@@ -191,14 +214,15 @@ await journey("v3", async (t) => {
   await eu.locator("#basic").click({ position: { x: 20, y: 20 } });
   for (let index = 0; index < 3; index++) await eu.locator("[data-analytics-action=buy]").click();
   await eu.locator("#email").fill("secret-typed@example.test");
-  await eu.locator("#company").fill("Typed Company Ltd");
-  await eu.locator("#company").blur();
+  await eu.locator("#alice-smith-private").fill("Typed Company Ltd");
+  await eu.locator("#alice-smith-private").blur();
   await eu.mouse.wheel(0, 1600);
   await delay(1200);
   // Leaving sends the summary with clicks, attention and form fields.
   await Promise.all([decision(eu), eu.goto(`${originA}/catalog?q=Garden+Tools`)]);
   await t.until(() => row("SELECT count(*) n FROM click_cells WHERE path='/pricing'").n >= 2, "click cells");
   assert.ok(row("SELECT sum(rage) n FROM click_cells WHERE path='/pricing'").n >= 1);
+  assert.equal(row("SELECT count(*) n FROM click_cells WHERE element LIKE '%alice%'").n, 0);
   const form = rows("SELECT field,abandons,submits FROM form_fields WHERE form='signup' ORDER BY field");
   assert.deepEqual(form.map((entry) => entry.field), ["", "company", "email"]);
   assert.equal(form.find((entry) => entry.field === "company").abandons, 1);
@@ -226,7 +250,7 @@ await journey("v3", async (t) => {
   await t.until(() => replays.prepare("SELECT count(*) n FROM replay_chunks WHERE session_id=?").get(pricing.session_id).n > 0, "replay chunks");
   const recorded = replays.prepare("SELECT data FROM replay_chunks WHERE session_id=?").all(pricing.session_id).map((chunk) => (chunk.data[0] === 0x1f && chunk.data[1] === 0x8b ? gunzipSync(chunk.data) : Buffer.from(chunk.data)).toString()).join("");
   assert.ok(recorded.includes('"type":2'), "a full snapshot was recorded");
-  for (const secret of ["Secret heading", "secret-typed@example.test", "Typed Company Ltd", "Visible text for the replay"]) assert.ok(!recorded.includes(secret), `${secret} must be masked`);
+  for (const secret of ["Secret heading", "secret-typed@example.test", "Typed Company Ltd", "Visible text for the replay", "hidden-csrf-secret", "url-token-secret", "attribute-secret", "title-secret", "stylesheet-secret", "inline-style-secret", "replace-sync-secret", "replace-secret", "css-property-private", "css-property-value-secret", "person-email-example-test", "alice-smith-private", "private-person-identifier", "isChecked", "utm_source=newsletter"]) assert.ok(!recorded.includes(secret), `${secret} must be masked`);
 
   // ---------------------------------------------------------------- SPA routes and errors
 
@@ -236,7 +260,7 @@ await journey("v3", async (t) => {
   await t.until(() => row("SELECT count(*) n FROM page_summaries ps JOIN page_views pv ON pv.page_id=ps.page_id WHERE pv.path='/spa'").n === 1, "summary of the previous route");
   await Promise.all([decision(eu), eu.goto(`${originA}/broken`)]);
   await t.until(() => row("SELECT count(*) n FROM errors WHERE path='/broken' AND visitor_id=?", visitorA).n === 1, "error recorded");
-  assert.match(row("SELECT message m FROM errors").m, /undefinedFunction/);
+  assert.equal(row("SELECT message m FROM errors").m, "ReferenceError");
 
   // ---------------------------------------------------------------- ecommerce and identity
 
@@ -337,7 +361,7 @@ await journey("v3", async (t) => {
   await visit("/shop/pages?tab=outbound", "partner.example");
   await visit("/shop/pages?tab=downloads", "menu.pdf");
   await visit("/shop/search", "garden tools");
-  await visit("/shop/errors", "undefinedFunction");
+  await visit("/shop/errors", "ReferenceError");
   await visit("/shop/funnels?tab=forms", "signup");
   await page.locator("td.mono", { hasText: "company" }).waitFor();
   await visit("/shop/sessions?signal=recorded", "Sessions & replays");
@@ -383,6 +407,14 @@ await journey("v3", async (t) => {
   // The shop doesn't exist for them, and settings beyond sign-in are closed.
   assert.equal((await viewer.goto(`${originA}/shop`)).status(), 404);
   assert.equal((await viewer.goto(`${originA}/settings/team`)).status(), 403);
+  for (const [action, form] of [
+    ["primary", { method: "passkey" }],
+    ["toggle", { method: "passkey" }],
+    ["provider", { provider: "google", client_id: "blocked", client_secret: "blocked", issuer: originA }],
+  ]) {
+    const response = await viewerContext.request.post(`${originA}/settings/signin/${action}`, { form, headers: { origin: originA }, maxRedirects: 0 });
+    assert.equal(response.status(), 403, action);
+  }
   await viewer.goto(`${originA}/blog`);
   assert.equal(await viewer.locator("#site-menu .menu-item", { hasText: "shop" }).count(), 0);
   await viewerContext.close();

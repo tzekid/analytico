@@ -88,10 +88,10 @@ fn rememberedView(ctx: *Ctx, site: data.Site) !void {
 /// waiting state, with the snippet, instead of empty tables.
 fn waitingReport(ctx: *Ctx, site: data.Site, page: []const u8) !bool {
     const reports = [_]struct { []const u8, layout.Nav, []const u8 }{
-        .{ "pages", .pages, "Pages" },               .{ "acquisition", .acquisition, "Acquisition" }, .{ "search", .search, "Search" },
-        .{ "audience", .audience, "Audience" },      .{ "events", .events, "Events & goals" },        .{ "funnels", .funnels, "Funnels" },
-        .{ "sessions", .sessions, "Sessions & replays" }, .{ "heatmaps", .heatmaps, "Heatmaps" },      .{ "revenue", .revenue, "Revenue" },
-        .{ "retention", .retention, "Retention" },   .{ "people", .people, "People" },                .{ "performance", .performance, "Performance" },
+        .{ "pages", .pages, "Pages" },                    .{ "acquisition", .acquisition, "Acquisition" }, .{ "search", .search, "Search" },
+        .{ "audience", .audience, "Audience" },           .{ "events", .events, "Events & goals" },        .{ "funnels", .funnels, "Funnels" },
+        .{ "sessions", .sessions, "Sessions & replays" }, .{ "heatmaps", .heatmaps, "Heatmaps" },          .{ "revenue", .revenue, "Revenue" },
+        .{ "retention", .retention, "Retention" },        .{ "people", .people, "People" },                .{ "performance", .performance, "Performance" },
         .{ "errors", .errors, "Errors" },
     };
     for (reports) |report| if (is(page, report[0])) {
@@ -309,8 +309,7 @@ fn route(ctx: *Ctx) !void {
         if (rest.len == 2 and is(page, "heatmaps") and is(rest[1], "open")) return heatmaps.open(ctx, site);
         if (rest.len == 2 and is(page, "heatmaps") and is(rest[1], "warm")) return heatmaps.warm(ctx, site);
     }
-    const summary = rest.len == 3 and is(page, "replays") and is(rest[2], "summary");
-    if (post and !ctx.can(.editor) and !summary and !(rest.len == 1 and (is(page, "ask") or is(page, "why") or is(page, "describe")))) return forbidden(ctx);
+    if (post and !ctx.can(.editor) and !(rest.len == 1 and (is(page, "ask") or is(page, "why") or is(page, "describe")))) return forbidden(ctx);
     if (post) {
         if (rest.len == 1) {
             if (is(page, "annotations")) return overview.addAnnotation(ctx, site);
@@ -326,7 +325,6 @@ fn route(ctx: *Ctx) !void {
             if (is(page, "why")) return ai.why(ctx, site);
             if (is(page, "describe")) return ai.describe(ctx, site);
         }
-        if (summary) return ai.sessionSummary(ctx, site, rest[1]);
         if (rest.len == 3 and id != null) {
             if (is(page, "annotations") and is(action, "delete")) return overview.deleteAnnotation(ctx, site, id.?);
             if (is(page, "annotations") and is(action, "keep")) return overview.keepAnnotation(ctx, site, id.?);

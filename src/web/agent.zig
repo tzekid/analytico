@@ -1,5 +1,5 @@
 //! Talking to the AI providers, for every feature: OpenAI's Responses API
-//! (ChatGPT plan or API key), Anthropic Messages, or any OpenAI-compatible
+//! (ChatGPT plan or API key), Anthropic Messages, or a loopback OpenAI-compatible
 //! chat completions endpoint. With a `Scope`, the model may call the report
 //! catalog as tools, in-process and within "What the AI can see", for up to
 //! six rounds; text streams to a `Sink` as it arrives.
@@ -70,6 +70,7 @@ pub const ToolOutput = struct { text: []const u8, used: []const u8 };
 pub fn tool(arena: std.mem.Allocator, db: *db_mod.Db, site: data.Site, name: []const u8, arguments: std.json.ObjectMap, paths: bool, sources: bool, now_ms: i64) !ToolOutput {
     const overview = std.mem.eql(u8, name, "site_overview");
     const report = if (overview) null else catalog.find(name) orelse return error.UnknownTool;
+    if (report) |value| if (!safeReport(value.name)) return error.UnknownTool;
     // Period and filters; a filter on a hidden dimension would let the model probe for its values.
     var query: std.Io.Writer.Allocating = .init(arena);
     try query.writer.print("range={f}", .{html.url(argString(arguments, "range") orelse if (overview) "7d" else "30d")});
@@ -123,10 +124,27 @@ fn revealed(report: *const catalog.Report, arguments: std.json.ObjectMap, paths:
     };
 }
 
+/// AI receives report aggregates, never row-level activity or stable session
+/// identifiers. Detailed timelines remain in the signed-in workspace only.
+pub fn safeReport(name: []const u8) bool {
+    // New reports stay local until someone deliberately adds them here.
+    inline for (.{
+        "overview",  "breakdown",          "timeseries", "pages",       "acquisition",
+        "campaigns", "events",             "goals",      "funnel",      "paths",
+        "came_from", "revenue",            "vitals",     "performance", "sections",
+        "actions",   "minutes",            "coverage",   "traffic",     "flow",
+        "friction",  "campaign_economics",
+    }) |safe| if (std.mem.eql(u8, name, safe)) return true;
+    return false;
+}
+
 /// Function definitions for the catalog, without the website (the scope fixes it).
 fn toolList(w: *std.Io.Writer, comptime style: enum { responses, anthropic }) !void {
-    for (&catalog.reports, 0..) |*report, index| {
-        if (index != 0) try w.writeByte(',');
+    var wrote = false;
+    for (&catalog.reports) |*report| {
+        if (!safeReport(report.name)) continue;
+        if (wrote) try w.writeByte(',');
+        wrote = true;
         try w.writeAll(if (style == .responses) "{\"type\":\"function\",\"name\":" else "{\"name\":");
         try std.json.Stringify.value(report.name, .{}, w);
         try w.writeAll(",\"description\":");

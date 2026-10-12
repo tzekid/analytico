@@ -573,6 +573,7 @@ fn decisionJson(arena: std.mem.Allocator, shared: *Shared, site: store_mod.Site,
     const w = &out.writer;
     try w.print("{{\"upgrade\":\"{s}\"", .{@tagName(result.decision)});
     if (result.dropped) try w.writeAll(",\"drop\":true");
+    if (result.continued) try w.writeAll(",\"continued\":true");
     if (result.decision == .ask and site.consent_banner) {
         try w.writeAll(",\"banner\":{\"text\":");
         try std.json.Stringify.value(site.banner_text, .{}, w);
@@ -590,7 +591,7 @@ fn decisionJson(arena: std.mem.Allocator, shared: *Shared, site: store_mod.Site,
         const origins = try shared.store.origins(arena, site.id);
         if (origins.len > 1) {
             var payload_buffer: [160]u8 = undefined;
-            const payload = try collector.linkPayload(&payload_buffer, site.public_id, identity.visitor_id, identity.session_id);
+            const payload = try collector.linkPayload(&payload_buffer, site.public_id, identity.visitor_id, identity.session_id, identity.consent_mode);
             var token_buffer: [300]u8 = undefined;
             const token = try domain.signToken(&token_buffer, shared.master_key, "link", payload, domain.nowMs() + 30 * 60_000);
             try w.writeAll(",\"link\":");
@@ -599,7 +600,7 @@ fn decisionJson(arena: std.mem.Allocator, shared: *Shared, site: store_mod.Site,
             try std.json.Stringify.value(origins, .{}, w);
         }
         if (site.replay_percent > 0 or site.replay_triggers) {
-            try w.print(",\"replay\":{{\"rate\":{d},\"triggers\":{},\"mask_text\":{},\"goals\":[", .{ site.replay_percent, site.replay_triggers, site.mask_text });
+            try w.print(",\"replay\":{{\"rate\":{d},\"triggers\":{},\"mask_text\":true,\"goals\":[", .{ site.replay_percent, site.replay_triggers });
             var goals = try shared.store.database.prepare(arena, "SELECT match_value FROM goals WHERE site_id=? AND kind='event' ORDER BY name LIMIT 32");
             defer goals.deinit();
             try goals.bindInt(1, site.id);
@@ -633,14 +634,46 @@ fn siteOrigin(arena: std.mem.Allocator, read_db: *db_mod.Db, site_id: i64, raw: 
     return if (try statement.step() == .row) raw.? else null;
 }
 
-const ReplaySite = struct { id: i64, mode: []const u8, enabled: bool, recording: bool };
+const ReplaySite = struct { id: i64, mode: []const u8, enabled: bool, recording: bool, record_exclude: []const u8 };
 
 fn replaySite(arena: std.mem.Allocator, read_db: *db_mod.Db, public_id: []const u8) !?ReplaySite {
-    var statement = try read_db.prepare(arena, "SELECT id,tracking_mode,enabled,replay_percent>0 OR replay_triggers=1 FROM sites WHERE public_id=?");
+    var statement = try read_db.prepare(arena, "SELECT id,tracking_mode,enabled,replay_percent>0 OR replay_triggers=1,record_exclude FROM sites WHERE public_id=?");
     defer statement.deinit();
     try statement.bindText(1, public_id);
     if (try statement.step() != .row) return null;
-    return .{ .id = statement.columnInt(0), .mode = try arena.dupe(u8, statement.columnText(1)), .enabled = statement.columnBool(2), .recording = statement.columnBool(3) };
+    return .{ .id = statement.columnInt(0), .mode = try arena.dupe(u8, statement.columnText(1)), .enabled = statement.columnBool(2), .recording = statement.columnBool(3), .record_exclude = try arena.dupe(u8, statement.columnText(4)) };
+}
+
+fn wildcard(pattern: []const u8, value: []const u8) bool {
+    var p: usize = 0;
+    var v: usize = 0;
+    var star: ?usize = null;
+    var retry: usize = 0;
+    while (v < value.len) {
+        if (p < pattern.len and pattern[p] == value[v]) {
+            p += 1;
+            v += 1;
+        } else if (p < pattern.len and pattern[p] == '*') {
+            star = p;
+            p += 1;
+            retry = v;
+        } else if (star) |at| {
+            retry += 1;
+            v = retry;
+            p = at + 1;
+        } else return false;
+    }
+    while (p < pattern.len and pattern[p] == '*') p += 1;
+    return p == pattern.len;
+}
+
+fn replayExcluded(patterns: []const u8, path: []const u8) bool {
+    var lines = std.mem.tokenizeAny(u8, patterns, "\r\n");
+    while (lines.next()) |raw| {
+        const pattern = std.mem.trim(u8, raw, " ");
+        if (pattern.len != 0 and wildcard(pattern, path)) return true;
+    }
+    return false;
 }
 
 /// POST /r: one gzip-compressed chunk of rrweb events for a consented,
@@ -661,15 +694,18 @@ fn replayChunk(arena: std.mem.Allocator, shared: *Shared, read_db: *db_mod.Db, r
     const seq = std.fmt.parseInt(i64, queryValue(arena, target, "seq") orelse "", 10) catch return respondError(request, .bad_request, "invalid_replay", origin);
     const first = std.fmt.parseInt(i64, queryValue(arena, target, "first") orelse "", 10) catch return respondError(request, .bad_request, "invalid_replay", origin);
     const last = std.fmt.parseInt(i64, queryValue(arena, target, "last") orelse "", 10) catch return respondError(request, .bad_request, "invalid_replay", origin);
+    if (seq < 0 or seq > 100_000) return respondError(request, .bad_request, "invalid_replay", origin);
     const length = request.head.content_length orelse return respondError(request, .length_required, "length_required", origin);
     if (length == 0 or length > replay.maximum_chunk_bytes) return respondError(request, .payload_too_large, "body_too_large", origin);
-    // Only sessions with a consented page view on this site can record.
-    var session = try read_db.prepare(arena, "SELECT path,device,browser,country FROM page_views WHERE site_id=? AND session_id=? AND visitor_id=? ORDER BY received_at_ms LIMIT 1");
+    // The exact page must belong to this consented visitor and session.
+    var session = try read_db.prepare(arena, "SELECT path,device,browser,country FROM page_views WHERE site_id=? AND session_id=? AND visitor_id=? AND page_id=? AND consent_mode IN ('granted','not_required') LIMIT 1");
     defer session.deinit();
     try session.bindInt(1, site.id);
     try session.bindText(2, session_id);
     try session.bindText(3, visitor_id);
+    try session.bindText(4, page_id);
     if (try session.step() != .row) return respondError(request, .forbidden, "unknown_session", origin);
+    if (replayExcluded(site.record_exclude, session.columnText(0))) return respondError(request, .forbidden, "replay_excluded", origin);
     const body = try arena.alloc(u8, @intCast(length));
     var body_buffer: [16 * 1024]u8 = undefined;
     const reader = request.readerExpectContinue(&body_buffer) catch return error.InvalidExpectation;

@@ -48,7 +48,6 @@ pub fn run(
     if (std.mem.eql(u8, args[1], "user") and args.len >= 4 and std.mem.eql(u8, args[2], "invite")) {
         return runInvite(allocator, io, output, args[3], data, option(args, "--origin") orelse return error.MissingOrigin);
     }
-    if (std.mem.eql(u8, args[1], "user") and args.len >= 4 and std.mem.eql(u8, args[2], "session")) return runUserSession(allocator, io, output, args[3], data);
     if (std.mem.eql(u8, args[1], "user") and args.len >= 5 and std.mem.eql(u8, args[2], "key")) return runUserKey(allocator, io, output, args, data);
     if (std.mem.eql(u8, args[1], "vacuum") and args.len >= 3) {
         return ops.vacuum(allocator, io, output, args[2], option(args, "--backup") orelse return error.MissingBackup);
@@ -108,15 +107,6 @@ fn userId(allocator: std.mem.Allocator, store: *store_mod.Store, email_raw: []co
     const email = try @import("web/auth.zig").normalizeEmail(allocator, email_raw);
     const id = try store.database.scalar(allocator, i64, "SELECT id FROM users WHERE email=?", .{email});
     return if (id == 0) error.UnknownUser else id;
-}
-
-/// Signs someone in from the shell, for scripts and tests: prints the `an_s`
-/// cookie value. Whoever runs the CLI already holds the database.
-fn runUserSession(allocator: std.mem.Allocator, io: std.Io, output: *std.Io.Writer, email: []const u8, data: []const u8) !void {
-    var store = try store_mod.Store.open(allocator, io, data, true);
-    defer store.close();
-    const token = try @import("web/auth.zig").createSession(allocator, io, &store.database, try userId(allocator, &store, email), domain.nowMs());
-    try output.print("{s}\n", .{&token});
 }
 
 /// A read API key, as Settings → API creates it: prints the key once.
@@ -345,7 +335,7 @@ fn runSite(
     var store = try store_mod.Store.open(allocator, io, data, write);
     defer store.close();
     if (std.mem.eql(u8, args[2], "add") and args.len >= 5) {
-        const mode = try domain.parseMode(option(args, "--mode") orelse "full");
+        const mode = try domain.parseMode(option(args, "--mode") orelse "lite");
         var site = try store.addSite(io, args[3], args[4], mode);
         defer site.deinit(allocator);
         const secret = std.fmt.bytesToHex(site.internal_secret, .lower);
@@ -486,7 +476,7 @@ pub fn writeUsage(output: *std.Io.Writer) !void {
         \\  analytico init <data-dir> [--origin https://analytics.example]
         \\    with --origin, prints a one-time link to create the first account
         \\  analytico site add <slug> <origin> [--mode full|session|lite] [--data <dir>]
-        \\    full (default) asks for consent where needed and starts as lite
+        \\    lite (default) stores no browser identifier; choose richer modes explicitly
         \\  analytico geo import <dbip-city-lite.csv.gz> --data <dir>
         \\    places visitors by country, region and city; IPs are never stored
         \\  analytico geo lookup <ip> --data <dir>
@@ -499,8 +489,6 @@ pub fn writeUsage(output: *std.Io.Writer) !void {
         \\Workspace:
         \\  analytico user invite <email> --origin https://analytics.example.com --data <dir>
         \\    prints a one-time link to sign in (passkey, Google, ChatGPT or password)
-        \\  analytico user session <email> --data <dir>
-        \\    prints a sign-in cookie (an_s) for scripts and tests
         \\  analytico user key <email> <name> [--site <slug>] --data <dir>
         \\    prints a read API key with that person's access
         \\
@@ -529,7 +517,7 @@ pub fn writeUsage(output: *std.Io.Writer) !void {
         \\  analytico campaign spend-add <site> <date> <source> <campaign> <content> <amount-minor> <currency>
         \\  analytico campaign spend-import <site> <costs.csv>
         \\
-        \\Report names (the same reports serve the read API at /api/v1/sites/<site>/<name> and MCP connectors):
+        \\Report names (all serve the read API; aggregate reports also serve AI connectors):
         \\
     );
     for (&catalog.reports) |*report| {

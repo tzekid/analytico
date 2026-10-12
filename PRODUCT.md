@@ -17,7 +17,7 @@ back, and one identified user's journey across devices.
 
 ## Tracking modes
 
-**Full** (the default for new websites) starts every visit as Lite and
+**Lite is the default for new websites.** Full starts every visit as Lite and
 remembers a visitor only once consent is known: granted by the visitor, or not
 required under the site's policy for that visitor. The policy is "ask in the
 EU, UK and Switzerland" (default; the country is decided at collection),
@@ -27,7 +27,7 @@ Google Consent Mode's `analytics_storage`. Global Privacy Control and Do Not
 Track keep a visitor in Lite, and the server enforces it. Remembered visitors
 get a first-party ID in `localStorage` (13 months) and 30-minute sessions,
 which unlock returning visitors and retention, people, revenue per person,
-replays, heatmaps, form analytics and cross-domain visits across the
+replays, heatmaps, form analytics for explicitly marked forms and cross-domain visits across the
 website's own domains.
 
 **Session** adds one random ID in `sessionStorage`: same-visit paths,
@@ -39,7 +39,7 @@ server-derived site/day visitor pseudonym.
 
 All modes track single-page-app route changes (opt out with
 `data-spa="false"`), site search terms, outbound link hosts and download file
-names, and JavaScript errors.
+names, and JavaScript error types without arbitrary application messages.
 
 ## Identity and deletion
 
@@ -55,9 +55,9 @@ data can be exported as JSON from their page.
 
 Replays record consented Full-mode sessions on websites that turn recording
 on: a sampled share, plus (optionally) every session with a rage click, an
-error, a goal or a purchase. Text is masked unless marked
-`data-analytico-unmask` (or the site chooses "inputs only"), every input value
-always, and images, media, canvases and frames are replaced. Sessions are
+error, a goal or a purchase. All text and every input value are always masked;
+URL queries, fragments and arbitrary attributes are removed; images, media,
+canvases and frames are replaced. Sessions are
 capped at 30 minutes and 5 MB, kept in `replays.db` and pruned after 30 days by
 default. Heatmaps aggregate clicks per element on a 5% grid, scroll reach and
 attention per tenth of the page, per screen class — never a trail per person
@@ -83,7 +83,7 @@ accountability.
 
 Optional AI answers questions, explains chart points and triggered alerts,
 and writes summaries for scheduled emails. It uses an operator-supplied key
-(Anthropic, OpenAI, or any OpenAI-compatible endpoint) or, through the
+(Anthropic, OpenAI, or a loopback OpenAI-compatible endpoint) or, through the
 read-only MCP connector, the operator's own Claude or ChatGPT plan. Only
 aggregates leave the instance.
 

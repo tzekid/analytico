@@ -12,7 +12,7 @@ const plan = "openid profile email offline_access resource.invoke chatgpt.tokens
 
 // What the stand-in saw, and how it should answer next.
 const seen = { authorize: [], tokens: [], revoked: [], responses: [], anthropic: [] };
-const mode = { forged: false, scope: plan };
+const mode = { invalidSignature: false, scope: plan };
 const attempts = new Map();
 let serial = 0;
 const live = new Map();
@@ -51,7 +51,7 @@ function stand({ incoming, outgoing, url, base, body, json }) {
         // A minute left: the first use refreshes.
         live.set(`access-${serial}`, true);
         live.set(`refresh-${serial}`, true);
-        return json({ access_token: `access-${serial}`, refresh_token: `refresh-${serial}`, id_token: mode.forged ? openai.forged(claims) : openai.sign(claims), token_type: "Bearer", expires_in: 60, scope: mode.scope });
+        return json({ access_token: `access-${serial}`, refresh_token: `refresh-${serial}`, id_token: mode.invalidSignature ? openai.wrongKey(claims) : openai.sign(claims), token_type: "Bearer", expires_in: 60, scope: mode.scope });
       }
       if (!live.has(form.refresh_token)) return json({ error: "refresh_token_reused" }, 400);
       live.delete(form.refresh_token);
@@ -64,8 +64,7 @@ function stand({ incoming, outgoing, url, base, body, json }) {
       return json({});
     case "/v1/models":
       assert.ok(live.has(incoming.headers.authorization.slice(7)), incoming.headers.authorization);
-      // Without a client version the catalog leaves newer models out.
-      assert.equal(url.searchParams.get("client_version"), "99.0.0");
+      assert.equal(url.search, "");
       return json({ models: [
         { slug: "gpt-test", display_name: "GPT Test", visibility: "list", supported_in_api: true },
         { slug: "gpt-hidden", display_name: "Hidden", visibility: "hide", supported_in_api: true },
@@ -75,10 +74,6 @@ function stand({ incoming, outgoing, url, base, body, json }) {
       const request = JSON.parse(body);
       seen.responses.push({ authorization: incoming.headers.authorization, request });
       const question = request.input[0].content;
-      if (request.instructions.startsWith("You summarise one visit")) {
-        assert.equal(question, "0:00 opened /pricing\n0:05 rage click\n0:09 JavaScript error: TypeError: x is undefined\n");
-        return sse(outgoing, [{ type: "response.output_text.delta", delta: "0:00 — Opened the pricing page.\n0:05 — Rage-clicked, then hit an error at 0:09." }, { type: "response.completed", response: { usage: { input_tokens: 80, output_tokens: 25 } } }]);
-      }
       if (request.instructions.startsWith("You turn a description")) {
         assert.equal(request.tools, undefined);
         const view = question.includes("Germany") ? { range: "30d", filters: [{ dim: "device", value: "mobile" }, { dim: "country", value: "DE" }, { dim: "planet", value: "Mars" }] } : {};
@@ -157,17 +152,17 @@ await journey("ai", async (t) => {
     return popup;
   };
 
-  // A forged ID token, then an account without plan sharing: refused, nothing saved.
+  // An ID token with an invalid signature, then an account without plan sharing: refused, nothing saved.
   await page.goto(`${origin}/settings/ai`);
   // OpenAI's approved button: black, with the ChatGPT logo.
   const logo = page.locator("a.btn-chatgpt svg");
   assert.match(await logo.locator("use").getAttribute("href"), /#chatgpt$/);
   assert.equal((await logo.boundingBox()).width, 18);
-  mode.forged = true;
+  mode.invalidSignature = true;
   let popup = await continueWith();
   await popup.getByText("couldn’t be verified").waitFor();
   await popup.close();
-  mode.forged = false;
+  mode.invalidSignature = false;
   mode.scope = "openid profile email offline_access";
   await page.goto(`${origin}/settings/ai`);
   popup = await continueWith();
@@ -183,8 +178,7 @@ await journey("ai", async (t) => {
   assert.equal(first.code_challenge_method, "S256");
   assert.match(first.redirect_uri, /^http:\/\/127\.0\.0\.1:\d+\/auth\/callback$/);
 
-  // A remote server: the browser can't reach the loopback address, so the
-  // address is pasted into the waiting dialog.
+  // A remote browser reaches the server's loopback listener through a tunnel.
   await page.goto(`${origin}/settings/ai`);
   let blocked = "";
   // Routing never sees a redirect's next hop: the start is taken, the
@@ -199,9 +193,7 @@ await journey("ai", async (t) => {
   for (let attempt = 0; attempt < 50 && !blocked; attempt++) await delay(100);
   await popup.close();
   await context.unrouteAll();
-  const dialog = page.locator("#chatgpt-dialog");
-  await dialog.getByLabel("Address from the tab").fill(blocked);
-  await dialog.getByRole("button", { name: "Continue", exact: true }).click();
+  assert.equal((await fetch(blocked)).status, 200);
   await page.getByText("You’re using your ChatGPT plan").waitFor();
   await page.getByRole("button", { name: "Got it" }).click();
   await page.getByText("Using ChatGPT plan").waitFor();
@@ -292,28 +284,6 @@ await journey("ai", async (t) => {
   await described.getByText("Couldn’t turn that into filters").waitFor();
   await page.keyboard.press("Escape");
 
-  // A session's summary: its moments (never anything typed) become lines
-  // that seek the replay.
-  const sessionId = randomUUID();
-  const pageId = randomUUID();
-  const at = Date.now() - 60_000;
-  const moment = (offset, extra) => ({ event_id: randomUUID(), page_id: pageId, session_id: sessionId, occurred_at_ms: at + offset, tracking_mode: "session", consent_mode: "analytics", tracker_version: "1", release_id: "", internal: false, path: "/pricing", ...extra });
-  const collected = await fetch(`http://127.0.0.1:${t.port}/e`, {
-    method: "POST",
-    headers: { origin, "content-type": "text/plain", "x-forwarded-for": "198.51.100.9", "user-agent": "Mozilla/5.0 (X11; Linux x86_64) Chrome/140 Safari/537.36" },
-    body: JSON.stringify({ v: 2, site: shopId, sent_at_ms: Date.now(), records: [
-      moment(0, { type: "page_view", navigation_type: "navigate", viewport_class: "desktop", language: "en" }),
-      moment(5000, { type: "event", name: "rage_click", properties: { element: "button" } }),
-      moment(9000, { type: "error", message: "TypeError: x is undefined", file: "/app.js", line: 3, column: 1 }),
-    ] }),
-  });
-  assert.equal(collected.status, 204, await collected.text());
-  await page.goto(`${origin}/shop/replays/${sessionId}`);
-  await page.getByRole("button", { name: "Summarise" }).click();
-  const summary = page.locator("[data-summary-out]");
-  await summary.getByText("Rage-clicked, then hit an error at 0:09.").waitFor();
-  assert.deepEqual(await summary.locator("[data-seek]").evaluateAll((rows) => rows.map((row) => row.dataset.seek)), ["0", "5000"]);
-
   // A teammate can't use the owner's plan: their Ask runs on the instance's
   // key (Anthropic, with a tool call), and Settings → AI shows only their own plan.
   await page.goto(`${origin}/settings/team`);
@@ -347,5 +317,5 @@ await journey("ai", async (t) => {
   assert.equal(await teammate.getByText("For the whole team").count(), 0);
   await teammateContext.close();
 
-  return "ChatGPT plan sign-in (forged token, scope, paste, loopback, reuse), revoke, refresh rotation, streamed Ask with tools and the screen, usage limit, plain-language filters, session summary, teammate on the instance key (Anthropic tools)";
+  return "ChatGPT plan sign-in (signature, scope, loopback, reuse), revoke, refresh rotation, streamed Ask with aggregate tools and the screen, usage limit, plain-language filters, teammate on the instance key (Anthropic tools)";
 });

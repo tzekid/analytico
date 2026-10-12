@@ -45,6 +45,7 @@
   var replayConfig = null;
   var replay = null;
   var replayRequested = false;
+  var identityGeneration = 0;
   var bannerHost = null;
   var clickCells, clickCount, recentClicks, attention, forms, lastAttention;
   var arrivedClickId = null;
@@ -326,12 +327,19 @@
       if (count >= 0) record.search_results = count;
     }
     /* @full-begin */
-    if (linkArrival) record.link = linkArrival;
+    if (linkArrival) {
+      record.link = linkArrival.token;
+      record.visitor_id = linkArrival.visitor;
+      record.session_id = linkArrival.session;
+      record.consent_mode = linkArrival.consent;
+    }
     if (visitorId && arrivedClickId) {
       record.click_id = arrivedClickId;
       arrivedClickId = null;
     }
-    send([record], decision);
+    var expectedClaim = linkArrival;
+    var generation = identityGeneration;
+    send([record], function (response) { decision(response, expectedClaim, generation); });
     return;
     /* @full-end */
     send([record]);
@@ -520,10 +528,6 @@
     var steps = [];
     for (var node = element; node && node.nodeType === 1 && node !== document.documentElement && steps.length < 6; node = node.parentElement) {
       var tag = node.tagName.toLowerCase();
-      if (node.id && /^[A-Za-z][A-Za-z0-9_-]{0,40}$/.test(node.id) && !/\d{3,}/.test(node.id)) {
-        steps.unshift("#" + node.id);
-        break;
-      }
       if (tag === "body") {
         steps.unshift("body");
         break;
@@ -599,19 +603,26 @@
   // ---------------------------------------------------------- forms
 
   function formKey(form) {
-    var name = form.getAttribute("name") || form.id || form.getAttribute("data-analytics-form");
+    var name = form.getAttribute("data-analytics-form");
     if (name) return clean(name, 64);
     var index = Array.prototype.indexOf.call(document.forms, form);
     return "form-" + (index + 1);
   }
 
   function fieldKey(field) {
-    return clean(field.getAttribute("name") || field.id || field.getAttribute("type") || field.tagName.toLowerCase(), 64);
+    var label = clean(field.getAttribute("data-analytics-field") || "", 64);
+    if (label) return label;
+    var fields = Array.prototype.filter.call(field.form.elements, function (candidate) {
+      return /^(INPUT|SELECT|TEXTAREA)$/.test(candidate.tagName) && !/^(hidden|submit|button|reset|image|password)$/i.test(candidate.type || "");
+    });
+    return "field-" + (fields.indexOf(field) + 1);
   }
 
   function formField(target) {
     if (!target || !target.form || !/^(INPUT|SELECT|TEXTAREA)$/.test(target.tagName)) return null;
-    if (/^(hidden|submit|button|reset|image)$/i.test(target.type || "")) return null;
+    if (!target.form.hasAttribute("data-analytics-form")) return null;
+    if (/^(hidden|submit|button|reset|image|password)$/i.test(target.type || "")) return null;
+    if (/^(cc-|card|cvc|cvv|otp|token|secret|pass)/i.test(target.name || target.id || "")) return null;
     var form = formKey(target.form);
     var field = fieldKey(target);
     if (!form || !field) return null;
@@ -716,13 +727,12 @@
     /* @full-end */
   }
 
-  // Errors: message (query strings and long numbers removed), file name,
-  // line and column. At most five distinct errors per page.
+  // Errors: the exception class plus file name, line and column. Arbitrary
+  // application messages can contain personal data and are never collected.
   function reportError(message, file, line, column) {
     if (!pageId) return;
-    message = clean(String(message || "Error").replace(/https?:\/\/[^\s?#]*[?#][^\s]*/g, function (url) {
-      return url.split(/[?#]/)[0];
-    }).replace(/\d{5,}/g, "…"), 300);
+    var kind = /^(?:Uncaught\s+)?([A-Za-z][A-Za-z0-9_.]{0,60}(?:Error|Exception|Rejection))\b/.exec(String(message || ""));
+    message = kind ? kind[1] : "JavaScriptError";
     if (!message || errorsSent[message] || Object.keys(errorsSent).length >= 5) return;
     errorsSent[message] = true;
     var record = Object.assign(base(uuid(), "error"), { path: currentPath, message: message });
@@ -924,6 +934,7 @@
   }
 
   function establish(state, adopted) {
+    identityGeneration += 1;
     visitorId = adopted ? adopted.visitor : storedVisitor();
     if (!visitorId) {
       visitorId = uuid();
@@ -940,9 +951,12 @@
   }
 
   function clearIdentity(state) {
+    identityGeneration += 1;
+    linkArrival = null;
     visitorId = null;
     sessionId = null;
     linkToken = null;
+    clearDecoratedLinks();
     save("visitor", null);
     save("session", null);
     save("click", null);
@@ -979,7 +993,8 @@
   }
 
   function sendConsent() {
-    send([Object.assign(base(uuid(), "consent"), { state: consent === "granted" ? "granted" : "not_required" })], decision);
+    var generation = identityGeneration;
+    send([Object.assign(base(uuid(), "consent"), { state: consent === "granted" ? "granted" : "not_required" })], function (response) { decision(response, null, generation); });
   }
 
   function setConsent(value) {
@@ -997,13 +1012,26 @@
   }
 
   // The server's answer to a page view or consent record.
-  function decision(response) {
+  function decision(response, expectedClaim, generation) {
     if (!response) return;
+    if (generation !== identityGeneration) return;
+    // Consent, GPC or forgetting may have cancelled this request while it was
+    // in flight. A stale continuation response cannot change the newer state.
+    if (expectedClaim && linkArrival !== expectedClaim) return;
+    // A cross-domain identity remains in memory until the server authenticates
+    // its signed claim. Failed or lost validation never writes browser state.
+    var rejectedLink = false;
+    if (expectedClaim && linkArrival === expectedClaim) {
+      var claim = expectedClaim;
+      linkArrival = null;
+      if (response.continued && !gpc && consent !== "denied") establish(claim.consent, { visitor: claim.visitor, session: claim.session });
+      else rejectedLink = true;
+    }
     if (response.upgrade === "never") {
       if (visitorId || consent !== "gpc") clearIdentity("gpc");
       return;
     }
-    if (response.drop) clearIdentity("pending");
+    if (response.drop && !rejectedLink) clearIdentity("pending");
     linkToken = response.link || null;
     excluded = Array.isArray(response.exclude) ? response.exclude : [];
     linkDomains = Array.isArray(response.domains) ? response.domains : [];
@@ -1083,23 +1111,32 @@
       if (!token) return;
       url.searchParams.delete("_an");
       history.replaceState(history.state, "", url.pathname + url.search + url.hash);
-      var parts = token.split(".")[0].split("~");
-      if (gpc || consent === "denied" || parts[0] !== site || !isUuid(parts[1]) || !isUuid(parts[2])) return;
-      linkArrival = clean(token, 300);
-      establish("granted", { visitor: parts[1], session: parts[2] });
+      var cleaned = clean(token, 300);
+      if (!cleaned || cleaned !== token) return;
+      var parts = cleaned.split(".")[0].split("~");
+      if (gpc || consent === "denied" || parts[0] !== site || !isUuid(parts[1]) || !isUuid(parts[2]) || (parts[3] !== "granted" && parts[3] !== "not_required")) return;
+      linkArrival = { token: cleaned, visitor: parts[1], session: parts[2], consent: parts[3] };
     } catch (_) {}
   }
 
   function decorate(event) {
-    if (!linkToken || !visitorId) return;
     var link = event.target && event.target.closest && event.target.closest("a[href]");
     if (!link) return;
     try {
       var url = new URL(link.href, location.href);
-      if (url.origin === location.origin || linkDomains.indexOf(url.origin) < 0) return;
-      url.searchParams.set("_an", linkToken);
+      url.searchParams.delete("_an");
+      if (linkToken && visitorId && url.origin !== location.origin && linkDomains.indexOf(url.origin) >= 0) url.searchParams.set("_an", linkToken);
       link.href = url.href;
     } catch (_) {}
+  }
+  function clearDecoratedLinks() {
+    document.querySelectorAll("a[href*='_an=']").forEach(function (link) {
+      try {
+        var url = new URL(link.href, location.href);
+        url.searchParams.delete("_an");
+        link.href = url.href;
+      } catch (_) {}
+    });
   }
   document.addEventListener("mousedown", decorate, true);
   document.addEventListener("keydown", function (event) { if (event.key === "Enter") decorate(event); }, true);
@@ -1120,12 +1157,8 @@
     if (!replayConfig || !visitorId || replay || replayRequested || !window.CompressionStream || isExcluded(currentPath)) return;
     var stream = sampled(sessionId) || load("replay") === sessionId;
     if (!stream && !replayConfig.triggers) return;
-    replayRequested = true;
-    var loader = document.createElement("script");
-    loader.src = origin + "__REPLAY_PATH__";
-    loader.async = true;
-    loader.onload = function () {
-      if (!visitorId || !window.__analyticoRecorder) return;
+    function beginRecording() {
+      if (!visitorId || !window.__analyticoRecorder || isExcluded(currentPath)) return;
       replay = window.__analyticoRecorder({
         endpoint: origin + "/r",
         site: site,
@@ -1133,9 +1166,19 @@
         session: sessionId,
         page: function () { return pageId; },
         stream: stream,
-        maskText: replayConfig.mask_text !== false
+        maskText: true
       });
+    }
+    if (window.__analyticoRecorder) return beginRecording();
+    replayRequested = true;
+    var loader = document.createElement("script");
+    loader.src = origin + "__REPLAY_PATH__";
+    loader.async = true;
+    loader.onload = function () {
+      replayRequested = false;
+      beginRecording();
     };
+    loader.onerror = function () { replayRequested = false; };
     document.head.appendChild(loader);
   }
 
@@ -1192,6 +1235,10 @@
   };
   // A new visitor ID for the next person on a shared device.
   window.analytico.reset = function () {
+    identityGeneration += 1;
+    linkArrival = null;
+    linkToken = null;
+    clearDecoratedLinks();
     if (!visitorId) return;
     visitorId = uuid();
     save("visitor", visitorId + "." + Date.now());

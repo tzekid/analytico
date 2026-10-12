@@ -54,6 +54,7 @@ await journey("workspace", async (t) => {
   const setupLink = t.init(origin);
   assert.match(setupLink, /\/welcome\/[0-9a-f]{64}$/);
   t.cli("site", "add", "shop", origin, "--mode", "session");
+  t.cli("goal", "add", "shop", "signed-up", "event", "signup");
   snippet = t.cli("site", "snippet", "shop", origin);
   await t.serve();
 
@@ -186,9 +187,10 @@ await journey("workspace", async (t) => {
   assert.equal((await mcp({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18" } })).result.serverInfo.name, "analytico");
   const overview = await mcp({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "site_overview", arguments: { site: "shop" } } });
   assert.match(overview.result.content[0].text, /page views 3/);
-  // Every catalog report is a tool, and a report call returns its table.
+  // The connector exposes aggregate reports and omits row-level activity.
   const tools = (await mcp({ jsonrpc: "2.0", id: 3, method: "tools/list" })).result.tools.map((tool) => tool.name);
-  for (const name of ["list_sites", "site_overview", "overview", "pages", "goals", "funnel", "errors", "performance"]) assert.ok(tools.includes(name), name);
+  for (const name of ["list_sites", "site_overview", "overview", "pages", "goals", "funnel", "performance"]) assert.ok(tools.includes(name), name);
+  for (const name of ["recent", "sessions", "session", "search", "errors"]) assert.ok(!tools.includes(name), name);
   const pages = await mcp({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "pages", arguments: { site: "shop", range: "7d" } } });
   assert.match(pages.result.content[0].text, /^Pages for .*\npath \| page_type/);
   assert.equal((await fetch(`${origin}/mcp`, { method: "POST", body: "{}" })).status, 401);
@@ -254,7 +256,6 @@ await journey("workspace", async (t) => {
   assert.equal((await register({})).status, 204);
   const settingsDb = t.db("analytico.db", { readOnly: false });
   settingsDb.prepare("INSERT OR REPLACE INTO settings(name,value) VALUES('push.relay',?)").run(aiBase);
-  settingsDb.prepare("INSERT INTO goals(site_id,name,kind,match_value,created_at_ms) SELECT id,'Signed up','event','signup',0 FROM sites WHERE slug='shop'").run();
   settingsDb.close();
   const signup = await (await t.context()).newPage();
   await signup.goto(`${origin}/pricing`);
@@ -271,22 +272,19 @@ await journey("workspace", async (t) => {
   decipher.setAuthTag(sealed.subarray(-16));
   const opened = Buffer.concat([decipher.update(sealed.subarray(21 + sealed[20], -16)), decipher.final()]);
   assert.equal(opened.at(-1), 2);
-  assert.deepEqual(JSON.parse(opened.subarray(0, -1)), { title: shopSite.name, body: "Goal reached: Signed up", site: "shop", kind: "goal" });
-  assert.doesNotMatch(JSON.stringify(delivered), /Signed up|shop/);
+  assert.deepEqual(JSON.parse(opened.subarray(0, -1)), { title: shopSite.name, body: "Goal reached: signed-up", site: "shop", kind: "goal" });
+  assert.doesNotMatch(JSON.stringify(delivered), /signed-up|shop/);
   // The app's settings: who is signed in, and a test notification to this device alone.
   assert.deepEqual(await (await app("/me")).json(), { email: "owner@example.test", role: "owner" });
   assert.equal((await app("/device/test", { method: "POST" })).status, 204);
   assert.equal((await t.until(() => pushes[1], "test push")).token, "ab".repeat(32));
-  // The app is a device under Settings → Sign-in, not an AI connector; signing it out ends its access.
+  // A password change is an account-wide sign-out, including native apps.
   await page.goto(`${origin}/settings/ai?site=shop`);
   assert.equal(await page.getByText("Analytico for Mac, iPhone and iPad").count(), 0);
-  await page.goto(`${origin}/settings/signin`);
-  const deviceRow = page.locator("[data-devices] .method-row", { hasText: "Test iPhone" });
-  await deviceRow.waitFor();
-  page.once("dialog", (dialog) => dialog.accept());
-  await deviceRow.getByRole("button", { name: "Sign out" }).click();
-  await page.locator(".toast", { hasText: "Signed out" }).waitFor();
+  const changed = await page.context().request.post(`${origin}/settings/signin/password`, { form: { password: "a new correct horse password" }, headers: { origin }, maxRedirects: 0 });
+  assert.equal(changed.status(), 303);
   assert.equal((await app("/sites")).status, 401);
+  assert.equal((await exchange({ grant_type: "refresh_token", refresh_token: rotated.refresh_token, client_id: "analytico-apple" })).error, "invalid_grant");
   assert.equal(t.db().prepare("SELECT count(*) AS n FROM devices").get().n, 0);
 
   // Settings → Sign-in: the passkey is listed; set up Google and link it.

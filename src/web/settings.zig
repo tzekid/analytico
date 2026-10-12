@@ -52,6 +52,29 @@ fn keyProvider(name: []const u8) ai.Provider {
     return if (provider == .chatgpt) .anthropic else provider;
 }
 
+fn localAiEndpoint(url: []const u8) bool {
+    const prefix = "http://";
+    if (!std.mem.startsWith(u8, url, prefix)) return false;
+    const end = std.mem.findAnyPos(u8, url, prefix.len, "/?#") orelse url.len;
+    const authority = url[prefix.len..end];
+    if (authority.len == 0 or std.mem.findScalar(u8, authority, '@') != null) return false;
+    const colon = std.mem.findScalar(u8, authority, ':');
+    const host = if (colon) |at| authority[0..at] else authority;
+    if (colon) |at| {
+        if (at + 1 == authority.len) return false;
+        _ = std.fmt.parseInt(u16, authority[at + 1 ..], 10) catch return false;
+    }
+    return std.mem.eql(u8, host, "127.0.0.1") or std.ascii.eqlIgnoreCase(host, "localhost");
+}
+
+test localAiEndpoint {
+    try std.testing.expect(localAiEndpoint("http://127.0.0.1:11434/v1"));
+    try std.testing.expect(localAiEndpoint("http://localhost:8080/v1"));
+    try std.testing.expect(!localAiEndpoint("http://localhost:80@remote.example/v1"));
+    try std.testing.expect(!localAiEndpoint("http://localhost.example/v1"));
+    try std.testing.expect(!localAiEndpoint("https://127.0.0.1/v1"));
+}
+
 fn is(value: []const u8, expected: []const u8) bool {
     return std.mem.eql(u8, value, expected);
 }
@@ -538,8 +561,8 @@ fn aiSection(ctx: *Ctx, site: ?data.Site) !void {
     try render(w,
         \\<div><strong class="t-13">{title}</strong><div class="hint">{detail}</div></div></div><a class="btn" href="/settings/ai?site={slug}&amp;key=compatible">{action}</a></section>
     , .{
-        .title = if (compatible) try std.fmt.allocPrint(arena, "OpenAI-compatible endpoint · {s}", .{config.?.model}) else "Any OpenAI-compatible endpoint",
-        .detail = if (compatible) config.?.base_url else "Ollama, LM Studio, OpenRouter, vLLM — run a local model and keep every byte on your server.",
+        .title = if (compatible) try std.fmt.allocPrint(arena, "Local OpenAI-compatible endpoint · {s}", .{config.?.model}) else "Local OpenAI-compatible endpoint",
+        .detail = if (compatible) config.?.base_url else "Ollama, LM Studio or vLLM on this server — keep every byte local.",
         .slug = slug,
         .action = if (compatible) "Edit" else "Add endpoint",
     });
@@ -605,7 +628,7 @@ fn keyDialog(ctx: *Ctx, provider: ai.Provider, config: ?ai.Config, slug: []const
     try render(w,
         \\<dialog class="dialog" id="key-dialog" data-open data-close-href="/settings/ai?site={slug}"><form method="post" action="/settings/ai/key" data-busy="Checking the key…"><input type="hidden" name="site" value="{slug}"><input type="hidden" name="provider" value="{provider}"><div class="dialog-head"><div><h2>{title}</h2><p>Stored encrypted on this server. You’re billed by the provider directly.</p></div><a class="btn btn-quiet btn-icon close" href="/settings/ai?site={slug}" data-close aria-label="Close">×</a></div><div class="dialog-body"><nav class="seg seg-fill">
     , .{ .slug = slug, .provider = provider, .title = if (provider == .compatible) "Add an endpoint" else "Add an API key" });
-    for ([_]struct { ai.Provider, []const u8 }{ .{ .anthropic, "Anthropic" }, .{ .openai, "OpenAI" }, .{ .compatible, "OpenAI-compatible" } }) |option| try render(w,
+    for ([_]struct { ai.Provider, []const u8 }{ .{ .anthropic, "Anthropic" }, .{ .openai, "OpenAI" }, .{ .compatible, "Local OpenAI-compatible" } }) |option| try render(w,
         \\<a href="/settings/ai?site={slug}&amp;key={provider}"{!current}>{label}</a>
     , .{ .slug = slug, .provider = option[0], .current = if (option[0] == provider) " aria-current=\"true\"" else "", .label = option[1] });
     try w.writeAll("</nav>");
@@ -679,7 +702,7 @@ fn aiPost(ctx: *Ctx, action: []const u8) !void {
     };
     if (provider != .compatible and key.len < 10) return retry.go(ctx, slug, provider, "Paste the API key from your provider’s console.");
     if (model.len == 0 or model.len > 100) return retry.go(ctx, slug, provider, "Choose a model.");
-    if (provider == .compatible and !(std.mem.startsWith(u8, base_url, "http://") or std.mem.startsWith(u8, base_url, "https://"))) return retry.go(ctx, slug, provider, "The base URL starts with http:// or https://.");
+    if (provider == .compatible and !localAiEndpoint(base_url)) return retry.go(ctx, slug, provider, "Use a local endpoint on 127.0.0.1 or localhost.");
     const config: ai.Config = .{ .provider = provider, .model = model, .base_url = base_url, .key = key, .budget_cents = std.math.clamp(budget, 0, 100_000) * 100, .share_paths = true, .share_sources = true };
     ctx.extendDeadline(60);
     const reply = ai.call(arena, ctx.shared.io, config, "Reply with the single word OK.", "Connection check from Analytico.", 16) catch |err| return retry.go(ctx, slug, provider, ai.errorText(err));

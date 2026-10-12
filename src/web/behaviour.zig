@@ -105,7 +105,11 @@ pub fn sessions(ctx: *Ctx, site: data.Site) !void {
             if (chip[0] == .recorded and site.mode != .full) continue;
             const active = signal != null and signal.? == chip[0];
             try render(w, "<a class=\"chip{!plain}\" href=\"{href}\"><span class=\"dot-mark\" style=\"background:{color}\"></span>{label} · {count}</a>", .{
-                .plain = if (active) "" else " chip-plain", .href = try view.href(arena, path, &.{.{ "signal", if (active) "" else @tagName(chip[0]) }}), .color = chip[3], .label = chip[1], .count = html.int(counts.columnInt(chip[2])),
+                .plain = if (active) "" else " chip-plain",
+                .href = try view.href(arena, path, &.{.{ "signal", if (active) "" else @tagName(chip[0]) }}),
+                .color = chip[3],
+                .label = chip[1],
+                .count = html.int(counts.columnInt(chip[2])),
             });
         }
         if (ctx.param("event")) |name| try render(w, "<span class=\"chip\">Has event {name}<a href=\"{href}\" aria-label=\"Remove\">×</a></span>", .{ .name = name, .href = try view.href(arena, path, &.{}) });
@@ -287,7 +291,13 @@ fn sessionTable(ctx: *Ctx, view: data.View, signal: ?Signal) !void {
         const href = try std.fmt.allocPrint(arena, "/{s}/replays/{s}", .{ site.slug, row.sid });
         const label = if (site.mode == .full) try personLabel(arena, row.visitor, row.user_hash) else try std.fmt.allocPrint(arena, "Session {s}", .{row.sid[0..4]});
         try render(w, "<tr data-href=\"{href}\"><td class=\"secondary\">{when}</td><td class=\"hide-m {class}\">{visitor}</td><td class=\"strong journey\"><a href=\"{href}\">{journey}</a></td><td class=\"r hide-m\">{pages}</td><td class=\"r hide-m\">{length}</td><td class=\"hide-m\"><span class=\"row gap-6\">", .{
-            .href = href, .when = data.clock(row.started, ctx.now()), .class = if (row.user_hash.len != 0) "strong" else "secondary", .visitor = label, .journey = row.journey, .pages = row.pages, .length = html.duration(row.ended - row.started),
+            .href = href,
+            .when = data.clock(row.started, ctx.now()),
+            .class = if (row.user_hash.len != 0) "strong" else "secondary",
+            .visitor = label,
+            .journey = row.journey,
+            .pages = row.pages,
+            .length = html.duration(row.ended - row.started),
         });
         if (row.rage > 0) try w.writeAll("<span class=\"pill pill-brand\">Rage click</span>");
         if (row.errors > 0) try w.writeAll("<span class=\"pill pill-bad\">JS error</span>");
@@ -403,10 +413,16 @@ pub fn player(ctx: *Ctx, site: data.Site, session_id: []const u8) !void {
         try ui.empty(w, "This session wasn’t recorded", if (site.recording()) "It wasn’t sampled and nothing triggered a recording. The timeline still shows everything that happened." else "Session replay is off for this website. The timeline still shows everything that happened.", if (site.recording() or !ctx.can(.admin)) "" else try std.fmt.allocPrint(arena, "<a class=\"btn btn-primary\" href=\"/settings/recording?site={s}\">Turn on session replay</a>", .{site.slug}));
         try w.writeAll("</section>");
     }
-    try render(w, "<section class=\"card\" data-summary=\"/{slug}/replays/{session}/summary\"><div class=\"card-head\"><h2>What happened?</h2><button class=\"btn\" type=\"button\" data-summarize>Summarise</button></div><div class=\"timeline\" data-summary-out hidden></div></section>", .{ .slug = site.slug, .session = session_id });
     if (first_error) |value| {
         try render(w, "<section class=\"card callout-card\"><div class=\"card-head\"><h2>What went wrong</h2><span class=\"meta\">From the error log — never from what was typed</span></div><p class=\"t-14 lh-22\"><strong class=\"bad\">{title}</strong> at {at}{in}{detail}. {count} error{plural} in this session.</p><div class=\"row mt-12\"><a class=\"btn btn-primary\" href=\"/{slug}/errors?error={fingerprint}\">Open the error →</a></div></section>", .{
-            .title = value.title, .at = Offset{ .ms = value.at - started }, .in = if (value.detail.len != 0) " in " else "", .detail = value.detail, .count = errors_count, .plural = if (errors_count == 1) "" else "s", .slug = site.slug, .fingerprint = try fingerprintOf(ctx, site, session_id),
+            .title = value.title,
+            .at = Offset{ .ms = value.at - started },
+            .in = if (value.detail.len != 0) " in " else "",
+            .detail = value.detail,
+            .count = errors_count,
+            .plural = if (errors_count == 1) "" else "s",
+            .slug = site.slug,
+            .fingerprint = try fingerprintOf(ctx, site, session_id),
         });
     }
     try render(w, "</div><aside class=\"card card-flush player-side\"><div class=\"card-head side-head\"><h2>Timeline</h2><span class=\"meta\">{count} moments</span></div><div class=\"timeline player-timeline\">", .{ .count = moments.len });
@@ -415,7 +431,12 @@ pub fn player(ctx: *Ctx, site: data.Site, session_id: []const u8) !void {
         const dot = if (std.mem.eql(u8, moment.kind, "error")) "bad" else if (std.mem.eql(u8, moment.kind, "rage")) "brand" else if (std.mem.eql(u8, moment.kind, "money")) "good" else if (std.mem.eql(u8, moment.kind, "page")) "" else "blue";
         const heading = if (std.mem.eql(u8, moment.kind, "page")) try std.fmt.allocPrint(arena, "Opened {s}", .{moment.title}) else if (std.mem.eql(u8, moment.kind, "rage")) "Rage click" else moment.title;
         try render(w, "<button class=\"tl-row tl-seek{!alert}\" type=\"button\" data-seek=\"{offset}\"><span class=\"tl-time\">{time}</span><span class=\"tl-dot {dot}\"></span><div><strong>{heading}</strong><small>{detail}</small></div></button>", .{
-            .alert = if (std.mem.eql(u8, moment.kind, "error")) " tl-alert" else "", .offset = @max(offset, 0), .time = Offset{ .ms = offset }, .dot = dot, .heading = heading, .detail = moment.detail,
+            .alert = if (std.mem.eql(u8, moment.kind, "error")) " tl-alert" else "",
+            .offset = @max(offset, 0),
+            .time = Offset{ .ms = offset },
+            .dot = dot,
+            .heading = heading,
+            .detail = moment.detail,
         });
     }
     try w.writeAll("</div><div class=\"card-foot\"><span>Values typed into forms are never recorded</span></div></aside></div>");

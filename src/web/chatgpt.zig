@@ -5,9 +5,8 @@
 //!
 //! OpenAI only redirects to `http://127.0.0.1:<port>/auth/callback`. A
 //! temporary loopback listener completes the sign-in when the browser runs
-//! on this machine (or through an SSH tunnel); otherwise the person pastes
-//! the address the browser could not open. Either way the code is useless
-//! without the PKCE verifier, which never leaves the server.
+//! on this machine or through an SSH tunnel. Callback credentials are never
+//! copied into or submitted through the workspace.
 const std = @import("std");
 const net = @import("../net.zig");
 const server = @import("../server.zig");
@@ -255,15 +254,9 @@ fn hasScope(granted: []const u8, wanted: []const u8) bool {
     return false;
 }
 
-/// The plan's catalog treats a request without a client version as an old
-/// Codex and leaves newer models out (GPT-6.1-Sol and GPT-6-Luna, Oct 2026).
-/// Analytico drives no Codex features, so it asks with no version limit and
-/// keeps the models the Responses API supports instead.
-const catalog_client_version = "99.0.0";
-
 /// The plan's models, as "slug<TAB>name" lines.
 fn listModels(arena: std.mem.Allocator, api: []const u8, access: []const u8) ![]const u8 {
-    const response = try net.send(arena, try std.fmt.allocPrint(arena, "{s}/models?client_version={s}", .{ api, catalog_client_version }), .{ .headers = &.{.{ .name = "authorization", .value = try std.fmt.allocPrint(arena, "Bearer {s}", .{access}) }} });
+    const response = try net.send(arena, try std.fmt.allocPrint(arena, "{s}/models", .{api}), .{ .headers = &.{.{ .name = "authorization", .value = try std.fmt.allocPrint(arena, "Bearer {s}", .{access}) }} });
     if (response.status != .ok) return error.Rejected;
     const body = net.parseObject(arena, response.body) orelse return error.Rejected;
     var out: std.Io.Writer.Allocating = .init(arena);
@@ -455,15 +448,6 @@ pub fn route(ctx: *Ctx, action: []const u8) !void {
     }
     const arena = ctx.arena;
     const user_id = ctx.user.?.id;
-    if (is(action, "paste")) {
-        // The whole address from the browser's bar, or just its query.
-        const address = std.mem.trim(u8, try ctx.field("address"), " \n\r\t");
-        const query_text = if (std.mem.findScalar(u8, address, '?')) |index| address[index + 1 ..] else address;
-        const query = html.Params.parse(arena, query_text) catch html.Params{};
-        ctx.extendDeadline(60);
-        complete(ctx.shared, arena, user_id, query) catch |err| return back(ctx, problemOf(err) orelse return err);
-        return ctx.redirect("/settings/ai?chatgpt=connected");
-    }
     const db = ctx.shared.lockWrite();
     if (is(action, "welcomed")) {
         defer ctx.shared.unlockWrite();
@@ -555,6 +539,6 @@ pub fn card(ctx: *Ctx) !void {
 fn waitingDialog(w: *std.Io.Writer) !void {
     try w.writeAll(
         \\<dialog class="dialog" id="chatgpt-dialog" data-chatgpt-status="/settings/ai/chatgpt/status.json"><div class="dialog-head"><div><h2>Continue in the new tab</h2><p>Approve Analytico in ChatGPT. This window finishes by itself when ChatGPT returns here.</p></div><button class="btn btn-quiet btn-icon close" type="button" data-close aria-label="Close">×</button></div>
-        \\<form class="dialog-body" method="post" action="/settings/ai/chatgpt/paste" data-busy="Signing in…"><p class="hint ink-2">Analytico runs on another computer? After you approve, the tab stops at a page that can’t be reached (its address starts with <code>http://127.0.0.1</code>). Copy that address and paste it here.</p><div class="row nowrap"><input class="input mono" name="address" placeholder="http://127.0.0.1:1455/auth/callback?code=…" autocomplete="off" required aria-label="Address from the tab"><button class="btn" type="button" data-paste-address>Paste</button><button class="btn btn-primary">Continue</button></div></form></dialog>
+        \\<div class="dialog-body"><p class="hint ink-2">The callback is accepted only by Analytico’s temporary loopback listener. If Analytico runs on another computer, forward the displayed loopback port over SSH before starting sign-in.</p></div></dialog>
     );
 }

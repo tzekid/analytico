@@ -120,11 +120,10 @@ same chooser: create a passkey, or use another allowed method. Sign-in failures
 are rate limited per client address. Sessions last thirty days; setting a new
 password signs out every other device.
 
-Scripts and tests sign in from the shell instead of forging rows: `analytico
-user session <email>` prints a session cookie (`an_s`) and `analytico user key
-<email> <name> [--site <slug>]` prints a read API key, both for an existing
-person (`user invite` creates one; the first becomes the owner). Like every
-CLI write, they run while the service is stopped.
+Automations use `analytico user key <email> <name> [--site <slug>]` to create a
+read-only API key for an existing person (`user invite` creates one; the first
+becomes the owner). Like every CLI write, it runs while the service is stopped.
+Browser sessions are created only by completing a configured sign-in flow.
 
 Google sign-in needs an OAuth client (Web application) from Google Cloud with
 the redirect URI `https://<your-origin>/auth/google/callback`; paste its ID and
@@ -143,9 +142,9 @@ it out. Behind Caddy nothing changes: the apps use the public origin.
 
 Signed-in apps can ask for notifications: alerts, goals reached (one per
 website per minute, however many) and unusual days. The instance encrypts
-each one to the device's own key and sends it to the app publisher's relay,
-`https://push.analytico.plosca.ru` (setting `push.relay`), which passes it
-to Apple. The relay sees a push token and ciphertext, nothing else. Signing
+each one to the device's own key and sends it to the app publisher's local
+relay at `http://127.0.0.1:4395`, which passes it to Apple. The relay sees a
+push token and ciphertext, nothing else. Signing
 a device out, or its sign-in expiring, stops its notifications.
 
 ### The push relay
@@ -162,16 +161,9 @@ cp relay/analytico-relay.service ~/.config/systemd/user/
 systemctl --user enable --now analytico-relay.service
 ```
 
-Caddy forwards the relay's host to it:
-
-```caddyfile
-push.analytico.plosca.ru {
-	reverse_proxy 127.0.0.1:4395
-}
-```
-
-`curl https://push.analytico.plosca.ru/healthz` answers `ok`. It logs
-only rejected pushes (a token prefix, Apple's status and reason).
+The relay binds to loopback and must not be exposed through Caddy or another
+public proxy. `curl http://127.0.0.1:4395/healthz` answers `ok`. It logs only
+rejected pushes (a token prefix, Apple's status and reason).
 
 Email delivery (alerts, scheduled reports, invites) uses any SMTP server:
 STARTTLS on 587, TLS on 465, or a plain local relay. Configure it under
@@ -203,8 +195,7 @@ sealed like API keys and revoked at sign-out.
 
 The same AI also fills in the filter popover from a description ("mobile
 visitors from Germany last month"; the chips show the result before it is
-applied), and summarises a replay from its pages, events, rage clicks and
-errors, never from anything typed. Each call is logged under Settings → AI.
+applied). Each call is logged under Settings → AI.
 
 Once a day closes, a website whose page views were at least twice or at most
 half the previous two weeks' mean (and well outside their spread) gets a draft

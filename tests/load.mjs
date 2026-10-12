@@ -49,7 +49,7 @@ if (!readsOnly) {
   await rm(work, { recursive: true, force: true });
   execFileSync("mkdir", ["-p", work]);
   execFileSync(app, ["init", data]);
-  const added = execFileSync(app, ["site", "add", "load", origin, "--data", data], { encoding: "utf8" });
+  const added = execFileSync(app, ["site", "add", "load", origin, "--mode", "full", "--data", data], { encoding: "utf8" });
   const site = /public_id=([^ ]+)/.exec(added)[1];
   await start();
   const paths = ["/", "/pricing", "/blog/a", "/blog/b", "/checkout", "/about"];
@@ -111,7 +111,7 @@ if (!readsOnly) {
     insertView.run(uuid(), page, session, at, at, day, (visitor % 1_000_000).toString(16).padStart(16, "0"), path, sources[index % sources.length], consented ? "granted" : "pending", countries[visitor % countries.length], devices[index % devices.length], visitorId, ...(index % 7 !== 0 ? [9000, 50, 2] : [null, null, null]), ...campaign);
     if (index % 7 !== 0) insertSummary.run(uuid(), page, session, at, at, ...(index % 3 === 0 ? [180 + index % 400, 900 + index % 900, 1400 + index % 2600, 80 + index % 300, index % 200] : [null, null, null, null, null]));
     if (index % 100 === 0) insertEvent.run(uuid(), page, session, at, at, day, "purchase", path, 1500 + index % 9000, "EUR", visitorId, `L-${index}`);
-    if (index % 500 === 0) insertError.run(uuid(), page, session, visitorId, at, at, path, (index % 12).toString(16).padStart(16, "0"), `TypeError: load error ${index % 12}`, 10 + index % 12);
+    if (index % 500 === 0) insertError.run(uuid(), page, session, visitorId, at, at, path, (index % 12).toString(16).padStart(16, "0"), "TypeError", 10 + index % 12);
     if (index % 500_000 === 499_999) { db.exec("COMMIT"); db.exec("BEGIN"); }
   }
   db.exec("COMMIT");
@@ -126,10 +126,9 @@ if (!readsOnly) {
 
 // ---------------------------------------------------------------- reads
 
-// The workspace session and an API key, from the CLI as an operator would.
+// A read-only API key, from the CLI as an operator would use for automation.
 const cli = (...args) => execFileSync(app, [...args, "--data", data], { encoding: "utf8" }).trim();
 cli("user", "invite", "owner@load.example", "--origin", "https://analytics.load.example");
-const sessionToken = cli("user", "session", "owner@load.example");
 const apiToken = cli("user", "key", "owner@load.example", "load");
 
 await start();
@@ -165,24 +164,8 @@ const timed = async (label, url, headers) => {
   times.sort((a, b) => a - b);
   console.log(`  ${label.padEnd(34)} ${times[1].toFixed(0).padStart(6)} ms (median of 3)`);
 };
-const cookie = { cookie: `an_s=${sessionToken}` };
 const bearer = { authorization: `Bearer ${apiToken}` };
 console.log("reads at that size:");
-await timed("workspace overview, 30 days", "/load?range=30d", cookie);
-await timed("workspace overview, 7 days", "/load", cookie);
-await timed("workspace pages, 30 days", "/load/pages?range=30d", cookie);
-await timed("workspace page sheet, 30 days", "/load/pages?range=30d&page=%2Fpricing", cookie);
-await timed("workspace page sheet paths, 30 days", "/load/pages?range=30d&page=%2Fpricing&pt=paths", cookie);
-await timed("workspace audience, 30 days", "/load/audience?range=30d", cookie);
-await timed("workspace retention", "/load/retention", cookie);
-await timed("workspace people, 30 days", "/load/people?range=30d", cookie);
-await timed("workspace sessions, 7 days", "/load/sessions?range=7d", cookie);
-await timed("workspace paths, 30 days", "/load/sessions?tab=paths&range=30d", cookie);
-await timed("workspace revenue, 30 days", "/load/revenue?range=30d", cookie);
-await timed("workspace performance, 30 days", "/load/performance?range=30d", cookie);
-await timed("workspace errors, 30 days", "/load/errors?range=30d", cookie);
-await timed("workspace events, 30 days", "/load/events?range=30d", cookie);
-await timed("workspace campaigns, 30 days", "/load/acquisition?tab=campaigns&range=30d", cookie);
 await timed("API overview, 30 days", "/api/v1/sites/load/overview?range=30d", bearer);
 await timed("API breakdown by country, 30 days", "/api/v1/sites/load/breakdown?dimension=country&range=30d", bearer);
 await timed("API time series, 30 days", "/api/v1/sites/load/timeseries?metric=visitors&range=30d", bearer);

@@ -1759,32 +1759,7 @@
   // What a click does, in one place. The first action whose selector matches
   // runs (one returning false passes the click on); a click nothing claims
   // may close a dialog by its backdrop, or follow a link or a table row.
-  // A replay's "What happened?": timestamped lines that seek the player.
-  async function summarise(button) {
-    const card = button.closest("[data-summary]");
-    const out = $("[data-summary-out]", card);
-    const node = (tag, className, text) => Object.assign(document.createElement(tag), { className, textContent: text });
-    button.disabled = true;
-    out.hidden = false;
-    out.replaceChildren(node("p", "hint", "Reading the session…"));
-    try {
-      const result = await (await fetch(card.dataset.summary, { method: "POST", headers: { "x-requested-with": "fetch" } })).json();
-      if (result.error) return out.replaceChildren(node("div", "callout callout-warn", result.error));
-      out.replaceChildren(...result.lines.map((line) => {
-        const row = Object.assign(node("button", "tl-row tl-seek", ""), { type: "button" });
-        row.dataset.seek = line.at;
-        row.append(node("span", "tl-time", line.time), node("span", "tl-dot blue", ""), node("div", "", line.text));
-        return row;
-      }));
-    } catch {
-      out.replaceChildren(node("div", "callout callout-warn", "Couldn’t reach Analytico. Try again."));
-    } finally {
-      button.disabled = false;
-    }
-  }
-
   const actions = [
-    ["[data-summarize]", (button) => { summarise(button); }],
     ["[data-dialog]", (opener, event) => {
       event.preventDefault();
       const dialog = document.getElementById(opener.dataset.dialog);
@@ -1838,13 +1813,6 @@
           navigate("/settings/ai?chatgpt=connected", { mode: "replace" });
         }).catch(() => {});
       }, 2000);
-    }],
-    ["[data-paste-address]", (paste) => {
-      const input = $("input[name=address]", paste.form);
-      navigator.clipboard?.readText().then((value) => {
-        input.value = value.trim();
-        paste.form.requestSubmit();
-      }).catch(() => input.focus());
     }],
     ["[data-palette]", (trigger, event) => {
       event.preventDefault();

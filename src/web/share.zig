@@ -244,6 +244,7 @@ pub fn createLink(ctx: *Ctx, site: data.Site) !void {
     const label = std.mem.trim(u8, try ctx.field("label"), " ");
     @import("../domain.zig").validateText(label, 80, false) catch return @import("overview.zig").failBack(ctx, site, "Give the link a name.");
     const days = std.fmt.parseInt(i64, try ctx.field("expires"), 10) catch 0;
+    if (days < 0 or days > 365) return @import("overview.zig").failBack(ctx, site, "Choose an expiry up to one year.");
     const password = try ctx.field("password");
     const dashboard_id: ?i64 = std.fmt.parseInt(i64, try ctx.field("dashboard"), 10) catch null;
     const password_hash: ?[]const u8 = if (password.len != 0) try auth.hashPassword(ctx, password) else null;
