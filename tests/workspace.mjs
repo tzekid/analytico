@@ -337,6 +337,11 @@ await journey("workspace", async (t) => {
   await page.getByRole("button", { name: "Sign in with passkey" }).click();
   await page.waitForURL(/\/shop$/);
 
+  // Untrusted retention previews are ignored before date arithmetic.
+  const retentionPreview = await page.context().request.get(`${origin}/settings/retention?keep=9223372036854775807`);
+  assert.equal(retentionPreview.status(), 200);
+  assert.equal((await fetch(`http://127.0.0.1:${t.port}/readyz`)).status, 200);
+
   // Phones get the tab bar.
   await page.setViewportSize({ width: 375, height: 812 });
   await page.locator(".tabbar").getByRole("link", { name: "Pages" }).click();

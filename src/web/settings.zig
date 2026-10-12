@@ -414,7 +414,8 @@ fn retentionSection(ctx: *Ctx) !void {
     });
     try render(w, "</nav><span class=\"hint\">Currently: {label}</span></div>", .{ .label = current_label });
     const days = std.fmt.parseInt(i64, chosen, 10) catch 0;
-    if (days > 0 and !is(chosen, current)) {
+    const offered = days == 90 or days == 180 or days == 365 or days == 730;
+    if (offered and !is(chosen, current)) {
         const cutoff = ctx.now() - days * data.day_ms;
         const affected = try ctx.db.scalar(arena, i64, "SELECT (SELECT count(*) FROM page_views WHERE received_at_ms<?1)+(SELECT count(*) FROM events WHERE received_at_ms<?1)", .{cutoff});
         const date = data.civil(cutoff);

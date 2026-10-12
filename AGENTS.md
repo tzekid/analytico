@@ -174,6 +174,17 @@ share links are written to the audit log.
   workflow churn.
 - Preserve unrelated work and never add tool branding to commits or artifacts.
 
+## Review safety
+
+Security and privacy reviews must remain bounded defensive work on synthetic,
+loopback-only data. Prefer source analysis and the existing end-to-end journeys.
+Add a regression test for a confirmed defect without turning it into an attack
+harness. Do not mint reusable browser sessions or credentials, construct
+multi-step privilege-escalation scripts, intentionally crash a process, or
+persist secrets, bearer tokens, cookies, signed requests or crash stacks as
+review evidence. Redact security-sensitive values and describe the violated
+boundary and expected refusal instead.
+
 ## Operations
 
 Backups use SQLite's online backup API and cover both database files.
