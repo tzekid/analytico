@@ -387,11 +387,7 @@ fn goalsReport(input: Input) !Table {
 }
 
 fn revenueReport(input: Input) !Table {
-    var sql = data.Sql.init(input.arena);
-    try sql.add("WITH it AS (SELECT e.name,i.item_id,i.name iname,i.price_minor,i.quantity,e.event_id FROM events e JOIN event_items i ON i.site_id=e.site_id AND i.event_id=e.event_id WHERE ");
-    try sql.events(input.view, input.view.range.start_ms, input.view.range.end_ms);
-    try sql.add(") SELECT item_id AS product_id,max(iname) AS product,sum(name='view_item') AS views,sum(name='add_to_cart') AS add_to_carts,count(DISTINCT CASE WHEN name IN " ++ customers.purchase_names ++ " THEN event_id END) AS orders,coalesce(sum(CASE WHEN name IN " ++ customers.purchase_names ++ " THEN coalesce(price_minor,0)*quantity END),0) AS revenue_minor,coalesce(sum(CASE WHEN name IN " ++ customers.refund_names ++ " THEN coalesce(price_minor,0)*quantity END),0) AS refunds_minor FROM it GROUP BY item_id ORDER BY 6 DESC,3 DESC LIMIT ");
-    try sql.int(input.int("limit", 100, 1, 1000));
+    var sql = try customers.productSql(input.arena, input.view, @intCast(input.int("limit", 100, 1, 1000)));
     var statement = try sql.prepare(input.db);
     defer statement.deinit();
     return sqlTable(input.arena, &statement);
@@ -424,42 +420,12 @@ fn searchReport(input: Input) !Table {
 
 fn funnelReport(input: Input) !Table {
     const name = input.get("name").?;
-    try domain.validateName(name);
+    try domain.validateText(name, 64, false);
     const funnel = try input.db.one(input.arena, struct { id: i64, window_ms: i64 }, "SELECT id,window_ms FROM funnels WHERE site_id=? AND name=?", .{ input.view.site.id, name }) orelse return error.InvalidParameter;
-    const steps = try input.db.all(input.arena, struct { kind: []const u8, value: []const u8 }, "SELECT kind,match_value FROM funnel_steps WHERE funnel_id=? ORDER BY step_index", .{funnel.id});
+    const journeys = @import("journeys.zig");
+    const steps = try input.db.all(input.arena, journeys.Step, "SELECT kind,match_value FROM funnel_steps WHERE funnel_id=? ORDER BY step_index", .{funnel.id});
     if (steps.len < 2) return error.InvalidParameter;
-    const counts = try input.arena.alloc(i64, steps.len);
-    @memset(counts, 0);
-    const Progress = struct { next_step: usize, started_at_ms: i64 };
-    var progress: std.StringHashMapUnmanaged(Progress) = .empty;
-    var timeline = try input.db.prepare(input.arena,
-        \\SELECT session_id,occurred_at_ms,kind,value FROM (
-        \\ SELECT session_id,occurred_at_ms,'path' kind,path value FROM page_views
-        \\ WHERE internal=0 AND traffic_class IN ('human_like','unknown') AND site_id=?1 AND received_at_ms>=?2 AND received_at_ms<?3 AND session_id IS NOT NULL
-        \\ UNION ALL SELECT session_id,occurred_at_ms,'event',name FROM events
-        \\ WHERE internal=0 AND site_id=?1 AND received_at_ms>=?2 AND received_at_ms<?3 AND session_id IS NOT NULL
-        \\ AND (source='server' OR traffic_class IN ('human_like','unknown'))
-        \\) ORDER BY session_id,occurred_at_ms
-    );
-    defer timeline.deinit();
-    try timeline.bindAll(.{ input.view.site.id, input.view.range.start_ms, input.view.range.end_ms });
-    while (try timeline.step() == .row) {
-        const session = timeline.columnText(0);
-        const occurred = timeline.columnInt(1);
-        const kind = timeline.columnText(2);
-        const value = timeline.columnText(3);
-        if (progress.getPtr(session)) |state| {
-            if (state.next_step >= steps.len or occurred - state.started_at_ms > funnel.window_ms) continue;
-            const expected = steps[state.next_step];
-            if (std.mem.eql(u8, kind, expected.kind) and std.mem.eql(u8, value, expected.value)) {
-                counts[state.next_step] += 1;
-                state.next_step += 1;
-            }
-        } else if (std.mem.eql(u8, kind, steps[0].kind) and std.mem.eql(u8, value, steps[0].value)) {
-            counts[0] += 1;
-            try progress.put(input.arena, try input.arena.dupe(u8, session), .{ .next_step = 1, .started_at_ms = occurred });
-        }
-    }
+    const counts = try journeys.computeFunnel(input.arena, input.db, input.view, steps, funnel.window_ms);
     var table: TableBuilder = .{ .arena = input.arena, .columns = &.{ "step", "kind", "match", "sessions", "step_conversion_percent", "overall_conversion_percent" } };
     for (steps, 0..) |step, index| {
         const prior = if (index == 0) counts[0] else counts[index - 1];

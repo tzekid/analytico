@@ -413,10 +413,14 @@ pub fn invitePost(ctx: *Ctx, token: []const u8) !void {
     defer ctx.shared.unlockWrite();
     try db.exec("BEGIN IMMEDIATE");
     errdefer db.exec("ROLLBACK") catch {};
+    try db.run(ctx.arena, "DELETE FROM user_invites WHERE token_hash=? AND user_id=? AND expires_at_ms>?", .{ &hashed_token, invite.user_id, ctx.now() });
+    if (db.changes() != 1) {
+        try db.exec("ROLLBACK");
+        return invitePage(ctx, token, "");
+    }
     try db.run(ctx.arena, "UPDATE users SET password_hash=? WHERE id=?", .{ hashed_password, invite.user_id });
-    try db.run(ctx.arena, "DELETE FROM user_invites WHERE token_hash=?", .{&hashed_token});
     // A password reset signs out every other device.
-    try db.run(ctx.arena, "DELETE FROM web_sessions WHERE user_id=?", .{invite.user_id});
+    try auth.revokeSessions(ctx.arena, db, invite.user_id);
     try auth.startSession(ctx, db, invite.user_id);
     try db.exec("COMMIT");
     return ctx.done("You’re in. Welcome to Analytico.", "{s}", .{"/"});
@@ -769,12 +773,13 @@ pub fn providerStart(ctx: *Ctx, method: Method) !void {
         try statement.bindText(5, binding);
         try statement.bindText(6, @tagName(provider));
         try statement.bindText(7, intent);
-        try statement.bindText(8, if (std.mem.eql(u8, intent, "invite")) token else auth.safeNext(ctx.param("next") orelse "/"));
+        try statement.bindText(8, auth.safeNext(ctx.param("next") orelse "/"));
         try statement.bindInt(9, ctx.now() + oidc_ms);
         _ = try statement.step();
     }
     // The browser that starts the flow must be the one that finishes it.
-    try ctx.setCookie(oidc_cookie, try arena.dupe(u8, &state), oidc_ms / 1000);
+    const cookie_value = if (std.mem.eql(u8, intent, "invite")) try std.fmt.allocPrint(arena, "{s}{s}", .{ &state, token }) else try arena.dupe(u8, &state);
+    try ctx.setCookie(oidc_cookie, cookie_value, oidc_ms / 1000);
     const redirect_uri = try std.fmt.allocPrint(arena, "{s}/auth/{s}/callback", .{ origin, @tagName(provider) });
     return ctx.redirect(try oidc.authorizationUrl(arena, discovery, config, redirect_uri, &state, nonce, verifier));
 }
@@ -785,9 +790,10 @@ pub fn providerCallback(ctx: *Ctx, method: Method) !void {
     const state = ctx.param("state") orelse "";
     const cookie = ctx.cookie(oidc_cookie) orelse "";
     try ctx.setCookie(oidc_cookie, "", 0);
-    if (state.len != 64 or !std.mem.eql(u8, state, cookie)) return failTo(ctx, "login", "expired", "");
+    if (state.len != 64 or (cookie.len != 64 and cookie.len != 128) or !std.mem.eql(u8, state, cookie[0..64])) return failTo(ctx, "login", "expired", "");
     const challenge = try consumeChallenge(ctx, &auth.hashToken(state)) orelse return failTo(ctx, "login", "expired", "");
-    const token = if (std.mem.eql(u8, challenge.intent, "invite")) challenge.next else "";
+    const token = if (std.mem.eql(u8, challenge.intent, "invite") and cookie.len == 128) cookie[64..] else "";
+    if (std.mem.eql(u8, challenge.intent, "invite") and !std.mem.eql(u8, challenge.binding, &auth.hashToken(token))) return failTo(ctx, "login", "expired", "");
     if (!std.mem.eql(u8, challenge.purpose, "oidc") or !std.mem.eql(u8, challenge.provider, @tagName(provider))) return failTo(ctx, "login", "expired", "");
     if (ctx.param("error") != null) return failTo(ctx, challenge.intent, "cancelled", token);
     const code = ctx.param("code") orelse return failTo(ctx, challenge.intent, "cancelled", token);

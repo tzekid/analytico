@@ -117,6 +117,13 @@ pub fn createSession(arena: std.mem.Allocator, io: std.Io, db: *db_mod.Db, user_
     return token;
 }
 
+/// Account-wide sign-out, used whenever an account's password changes.
+pub fn revokeSessions(arena: std.mem.Allocator, db: *db_mod.Db, user_id: i64) !void {
+    try db.run(arena, "DELETE FROM web_sessions WHERE user_id=?", .{user_id});
+    try db.run(arena, "DELETE FROM oauth_grants WHERE user_id=?", .{user_id});
+    try db.run(arena, "DELETE FROM devices WHERE user_id=?", .{user_id});
+}
+
 /// A read API key with `user_id`'s access, narrowed to `site_id` when set.
 /// Returns the key; only its hash is stored.
 pub fn createApiKey(arena: std.mem.Allocator, io: std.Io, db: *db_mod.Db, user_id: i64, site_id: ?i64, name: []const u8, now_ms: i64) ![]const u8 {

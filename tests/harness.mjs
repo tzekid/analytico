@@ -79,7 +79,7 @@ export async function journey(name, story) {
     async listen(server) {
       const port = await listen(server);
       closers.push(async () => {
-        server.closeAllConnections();
+        server.closeAllConnections?.();
         await new Promise((done) => server.close(done));
       });
       return port;

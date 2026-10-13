@@ -29,9 +29,33 @@ pub const refund_names = "('refund','payment_refunded','refund_confirmed')";
 /// once, and the server's copy wins. The visit comes from whichever copy
 /// knows it, usually the browser's.
 pub fn ordersCte(sql: *data.Sql, view: data.View, start: i64, end: i64) !void {
-    try sql.add("WITH o AS (SELECT * FROM (SELECT coalesce(e.order_id,e.event_id) k,e.source,e.value_minor v,e.currency c,e.received_at_ms t,coalesce(e.session_id,max(e.session_id) OVER w) session_id,coalesce(e.page_id,max(e.page_id) OVER w) page_id,coalesce(e.visitor_id,max(e.visitor_id) OVER w) visitor_id,coalesce(e.user_hash,max(e.user_hash) OVER w) user_hash,e.event_id,e.properties_json,row_number() OVER (w ORDER BY e.source='server' DESC,e.received_at_ms) rn FROM events e WHERE ");
-    try sql.events(view, start, end);
-    try sql.add(" AND e.name IN " ++ purchase_names ++ " AND e.value_minor IS NOT NULL WINDOW w AS (PARTITION BY coalesce(e.order_id,e.event_id))) WHERE rn=1)");
+    try sql.add("WITH o AS (SELECT * FROM (SELECT coalesce(e.order_id,e.event_id) k,e.source,e.value_minor v,e.currency c,e.received_at_ms t,coalesce(e.session_id,max(e.session_id) OVER w) session_id,coalesce(e.page_id,max(e.page_id) OVER w) page_id,coalesce(e.visitor_id,max(e.visitor_id) OVER w) visitor_id,coalesce(e.user_hash,max(e.user_hash) OVER w) user_hash,e.event_id,e.properties_json,first_value(e.event_id) OVER (w ORDER BY EXISTS(SELECT 1 FROM event_items i WHERE i.site_id=e.site_id AND i.event_id=e.event_id) DESC,e.source='server' DESC,e.received_at_ms) items_event_id,row_number() OVER (w ORDER BY e.source='server' DESC,e.received_at_ms) rn FROM events e WHERE ");
+    var unfiltered = view;
+    unfiltered.filters = &.{};
+    try sql.events(unfiltered, start, end);
+    try sql.add(" AND e.name IN " ++ purchase_names ++ " AND e.value_minor IS NOT NULL WINDOW w AS (PARTITION BY coalesce(e.order_id,e.event_id))) picked WHERE rn=1");
+    if (view.filters.len != 0) {
+        try sql.add(" AND EXISTS(SELECT 1 FROM page_views pv WHERE pv.site_id=");
+        try sql.int(view.site.id);
+        try sql.add(" AND pv.internal=0 AND pv.traffic_class IN ('human_like','unknown') AND (pv.page_id=picked.page_id OR (picked.page_id IS NULL AND pv.session_id=picked.session_id))");
+        try sql.filters(view.filters, view.any);
+        try sql.add(")");
+    }
+    try sql.add(")");
+}
+
+/// Products use one item's copy per order: server items when present,
+/// otherwise the browser's item detail. They never count both copies.
+pub fn productSql(arena: std.mem.Allocator, view: data.View, limit: usize) !data.Sql {
+    var sql = data.Sql.init(arena);
+    try ordersCte(&sql, view, view.range.start_ms, view.range.end_ms);
+    try sql.add(", it AS (SELECT 'purchase' name,i.item_id,i.name iname,i.price_minor,i.quantity,o.event_id FROM o JOIN event_items i ON i.site_id=");
+    try sql.int(view.site.id);
+    try sql.add(" AND i.event_id=o.items_event_id UNION ALL SELECT e.name,i.item_id,i.name,i.price_minor,i.quantity,e.event_id FROM events e JOIN event_items i ON i.site_id=e.site_id AND i.event_id=e.event_id WHERE e.name NOT IN " ++ purchase_names ++ " AND ");
+    try sql.events(view, view.range.start_ms, view.range.end_ms);
+    try sql.add(") SELECT item_id AS product_id,max(iname) AS product,sum(name='view_item') AS views,sum(name='add_to_cart') AS add_to_carts,count(DISTINCT CASE WHEN name IN " ++ purchase_names ++ " THEN event_id END) AS orders,coalesce(sum(CASE WHEN name IN " ++ purchase_names ++ " THEN coalesce(price_minor,0)*quantity END),0) AS revenue_minor,coalesce(sum(CASE WHEN name IN " ++ refund_names ++ " THEN abs(coalesce(price_minor,0)*quantity) END),0) AS refunds_minor FROM it GROUP BY item_id ORDER BY 6 DESC,3 DESC LIMIT ");
+    try sql.int(@intCast(limit));
+    return sql;
 }
 
 pub const Sales = struct { revenue: i64 = 0, orders: i64 = 0, refunds: i64 = 0 };
@@ -220,10 +244,7 @@ fn checkout(ctx: *Ctx, view: data.View) !void {
 fn products(ctx: *Ctx, view: data.View) !void {
     const arena = ctx.arena;
     const w = ctx.w();
-    var sql = data.Sql.init(arena);
-    try sql.add("WITH it AS (SELECT e.name,i.item_id,i.name iname,i.price_minor,i.quantity,e.event_id FROM events e JOIN event_items i ON i.site_id=e.site_id AND i.event_id=e.event_id WHERE ");
-    try sql.events(view, view.range.start_ms, view.range.end_ms);
-    try sql.add(") SELECT item_id,max(iname),sum(name='view_item'),sum(name='add_to_cart'),count(DISTINCT CASE WHEN name IN " ++ purchase_names ++ " THEN event_id END),coalesce(sum(CASE WHEN name IN " ++ purchase_names ++ " THEN coalesce(price_minor,0)*quantity END),0),coalesce(sum(CASE WHEN name IN " ++ refund_names ++ " THEN coalesce(price_minor,0)*quantity END),0) FROM it GROUP BY item_id ORDER BY 6 DESC,3 DESC LIMIT 20");
+    var sql = try productSql(arena, view, 20);
     var statement = try sql.prepare(ctx.db);
     defer statement.deinit();
     try w.writeAll("<section class=\"card card-flush\"><div class=\"card-head table-head\"><h2>Products</h2></div><div class=\"table-wrap\"><table class=\"table\"><thead><tr><th>Product</th><th class=\"r hide-m\">Views</th><th class=\"r hide-m\">Add to cart</th><th class=\"r\">Orders</th><th class=\"r\">Revenue</th><th class=\"r hide-m\">Refunds</th></tr></thead><tbody>");
@@ -479,7 +500,6 @@ fn retentionBody(arena: std.mem.Allocator, numbers: Retention, w: *std.Io.Writer
 const Segment = enum { everyone, customers, identified, new, at_risk };
 
 /// A person is an identified user (all their visitors) or one visitor.
-
 pub fn people(ctx: *Ctx, site: data.Site) !void {
     const arena = ctx.arena;
     const view = try analyze.start(ctx, site, .people, "People");
@@ -517,8 +537,11 @@ pub fn people(ctx: *Ctx, site: data.Site) !void {
     // Without a search, the 2,000 visitors seen last (and their other devices)
     // are enough for the list, straight from the last-seen index.
     var sql = data.Sql.init(arena);
+    var lifetime = view;
+    lifetime.filters = &.{};
+    try ordersCte(&sql, lifetime, 0, ctx.now() + 1);
     if (query.len == 0) {
-        try sql.add("WITH recent AS MATERIALIZED (SELECT visitor_id,user_hash FROM visitors WHERE site_id=");
+        try sql.add(", recent AS MATERIALIZED (SELECT visitor_id,user_hash FROM visitors WHERE site_id=");
         try sql.int(site.id);
         try sql.add(" AND last_seen_ms>=");
         try sql.int(range.start_ms);
@@ -528,7 +551,7 @@ pub fn people(ctx: *Ctx, site: data.Site) !void {
         try sql.int(site.id);
         try sql.add(" AND user_hash IN (SELECT user_hash FROM recent WHERE user_hash IS NOT NULL)");
     } else {
-        try sql.add("WITH v AS MATERIALIZED (SELECT visitor_id,coalesce(user_hash,visitor_id) k,user_hash,first_seen_ms,last_seen_ms,first_source FROM visitors WHERE site_id=");
+        try sql.add(", v AS MATERIALIZED (SELECT visitor_id,coalesce(user_hash,visitor_id) k,user_hash,first_seen_ms,last_seen_ms,first_source FROM visitors WHERE site_id=");
         try sql.int(site.id);
         try sql.add(" AND (last_seen_ms>=");
         try sql.int(range.start_ms);
@@ -552,12 +575,7 @@ pub fn people(ctx: *Ctx, site: data.Site) !void {
         "src AS (SELECT k,first_source FROM (SELECT k,first_source,row_number() OVER (PARTITION BY k ORDER BY first_seen_ms) rn FROM pv) WHERE rn=1)," ++
         "s AS (SELECT x.k,count(DISTINCT w.session_id) sessions,group_concat(DISTINCT w.operating_system) systems FROM pv x CROSS JOIN page_views w ON w.site_id=");
     try sql.int(site.id);
-    // An order seen from both the browser and the server counts once.
-    try sql.add(" AND w.visitor_id=x.visitor_id GROUP BY x.k),r AS (SELECT k,sum(v) revenue FROM (SELECT k,o,max(v) v FROM (SELECT x.k,coalesce(e.order_id,e.event_id) o,e.value_minor v FROM pv x CROSS JOIN events e ON e.site_id=");
-    try sql.int(site.id);
-    try sql.add(" AND e.visitor_id=x.visitor_id WHERE e.name IN " ++ purchase_names ++ " AND e.value_minor IS NOT NULL UNION ALL SELECT p.k,coalesce(e.order_id,e.event_id),e.value_minor FROM p CROSS JOIN events e ON e.site_id=");
-    try sql.int(site.id);
-    try sql.add(" AND e.user_hash=p.u WHERE p.u IS NOT NULL AND e.user_hash IS NOT NULL AND e.name IN " ++ purchase_names ++ " AND e.value_minor IS NOT NULL) GROUP BY k,o) GROUP BY k),er AS (SELECT x.k,count(*) n FROM errors e JOIN pv x ON x.visitor_id=e.visitor_id WHERE e.site_id=");
+    try sql.add(" AND w.visitor_id=x.visitor_id GROUP BY x.k),r AS (SELECT k,sum(value) revenue FROM (SELECT x.k,o.k order_key,o.v value FROM pv x JOIN o ON o.visitor_id=x.visitor_id UNION SELECT p.k,o.k,o.v FROM p JOIN o ON o.user_hash=p.u WHERE p.u IS NOT NULL) GROUP BY k),er AS (SELECT x.k,count(*) n FROM errors e JOIN pv x ON x.visitor_id=e.visitor_id WHERE e.site_id=");
     try sql.int(site.id);
     try sql.add(" AND e.received_at_ms>=");
     try sql.int(range.start_ms);
@@ -673,16 +691,16 @@ pub fn person(ctx: *Ctx, site: data.Site, key: []const u8) !void {
     defer totals.deinit();
     _ = try totals.step();
     var money_sql = data.Sql.init(arena);
-    // An order seen from both the browser and the server counts once.
-    try money_sql.add("SELECT coalesce(sum(v),0),count(*) FROM (SELECT coalesce(order_id,event_id) o,max(value_minor) v FROM events WHERE site_id=");
-    try money_sql.int(site.id);
-    try money_sql.add(" AND name IN " ++ purchase_names ++ " AND (visitor_id IN ");
+    var lifetime = view;
+    lifetime.filters = &.{};
+    try ordersCte(&money_sql, lifetime, 0, ctx.now() + 1);
+    try money_sql.add(" SELECT coalesce(sum(v),0),count(*) FROM o WHERE (visitor_id IN ");
     try visitorList(&money_sql, found);
     if (found.user_hash.len != 0) {
         try money_sql.add(" OR user_hash=");
         try money_sql.str(found.user_hash);
     }
-    try money_sql.add(") GROUP BY o)");
+    try money_sql.add(")");
     var money = try money_sql.prepare(ctx.db);
     defer money.deinit();
     _ = try money.step();
@@ -703,7 +721,8 @@ pub fn person(ctx: *Ctx, site: data.Site, key: []const u8) !void {
 
     // Journey: sessions across every device, newest first.
     var journey_sql = data.Sql.init(arena);
-    try journey_sql.add("SELECT pv.session_id,min(pv.received_at_ms),max(pv.received_at_ms),max(pv.device),max(pv.browser),max(pv.operating_system),(SELECT group_concat(p,' → ') FROM (SELECT x.path p FROM page_views x WHERE x.site_id=pv.site_id AND x.session_id=pv.session_id ORDER BY x.occurred_at_ms LIMIT 4)),(SELECT coalesce(nullif(x.utm_source,''),nullif(x.referrer_host,''),'direct') FROM page_views x WHERE x.site_id=pv.site_id AND x.session_id=pv.session_id ORDER BY x.occurred_at_ms LIMIT 1),(SELECT count(*) FROM events e WHERE e.site_id=pv.site_id AND e.session_id=pv.session_id AND e.name='rage_click'),(SELECT count(*) FROM errors x WHERE x.site_id=pv.site_id AND x.session_id=pv.session_id),(SELECT sum(o.v) FROM (SELECT max(e.value_minor) v FROM events e WHERE e.site_id=pv.site_id AND e.session_id=pv.session_id AND e.name IN " ++ purchase_names ++ " GROUP BY coalesce(e.order_id,e.event_id)) o),EXISTS(SELECT 1 FROM rp.replays r WHERE r.site_id=pv.site_id AND r.session_id=pv.session_id),(SELECT g.name FROM goals g JOIN events e ON e.site_id=g.site_id AND e.name=g.match_value AND g.kind='event' WHERE g.site_id=pv.site_id AND e.session_id=pv.session_id LIMIT 1) FROM page_views pv WHERE pv.site_id=");
+    try ordersCte(&journey_sql, lifetime, 0, ctx.now() + 1);
+    try journey_sql.add(" SELECT pv.session_id,min(pv.received_at_ms),max(pv.received_at_ms),max(pv.device),max(pv.browser),max(pv.operating_system),(SELECT group_concat(p,' → ') FROM (SELECT x.path p FROM page_views x WHERE x.site_id=pv.site_id AND x.session_id=pv.session_id ORDER BY x.occurred_at_ms LIMIT 4)),(SELECT coalesce(nullif(x.utm_source,''),nullif(x.referrer_host,''),'direct') FROM page_views x WHERE x.site_id=pv.site_id AND x.session_id=pv.session_id ORDER BY x.occurred_at_ms LIMIT 1),(SELECT count(*) FROM events e WHERE e.site_id=pv.site_id AND e.session_id=pv.session_id AND e.name='rage_click'),(SELECT count(*) FROM errors x WHERE x.site_id=pv.site_id AND x.session_id=pv.session_id),(SELECT sum(o.v) FROM o WHERE o.session_id=pv.session_id),EXISTS(SELECT 1 FROM rp.replays r WHERE r.site_id=pv.site_id AND r.session_id=pv.session_id),(SELECT g.name FROM goals g JOIN events e ON e.site_id=g.site_id AND e.name=g.match_value AND g.kind='event' WHERE g.site_id=pv.site_id AND e.session_id=pv.session_id LIMIT 1) FROM page_views pv WHERE pv.site_id=");
     try journey_sql.int(site.id);
     try journey_sql.add(" AND pv.visitor_id IN ");
     try visitorList(&journey_sql, found);

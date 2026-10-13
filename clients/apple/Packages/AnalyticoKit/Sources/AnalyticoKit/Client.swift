@@ -141,6 +141,7 @@ public actor Client {
     let session: URLSession
     var tokens: Tokens
     var refreshing: Task<Tokens, Error>?
+    var signedOut = false
 
     public init(instance: Instance, tokens: Tokens, store: TokenStore, session: URLSession = .shared) {
         self.instance = instance
@@ -176,13 +177,13 @@ public actor Client {
 
     public func notes(site: String, view: ViewState) async throws -> [Note] {
         struct Reply: Decodable { var notes: [Note] }
-        return try await get(Reply.self, "sites/\(site)/notes", query: [URLQueryItem(name: "range", value: view.period.rawValue)]).notes
+        return try await get(Reply.self, "sites/\(site)/notes", query: view.queryItems).notes
     }
 
     public func addNote(site: String, day: String, label: String) async throws {
         var body = URLComponents()
         body.queryItems = [URLQueryItem(name: "day", value: day), URLQueryItem(name: "label", value: label)]
-        _ = try await send("POST", "sites/\(site)/notes", body: Data((body.percentEncodedQuery ?? "").utf8))
+        _ = try await send("POST", "sites/\(site)/notes", body: Data((body.percentEncodedQuery ?? "").replacingOccurrences(of: "+", with: "%2B").utf8))
     }
 
     public func keepNote(site: String, id: Int) async throws {
@@ -216,6 +217,25 @@ public actor Client {
     }
 
     // MARK: - Transport
+
+    /// Ends this device's grant using its refresh token, including when the
+    /// access token has expired. Pending work cannot save tokens afterwards.
+    public func signOut() async throws {
+        guard !signedOut else { return }
+        var refresh = tokens.refresh
+        let pending = refreshing
+        signedOut = true
+        store.remove(instance.origin)
+        if let pending { refresh = try await pending.value.refresh }
+        var request = URLRequest(url: instance.origin.appending(path: "oauth/revoke"))
+        request.httpMethod = "POST"
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "content-type")
+        var body = URLComponents()
+        body.queryItems = [URLQueryItem(name: "token", value: refresh), URLQueryItem(name: "client_id", value: AppClient.id)]
+        request.httpBody = Data((body.percentEncodedQuery ?? "").replacingOccurrences(of: "+", with: "%2B").utf8)
+        let (_, response) = try await session.data(for: request)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw ClientError.server(status: (response as? HTTPURLResponse)?.statusCode ?? 0, code: "sign_out") }
+    }
 
     func get<T: Decodable>(_ type: T.Type, _ path: String, query: [URLQueryItem] = []) async throws -> T {
         let data = try await send("GET", path, query: query)
@@ -260,8 +280,13 @@ public actor Client {
     }
 
     func validTokens() async throws -> Tokens {
+        guard !signedOut else { throw ClientError.signedOut }
         if !tokens.isExpiring { return tokens }
-        if let refreshing { return try await refreshing.value }
+        if let refreshing {
+            let fresh = try await refreshing.value
+            guard !signedOut else { throw ClientError.signedOut }
+            return fresh
+        }
         let endpoint = TokenEndpoint(url: URL(string: instance.oauth.tokenEndpoint)!)
         let refresh = tokens.refresh
         let task = Task { [session] in
@@ -270,7 +295,9 @@ public actor Client {
         refreshing = task
         defer { refreshing = nil }
         do {
-            tokens = try await task.value
+            let fresh = try await task.value
+            guard !signedOut else { throw ClientError.signedOut }
+            tokens = fresh
             store.save(tokens, for: instance.origin)
             return tokens
         } catch AuthError.signedOut {

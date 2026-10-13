@@ -234,13 +234,12 @@ pub fn post(ctx: *Ctx, action: []const u8) !void {
         try db.run(arena, "DELETE FROM identities WHERE provider=? AND user_id=?", .{ @tagName(method), user.id });
         try ctx.flash(try std.fmt.allocPrint(arena, "{s} unlinked.", .{method.label()}), "", "");
     } else if (is(action, "password")) {
+        try db.exec("BEGIN IMMEDIATE");
+        errdefer db.exec("ROLLBACK") catch {};
         try db.run(arena, "UPDATE users SET password_hash=? WHERE id=?", .{ new_hash, user.id });
-        try db.run(arena, "DELETE FROM web_sessions WHERE user_id=?", .{user.id});
-        // A password change is an account-wide sign-out. Native app and MCP
-        // grants must not outlive the browser sessions it promises to revoke.
-        try db.run(arena, "DELETE FROM oauth_grants WHERE user_id=?", .{user.id});
-        try db.run(arena, "DELETE FROM devices WHERE user_id=?", .{user.id});
+        try auth.revokeSessions(arena, db, user.id);
         try auth.startSession(ctx, db, user.id);
+        try db.exec("COMMIT");
         try ctx.flash("Password saved. Other devices were signed out.", "", "");
     } else if (is(action, "remove-password")) {
         if (try signin.enabled(arena, db, .password) and try signin.userMethodCount(arena, db, user.id, .password) == 0) return fail(ctx, "That’s your last way in. Add another method first.");

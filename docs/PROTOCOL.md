@@ -84,6 +84,11 @@ present when the site shows the built-in banner and the visitor must be
 asked; `link`, `domains` and `replay` are present only for consented
 visitors.
 
+When a remembered visitor withdraws consent, the server stores that decision
+and refuses further replay uploads for the visitor. A dropped identity with
+`drop_state: "denied"` keeps the tracker declined rather than starting Full
+mode again. Granting consent again starts a new identity.
+
 ## Server batches
 
 The loopback proxy must replace `X-Forwarded-For` with the immediate client's

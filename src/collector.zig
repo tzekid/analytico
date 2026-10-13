@@ -145,6 +145,7 @@ pub const Result = struct {
     identity: ?Identity = null,
     /// A consented identity was removed by the server (GPC, consent required).
     dropped: bool = false,
+    withdrawn: bool = false,
     /// A cross-domain identity claim was authenticated on this request.
     continued: bool = false,
     /// Visitors erased on request; their replays are removed after commit.
@@ -289,6 +290,15 @@ pub fn ingest(
         var record = original;
         if (site.mode == .full and source == .browser) {
             if (try enforceConsent(&record, result.decision, client.gpc)) result.dropped = true;
+            if (record.visitor_id) |visitor_id| {
+                const granting = std.mem.eql(u8, record.type, "consent") and record.state != null and (std.mem.eql(u8, record.state.?, "granted") or std.mem.eql(u8, record.state.?, "not_required"));
+                if (!granting and !std.mem.eql(u8, record.type, "forget") and try store.database.scalar(allocator, i64, "SELECT count(*) FROM visitors WHERE site_id=? AND visitor_id=? AND consent_state IN ('denied','gpc')", .{ site.id, visitor_id }) != 0) {
+                    strip(&record, client.gpc);
+                    record.consent_mode = if (client.gpc) "gpc" else "denied";
+                    result.dropped = true;
+                    result.withdrawn = true;
+                }
+            }
             // A visit continued from another of the site's domains must carry
             // a valid link for the identity it claims.
             if (record.link) |token| {
@@ -318,6 +328,11 @@ pub fn ingest(
             try insertEvent(context, record);
         } else if (std.mem.eql(u8, kind, "consent")) {
             try applyConsent(context, record);
+            if (std.mem.eql(u8, record.state.?, "denied") or std.mem.eql(u8, record.state.?, "gpc")) {
+                result.identity = null;
+                result.withdrawn = true;
+                result.dropped = true;
+            }
         } else if (std.mem.eql(u8, kind, "error")) {
             try insertError(context, record);
         } else if (std.mem.eql(u8, kind, "identify")) {
@@ -470,7 +485,7 @@ fn insertPageView(c: Context, record: Record) !void {
         const lower = try lowercaseAscii(allocator, host);
         break :blk if (c.client.page_host.len != 0 and std.ascii.eqlIgnoreCase(lower, c.client.page_host)) self_referrer else lower;
     } else null;
-    const search_term = if (record.search_term) |term| try lowercaseAscii(allocator, std.mem.trim(u8, term, " ")) else null;
+    const search_term = if (record.search_term) |term| try searchTerm(allocator, term) else null;
     const place = c.client.place;
     var statement = try c.store.database.prepare(allocator,
         \\INSERT INTO page_views(site_id,event_id,page_id,session_id,occurred_at_ms,received_at_ms,received_date,visitor_day_id,
@@ -727,6 +742,11 @@ fn insertEvent(c: Context, record: Record) !void {
 
 fn applyConsent(c: Context, record: Record) !void {
     const state = record.state.?;
+    if (std.mem.eql(u8, state, "denied") or std.mem.eql(u8, state, "gpc")) {
+        try c.store.database.run(c.allocator, "UPDATE visitors SET consent_state=?3 WHERE site_id=?1 AND visitor_id IN (SELECT visitor_id FROM page_views WHERE site_id=?1 AND page_id=?2)", .{ c.site.id, record.page_id.?, state });
+        try c.store.database.run(c.allocator, "UPDATE page_views SET consent_mode=?3,click_id=NULL WHERE site_id=?1 AND page_id=?2", .{ c.site.id, record.page_id.?, state });
+        return;
+    }
     var statement = try c.store.database.prepare(c.allocator, "UPDATE page_views SET visitor_id=?3,session_id=?4,consent_mode=?5,click_id=CASE WHEN ?3 IS NULL THEN NULL ELSE click_id END WHERE site_id=?1 AND page_id=?2 AND visitor_id IS NULL");
     defer statement.deinit();
     try statement.bindInt(1, c.site.id);
@@ -735,7 +755,10 @@ fn applyConsent(c: Context, record: Record) !void {
     try statement.bindOptionalText(4, record.session_id);
     try statement.bindText(5, state);
     _ = try statement.step();
-    if (record.visitor_id) |visitor_id| try touchVisitor(c, visitor_id, record.page_id.?);
+    if (record.visitor_id) |visitor_id| {
+        try touchVisitor(c, visitor_id, record.page_id.?);
+        try c.store.database.run(c.allocator, "UPDATE visitors SET consent_state=? WHERE site_id=? AND visitor_id=?", .{ state, c.site.id, visitor_id });
+    }
 }
 
 fn applyIdentify(c: Context, record: Record) !void {
@@ -766,9 +789,10 @@ fn linkVisitor(c: Context, visitor_id: []const u8, hash: []const u8) !void {
 }
 
 fn insertError(c: Context, record: Record) !void {
-    const message = record.message.?;
+    const message = errorClass(record.message.?);
+    const file: ?[]const u8 = if (record.file) |raw| errorFile(raw) else null;
     var fingerprint_source: std.Io.Writer.Allocating = .init(c.allocator);
-    try fingerprint_source.writer.print("{s}\x00{s}\x00{d}", .{ message, record.file orelse "", record.line orelse 0 });
+    try fingerprint_source.writer.print("{s}\x00{s}\x00{d}", .{ message, file orelse "", record.line orelse 0 });
     const digest = domain.payloadHash(fingerprint_source.written());
     var statement = try c.store.database.prepare(c.allocator,
         \\INSERT INTO errors(site_id,event_id,page_id,session_id,visitor_id,occurred_at_ms,received_at_ms,path,release_id,fingerprint,
@@ -786,7 +810,7 @@ fn insertError(c: Context, record: Record) !void {
     try statement.bindOptionalText(9, optionalNonEmpty(record.release_id));
     try statement.bindText(10, digest[0..16]);
     try statement.bindText(11, message);
-    try statement.bindOptionalText(12, record.file);
+    try statement.bindOptionalText(12, file);
     try statement.bindOptionalInt(13, record.line);
     try statement.bindOptionalInt(14, record.column);
     try statement.bindText(15, c.dimensions.browser);
@@ -1097,6 +1121,40 @@ fn lowercaseAscii(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
     const out = try allocator.alloc(u8, value.len);
     for (value, 0..) |byte, index| out[index] = std.ascii.toLower(byte);
     return out;
+}
+
+/// The same minimization as the tracker, enforced before storage.
+fn searchTerm(allocator: std.mem.Allocator, raw: []const u8) !?[]const u8 {
+    if (std.mem.findScalar(u8, raw, '@') != null) return null;
+    var digits: usize = 0;
+    for (raw) |byte| {
+        if (std.ascii.isDigit(byte)) {
+            digits += 1;
+            if (digits >= 6) return null;
+        } else if (byte != ' ' and byte != '-') digits = 0;
+    }
+    var out: std.ArrayList(u8) = .empty;
+    for (std.mem.trim(u8, raw, " ")) |byte| {
+        if (byte == ' ' and out.items.len != 0 and out.items[out.items.len - 1] == ' ') continue;
+        try out.append(allocator, std.ascii.toLower(byte));
+    }
+    return if (out.items.len == 0) null else out.items;
+}
+
+fn errorClass(raw: []const u8) []const u8 {
+    const text = if (std.mem.startsWith(u8, raw, "Uncaught ")) std.mem.trimStart(u8, raw[9..], " ") else raw;
+    if (text.len == 0 or !std.ascii.isAlphabetic(text[0])) return "JavaScriptError";
+    var end: usize = 0;
+    while (end < text.len and (std.ascii.isAlphanumeric(text[end]) or text[end] == '_' or text[end] == '.')) : (end += 1) {}
+    const name = text[0..end];
+    if (name.len <= 64 and (std.mem.endsWith(u8, name, "Error") or std.mem.endsWith(u8, name, "Exception") or std.mem.endsWith(u8, name, "Rejection"))) return name;
+    return "JavaScriptError";
+}
+
+fn errorFile(raw: []const u8) ?[]const u8 {
+    const path = raw[0 .. std.mem.indexOfAny(u8, raw, "?#") orelse raw.len];
+    const name = if (std.mem.lastIndexOfScalar(u8, path, '/')) |at| path[at + 1 ..] else path;
+    return if (name.len == 0) null else name;
 }
 
 fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {

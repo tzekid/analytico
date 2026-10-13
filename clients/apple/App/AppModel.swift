@@ -83,8 +83,7 @@ final class AppModel {
         signedOutFrom = ended ? client?.instance.host : nil
         me = nil
         if let client {
-            // The instance forgets this device; its tokens still work until the request is sent.
-            Task { try? await client.unregisterDevice() }
+            Task { try? await client.signOut() }
             store.remove(client.instance.origin)
         }
         Shared.instance = nil
@@ -108,6 +107,7 @@ final class AppModel {
             while !Task.isCancelled {
                 do {
                     for try await update in await client.live(site: site) {
+                        guard !Task.isCancelled, self?.client === client else { return }
                         self?.online = update.online
                     }
                 } catch {}
@@ -167,18 +167,23 @@ final class AppModel {
     func loadSites() async {
         guard let client else { return }
         do {
-            sites = try await client.sites()
+            let loaded = try await client.sites()
+            guard self.client === client else { return }
+            sites = loaded
             Shared.sites = sites
             sitesError = nil
             await enablePush()
+            guard self.client === client else { return }
             if selectedSite == nil || !sites.contains(where: { $0.slug == selectedSite }), sites.count == 1 {
                 selectedSite = sites[0].slug
             } else if live == nil {
                 followLive()
             }
         } catch ClientError.signedOut {
+            guard self.client === client else { return }
             signOut(ended: true)
         } catch {
+            guard self.client === client else { return }
             sitesError = "Couldn’t load your sites. Check the connection and try again."
         }
     }
@@ -186,8 +191,11 @@ final class AppModel {
     func loadMe() async {
         guard let client else { return }
         do {
-            me = try await client.me()
+            let loaded = try await client.me()
+            guard self.client === client else { return }
+            me = loaded
         } catch ClientError.signedOut {
+            guard self.client === client else { return }
             signOut(ended: true)
         } catch {}
     }

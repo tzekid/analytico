@@ -120,7 +120,13 @@ pub fn pages(ctx: *Ctx, site: data.Site) !void {
     for (rows.items) |row| {
         const href = try view.href(arena, path, &.{ .{ "page", row.path }, .{ "sort", if (std.mem.eql(u8, sort, "views")) "" else sort }, .{ "q", search } });
         try render(w, "<tr data-href=\"{href}\"{!selected}><td class=\"strong\"><a href=\"{href}\">{path}</a></td><td class=\"r\">{views}</td><td class=\"r\">{visitors}</td><td class=\"r hide-m\">{time}</td><td class=\"r hide-m\">{scroll}%</td><td class=\"r hide-m\">", .{
-            .href = href, .selected = if (selected != null and std.mem.eql(u8, selected.?, row.path)) " aria-selected=\"true\"" else "", .path = row.path, .views = html.int(row.views), .visitors = html.int(row.visitors), .time = html.duration(row.active_ms), .scroll = row.scroll,
+            .href = href,
+            .selected = if (selected != null and std.mem.eql(u8, selected.?, row.path)) " aria-selected=\"true\"" else "",
+            .path = row.path,
+            .views = html.int(row.views),
+            .visitors = html.int(row.visitors),
+            .time = html.duration(row.active_ms),
+            .scroll = row.scroll,
         });
         try ui.delta(w, @floatFromInt(row.views), @floatFromInt(row.previous), false);
         try w.writeAll("</td></tr>");
@@ -474,7 +480,8 @@ fn campaigns(ctx: *Ctx, view: data.View, path: []const u8) !void {
     var sql = data.Sql.init(arena);
     // Each set once, then joined by campaign. Revenue is orders (one per order
     // ID, whether seen from the browser, the server or both) minus refunds.
-    try sql.add("WITH cv AS MATERIALIZED (SELECT pv.utm_campaign c,pv.session_id,pv.page_id,pv.visitor_day_id FROM page_views pv WHERE ");
+    try customers.ordersCte(&sql, view, view.range.start_ms, view.range.end_ms);
+    try sql.add(", cv AS MATERIALIZED (SELECT pv.utm_campaign c,pv.session_id,pv.page_id,pv.visitor_day_id FROM page_views pv WHERE ");
     try sql.pageViews(view, view.range.start_ms, view.range.end_ms);
     try sql.add(" AND pv.utm_campaign>''), cs AS MATERIALIZED (SELECT session_id,max(c) c FROM cv WHERE session_id IS NOT NULL GROUP BY session_id), ev AS MATERIALIZED (SELECT coalesce(json_extract(e.properties_json,'$.campaign'),cs.c,cv.c) c,e.name,e.value_minor,e.currency,coalesce(e.order_id,e.event_id) o FROM events e LEFT JOIN cs ON cs.session_id=e.session_id LEFT JOIN cv ON cv.page_id=e.page_id WHERE ");
     try sql.events(view, view.range.start_ms, view.range.end_ms);
@@ -486,7 +493,7 @@ fn campaigns(ctx: *Ctx, view: data.View, path: []const u8) !void {
     try sql.str(&to);
     try sql.add(" GROUP BY campaign), k AS (SELECT c FROM cv UNION SELECT c FROM sp), vis AS (SELECT c,count(DISTINCT visitor_day_id) n FROM cv GROUP BY c), conv AS (SELECT c,sum(name IN (SELECT match_value FROM goals WHERE kind='event' AND site_id=");
     try sql.int(site.id);
-    try sql.add(")) n,max(currency) cur FROM ev GROUP BY c), orders AS (SELECT c,sum(v) v FROM (SELECT c,o,max(value_minor) v FROM ev WHERE name IN " ++ customers.purchase_names ++ " AND value_minor IS NOT NULL GROUP BY c,o) GROUP BY c), refunds AS (SELECT c,sum(abs(value_minor)) v FROM ev WHERE name IN " ++ customers.refund_names ++ " AND value_minor IS NOT NULL GROUP BY c) SELECT k.c,coalesce(vis.n,0),coalesce(conv.n,0),coalesce(orders.v,0)-coalesce(refunds.v,0),coalesce(sp.a,0),coalesce(sp.cur,conv.cur,'') FROM k LEFT JOIN vis ON vis.c=k.c LEFT JOIN conv ON conv.c=k.c LEFT JOIN orders ON orders.c=k.c LEFT JOIN refunds ON refunds.c=k.c LEFT JOIN sp ON sp.c=k.c ORDER BY 4 DESC,2 DESC LIMIT 100");
+    try sql.add(")) n,max(currency) cur FROM ev GROUP BY c), orders AS (SELECT coalesce(json_extract(o.properties_json,'$.campaign'),cs.c,cv.c) c,sum(o.v) v FROM o LEFT JOIN cs ON cs.session_id=o.session_id LEFT JOIN cv ON cv.page_id=o.page_id WHERE o.source='server' GROUP BY 1), refunds AS (SELECT c,sum(abs(value_minor)) v FROM ev WHERE name IN " ++ customers.refund_names ++ " AND value_minor IS NOT NULL GROUP BY c) SELECT k.c,coalesce(vis.n,0),coalesce(conv.n,0),coalesce(orders.v,0)-coalesce(refunds.v,0),coalesce(sp.a,0),coalesce(sp.cur,conv.cur,'') FROM k LEFT JOIN vis ON vis.c=k.c LEFT JOIN conv ON conv.c=k.c LEFT JOIN orders ON orders.c=k.c LEFT JOIN refunds ON refunds.c=k.c LEFT JOIN sp ON sp.c=k.c ORDER BY 4 DESC,2 DESC LIMIT 100");
     var statement = try sql.prepare(ctx.db);
     defer statement.deinit();
     var rows: std.ArrayList(Campaign) = .empty;
@@ -720,7 +727,13 @@ fn goals(ctx: *Ctx, view: data.View) !void {
         const match_value = statement.columnText(3);
         const counts = try data.goalCount(arena, ctx.db, view, kind, match_value, view.range.start_ms, view.range.end_ms, true);
         try render(w, "<tr><td class=\"strong\">{name}</td><td class=\"hide-m secondary\">{kind} <span class=\"mono\">{match}</span></td><td class=\"r\">{count}</td><td class=\"r\">{share}</td><td><form method=\"post\" action=\"/{slug}/goals/{id}/delete\" data-undo=\"Goal deleted\"><button class=\"btn btn-quiet btn-icon\" aria-label=\"Delete goal\">", .{
-            .name = statement.columnText(1), .kind = if (std.mem.eql(u8, kind, "event")) "Event" else "Page", .match = match_value, .count = html.int(counts.completions), .share = html.share(counts.visitor_days, visitors), .slug = site.slug, .id = statement.columnInt(0),
+            .name = statement.columnText(1),
+            .kind = if (std.mem.eql(u8, kind, "event")) "Event" else "Page",
+            .match = match_value,
+            .count = html.int(counts.completions),
+            .share = html.share(counts.visitor_days, visitors),
+            .slug = site.slug,
+            .id = statement.columnInt(0),
         });
         try icon(w, "trash");
         try w.writeAll("</button></form></td></tr>");

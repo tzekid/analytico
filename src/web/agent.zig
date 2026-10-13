@@ -201,7 +201,7 @@ fn errorCode(object: std.json.ObjectMap) []const u8 {
 }
 
 fn httpError(arena: std.mem.Allocator, provider: ai.Provider, response: net.Response) anyerror {
-    std.log.warn("ai_request_rejected provider={s} status={d} body={s}", .{ @tagName(provider), @backingInt(response.status), response.body[0..@min(response.body.len, 300)] });
+    std.log.warn("ai_request_rejected provider={s} status={d}", .{ @tagName(provider), @backingInt(response.status) });
     if (net.parseObject(arena, response.body)) |object| if (codeError(errorCode(object))) |err| return err;
     return switch (response.status) {
         .unauthorized => if (provider == .chatgpt) error.AiSignInAgain else error.AiKeyRejected,
@@ -243,14 +243,14 @@ const ResponsesStream = struct {
             self.output_tokens += net.int(usage, "output_tokens");
         } else if (std.mem.eql(u8, kind, "response.failed")) {
             const code = errorCode(net.object(object, "response") orelse object);
-            std.log.warn("ai_response_failed code={s}", .{code});
             self.failure = codeError(code) orelse error.AiFailed;
+            std.log.warn("ai_response_failed code={s}", .{@errorName(self.failure.?)});
         } else if (std.mem.eql(u8, kind, "response.incomplete")) {
             self.failure = error.AiIncomplete;
         } else if (std.mem.eql(u8, kind, "error")) {
             const code = errorCode(object);
-            std.log.warn("ai_stream_error code={s}", .{code});
             self.failure = codeError(code) orelse error.AiFailed;
+            std.log.warn("ai_stream_error code={s}", .{@errorName(self.failure.?)});
         }
     }
 };

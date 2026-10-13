@@ -35,7 +35,8 @@ connection; writes share one connection behind a lock. Collector requests
 have a fixed two-second deadline for network reads and writes, including
 partial headers or bodies, and workspace requests thirty seconds (extended
 only for AI calls, backups and retention). A stalled connection cannot hold
-a worker indefinitely. A background thread sends scheduled emails, checks
+a worker indefinitely. Outbound HTTP calls use the configured endpoint URLs
+directly and return redirects to their callers. A background thread sends scheduled emails, checks
 alerts daily at 06:00 UTC, delivers goal webhooks every thirty seconds, and
 at 03:00 UTC takes the automatic backup, applies retention, prunes replays,
 syncs integrations and writes the daily export. Database transactions finish synchronously before
@@ -53,6 +54,8 @@ analytico migrate --data ~/.local/share/analytico-sqlite \
 systemctl --user start analytico.service
 ```
 
+Schema 12 records the current consent state on remembered visitors so withdrawn
+consent also stops queued replay uploads; it is instant.
 Schema 11 adds the `devices` table for app notifications; it is instant.
 Schema 10 lets the Mac, iPhone and iPad apps sign in (a built-in OAuth
 client and a device name per sign-in); it is instant.
@@ -162,14 +165,17 @@ systemctl --user enable --now analytico-relay.service
 ```
 
 The relay binds to loopback and must not be exposed through Caddy or another
-public proxy. `curl http://127.0.0.1:4395/healthz` answers `ok`. It logs only
-rejected pushes (a token prefix, Apple's status and reason).
+public proxy. Its executable also refuses non-loopback listen addresses.
+`--key -` reads the signing key from stdin. `curl http://127.0.0.1:4395/healthz`
+answers `ok`. It logs rejected pushes with a token prefix and Apple's status,
+without recording provider response bodies.
 
 Email delivery (alerts, scheduled reports, invites) uses any SMTP server:
 STARTTLS on 587, TLS on 465, or a plain local relay. Configure it under
 Settings → Email delivery, or from the shell with the service stopped; the
 password is read from stdin and a test email must arrive before anything is
-saved:
+saved. Each delivery has a 30-second overall deadline and is cancelled during
+graceful shutdown:
 
 ```sh
 analytico email set --host smtp.fastmail.com --security tls \

@@ -3,11 +3,14 @@
 // an OpenAI-compatible AI endpoint and an OpenID provider.
 import assert from "node:assert/strict";
 import { createDecipheriv, createECDH, createHash, hkdfSync, randomBytes } from "node:crypto";
+import { createServer } from "node:net";
 import { journey, signer } from "./harness.mjs";
 
 const aiRequests = [];
 const pushes = [];
 const google = signer();
+let googleSubject = "google-subject-1";
+let googleEmail = "owner@example.test";
 
 // A minimal chat-completions endpoint and OpenID provider: records what
 // Analytico sends and signs the stand-in user in without a prompt.
@@ -34,7 +37,7 @@ function fakeAi({ incoming, outgoing, url, base, body, json }) {
     const form = new URLSearchParams(body);
     assert.equal(incoming.headers.authorization, `Basic ${Buffer.from("test-client:test-secret").toString("base64")}`);
     assert.ok(form.get("code_verifier").length >= 43);
-    const claims = { iss: base, aud: "test-client", sub: "google-subject-1", exp: Math.floor(Date.now() / 1000) + 300, nonce: nonces.get(form.get("code")), email: "owner@example.test", email_verified: true };
+    const claims = { iss: base, aud: "test-client", sub: googleSubject, exp: Math.floor(Date.now() / 1000) + 300, nonce: nonces.get(form.get("code")), email: googleEmail, email_verified: true };
     return json({ id_token: google.sign(claims), token_type: "Bearer" });
   }
   if (JSON.parse(body).model === "missing-model") return json({ error: { message: "model not found" } }, 404);
@@ -193,6 +196,10 @@ await journey("workspace", async (t) => {
   for (const name of ["recent", "sessions", "session", "search", "errors"]) assert.ok(!tools.includes(name), name);
   const pages = await mcp({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "pages", arguments: { site: "shop", range: "7d" } } });
   assert.match(pages.result.content[0].text, /^Pages for .*\npath \| page_type/);
+  const emptyFunnel = await mcp({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "funnel", arguments: { site: "shop", name: "Pricing to checkout", range: "7d", filters: ["country:ZZ"] } } });
+  assert.match(emptyFunnel.result.content[0].text, /1 \| path \| \/pricing \| 0 \|/);
+  await page.goto(`${origin}/shop/funnels/1?f=country:ZZ`);
+  await page.getByText("0.0% end to end", { exact: true }).waitFor();
   assert.equal((await fetch(`${origin}/mcp`, { method: "POST", body: "{}" })).status, 401);
 
   // The connected app shows up.
@@ -245,6 +252,17 @@ await journey("workspace", async (t) => {
   assert.equal((await exchange({ grant_type: "refresh_token", refresh_token: appTokens.refresh_token, client_id: "analytico-apple" })).error, "invalid_grant");
   appTokens.access_token = rotated.access_token;
   assert.equal((await app("/sites")).status, 200);
+  // Another signed-in device can sign out without ending this one.
+  const ipadVerifier = randomBytes(32).toString("base64url");
+  const ipadChallenge = createHash("sha256").update(ipadVerifier).digest("base64url");
+  const ipadConsent = await page.context().request.post(`${origin}/oauth/authorize`, { form: { client_id: "analytico-apple", redirect_uri: "analytico://oauth", response_type: "code", code_challenge_method: "S256", code_challenge: ipadChallenge, state: "ipad", decision: "allow", all: "1", device_name: "Test iPad" }, headers: { origin }, maxRedirects: 0 });
+  const ipadReturn = new URL(ipadConsent.headers().location);
+  const ipad = await exchange({ grant_type: "authorization_code", code: ipadReturn.searchParams.get("code"), client_id: "analytico-apple", redirect_uri: "analytico://oauth", code_verifier: ipadVerifier });
+  const signedOut = await fetch(`${origin}/oauth/revoke`, { method: "POST", body: new URLSearchParams({ token: ipad.refresh_token, client_id: "analytico-apple" }) });
+  assert.equal(signedOut.status, 200);
+  assert.equal((await fetch(`${origin}/api/v1/sites`, { headers: { authorization: `Bearer ${ipad.access_token}` } })).status, 401);
+  assert.equal((await exchange({ grant_type: "refresh_token", refresh_token: ipad.refresh_token, client_id: "analytico-apple" })).error, "invalid_grant");
+  assert.equal((await app("/sites")).status, 200);
   // Push: the app registers its key; a goal reaches the relay as ciphertext
   // that only that key opens (RFC 8291, decrypted here independently).
   const deviceKey = createECDH("prime256v1");
@@ -278,6 +296,23 @@ await journey("workspace", async (t) => {
   assert.deepEqual(await (await app("/me")).json(), { email: "owner@example.test", role: "owner" });
   assert.equal((await app("/device/test", { method: "POST" })).status, 204);
   assert.equal((await t.until(() => pushes[1], "test push")).token, "ab".repeat(32));
+  // Recovery also ends this device and its open live stream.
+  const recoveryLive = await app("/sites/shop/live", { signal: AbortSignal.timeout(20000) });
+  const recoveryReader = recoveryLive.body.getReader();
+  await recoveryReader.read();
+  await page.goto(`${origin}/settings/team`);
+  await page.locator("tr", { hasText: "owner@example.test" }).getByRole("button", { name: "Sign-in link", exact: true }).click();
+  const recoveryLink = await page.getByLabel("Invite link").inputValue();
+  await page.goto(recoveryLink);
+  await page.getByRole("button", { name: "Other ways to sign in" }).click();
+  await page.getByRole("link", { name: /Choose a password/ }).click();
+  await page.getByLabel("Password").fill("a recovered correct horse password");
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
+  await page.waitForURL(`${origin}/shop`);
+  assert.equal((await app("/sites")).status, 401);
+  assert.equal((await exchange({ grant_type: "refresh_token", refresh_token: rotated.refresh_token, client_id: "analytico-apple" })).error, "invalid_grant");
+  assert.equal(t.db().prepare("SELECT count(*) AS n FROM devices").get().n, 0);
+  while (!(await recoveryReader.read()).done) {}
   // A password change is an account-wide sign-out, including native apps.
   await page.goto(`${origin}/settings/ai?site=shop`);
   assert.equal(await page.getByText("Analytico for Mac, iPhone and iPad").count(), 0);
@@ -299,6 +334,33 @@ await journey("workspace", async (t) => {
   await provider.getByRole("button", { name: "Save and link Google" }).click();
   await page.waitForURL(/\/settings\/signin$/);
   await page.locator(".method-row", { hasText: "Google · owner@example.test" }).waitFor();
+
+  // An invited Google account completes without storing its invite value.
+  await page.goto(`${origin}/settings/team`);
+  await page.getByPlaceholder("name@example.com").fill("google-reader@example.test");
+  await page.locator("form.invite select[name=role]").selectOption("viewer");
+  await page.getByRole("button", { name: "Invite", exact: true }).click();
+  const googleInvite = await page.getByLabel("Invite link").inputValue();
+  const inviteValue = new URL(googleInvite).pathname.split("/").at(-1);
+  googleSubject = "google-reader-1";
+  googleEmail = "google-reader@example.test";
+  const googleReaderContext = await t.context();
+  const googleReader = await googleReaderContext.newPage();
+  await googleReader.route(`${aiBase}/authorize**`, async (route) => {
+    const stored = t.db();
+    const challenges = stored.prepare("SELECT next FROM auth_challenges WHERE intent='invite'").all();
+    stored.close();
+    assert.equal(challenges.length, 1);
+    assert.ok(challenges.every((item) => !item.next.includes(inviteValue)));
+    await route.continue();
+  });
+  await googleReader.goto(googleInvite);
+  await googleReader.getByRole("button", { name: "Other ways to sign in" }).click();
+  await googleReader.getByRole("link", { name: /Google/ }).click();
+  await googleReader.waitForURL(`${origin}/shop`);
+  await googleReaderContext.close();
+  googleSubject = "google-subject-1";
+  googleEmail = "owner@example.test";
 
   // A teammate joins with a password from the invite's other ways.
   await page.goto(`${origin}/settings/team`);
@@ -347,5 +409,19 @@ await journey("workspace", async (t) => {
   await page.locator(".tabbar").getByRole("link", { name: "Pages" }).click();
   await page.waitForURL(/\/shop\/pages$/);
 
-  return "passkey first run, pages, goals, funnels, filters, alerts, notes, BYOK ask, MCP connector, app sign-in and API, encrypted push, Google linking and sign-in, teammate invite";
+  // An unfinished mail delivery does not outlive a graceful server stop.
+  let smtpSocket;
+  const smtpPort = await t.listen(createServer((socket) => { smtpSocket = socket; }));
+  try {
+    const mailing = page.context().request.post(`${origin}/settings/email/test`, { headers: { origin }, form: { host: "127.0.0.1", port: String(smtpPort), security: "none", from: "analytics@example.test" } }).catch(() => null);
+    await t.until(() => smtpSocket, "mail delivery connected");
+    t.server.kill("SIGTERM");
+    await t.until(() => t.server.exitCode !== null, "mail delivery stopped cleanly", 4000);
+    assert.equal(await t.exited, 0);
+    await mailing;
+  } finally {
+    smtpSocket?.destroy();
+  }
+
+  return "passkey first run, pages, goals, funnels, filters, alerts, notes, BYOK ask, MCP connector, app sign-in and API, encrypted push, Google linking and sign-in, teammate invite, graceful mail shutdown";
 });

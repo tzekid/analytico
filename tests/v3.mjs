@@ -184,7 +184,7 @@ await journey("v3", async (t) => {
   const visitorEU = await newContext();
   const eu = await visitorEU.newPage();
   const decision = (target) => target.waitForResponse((response) => response.url().endsWith("/e") && response.status() === 200);
-  let [response] = await Promise.all([decision(eu), eu.goto(`${originA}/home?utm_source=newsletter`)]);
+  let [response] = await Promise.all([decision(eu), eu.goto(`${originA}/home?utm_source=newsletter&utm_campaign=welcome`)]);
   assert.equal((await response.json()).upgrade, "ask");
   // Nothing is stored before consent; the page view still counts as Lite.
   assert.equal(await eu.evaluate(() => Object.keys(localStorage).length), 0);
@@ -274,7 +274,7 @@ await journey("v3", async (t) => {
   assert.equal(row("SELECT click_id c FROM page_views WHERE path='/checkout'").c, "gclid:Cj0KEQ-test");
   // The shop's server confirms the same order: counted once, server wins.
   const now = Date.now();
-  const server = JSON.stringify({ v: 2, site: publicId, sent_at_ms: now, records: [{ event_id: "9a4f8f8e-1c2b-4d3e-8f00-000000000001", type: "event", occurred_at_ms: now, tracking_mode: "full", consent_mode: "server", tracker_version: "backend", release_id: "", internal: false, name: "purchase", value_minor: 4900, currency: "EUR", order_id: "A-1001", user_id: "user-42", properties: {} }] });
+  const server = JSON.stringify({ v: 2, site: publicId, sent_at_ms: now, records: [{ event_id: "9a4f8f8e-1c2b-4d3e-8f00-000000000001", type: "event", occurred_at_ms: now, tracking_mode: "full", consent_mode: "server", tracker_version: "backend", release_id: "", internal: false, name: "purchase", value_minor: 4500, currency: "EUR", order_id: "A-1001", user_id: "user-42", items: [{ id: "seed-kit", name: "Seed starter kit", price_minor: 3500, quantity: 1 }, { id: "guide", name: "Garden guide", price_minor: 1000, quantity: 1 }], properties: {} }] });
   assert.equal((await fetch(`http://127.0.0.1:${t.port}/i`, { method: "POST", headers: { "content-type": "application/json", ...t.sign("shop", server) }, body: server })).status, 204);
   assert.equal(row("SELECT count(*) n FROM visitor_links WHERE visitor_id=?", visitorA).n, 1);
 
@@ -292,14 +292,32 @@ await journey("v3", async (t) => {
 
   const visitorUS = await newContext();
   const us = await visitorUS.newPage();
+  const automaticReplay = us.waitForRequest((request) => new URL(request.url()).pathname === "/r");
   [response] = await Promise.all([decision(us), us.goto(`${originB}/welcome`)]);
   assert.equal((await response.json()).upgrade, "grant");
   // Outside the EU nobody is asked: identity follows right away, without a banner.
   await t.until(() => us.evaluate((site) => localStorage.getItem(`analytico:${site}:consent`) === "auto", publicId), "not required outside the EU");
   assert.equal(await us.getByRole("dialog", { name: "Analytics consent" }).count(), 0);
 
+  // A stricter current policy also applies to automatically consented replay.
+  const automaticUrl = new URL((await automaticReplay).url());
+  automaticUrl.searchParams.set("seq", "99999");
+  for (const policy of ["everyone", "regional"]) {
+    const changedPolicy = await page.context().request.post(`${originA}/settings/consent/update`, { headers: { origin: originA }, form: { site: "shop", policy, banner: "1" }, maxRedirects: 0 });
+    assert.equal(changedPolicy.status(), 303);
+    if (policy === "everyone") {
+      const refusedReplay = await visitorUS.request.post(automaticUrl.href, { headers: { origin: originB, "content-type": "text/plain" }, data: "[]" });
+      assert.equal(refusedReplay.status(), 403);
+    }
+  }
+
   const gpcContext = await newContext({ extraHTTPHeaders: { "Sec-GPC": "1" } });
-  await gpcContext.addInitScript(() => Object.defineProperty(Navigator.prototype, "globalPrivacyControl", { get: () => true }));
+  await gpcContext.addInitScript((site) => {
+    Object.defineProperty(Navigator.prototype, "globalPrivacyControl", { get: () => true });
+    if (location.protocol === "http:" || location.protocol === "https:") {
+      for (const name of ["visitor", "session", "click", "arrival", "replay", "consent"]) localStorage.setItem(`analytico:${site}:${name}`, "fixture");
+    }
+  }, publicId);
   const gpc = await gpcContext.newPage();
   [response] = await Promise.all([decision(gpc), gpc.goto(`${originB}/welcome`)]);
   assert.equal((await response.json()).upgrade, "never");
@@ -347,12 +365,19 @@ await journey("v3", async (t) => {
   assert.match(await page.locator(".sidebar-meta").textContent(), /Full · \d+% consented · UTC/);
   await visit("/shop/revenue", "Orders");
   assert.equal((await page.locator(".metric", { hasText: "Orders" }).locator(".metric-value").textContent()).trim(), "1");
-  assert.match(await page.locator(".metric", { hasText: "Revenue" }).locator(".metric-value").textContent(), /€49/);
+  assert.match(await page.locator(".metric", { hasText: "Revenue" }).locator(".metric-value").textContent(), /€45/);
+  const scopedRevenue = JSON.parse(t.cli("report", "overview", "shop", "--path", "/checkout", "--json"))[0];
+  assert.deepEqual([scopedRevenue.orders, scopedRevenue.revenue_minor], [1, 4500]);
+  const products = JSON.parse(t.cli("report", "revenue", "shop", "--json"));
+  const kit = products.find((item) => item.product_id === "seed-kit");
+  assert.deepEqual([kit.orders, kit.revenue_minor], [1, 3500]);
   // The server's copy of the order wins, but the visit, and so the source, come from the browser's.
   assert.deepEqual(await page.locator(".source-money strong").allTextContents(), ["Newsletter"]);
   // Browser events carry their sender's traffic class; server events none.
   assert.deepEqual(rows("SELECT DISTINCT source,traffic_class FROM events WHERE site_id=1 AND name IN ('purchase','payment_confirmed') ORDER BY 1").map((entry) => ({ ...entry })), [{ source: "browser", traffic_class: "human_like" }, { source: "server", traffic_class: null }]);
   await page.locator("td", { hasText: "Garden guide" }).waitFor();
+  await visit("/shop/acquisition?tab=campaigns", "Confirmed revenue");
+  assert.match(await page.getByText("Confirmed revenue", { exact: true }).locator("..").textContent(), /€45/);
   await visit("/shop/retention", "Weekly cohorts");
   // Computed once a day, then served from the cache.
   assert.equal(row("SELECT day FROM cache WHERE site_id=1 AND name='retention'").day, new Date().toISOString().slice(0, 10));
@@ -365,6 +390,7 @@ await journey("v3", async (t) => {
   await visit("/shop/funnels?tab=forms", "signup");
   await page.locator("td.mono", { hasText: "company" }).waitFor();
   await visit("/shop/sessions?signal=recorded", "Sessions & replays");
+  await page.getByText("Purchased €45", { exact: true }).waitFor();
   await page.locator("tr", { hasText: "Rage click" }).locator("a.btn-replay").first().click();
   await page.waitForURL(/\/shop\/replays\//);
   await page.locator(".player.loaded").waitFor();
@@ -374,8 +400,11 @@ await journey("v3", async (t) => {
 
   // People: one person, two devices; then deletion on request.
   await visit("/shop/people?segment=identified", "identified");
+  assert.match(await page.locator("tr", { hasText: "user " }).first().textContent(), /€45/);
   await page.locator("tr", { hasText: "user " }).first().click();
   await page.getByText("2 devices").waitFor();
+  assert.match(await page.locator(".split-person .grid-4").getByText("Revenue", { exact: true }).locator("..").textContent(), /€45/);
+  await page.locator(".journey-card").getByText("Purchased €45", { exact: true }).waitFor();
   const exported = await (await page.request.get(page.url() + "?format=json")).json();
   assert.equal(exported.visitors.length, 2);
   assert.ok(exported.page_views.length >= 5);
@@ -569,9 +598,10 @@ await journey("v3", async (t) => {
   const summary = writer.prepare(`INSERT INTO page_summaries(site_id,event_id,page_id,session_id,occurred_at_ms,received_at_ms,tracking_mode,visible_ms,active_ms,interaction_count,max_scroll,sections_json,selection_count,copy_count,outbound_clicks,downloads,form_attempts,ttfb_ms,inp_ms,tracker_version,consent_mode,internal)
     VALUES(1,?,?,?,?,?,'full',1000,1000,1,50,'["intro"]',0,0,0,0,0,200,?,'2','pending',0)`);
   const archivePaths = ["/archive", "/archive/a", "/archive/b", "/archive/a", "/archive"];
+  const spanning = row("SELECT session_id s FROM page_views WHERE site_id=1 AND session_id IS NOT NULL ORDER BY received_at_ms DESC LIMIT 1").s;
   for (let index = 0; index < 25; index++) {
     const page = randomUUID();
-    const session = `archive-visit-${Math.floor(index / 5)}`;
+    const session = index < 5 ? spanning : `archive-visit-${Math.floor(index / 5)}`;
     insert.run(randomUUID(), page, session, yesterdayAt + index, yesterdayAt + index, yesterday, (index % 10).toString(16).padStart(16, "0"), archivePaths[index % 5]);
     // Multiples of 10 below 1000 are already rounded the way the summaries round.
     summary.run(randomUUID(), page, session, yesterdayAt + index, yesterdayAt + index, 40 + index * 30);
@@ -586,7 +616,7 @@ await journey("v3", async (t) => {
   const rankValue = async (card, name) => Number((await page.locator("section.card", { has: page.locator("h2", { hasText: card }) })
     .locator(".rank-row", { has: page.locator(".rank-name span", { hasText: new RegExp(`^${name}$`) }) }).locator(".rank-value").textContent()).replace(/,/g, ""));
   await page.goto(`${originA}/shop/sessions?tab=paths&range=7d&from=${encodeURIComponent("/archive/a")}`);
-  const ordered = `WITH f AS (SELECT path,lead(path) OVER w nxt,row_number() OVER w rn FROM page_views WHERE ${human} AND session_id IS NOT NULL WINDOW w AS (PARTITION BY session_id ORDER BY occurred_at_ms,received_at_ms))`;
+  const ordered = `WITH f AS (SELECT path,lead(path) OVER w nxt,row_number() OVER w rn FROM page_views WHERE ${human} AND session_id IS NOT NULL WINDOW w AS (PARTITION BY received_date,session_id ORDER BY occurred_at_ms,received_at_ms))`;
   assert.equal(await rankValue("Entry pages", "/archive"), row(`${ordered} SELECT count(*) n FROM f WHERE rn=1 AND path='/archive'`, weekFrom).n);
   assert.equal(await rankValue("Exit pages", "/archive"), row(`${ordered} SELECT count(*) n FROM f WHERE nxt IS NULL AND path='/archive'`, weekFrom).n);
   assert.equal(await rankValue("Next from", "/archive/b"), 5);
@@ -602,7 +632,7 @@ await journey("v3", async (t) => {
   assert.equal((await page.locator(".metrics-sheet .metric", { hasText: "Views" }).locator(".metric-value").textContent()).trim(), String(row(`SELECT count(*) n FROM page_views WHERE ${human} AND path='/archive'`, weekFrom).n));
   assert.equal((await page.locator(".row", { hasText: "intro" }).locator(".reach-pct").textContent()).trim(), "100%");
   await page.goto(`${originA}/shop/errors?range=7d`);
-  const visits = row(`SELECT count(DISTINCT coalesce(session_id,page_id)) n FROM page_views WHERE ${human}`, weekFrom).n;
+  const visits = row(`SELECT count(DISTINCT received_date||char(31)||coalesce(session_id,page_id)) n FROM page_views WHERE ${human}`, weekFrom).n;
   assert.match(await page.locator(".card", { hasText: "Sessions with an error" }).textContent(), new RegExp(` of ${visits.toLocaleString("en-US")}`));
   const rolledCountries = await (await api("/sites/shop/breakdown?dimension=country&range=7d")).json();
   const netherlands = rolledCountries.rows.find((entry) => entry.value === "NL");
@@ -613,6 +643,9 @@ await journey("v3", async (t) => {
   const live = row("SELECT count(*) n FROM page_views WHERE internal=0 AND traffic_class IN ('human_like','unknown') AND received_at_ms>=?", weekStart).n;
   const history = row("SELECT coalesce(sum(views),0) n FROM imported_daily WHERE dim='total' AND day>=?", new Date(weekStart).toISOString().slice(0, 10)).n;
   assert.equal(overview.page_views, live + history);
+  const rawSessions = row("SELECT count(DISTINCT received_date||char(31)||session_id) n FROM page_views WHERE internal=0 AND traffic_class IN ('human_like','unknown') AND received_at_ms>=?", weekStart).n;
+  const filteredSessions = (await (await api(`/sites/shop/overview?range=7d&f=${encodeURIComponent("page!:/absent")}`)).json()).rows[0].sessions;
+  assert.deepEqual([overview.sessions, filteredSessions], [rawSessions, rawSessions]);
 
   // Today is summarised up to a recent cut; raw rows after it count people
   // the summary already saw once. Forget today's summary so the job cuts
@@ -634,6 +667,73 @@ await journey("v3", async (t) => {
   const historyVisitors = row("SELECT coalesce(sum(visitors),0) n FROM imported_daily WHERE dim='total' AND day>=?", new Date(weekStart).toISOString().slice(0, 10)).n;
   const afterCut = (await (await api("/sites/shop/overview?range=7d")).json()).rows[0];
   assert.deepEqual([afterCut.page_views, afterCut.visitor_days], [exact.views + history, exact.visitors + historyVisitors]);
+
+  // A dashboard link keeps its selected widgets and disclosure setting.
+  await page.goto(`${originA}/shop/dashboards`);
+  await page.getByRole("button", { name: "Create dashboard", exact: true }).click();
+  await page.waitForURL(/\/shop\/dashboards\/\d+\?edit=1$/);
+  const dashboardPath = new URL(page.url()).pathname;
+  await Promise.all([
+    page.waitForResponse((response) => response.request().method() === "POST" && new URL(response.url()).pathname === `${dashboardPath}/save`),
+    page.locator('.dash-tile[data-key="metrics"]').getByRole("button", { name: "Remove widget" }).click(),
+  ]);
+  await page.getByRole("button", { name: "Share publicly…", exact: true }).click();
+  await page.locator("#share-dialog").getByRole("button", { name: "Create public link" }).click();
+  const firstPublic = /(http\S+\/share\/[0-9a-f]{64})/.exec(await page.locator(".toast", { hasText: "Public link ready" }).last().textContent())[1];
+  const publicContext = await newContext();
+  const publicPage = await publicContext.newPage();
+  await publicPage.goto(firstPublic);
+  await publicPage.getByRole("heading", { name: "Website pulse", exact: true }).waitFor();
+  assert.equal(await publicPage.locator(".metric").count(), 0);
+  assert.equal(await publicPage.getByRole("heading", { name: "Top pages", exact: true }).count(), 0);
+  await page.goto(`${originA}${dashboardPath}`);
+  await page.getByRole("button", { name: "Share publicly…", exact: true }).click();
+  await page.locator("#share-dialog").getByLabel("Show page paths and sources").check();
+  await page.locator("#share-dialog").getByRole("button", { name: "Create public link" }).click();
+  const detailedPublic = /(http\S+\/share\/[0-9a-f]{64})/.exec(await page.locator(".toast", { hasText: "Public link ready" }).last().textContent())[1];
+  await publicPage.goto(detailedPublic);
+  await publicPage.getByRole("heading", { name: "Top pages", exact: true }).waitFor();
+  assert.deepEqual(await publicPage.locator(".dash-tile").evaluateAll((tiles) => tiles.map((tile) => tile.dataset.key)), ["trend", "pages", "sources"]);
+  assert.equal(await publicPage.locator("form, a[href*='/shop/']").count(), 0);
+  await publicContext.close();
+
+  // Collector minimization applies even without the generated tracker.
+  const privacyNow = Date.now();
+  const privacyBase = { occurred_at_ms: privacyNow, tracking_mode: "full", consent_mode: "pending", tracker_version: "2", release_id: "", internal: false };
+  const privacyRecords = [
+    ...[["/privacy/email", "reader@example.test"], ["/privacy/number", "12 34-56"], ["/privacy/term", "  GARDEN   TOOLS  "]].map(([path, search_term]) => ({ ...privacyBase, event_id: randomUUID(), page_id: randomUUID(), type: "page_view", path, search_term, search_results: 0 })),
+    { ...privacyBase, event_id: randomUUID(), page_id: randomUUID(), type: "error", path: "/privacy/error", message: "ReferenceError: reader@example.test", file: "https://assets.example.test/app.js?version=fixture" },
+  ];
+  const minimized = await fetch(`${originA}/e`, { method: "POST", headers: { origin: originA, "content-type": "text/plain", "user-agent": "Chrome/140" }, body: JSON.stringify({ v: 2, site: publicId, sent_at_ms: privacyNow, records: privacyRecords }) });
+  assert.equal(minimized.status, 200);
+  assert.deepEqual(rows("SELECT search_term FROM page_views WHERE path LIKE '/privacy/%' ORDER BY path").map((item) => item.search_term), [null, null, "garden tools"]);
+  assert.deepEqual({ ...row("SELECT message,file FROM errors WHERE path='/privacy/error'") }, { message: "ReferenceError", file: "app.js" });
+
+  // Withdrawal ends replay authorization; a new grant gets a new identity.
+  const consentContext = await newContext();
+  const consentPage = await consentContext.newPage();
+  await Promise.all([decision(consentPage), consentPage.goto(`${originA}/home`)]);
+  const recordedRequest = consentPage.waitForRequest((request) => new URL(request.url()).pathname === "/r");
+  await consentPage.getByRole("dialog", { name: "Analytics consent" }).getByRole("button", { name: "Allow", exact: true }).click();
+  const recordedUrl = new URL((await recordedRequest).url());
+  const originalVisitor = recordedUrl.searchParams.get("visitor");
+  const withdrawalDecision = consentPage.waitForResponse((response) => new URL(response.url()).pathname === "/e" && response.request().postData()?.includes('"state":"denied"'));
+  await consentPage.evaluate(() => analytico.consent("denied"));
+  const withdrawn = await (await withdrawalDecision).json();
+  assert.deepEqual([withdrawn.upgrade, withdrawn.drop_state], ["never", "denied"]);
+  await t.until(() => row("SELECT consent_state FROM visitors WHERE visitor_id=?", originalVisitor)?.consent_state === "denied", "withdrawal stored");
+  recordedUrl.searchParams.set("seq", "99999");
+  recordedUrl.searchParams.set("first", String(Date.now()));
+  recordedUrl.searchParams.set("last", String(Date.now()));
+  const stoppedReplay = await consentContext.request.post(recordedUrl.href, { headers: { origin: originA, "content-type": "text/plain" }, data: "[]" });
+  assert.equal(stoppedReplay.status(), 403);
+  await consentPage.evaluate(() => analytico.consent("granted"));
+  const newVisitor = await t.until(() => consentPage.evaluate((site) => (localStorage.getItem(`analytico:${site}:visitor`) || "").split(".")[0], publicId), "consent granted again");
+  assert.notEqual(newVisitor, originalVisitor);
+  await t.until(() => row("SELECT count(*) n FROM page_views WHERE visitor_id=?", newVisitor).n === 1, "new consented page");
+  await consentPage.evaluate(() => analytico.forget());
+  await t.until(() => !row("SELECT visitor_id FROM visitors WHERE visitor_id=?", newVisitor), "new visitor forgotten");
+  await consentContext.close();
 
   // Backups cover the replay database too.
   const backup = join(t.temporary, "backup.db");

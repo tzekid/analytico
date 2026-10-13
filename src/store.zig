@@ -249,6 +249,7 @@ pub fn pruneBefore(allocator: std.mem.Allocator, database: *db_mod.Db, cutoff_ms
         "DELETE FROM visitors WHERE last_seen_ms<?1",
         "DELETE FROM rollups WHERE day<strftime('%Y-%m-%d',?1/1000,'unixepoch')",
         "DELETE FROM rollup_days WHERE day<strftime('%Y-%m-%d',?1/1000,'unixepoch')",
+        "DELETE FROM vitals_daily WHERE day<strftime('%Y-%m-%d',?1/1000,'unixepoch')",
     }) |sql| {
         var statement = try database.prepare(allocator, sql);
         defer statement.deinit();
@@ -256,6 +257,7 @@ pub fn pruneBefore(allocator: std.mem.Allocator, database: *db_mod.Db, cutoff_ms
         _ = try statement.step();
         removed += database.changes();
     }
+    try database.exec("DELETE FROM cache");
     try database.exec("COMMIT");
     return removed;
 }

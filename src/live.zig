@@ -14,20 +14,22 @@ pub const max_streams = 64;
 const interval_ms = 2_000;
 const ping_every = 10;
 
-const Stream = struct { stream: std.Io.net.Stream, site_id: i64, sent: [64]u8 = undefined, sent_len: usize = 0 };
+pub const Credential = struct { kind: enum { session, key, app }, hash: [64]u8 };
+pub const Subscription = struct { site_id: i64, credential: Credential };
+const Stream = struct { stream: std.Io.net.Stream, subscription: Subscription, sent: [64]u8 = undefined, sent_len: usize = 0 };
 
 pub const Hub = struct {
     mutex: std.Io.Mutex = .init,
     streams: [max_streams]?Stream = @splat(null),
 
     /// Takes ownership of `stream` after writing the response head; false when full.
-    pub fn add(self: *Hub, io: std.Io, stream: std.Io.net.Stream, site_id: i64) bool {
+    pub fn add(self: *Hub, io: std.Io, stream: std.Io.net.Stream, subscription: Subscription) bool {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
         for (&self.streams) |*slot| if (slot.* == null) {
             const head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-store, no-transform\r\nx-accel-buffering: no\r\nconnection: close\r\n\r\nretry: 5000\n\n";
             if (!send(stream, head)) return false;
-            slot.* = .{ .stream = stream, .site_id = site_id };
+            slot.* = .{ .stream = stream, .subscription = subscription };
             return true;
         };
         return false;
@@ -70,10 +72,16 @@ fn broadcast(arena: std.mem.Allocator, shared: *server.Shared, db: *db_mod.Db, p
     var payloads: std.AutoHashMapUnmanaged(i64, []const u8) = .empty;
     const now = @import("domain.zig").nowMs();
     for (&hub.streams) |*slot| {
-        const entry = &(slot.* orelse continue);
-        const payload = payloads.get(entry.site_id) orelse blk: {
-            const text = try std.fmt.allocPrint(arena, "{{\"online\":{d},\"last\":{d}}}", .{ try data.online(arena, db, entry.site_id, now), try data.lastSeen(arena, db, entry.site_id) });
-            try payloads.put(arena, entry.site_id, text);
+        const entry: *Stream = if (slot.*) |*value| value else continue;
+        if (!try allowed(arena, db, entry.subscription, now)) {
+            entry.stream.close(shared.io);
+            slot.* = null;
+            continue;
+        }
+        const site_id = entry.subscription.site_id;
+        const payload = payloads.get(site_id) orelse blk: {
+            const text = try std.fmt.allocPrint(arena, "{{\"online\":{d},\"last\":{d}}}", .{ try data.online(arena, db, site_id, now), try data.lastSeen(arena, db, site_id) });
+            try payloads.put(arena, site_id, text);
             break :blk text;
         };
         const changed = !std.mem.eql(u8, entry.sent[0..entry.sent_len], payload);
@@ -88,4 +96,19 @@ fn broadcast(arena: std.mem.Allocator, shared: *server.Shared, db: *db_mod.Db, p
             entry.sent_len = payload.len;
         }
     }
+}
+
+/// Open connections obey the same current account, site and grant access
+/// as a new request. The hub keeps only the credential's hash.
+fn allowed(arena: std.mem.Allocator, db: *db_mod.Db, subscription: Subscription, now: i64) !bool {
+    const scope = " AND (u.all_sites=1 OR u.role IN ('admin','owner') OR EXISTS(SELECT 1 FROM user_sites us WHERE us.user_id=u.id AND us.site_id=?2))";
+    const sql = switch (subscription.credential.kind) {
+        .session => "SELECT count(*) FROM web_sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=?1 AND s.expires_at_ms>?3" ++ scope,
+        .key => "SELECT count(*) FROM api_keys k JOIN users u ON u.id=k.user_id WHERE k.token_hash=?1 AND (k.site_id IS NULL OR k.site_id=?2)" ++ scope,
+        .app => "SELECT count(*) FROM oauth_grants g JOIN users u ON u.id=g.user_id WHERE g.token_hash=?1 AND g.kind='access' AND g.client_id LIKE 'analytico-%' AND g.device_id IS NOT NULL AND g.expires_at_ms>?3 AND (g.sites='*' OR instr(','||g.sites||',',','||?2||',')>0)" ++ scope,
+    };
+    return if (subscription.credential.kind == .key)
+        try db.scalar(arena, i64, sql, .{ &subscription.credential.hash, subscription.site_id }) == 1
+    else
+        try db.scalar(arena, i64, sql, .{ &subscription.credential.hash, subscription.site_id, now }) == 1;
 }

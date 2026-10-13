@@ -264,8 +264,7 @@ fn nothingHere(ctx: *Ctx, view: data.View, base: []const u8) !void {
             try html.print(arena, "{site} has data from {day} {month} {year}. These dates are before tracking started, so there is nothing to show yet.", .{ .site = view.site.title(), .day = first_date.day, .month = data.month_names[first_date.month - 1], .year = first_date.year })
         else if (today)
             "Nothing has arrived since midnight (UTC). Data health shows whether collection stopped."
-        else
-            if (range.oneDay()) "The tracker reported nothing that day. Data health shows whether collection stopped." else "The tracker reported nothing in these dates. Data health shows whether collection stopped.",
+        else if (range.oneDay()) "The tracker reported nothing that day. Data health shows whether collection stopped." else "The tracker reported nothing in these dates. Data health shows whether collection stopped.",
         .actions = try html.print(arena, "<a class=\"btn btn-primary\" href=\"{recent}\">Show the last 30 days</a>{!second}", .{
             .recent = try view.href(arena, base, &.{ .{ "range", "30d" }, .{ "from", "" }, .{ "to", "" } }),
             .second = if (before) "<button class=\"btn\" type=\"button\" popovertarget=\"range-pop\">Pick other dates</button>" else try html.print(arena, "<a class=\"btn\" href=\"/{slug}/health\">Open data health</a>", .{ .slug = view.site.slug }),
@@ -324,7 +323,7 @@ pub fn metricStrip(ctx: *Ctx, view: data.View, base: []const u8, current: data.T
             const before_share = try data.returningShare(ctx.arena, ctx.db, view, range.prev_start_ms, range.prev_end_ms);
             const delta = ((now_share orelse 0) - (before_share orelse 0)) * 100;
             try ui.metric(w, arena, .{
-                .href = try view.href(arena, try std.fmt.allocPrint(arena, "/{s}/retention", .{view.site.slug}), &.{.{ "m", "" }}),
+                .href = if (ctx.user == null) "" else try view.href(arena, try std.fmt.allocPrint(arena, "/{s}/retention", .{view.site.slug}), &.{.{ "m", "" }}),
                 .label = "Returning visitors",
                 // A share of nobody is not 0%.
                 .value = if (now_share) |share| try std.fmt.allocPrint(arena, "{d:.0}%", .{share * 100}) else "—",
@@ -335,7 +334,7 @@ pub fn metricStrip(ctx: *Ctx, view: data.View, base: []const u8, current: data.T
         if (metric == .active and sold.orders > 0) {
             const before = try customers.sales(ctx.arena, ctx.db, view, range.prev_start_ms, range.prev_end_ms);
             try ui.metric(w, arena, .{
-                .href = try view.href(arena, try std.fmt.allocPrint(arena, "/{s}/revenue", .{view.site.slug}), &.{.{ "m", "" }}),
+                .href = if (ctx.user == null) "" else try view.href(arena, try std.fmt.allocPrint(arena, "/{s}/revenue", .{view.site.slug}), &.{.{ "m", "" }}),
                 .label = "Revenue",
                 .value = try std.fmt.allocPrint(arena, "{f}", .{html.money(sold.revenue, view.site.currency)}),
                 .change = if (view.compare) try ui.change(arena, @floatFromInt(sold.revenue), @floatFromInt(before.revenue), false, try ui.versus(arena, try std.fmt.allocPrint(arena, "{f}", .{html.money(before.revenue, view.site.currency)}))) else "&nbsp;",
@@ -345,7 +344,7 @@ pub fn metricStrip(ctx: *Ctx, view: data.View, base: []const u8, current: data.T
         const value = current.metric(metric, range);
         const before = previous.metric(metric, range);
         try ui.metric(w, arena, .{
-            .href = try view.href(arena, base, &.{.{ "m", @tagName(metric) }}),
+            .href = if (ctx.user == null) "" else try view.href(arena, base, &.{.{ "m", @tagName(metric) }}),
             .current = view.metric == metric,
             // One day is a total, not an average per day.
             .label = if (metric == .visitors and range.oneDay()) "Visitors" else metric.label(),

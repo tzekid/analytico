@@ -45,7 +45,7 @@ pub fn route(ctx: *Ctx, parts: []const []const u8) !bool {
         return false;
     }
     if (is(parts[0], "oauth") and parts.len == 2) {
-        if (is(parts[1], "register") and ctx.method == .POST) try register(ctx) else if (is(parts[1], "token") and ctx.method == .POST) try token(ctx) else if (is(parts[1], "authorize")) try authorize(ctx) else return false;
+        if (is(parts[1], "register") and ctx.method == .POST) try register(ctx) else if (is(parts[1], "token") and ctx.method == .POST) try token(ctx) else if (is(parts[1], "revoke") and ctx.method == .POST) try revoke(ctx) else if (is(parts[1], "authorize")) try authorize(ctx) else return false;
         return true;
     }
     if (is(parts[0], "mcp") and parts.len == 1) {
@@ -115,6 +115,7 @@ fn authorizationServer(ctx: *Ctx) !void {
         .issuer = origin,
         .authorization_endpoint = try std.fmt.allocPrint(ctx.arena, "{s}/oauth/authorize", .{origin}),
         .token_endpoint = try std.fmt.allocPrint(ctx.arena, "{s}/oauth/token", .{origin}),
+        .revocation_endpoint = try std.fmt.allocPrint(ctx.arena, "{s}/oauth/revoke", .{origin}),
         .registration_endpoint = try std.fmt.allocPrint(ctx.arena, "{s}/oauth/register", .{origin}),
         .response_types_supported = &[_][]const u8{"code"},
         .grant_types_supported = &[_][]const u8{ "authorization_code", "refresh_token" },
@@ -386,6 +387,30 @@ fn token(ctx: *Ctx) !void {
 // ---------------------------------------------------------------- MCP
 
 const Grant = struct { client_name: []const u8, sites: []const u8 };
+
+/// Revocation works with a refresh token even after the access token expired.
+fn revoke(ctx: *Ctx) !void {
+    const form = try ctx.form();
+    const client_id = form.get("client_id") orelse "";
+    const hashed = auth.hashToken(form.get("token") orelse "");
+    const db = ctx.shared.lockWrite();
+    defer ctx.shared.unlockWrite();
+    const GrantOwner = struct { user_id: i64, device_id: ?[]const u8 };
+    const found = try db.one(ctx.arena, GrantOwner, "SELECT user_id,device_id FROM oauth_grants WHERE token_hash=? AND client_id=? AND kind IN ('access','refresh')", .{ &hashed, client_id });
+    if (found) |grant| {
+        try db.exec("BEGIN IMMEDIATE");
+        errdefer db.exec("ROLLBACK") catch {};
+        if (grant.device_id) |id| {
+            try db.run(ctx.arena, "DELETE FROM oauth_grants WHERE device_id=? AND user_id=?", .{ id, grant.user_id });
+            try db.run(ctx.arena, "DELETE FROM devices WHERE device_id=? AND user_id=?", .{ id, grant.user_id });
+        } else {
+            try db.run(ctx.arena, "DELETE FROM oauth_grants WHERE client_id=? AND user_id=?", .{ client_id, grant.user_id });
+        }
+        try db.exec("COMMIT");
+    }
+    try ctx.w().writeAll("{}");
+    return ctx.json();
+}
 
 fn bearer(ctx: *Ctx) !?Grant {
     const header = ctx.head.authorization;

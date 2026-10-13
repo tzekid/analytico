@@ -68,6 +68,100 @@ import Testing
     @Test func previousPeriod() {
         let before = ViewState(period: .week).previous(from: "2026-10-01", to: "2026-10-07")
         #expect(before?.queryItems.map(\.value) == ["custom", "2026-09-24", "2026-09-30"])
+        let daylightChange = ViewState(period: .week).previous(from: "2026-10-24", to: "2026-10-26")
+        #expect(daylightChange?.queryItems.map(\.value) == ["custom", "2026-10-21", "2026-10-23"])
+    }
+}
+
+private final class RecordedRequests: @unchecked Sendable {
+    private let lock = NSLock()
+    private var requests: [URLRequest] = []
+    func append(_ request: URLRequest) {
+        var captured = request
+        if captured.httpBody == nil, let stream = request.httpBodyStream {
+            stream.open()
+            defer { stream.close() }
+            var data = Data()
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            while true {
+                let count = stream.read(&buffer, maxLength: buffer.count)
+                if count <= 0 { break }
+                data.append(contentsOf: buffer.prefix(count))
+            }
+            captured.httpBody = data
+        }
+        lock.withLock { requests.append(captured) }
+    }
+    var all: [URLRequest] { lock.withLock { requests } }
+}
+
+private final class TransportProtocol: URLProtocol, @unchecked Sendable {
+    // These transport tests run serially and never use a network connection.
+    nonisolated(unsafe) static var respond: @Sendable (URLRequest) -> Data = { _ in Data("{}".utf8) }
+    override class func canInit(with request: URLRequest) -> Bool { request.url?.host == "transport.example.test" }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        let data = Self.respond(request)
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["content-type": "application/json"])!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: data)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
+}
+
+@Suite(.serialized) struct TransportTests {
+    static let instance = try! JSONDecoder().decode(Instance.self, from: Data("""
+    {"product":"analytico","name":"transport.example.test","version":"1.0.0","api":{"level":1,"base":"/api/v1"},
+     "oauth":{"issuer":"https://transport.example.test","authorization_endpoint":"https://transport.example.test/oauth/authorize","token_endpoint":"https://transport.example.test/oauth/token"},
+     "sign_in":["passkey"],"setup_complete":true}
+    """.utf8))
+
+    private func transport(expires: Date = Date().addingTimeInterval(3600), reply: String) -> (Client, URLSession, RecordedRequests) {
+        let records = RecordedRequests()
+        TransportProtocol.respond = { request in records.append(request); return Data(reply.utf8) }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [TransportProtocol.self]
+        let session = URLSession(configuration: configuration)
+        let client = Client(instance: Self.instance, tokens: .init(access: "fixture-access", refresh: "fixture-refresh", expiresAt: expires), store: TokenStore(), session: session)
+        return (client, session, records)
+    }
+
+    @Test func notesUseSelectedDates() async throws {
+        let (client, session, records) = transport(reply: "{\"notes\":[]}")
+        defer { session.invalidateAndCancel() }
+        _ = try await client.notes(site: "shop", view: .custom(from: "2026-09-30", to: "2026-10-01"))
+        let request = try #require(records.all.first)
+        let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!.queryItems!
+        #expect(request.url!.path == "/api/v1/sites/shop/notes")
+        #expect(query.first { $0.name == "range" }?.value == "custom")
+        #expect(query.first { $0.name == "from" }?.value == "2026-09-30")
+        #expect(query.first { $0.name == "to" }?.value == "2026-10-01")
+    }
+
+    @Test func noteTextPreservesPlusAndUnicode() async throws {
+        let (client, session, records) = transport(reply: "{}")
+        defer { session.invalidateAndCancel() }
+        try await client.addNote(site: "shop", day: "2026-10-01", label: "C++ release + café")
+        let body = String(decoding: try #require(records.all.first?.httpBody), as: UTF8.self)
+        #expect(!body.contains("+"))
+        var form = URLComponents()
+        form.percentEncodedQuery = body
+        #expect(form.queryItems?.first { $0.name == "label" }?.value == "C++ release + café")
+    }
+
+    @Test func signOutUsesRefreshGrantAndEndsTransport() async throws {
+        let (client, session, records) = transport(expires: .distantPast, reply: "{}")
+        defer { session.invalidateAndCancel() }
+        try await client.signOut()
+        let request = try #require(records.all.first)
+        #expect(request.url!.path == "/oauth/revoke")
+        #expect(request.value(forHTTPHeaderField: "authorization") == nil)
+        var form = URLComponents()
+        form.percentEncodedQuery = String(decoding: try #require(request.httpBody), as: UTF8.self)
+        #expect(form.queryItems?.first { $0.name == "token" }?.value == "fixture-refresh")
+        await #expect(throws: ClientError.signedOut) { _ = try await client.sites() }
+        #expect(records.all.count == 1)
     }
 }
 

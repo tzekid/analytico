@@ -80,7 +80,7 @@ pub const Ctx = struct {
     /// The page frame, built once by `layout.begin` and reused by `layout.end`.
     shell: ?@import("layout.zig").Shell = null,
     /// Set by the live stream route: the connection goes to the broadcaster.
-    live_site: ?i64 = null,
+    live_site: ?@import("../live.zig").Subscription = null,
     /// Read-only pages and API answers: an ETag of the body lets clients
     /// revalidate and get an empty 304 when nothing changed.
     revalidate: bool = false,
@@ -130,6 +130,8 @@ pub const Ctx = struct {
             if (!self.hasHeader("cache-control")) try self.header("cache-control", "no-store");
             try self.header("content-security-policy", try std.fmt.allocPrint(self.arena, "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors {s}; base-uri 'none'; form-action 'self'{s}{s}", .{ self.frame_ancestors, if (self.form_action.len == 0) "" else " ", self.form_action }));
         }
+        // A final answer must not invite an upload we already refused.
+        self.request.head.expect = null;
         try self.request.respond(self.body.writer.buffered(), .{
             .status = self.status,
             .keep_alive = false,

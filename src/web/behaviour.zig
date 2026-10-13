@@ -229,7 +229,8 @@ fn sessionTable(ctx: *Ctx, view: data.View, signal: ?Signal) !void {
     while (true) {
         rows.clearRetainingCapacity();
         var sql = data.Sql.init(arena);
-        try sql.add("WITH c(sid) AS MATERIALIZED (");
+        try customers.ordersCte(&sql, view, view.range.start_ms, view.range.end_ms);
+        try sql.add(", c(sid) AS MATERIALIZED (");
         const narrowed = try sessionCandidates(ctx, &sql, view, signal, window);
         try sql.add("),s AS (SELECT pv.session_id sid,min(pv.received_at_ms) started,max(pv.received_at_ms) ended,count(*) pages,max(pv.visitor_id) visitor FROM c CROSS JOIN page_views pv ON pv.site_id=");
         try sql.int(id);
@@ -245,11 +246,7 @@ fn sessionTable(ctx: *Ctx, view: data.View, signal: ?Signal) !void {
         try sql.int(id);
         try sql.add(" AND x.session_id=t.sid),(SELECT g.name FROM goals g JOIN events e ON e.site_id=g.site_id AND e.name=g.match_value AND g.kind='event' WHERE g.site_id=");
         try sql.int(id);
-        try sql.add(" AND e.session_id=t.sid LIMIT 1),(SELECT sum(o.v) FROM (SELECT max(e.value_minor) v FROM events e WHERE e.site_id=");
-        try sql.int(id);
-        try sql.add(" AND e.session_id=t.sid AND e.name IN " ++ customers.purchase_names ++ " GROUP BY coalesce(e.order_id,e.event_id)) o),(SELECT max(e.currency) FROM events e WHERE e.site_id=");
-        try sql.int(id);
-        try sql.add(" AND e.session_id=t.sid AND e.name IN " ++ customers.purchase_names ++ "),(SELECT r.last_at_ms-r.started_at_ms FROM rp.replays r WHERE r.site_id=");
+        try sql.add(" AND e.session_id=t.sid LIMIT 1),(SELECT sum(o.v) FROM o WHERE o.session_id=t.sid),(SELECT max(o.c) FROM o WHERE o.session_id=t.sid),(SELECT r.last_at_ms-r.started_at_ms FROM rp.replays r WHERE r.site_id=");
         try sql.int(id);
         try sql.add(" AND r.session_id=t.sid),coalesce((SELECT v.user_hash FROM visitors v WHERE v.site_id=");
         try sql.int(id);
@@ -510,7 +507,7 @@ pub fn errors(ctx: *Ctx, site: data.Site) !void {
     try layout.head(ctx, .{ .title = "Errors", .subtitle = try std.fmt.allocPrint(arena, "JavaScript errors visitors ran into, grouped · {f}", .{range}), .view = view, .path = path });
 
     // Visits: sessions where pages are linked, page views otherwise.
-    const unit = if (site.linked()) "coalesce(x.session_id,x.page_id)" else "x.page_id";
+    const unit = if (site.linked()) "strftime('%Y-%m-%d',x.received_at_ms/1000,'unixepoch')||char(31)||coalesce(x.session_id,x.page_id)" else "x.page_id";
     var rows_sql = data.Sql.init(arena);
     try rows_sql.add("SELECT x.fingerprint,max(x.message),coalesce(max(x.file),''),coalesce(max(x.line),0),(SELECT y.path FROM errors y WHERE y.site_id=x.site_id AND y.fingerprint=x.fingerprint GROUP BY y.path ORDER BY count(*) DESC LIMIT 1),count(*),count(DISTINCT ");
     try rows_sql.add(unit);

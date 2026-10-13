@@ -146,10 +146,10 @@ pub const Connection = struct {
         var fds = [_]std.posix.pollfd{.{ .fd = self.stream.socket.handle, .events = events, .revents = 0 }};
         while (true) {
             const remaining = self.deadline.durationFromNow(self.io).raw.toMilliseconds();
-            if (remaining <= 0) return error.NetworkTimeout;
-            const rc = std.c.poll(&fds, fds.len, @intCast(remaining));
+            if (remaining <= 0 or stop_requested.load(.acquire)) return error.NetworkTimeout;
+            const rc = std.c.poll(&fds, fds.len, @intCast(@min(remaining, 100)));
             switch (std.posix.errno(rc)) {
-                .SUCCESS => if (rc > 0) return else return error.NetworkTimeout,
+                .SUCCESS => if (rc > 0) return else continue,
                 .INTR => continue,
                 else => return error.NetworkTimeout,
             }
@@ -256,7 +256,9 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
     var started: usize = 0;
     errdefer {
         stopAll();
+        @import("net.zig").beginShutdown();
         for (threads[0..started]) |thread| thread.join();
+        @import("web/chatgpt.zig").shutdown(&shared);
     }
     while (started < worker_count) : (started += 1) {
         threads[started] = try std.Thread.spawn(.{}, worker, .{ &shared, &listener });
@@ -270,7 +272,9 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
     // Shutting the listener down ends every accept loop; active requests and
     // their transactions finish before the joins return.
     stopAll();
+    @import("net.zig").beginShutdown();
     for (threads[0..started]) |thread| thread.join();
+    @import("web/chatgpt.zig").shutdown(&shared);
     shared.heat_cache.deinit(allocator);
     try store.checkpoint();
     std.log.info("serve_stopped", .{});
@@ -571,8 +575,9 @@ fn ingestBatch(job: *IngestJob) !Outcome {
 fn decisionJson(arena: std.mem.Allocator, shared: *Shared, site: store_mod.Site, result: collector.Result) ![]const u8 {
     var out: std.Io.Writer.Allocating = .init(arena);
     const w = &out.writer;
-    try w.print("{{\"upgrade\":\"{s}\"", .{@tagName(result.decision)});
+    try w.print("{{\"upgrade\":\"{s}\"", .{if (result.withdrawn) "never" else @tagName(result.decision)});
     if (result.dropped) try w.writeAll(",\"drop\":true");
+    if (result.withdrawn) try w.writeAll(",\"drop_state\":\"denied\"");
     if (result.continued) try w.writeAll(",\"continued\":true");
     if (result.decision == .ask and site.consent_banner) {
         try w.writeAll(",\"banner\":{\"text\":");
@@ -634,14 +639,14 @@ fn siteOrigin(arena: std.mem.Allocator, read_db: *db_mod.Db, site_id: i64, raw: 
     return if (try statement.step() == .row) raw.? else null;
 }
 
-const ReplaySite = struct { id: i64, mode: []const u8, enabled: bool, recording: bool, record_exclude: []const u8 };
+const ReplaySite = struct { id: i64, mode: []const u8, enabled: bool, recording: bool, record_exclude: []const u8, consent_policy: domain.ConsentPolicy };
 
 fn replaySite(arena: std.mem.Allocator, read_db: *db_mod.Db, public_id: []const u8) !?ReplaySite {
-    var statement = try read_db.prepare(arena, "SELECT id,tracking_mode,enabled,replay_percent>0 OR replay_triggers=1,record_exclude FROM sites WHERE public_id=?");
+    var statement = try read_db.prepare(arena, "SELECT id,tracking_mode,enabled,replay_percent>0 OR replay_triggers=1,record_exclude,consent_policy FROM sites WHERE public_id=?");
     defer statement.deinit();
     try statement.bindText(1, public_id);
     if (try statement.step() != .row) return null;
-    return .{ .id = statement.columnInt(0), .mode = try arena.dupe(u8, statement.columnText(1)), .enabled = statement.columnBool(2), .recording = statement.columnBool(3), .record_exclude = try arena.dupe(u8, statement.columnText(4)) };
+    return .{ .id = statement.columnInt(0), .mode = try arena.dupe(u8, statement.columnText(1)), .enabled = statement.columnBool(2), .recording = statement.columnBool(3), .record_exclude = try arena.dupe(u8, statement.columnText(4)), .consent_policy = try domain.parseConsentPolicy(statement.columnText(5)) };
 }
 
 fn wildcard(pattern: []const u8, value: []const u8) bool {
@@ -697,37 +702,46 @@ fn replayChunk(arena: std.mem.Allocator, shared: *Shared, read_db: *db_mod.Db, r
     if (seq < 0 or seq > 100_000) return respondError(request, .bad_request, "invalid_replay", origin);
     const length = request.head.content_length orelse return respondError(request, .length_required, "length_required", origin);
     if (length == 0 or length > replay.maximum_chunk_bytes) return respondError(request, .payload_too_large, "body_too_large", origin);
-    // The exact page must belong to this consented visitor and session.
-    var session = try read_db.prepare(arena, "SELECT path,device,browser,country FROM page_views WHERE site_id=? AND session_id=? AND visitor_id=? AND page_id=? AND consent_mode IN ('granted','not_required') LIMIT 1");
-    defer session.deinit();
-    try session.bindInt(1, site.id);
-    try session.bindText(2, session_id);
-    try session.bindText(3, visitor_id);
-    try session.bindText(4, page_id);
-    if (try session.step() != .row) return respondError(request, .forbidden, "unknown_session", origin);
-    if (replayExcluded(site.record_exclude, session.columnText(0))) return respondError(request, .forbidden, "replay_excluded", origin);
     const body = try arena.alloc(u8, @intCast(length));
     var body_buffer: [16 * 1024]u8 = undefined;
     const reader = request.readerExpectContinue(&body_buffer) catch return error.InvalidExpectation;
     reader.readSliceAll(body) catch return error.InvalidBody;
-    const chunk: replay.Chunk = .{
-        .site_id = site.id,
-        .session_id = session_id,
-        .visitor_id = visitor_id,
-        .page_id = page_id,
-        .seq = seq,
-        .first_ms = first,
-        .last_ms = last,
-        .received_at_ms = domain.nowMs(),
-        .data = body,
-        .entry_path = try arena.dupe(u8, session.columnText(0)),
-        .device = try arena.dupe(u8, session.columnText(1)),
-        .browser = try arena.dupe(u8, session.columnText(2)),
-        .country = if (session.columnType(3) == db_mod.sqlite.SQLITE_NULL) null else try arena.dupe(u8, session.columnText(3)),
-    };
     {
         const replays = shared.lockReplays();
         defer shared.unlockReplays();
+        // Authorization is current at storage, including after deletion or
+        // consent changes while a chunk was being uploaded.
+        const current_site = (try replaySite(arena, read_db, public_id)) orelse return respondError(request, .forbidden, "replay_disabled", origin);
+        if (!current_site.enabled or !std.mem.eql(u8, current_site.mode, "full") or !current_site.recording) return respondError(request, .forbidden, "replay_disabled", origin);
+        if ((try siteOrigin(arena, read_db, site.id, headers.origin)) == null) return respondError(request, .forbidden, "origin_denied", null);
+        var session = try read_db.prepare(arena, "SELECT pv.path,pv.device,pv.browser,pv.country,pv.consent_mode FROM page_views pv JOIN visitors v ON v.site_id=pv.site_id AND v.visitor_id=pv.visitor_id WHERE pv.site_id=? AND pv.session_id=? AND pv.visitor_id=? AND pv.page_id=? AND pv.consent_mode IN ('granted','not_required') AND v.consent_state IN ('granted','not_required') LIMIT 1");
+        defer session.deinit();
+        try session.bindInt(1, site.id);
+        try session.bindText(2, session_id);
+        try session.bindText(3, visitor_id);
+        try session.bindText(4, page_id);
+        if (try session.step() != .row) return respondError(request, .forbidden, "unknown_session", origin);
+        if (std.mem.eql(u8, session.columnText(4), "not_required")) {
+            const country = if (session.columnType(3) == db_mod.sqlite.SQLITE_NULL) null else session.columnText(3);
+            const ask = current_site.consent_policy == .everyone or (current_site.consent_policy == .regional and geo_mod.consentRegion(country));
+            if (ask) return respondError(request, .forbidden, "consent_required", origin);
+        }
+        if (replayExcluded(current_site.record_exclude, session.columnText(0))) return respondError(request, .forbidden, "replay_excluded", origin);
+        const chunk: replay.Chunk = .{
+            .site_id = site.id,
+            .session_id = session_id,
+            .visitor_id = visitor_id,
+            .page_id = page_id,
+            .seq = seq,
+            .first_ms = first,
+            .last_ms = last,
+            .received_at_ms = domain.nowMs(),
+            .data = body,
+            .entry_path = try arena.dupe(u8, session.columnText(0)),
+            .device = try arena.dupe(u8, session.columnText(1)),
+            .browser = try arena.dupe(u8, session.columnText(2)),
+            .country = if (session.columnType(3) == db_mod.sqlite.SQLITE_NULL) null else try arena.dupe(u8, session.columnText(3)),
+        };
         replay.addChunk(arena, replays, chunk) catch |err| switch (err) {
             error.ReplayTooLarge, error.ReplayTooLong => return respondError(request, .payload_too_large, "replay_limit", origin),
             error.InvalidChunkSize, error.InvalidChunkEncoding, error.InvalidChunkTime, error.ReplayVisitorMismatch => return respondError(request, .unprocessable_entity, "invalid_replay", origin),
@@ -815,6 +829,7 @@ fn respond(
         headers[count] = .{ .name = "vary", .value = "Origin" };
         count += 1;
     }
+    request.head.expect = null;
     try request.respond(body, .{ .status = status, .keep_alive = false, .extra_headers = headers[0..count] });
 }
 

@@ -16,10 +16,19 @@ const std = @import("std");
 const db_mod = @import("db.zig");
 
 const baseline_version: i64 = 6;
-pub const current_version: i64 = 11;
+pub const current_version: i64 = 12;
 
 /// Migrations after the baseline: index 0 takes schema 6 to 7.
-const migrations = [_][]const u8{ chatgpt_sql, draft_notes_sql, scale_sql, apps_sql, push_sql };
+const migrations = [_][]const u8{ chatgpt_sql, draft_notes_sql, scale_sql, apps_sql, push_sql, consent_state_sql };
+
+/// 12: a withdrawn consent remains withdrawn for that remembered visitor.
+const consent_state_sql =
+    \\BEGIN IMMEDIATE;
+    \\ALTER TABLE visitors ADD COLUMN consent_state TEXT NOT NULL DEFAULT 'granted' CHECK(consent_state IN ('granted','not_required','denied','gpc'));
+    \\INSERT INTO schema_migrations VALUES(12,'visitor-consent-state',unixepoch('subsec')*1000);
+    \\PRAGMA user_version=12;
+    \\COMMIT;
+;
 
 /// 7: each person can run Analytico's AI on their own ChatGPT plan. The
 /// registration (issued client) outlives a sign-out; tokens are sealed;

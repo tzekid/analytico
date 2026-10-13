@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { Script } from "node:vm";
+import { DatabaseSync } from "node:sqlite";
 import { journey } from "./harness.mjs";
 
 await journey("cli", async (t) => {
@@ -144,5 +145,21 @@ await journey("cli", async (t) => {
   const restored = join(t.temporary, "restored");
   execFileSync(t.app, ["restore", backup, restored]);
   assert.match(execFileSync(t.app, ["doctor", "--data", restored], { encoding: "utf8" }), /page_views=1 summaries=1 events=3/);
+  // An older schema migrates only after a verified backup of the new copy.
+  const old = new DatabaseSync(join(restored, "analytico.db"));
+  old.exec("ALTER TABLE visitors DROP COLUMN consent_state; DELETE FROM schema_migrations WHERE version=12; PRAGMA user_version=11");
+  old.close();
+  assert.throws(() => execFileSync(t.app, ["doctor", "--data", restored], { stdio: ["ignore", "pipe", "pipe"] }), /MigrationRequired/);
+  execFileSync(t.app, ["migrate", "--data", restored, "--backup", join(t.temporary, "before-migrate.db")]);
+  const migrated = new DatabaseSync(join(restored, "analytico.db"));
+  assert.equal(migrated.prepare("PRAGMA user_version").get().user_version, 12);
+  migrated.exec("INSERT INTO vitals_daily(site_id,day,metric,path,value,samples) VALUES(1,'2000-01-01','lcp','/old',100,1)");
+  migrated.exec("INSERT INTO cache(site_id,name,day,value) VALUES(1,'retention','2000-01-01','{}')");
+  migrated.close();
+  execFileSync(t.app, ["prune", restored, "--before", "2020-01-01", "--backup", join(t.temporary, "before-prune.db")]);
+  const pruned = new DatabaseSync(join(restored, "analytico.db"));
+  assert.equal(pruned.prepare("SELECT count(*) n FROM vitals_daily WHERE day<'2020-01-01'").get().n, 0);
+  assert.equal(pruned.prepare("SELECT count(*) n FROM cache").get().n, 0);
+  pruned.close();
   return `collector over HTTP, ${catalog.length} catalog reports alike in the CLI and the API, report values, backup, restore and doctor`;
 });

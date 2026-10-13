@@ -66,12 +66,34 @@ fn origin(arena: std.mem.Allocator, db: *db_mod.Db) ![]const u8 {
     return (try data.setting(arena, db, .public_origin)) orelse "";
 }
 
-fn teamEmails(arena: std.mem.Allocator, db: *db_mod.Db) ![]const []const u8 {
-    var statement = try db.prepare(arena, "SELECT u.email FROM users u WHERE " ++ @import("auth.zig").joined_sql ++ " ORDER BY u.id LIMIT 20");
+fn teamEmails(arena: std.mem.Allocator, db: *db_mod.Db, site_id: i64) ![]const []const u8 {
+    var statement = try db.prepare(arena, "SELECT u.email FROM users u WHERE " ++ @import("auth.zig").joined_sql ++ " AND (u.all_sites=1 OR u.role IN ('admin','owner') OR EXISTS(SELECT 1 FROM user_sites us WHERE us.user_id=u.id AND us.site_id=?)) ORDER BY u.id LIMIT 20");
     defer statement.deinit();
+    try statement.bindInt(1, site_id);
     var out: std.ArrayList([]const u8) = .empty;
     while (try statement.step() == .row) try out.append(arena, try arena.dupe(u8, statement.columnText(0)));
     return out.items;
+}
+
+test "alert recipients follow current site access" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var db = try db_mod.Db.open(std.testing.allocator, ":memory:", true);
+    defer db.close();
+    try @import("../schema.zig").initialize(&db);
+    try db.exec("INSERT INTO sites(id,public_id,slug,tracking_mode,internal_secret,created_at_ms) VALUES(1,'550e8400-e29b-41d4-a716-446655440000','one','lite',zeroblob(32),0),(2,'550e8400-e29b-41d4-a716-446655440001','two','lite',zeroblob(32),0)");
+    try db.exec("INSERT INTO users(id,email,role,all_sites,password_hash,created_at_ms) VALUES(1,'owner@example.test','owner',0,'fixture',0),(2,'viewer@example.test','viewer',0,'fixture',0),(3,'editor@example.test','editor',0,'fixture',0),(4,'all@example.test','viewer',1,'fixture',0)");
+    try db.exec("INSERT INTO user_sites(user_id,site_id) VALUES(2,2),(3,1)");
+    const before = try teamEmails(arena, &db, 1);
+    try std.testing.expectEqual(@as(usize, 3), before.len);
+    try std.testing.expectEqualStrings("owner@example.test", before[0]);
+    try std.testing.expectEqualStrings("editor@example.test", before[1]);
+    try std.testing.expectEqualStrings("all@example.test", before[2]);
+    try db.exec("UPDATE user_sites SET site_id=2 WHERE user_id=3");
+    const after = try teamEmails(arena, &db, 1);
+    try std.testing.expectEqual(@as(usize, 2), after.len);
+    try std.testing.expectEqualStrings("all@example.test", after[1]);
 }
 
 // ---------------------------------------------------------------- scheduled emails
@@ -243,7 +265,7 @@ fn alerts(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, at: i64) !v
             integrations.broadcast(arena, shared, db, try std.fmt.allocPrint(arena, "*Alert* {s}\n{s}", .{ headline_text, result.text }), .{ .kind = "alert", .site = site.?.slug, .text = headline_text, .at_ms = at }, false) catch |err| std.log.warn("alert_channels_failed id={d} code={s}", .{ alert.id, @errorName(err) });
             push.send(arena, shared, db, .{ .kind = .alert, .site_id = site.?.id, .site = site.?.slug, .title = site.?.title(), .body = try std.fmt.allocPrint(arena, "{s}: {f} yesterday ({d:.0} vs {d:.0})", .{ alert.name, html.change(values[1], values[0]), values[1], values[0] }) }) catch |err| std.log.warn("alert_push_failed id={d} code={s}", .{ alert.id, @errorName(err) });
             if (alert.email) if (try mail.load(arena, db, shared.master_key)) |config| {
-                const recipients = try teamEmails(arena, db);
+                const recipients = try teamEmails(arena, db, site.?.id);
                 const link = try std.fmt.allocPrint(arena, "{s}/{s}/reports?tab=alerts", .{ try origin(arena, db), site.?.slug });
                 const headline = try std.fmt.allocPrint(arena, "{s}: {f} yesterday ({d:.0} vs {d:.0})", .{ alert.name, html.change(values[1], values[0]), values[1], values[0] });
                 if (recipients.len != 0) mail.send(arena, shared.io, config, .{

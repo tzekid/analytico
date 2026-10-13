@@ -724,7 +724,9 @@ pub const Sql = struct {
     /// under the same key and filters are left out, so the sum stays exact.
     pub fn distinctAfter(self: *Sql, view: View, column: []const u8, key: []const u8, start: i64, split: i64) !void {
         if (split == start or @mod(split, day_ms) == 0) {
-            try self.add("count(DISTINCT pv.");
+            try self.add("count(DISTINCT ");
+            if (std.mem.eql(u8, column, "session_id")) try self.add("pv.received_date||char(31)||");
+            try self.add("pv.");
             try self.add(column);
             try self.add(")");
             return;
@@ -758,6 +760,9 @@ pub const Sql = struct {
         }
         try self.add(") THEN pv.");
         try self.add(column);
+        if (std.mem.eql(u8, column, "session_id")) {
+            try self.add("||char(31)||pv.received_date");
+        }
         try self.add(" END)");
     }
 
@@ -789,7 +794,7 @@ pub const Sql = struct {
         if (view.filters.len == 0) {
             try self.add(" AND (e.source='server' OR e.traffic_class IN ('human_like','unknown'))");
         } else {
-            try self.add(" AND EXISTS(SELECT 1 FROM page_views pv WHERE pv.site_id=e.site_id AND pv.page_id=e.page_id AND pv.traffic_class IN ('human_like','unknown')");
+            try self.add(" AND EXISTS(SELECT 1 FROM page_views pv WHERE pv.site_id=e.site_id AND pv.internal=0 AND pv.traffic_class IN ('human_like','unknown') AND (pv.page_id=e.page_id OR (e.source='server' AND (pv.session_id=e.session_id OR (e.order_id IS NOT NULL AND pv.page_id IN (SELECT b.page_id FROM events b WHERE b.site_id=e.site_id AND b.order_id=e.order_id AND b.source='browser' AND b.internal=0 AND b.traffic_class IN ('human_like','unknown') AND b.name IN ('purchase','payment_confirmed'))))))");
             try self.filters(view.filters, view.any);
             try self.add(")");
         }

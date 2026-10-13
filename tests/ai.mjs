@@ -12,7 +12,7 @@ const plan = "openid profile email offline_access resource.invoke chatgpt.tokens
 
 // What the stand-in saw, and how it should answer next.
 const seen = { authorize: [], tokens: [], revoked: [], responses: [], anthropic: [] };
-const mode = { invalidSignature: false, scope: plan };
+const mode = { invalidSignature: false, scope: plan, modelsRedirect: "", holdModels: false, modelsWaiting: false };
 const attempts = new Map();
 let serial = 0;
 const live = new Map();
@@ -65,6 +65,16 @@ function stand({ incoming, outgoing, url, base, body, json }) {
     case "/v1/models":
       assert.ok(live.has(incoming.headers.authorization.slice(7)), incoming.headers.authorization);
       assert.equal(url.search, "");
+      if (mode.holdModels) {
+        mode.modelsWaiting = true;
+        outgoing.writeHead(200, { "content-type": "application/json" });
+        outgoing.flushHeaders();
+        return;
+      }
+      if (mode.modelsRedirect) {
+        outgoing.writeHead(302, { location: mode.modelsRedirect });
+        return outgoing.end();
+      }
       return json({ models: [
         { slug: "gpt-test", display_name: "GPT Test", visibility: "list", supported_in_api: true },
         { slug: "gpt-hidden", display_name: "Hidden", visibility: "hide", supported_in_api: true },
@@ -126,6 +136,11 @@ function stand({ incoming, outgoing, url, base, body, json }) {
 
 await journey("ai", async (t) => {
   const base = await t.standIn(stand);
+  const redirectedHeaders = [];
+  const modelHost = await t.standIn(({ incoming, json }) => {
+    redirectedHeaders.push(incoming.headers.authorization !== undefined);
+    json({ models: [{ slug: "gpt-test", display_name: "GPT Test", visibility: "list", supported_in_api: true }] });
+  });
   const origin = `http://localhost:${t.port}`;
   const setupLink = t.init(origin);
   const shopId = /public_id=([^ ]+)/.exec(t.cli("site", "add", "shop", origin, "--mode", "session"))[1];
@@ -221,8 +236,15 @@ await journey("ai", async (t) => {
   await page.locator("form[action='/settings/ai/chatgpt/sign-out'] button").click();
   await page.getByText("Use your ChatGPT plan").waitFor();
   assert.deepEqual(seen.revoked.at(-1), { token_type_hint: "refresh_token", token: pastedRefresh, client_id: issued });
+  mode.modelsRedirect = `${modelHost.replace("127.0.0.1", "localhost")}/models`;
   popup = await continueWith();
   assert.equal(seen.authorize.at(-1).client_id, issued);
+  await popup.getByText("OpenAI rejected the sign-in.", { exact: false }).waitFor();
+  await popup.close();
+  assert.deepEqual(redirectedHeaders, []);
+  mode.modelsRedirect = "";
+  await page.goto(`${origin}/settings/ai`);
+  popup = await continueWith();
   await page.getByText("Using ChatGPT plan").waitFor();
   await popup.close();
 
@@ -316,6 +338,18 @@ await journey("ai", async (t) => {
   await teammate.getByText("Use your ChatGPT plan").waitFor();
   assert.equal(await teammate.getByText("For the whole team").count(), 0);
   await teammateContext.close();
+
+  // Graceful shutdown finishes an outstanding provider request and callback.
+  await page.goto(`${origin}/settings/ai`);
+  await page.locator("form[action='/settings/ai/chatgpt/sign-out'] button").click();
+  await page.getByText("Use your ChatGPT plan").waitFor();
+  mode.holdModels = true;
+  await page.getByRole("link", { name: "Continue with ChatGPT", exact: true }).click();
+  await t.until(() => mode.modelsWaiting, "provider request started");
+  t.server.kill("SIGTERM");
+  await t.until(() => t.server.exitCode !== null || t.server.signalCode !== null, "provider work stopped cleanly", 4000);
+  assert.equal(await t.exited, 0, t.server.signalCode || "server exit status");
+  for (const pendingPage of context.pages()) if (pendingPage !== page) await pendingPage.close();
 
   return "ChatGPT plan sign-in (signature, scope, loopback, reuse), revoke, refresh rotation, streamed Ask with aggregate tools and the screen, usage limit, plain-language filters, teammate on the instance key (Anthropic tools)";
 });

@@ -32,8 +32,14 @@ pub fn main(init: std.process.Init) !void {
     gpa = init.gpa;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     const listen = option(args, "--listen") orelse "127.0.0.1:4395";
+    const colon = std.mem.findScalarLast(u8, listen, ':') orelse return usage();
+    const host = listen[0..colon];
+    if (!std.mem.eql(u8, host, "127.0.0.1") and !std.mem.eql(u8, host, "::1")) return error.ListenerMustBeLoopback;
+    const address = try std.Io.net.IpAddress.parse(host, try std.fmt.parseInt(u16, listen[colon + 1 ..], 10));
     const key_path = option(args, "--key") orelse return usage();
-    const pem = try std.Io.Dir.cwd().readFileAlloc(io, key_path, init.arena.allocator(), .limited(4096));
+    var key_buffer: [4096]u8 = undefined;
+    var key_reader = std.Io.File.stdin().readerStreaming(io, &key_buffer);
+    const pem = if (std.mem.eql(u8, key_path, "-")) try key_reader.interface.allocRemaining(init.arena.allocator(), .limited(4096)) else try std.Io.Dir.cwd().readFileAlloc(io, key_path, init.arena.allocator(), .limited(4096));
     config = .{
         .key = try Ecdsa.KeyPair.fromSecretKey(try Ecdsa.SecretKey.fromBytes(try privateKey(init.arena.allocator(), pem))),
         .key_id = option(args, "--key-id") orelse return usage(),
@@ -41,8 +47,6 @@ pub fn main(init: std.process.Init) !void {
         .topic = option(args, "--topic") orelse return usage(),
         .apns = option(args, "--apns"),
     };
-    const colon = std.mem.findScalarLast(u8, listen, ':') orelse return usage();
-    const address = try std.Io.net.IpAddress.parse(listen[0..colon], try std.fmt.parseInt(u16, listen[colon + 1 ..], 10));
     var server = try address.listen(io, .{ .reuse_address = true });
     std.log.info("relay_started listen={s} topic={s}", .{ listen, config.topic });
     while (true) {
@@ -98,7 +102,7 @@ fn handle(arena: std.mem.Allocator, stream: std.Io.net.Stream) !void {
     const apple = try apns(arena, push.token, production, push.payload);
     const token_hint = push.token[0..8];
     if (apple.status == 200) return reply(&request, .ok, "{}");
-    std.log.info("apns_rejected token={s} status={d} reason={s}", .{ token_hint, apple.status, apple.reason });
+    std.log.info("apns_rejected token={s} status={d}", .{ token_hint, apple.status });
     // A device that uninstalled the app or changed environment is gone for good.
     if (apple.status == 410 or std.mem.eql(u8, apple.reason, "BadDeviceToken") or std.mem.eql(u8, apple.reason, "DeviceTokenNotForTopic")) return reply(&request, .gone, "{\"error\":\"gone\"}");
     return reply(&request, .bad_gateway, "{\"error\":\"apns_failed\"}");

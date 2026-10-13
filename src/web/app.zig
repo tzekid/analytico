@@ -31,7 +31,7 @@ pub fn handle(
     deadline: *std.Io.Clock.Timestamp,
     target: []const u8,
     path: []const u8,
-) !?i64 {
+) !?@import("../live.zig").Subscription {
     const query_start = std.mem.findScalar(u8, target, '?');
     db_mod.thread_ns = 0;
     db_mod.thread_statements = 0;
@@ -57,7 +57,8 @@ pub fn handle(
         // The browser went away mid-response, typically a prefetch it no
         // longer needed; nothing failed here.
         if (err == error.WriteFailed) return null;
-        std.log.warn("web_request_failed method={s} path={s} code={s}", .{ @tagName(ctx.method), path, @errorName(err) });
+        const rejected = err == error.PayloadTooLarge or err == error.InvalidBody or err == error.InvalidEncoding;
+        if (rejected) std.log.warn("web_request_rejected method={s} code={s}", .{ @tagName(ctx.method), @errorName(err) }) else std.log.warn("web_request_failed method={s} code={s}", .{ @tagName(ctx.method), @errorName(err) });
         if (ctx.responded) return null;
         ctx.headers.clearRetainingCapacity();
         try switch (err) {
@@ -287,7 +288,7 @@ fn route(ctx: *Ctx) !void {
             if (is(page, "setup")) return manage.setupPage(ctx, site);
             if (is(page, "stream")) {
                 // The connection is handed to the live broadcaster.
-                ctx.live_site = site.id;
+                ctx.live_site = .{ .site_id = site.id, .credential = .{ .kind = .session, .hash = auth.hashToken(ctx.cookie(auth.session_cookie).?) } };
                 ctx.responded = true;
                 return;
             }

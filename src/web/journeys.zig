@@ -35,11 +35,11 @@ fn loadSteps(ctx: *Ctx, funnel_id: i64) ![]Step {
 const Progress = struct { next: usize, started: i64 };
 
 /// Sessions reaching each step in order within `window_ms` of the first step.
-pub fn computeFunnel(ctx: *Ctx, view: data.View, steps: []const Step, window_ms: i64) ![]i64 {
-    const counts = try ctx.arena.alloc(i64, steps.len);
+pub fn computeFunnel(arena: std.mem.Allocator, db: *db_mod.Db, view: data.View, steps: []const Step, window_ms: i64) ![]i64 {
+    const counts = try arena.alloc(i64, steps.len);
     @memset(counts, 0);
     if (steps.len == 0) return counts;
-    var sql = data.Sql.init(ctx.arena);
+    var sql = data.Sql.init(arena);
     try sql.add("SELECT session_id,occurred_at_ms,kind,value FROM (SELECT pv.session_id,pv.occurred_at_ms,'path' kind,pv.path value FROM page_views pv WHERE pv.internal=0 AND pv.traffic_class IN ('human_like','unknown') AND pv.site_id=");
     try sql.int(view.site.id);
     try sql.add(" AND pv.received_at_ms>=");
@@ -52,16 +52,16 @@ pub fn computeFunnel(ctx: *Ctx, view: data.View, steps: []const Step, window_ms:
     try sql.int(view.range.start_ms);
     try sql.add(" AND e.received_at_ms<");
     try sql.int(view.range.end_ms);
-    try sql.add(" AND e.session_id IS NOT NULL) t");
+    try sql.add(" AND e.session_id IS NOT NULL AND (e.source='server' OR e.traffic_class IN ('human_like','unknown'))) t");
     if (view.filters.len != 0) {
         try sql.add(" WHERE t.session_id IN (SELECT pv.session_id FROM page_views pv WHERE ");
         try sql.pageViews(view, view.range.start_ms, view.range.end_ms);
         try sql.add(")");
     }
     try sql.add(" ORDER BY session_id,occurred_at_ms");
-    var statement = try sql.prepare(ctx.db);
+    var statement = try sql.prepare(db);
     defer statement.deinit();
-    var progress = std.StringHashMap(Progress).init(ctx.arena);
+    var progress = std.StringHashMap(Progress).init(arena);
     while (try statement.step() == .row) {
         const session = statement.columnText(0);
         const occurred = statement.columnInt(1);
@@ -76,7 +76,7 @@ pub fn computeFunnel(ctx: *Ctx, view: data.View, steps: []const Step, window_ms:
             }
         } else if (std.mem.eql(u8, kind, steps[0].kind) and std.mem.eql(u8, value, steps[0].value)) {
             counts[0] += 1;
-            try progress.put(try ctx.arena.dupe(u8, session), .{ .next = 1, .started = occurred });
+            try progress.put(try arena.dupe(u8, session), .{ .next = 1, .started = occurred });
         }
     }
     return counts;
@@ -122,7 +122,7 @@ pub fn funnels(ctx: *Ctx, site: data.Site, id: ?i64) !void {
     try w.writeAll("<div class=\"grid grid-3\">");
     for (try ctx.db.all(arena, struct { id: i64, name: []const u8, window: i64 }, "SELECT id,name,window_ms FROM funnels WHERE site_id=? ORDER BY name", .{site.id})) |funnel| {
         const steps = try loadSteps(ctx, funnel.id);
-        const counts = try computeFunnel(ctx, view, steps, funnel.window);
+        const counts = try computeFunnel(ctx.arena, ctx.db, view, steps, funnel.window);
         const end_to_end = if (counts.len == 0 or counts[0] == 0) 0 else @as(f64, @floatFromInt(counts[counts.len - 1])) / @as(f64, @floatFromInt(counts[0])) * 100;
         try render(w, "<a class=\"card funnel-card\" href=\"{href}\"><div class=\"row-between\"><strong>{name}</strong><span class=\"pill pill-good\">{rate:.1}%</span></div><div class=\"row funnel-mini\">", .{ .href = try view.href(arena, try std.fmt.allocPrint(arena, "/{s}/funnels/{d}", .{ site.slug, funnel.id }), &.{}), .name = funnel.name, .rate = end_to_end });
         for (counts) |value| try render(w, "<span style=\"height:{height:.0}px\"></span>", .{ .height = if (counts[0] == 0) 4 else @max(4, @as(f64, @floatFromInt(value)) / @as(f64, @floatFromInt(counts[0])) * 56) });
@@ -169,7 +169,14 @@ fn forms(ctx: *Ctx, view: data.View, path: []const u8) !void {
         if (is_selected) selected = row;
         const href = try view.href(arena, path, &.{ .{ "tab", "forms" }, .{ "form", key } });
         try render(w, "<tr data-href=\"{href}\"{!selected}><td><a href=\"{href}\" class=\"strong block\">{form}</a><span class=\"mono secondary\">{path}</span></td><td class=\"r\">{starts}</td><td class=\"r\">{submits}</td><td class=\"r\"><span class=\"{class}\">{gave_up}</span></td></tr>", .{
-            .href = href, .selected = if (is_selected) " aria-selected=\"true\"" else "", .form = row.form, .path = row.path, .starts = html.int(row.starts), .submits = html.int(row.submits), .class = if (row.abandons * 3 > row.starts) "warn" else "", .gave_up = html.share(row.abandons, row.starts),
+            .href = href,
+            .selected = if (is_selected) " aria-selected=\"true\"" else "",
+            .form = row.form,
+            .path = row.path,
+            .starts = html.int(row.starts),
+            .submits = html.int(row.submits),
+            .class = if (row.abandons * 3 > row.starts) "warn" else "",
+            .gave_up = html.share(row.abandons, row.starts),
         });
     }
     try w.writeAll("</tbody></table></div></section>");
@@ -184,7 +191,12 @@ fn forms(ctx: *Ctx, view: data.View, path: []const u8) !void {
             worst = field.name;
         }
         try render(w, "<tr><td class=\"mono\">{name}</td><td class=\"r\">{time}</td><td class=\"r\"><span class=\"{error_class}\">{errors}</span></td><td class=\"r\"><span class=\"{abandon_class}\">{abandons}</span></td></tr>", .{
-            .name = field.name, .time = html.duration(@divFloor(field.ms, @max(1, field.starts))), .error_class = if (field.errors > 0) "bad" else "", .errors = field.errors, .abandon_class = if (field.abandons > 0) "warn strong" else "", .abandons = field.abandons,
+            .name = field.name,
+            .time = html.duration(@divFloor(field.ms, @max(1, field.starts))),
+            .error_class = if (field.errors > 0) "bad" else "",
+            .errors = field.errors,
+            .abandon_class = if (field.abandons > 0) "warn strong" else "",
+            .abandons = field.abandons,
         });
     }
     try w.writeAll("</tbody></table>");
@@ -226,7 +238,7 @@ fn stepRow(w: *std.Io.Writer, index: usize, step: Step) !void {
 fn result(ctx: *Ctx, view: data.View, steps: []const Step, window_ms: i64) !void {
     const w = ctx.w();
     const arena = ctx.arena;
-    const counts = try computeFunnel(ctx, view, steps, window_ms);
+    const counts = try computeFunnel(ctx.arena, ctx.db, view, steps, window_ms);
     const first: f64 = @floatFromInt(if (counts.len == 0) 0 else counts[0]);
     const end_to_end = if (first == 0) 0 else @as(f64, @floatFromInt(counts[counts.len - 1])) / first * 100;
     try render(w, "<section class=\"card card-flush\"><div class=\"card-head funnel-head\"><h2>Conversion</h2><strong class=\"good t-15\">{rate:.1}% end to end</strong></div><div class=\"pad-20\"><div class=\"funnel\" style=\"--steps:{steps}\">", .{ .rate = end_to_end, .steps = steps.len });
@@ -645,7 +657,11 @@ fn breakdown(ctx: *Ctx, view: data.View, dim: data.Dim, total: i64, base: []cons
     for (rows) |row| {
         const share = if (total == 0) 0 else @as(f64, @floatFromInt(row.value)) / @as(f64, @floatFromInt(total)) * 100;
         try render(w, "<a class=\"rank-row\" href=\"{href}\"><span class=\"bar\" style=\"width:{width:.1}%;background:var(--brand-wash)\"></span><span class=\"rank-name\"><span>{name}</span></span><span class=\"rank-value rank-value-text\">{value} · {share:.1}%</span><span></span></a>", .{
-            .href = try view.href(ctx.arena, base, &.{.{ "f+", try std.fmt.allocPrint(ctx.arena, "{s}:{s}", .{ @tagName(dim), row.key }) }}), .width = @max(share * 0.75, 4), .name = capitalized(ctx.arena, row.key), .value = html.int(row.value), .share = share,
+            .href = try view.href(ctx.arena, base, &.{.{ "f+", try std.fmt.allocPrint(ctx.arena, "{s}:{s}", .{ @tagName(dim), row.key }) }}),
+            .width = @max(share * 0.75, 4),
+            .name = capitalized(ctx.arena, row.key),
+            .value = html.int(row.value),
+            .share = share,
         });
     }
     try w.writeAll("</div>");
@@ -668,12 +684,12 @@ fn columnBreakdown(ctx: *Ctx, view: data.View, dim: []const u8, total: i64) !voi
 /// "de-AT" → "German (AT)"; codes without a name stay as they are.
 pub fn languageName(arena: std.mem.Allocator, code: []const u8) ![]const u8 {
     const names = [_][2][]const u8{
-        .{ "en", "English" },   .{ "de", "German" },     .{ "fr", "French" },    .{ "es", "Spanish" },   .{ "it", "Italian" },
-        .{ "nl", "Dutch" },     .{ "pt", "Portuguese" }, .{ "sv", "Swedish" },   .{ "da", "Danish" },    .{ "nb", "Norwegian" },
-        .{ "no", "Norwegian" }, .{ "fi", "Finnish" },    .{ "pl", "Polish" },    .{ "cs", "Czech" },     .{ "ro", "Romanian" },
-        .{ "hu", "Hungarian" }, .{ "el", "Greek" },      .{ "tr", "Turkish" },   .{ "ru", "Russian" },   .{ "uk", "Ukrainian" },
-        .{ "ja", "Japanese" },  .{ "ko", "Korean" },     .{ "zh", "Chinese" },   .{ "ar", "Arabic" },    .{ "he", "Hebrew" },
-        .{ "hi", "Hindi" },     .{ "id", "Indonesian" }, .{ "vi", "Vietnamese" }, .{ "th", "Thai" },     .{ "bg", "Bulgarian" },
+        .{ "en", "English" },   .{ "de", "German" },     .{ "fr", "French" },     .{ "es", "Spanish" }, .{ "it", "Italian" },
+        .{ "nl", "Dutch" },     .{ "pt", "Portuguese" }, .{ "sv", "Swedish" },    .{ "da", "Danish" },  .{ "nb", "Norwegian" },
+        .{ "no", "Norwegian" }, .{ "fi", "Finnish" },    .{ "pl", "Polish" },     .{ "cs", "Czech" },   .{ "ro", "Romanian" },
+        .{ "hu", "Hungarian" }, .{ "el", "Greek" },      .{ "tr", "Turkish" },    .{ "ru", "Russian" }, .{ "uk", "Ukrainian" },
+        .{ "ja", "Japanese" },  .{ "ko", "Korean" },     .{ "zh", "Chinese" },    .{ "ar", "Arabic" },  .{ "he", "Hebrew" },
+        .{ "hi", "Hindi" },     .{ "id", "Indonesian" }, .{ "vi", "Vietnamese" }, .{ "th", "Thai" },    .{ "bg", "Bulgarian" },
     };
     const dash = std.mem.findScalar(u8, code, '-') orelse code.len;
     for (names) |pair| if (std.ascii.eqlIgnoreCase(code[0..dash], pair[0])) {
@@ -874,7 +890,11 @@ pub fn performance(ctx: *Ctx, site: data.Site) !void {
         const rate = rating(vital, row.value);
         const hint = if (vital.cls) "Layout moves after load" else if (row.ttfb > 800) "Slow server response" else if (row.fcp > 1800) "Late first paint — render-blocking resources?" else if (std.mem.eql(u8, vital.key, "lcp") and row.value - row.fcp > 1200) "Largest element arrives late — images?" else "—";
         try render(w, "<tr><td class=\"strong\">{path}</td><td class=\"r\"><span class=\"{class}\">{value}</span></td><td class=\"secondary hide-m wrap\">{hint}</td><td class=\"r\"><a class=\"link\" href=\"{href}\">Page detail →</a></td></tr>", .{
-            .path = row.path, .class = if (std.mem.eql(u8, rate[1], "pill-good")) "good" else if (std.mem.eql(u8, rate[1], "pill-warn")) "warn" else "bad", .value = VitalValue{ .vital = vital, .value = row.value }, .hint = hint, .href = try view.href(arena, try std.fmt.allocPrint(arena, "/{s}/pages", .{site.slug}), &.{.{ "page", row.path }}),
+            .path = row.path,
+            .class = if (std.mem.eql(u8, rate[1], "pill-good")) "good" else if (std.mem.eql(u8, rate[1], "pill-warn")) "warn" else "bad",
+            .value = VitalValue{ .vital = vital, .value = row.value },
+            .hint = hint,
+            .href = try view.href(arena, try std.fmt.allocPrint(arena, "/{s}/pages", .{site.slug}), &.{.{ "page", row.path }}),
         });
     }
     try w.writeAll("</tbody></table></div>");

@@ -316,8 +316,7 @@ pub fn accessToken(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, us
     const response = net.send(arena, discovery.token_endpoint, .{ .method = .POST, .body = form.written(), .content_type = "application/x-www-form-urlencoded" }) catch return error.AiUnreachable;
     const body = net.parseObject(arena, response.body);
     if (response.status != .ok) {
-        const code = if (body) |object| net.string(object, "error") else "";
-        std.log.warn("chatgpt_refresh_failed status={d} code={s}", .{ @backingInt(response.status), code });
+        std.log.warn("chatgpt_refresh_failed status={d}", .{@backingInt(response.status)});
         if (response.status.class() == .server_error) return error.AiUnreachable;
         // The grant is gone (expired, revoked or reused): sign in again.
         const write = shared.lockWrite();
@@ -345,7 +344,11 @@ pub fn accessToken(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, us
 
 var listener_lock: std.Io.Mutex = .init;
 var listener_port: u16 = 0;
+var listener_handle: std.posix.socket_t = -1;
 var listener_until_ms: i64 = 0;
+var listener_thread: ?std.Thread = null;
+var active_callbacks: usize = 0;
+var callbacks_done: std.Io.Condition = .init;
 
 /// The loopback port waiting for OpenAI's redirect: 1455 when free, as
 /// OpenAI's own tools use, otherwise any. One listener serves every attempt
@@ -354,14 +357,19 @@ fn loopback(shared: *Shared) !u16 {
     const io = shared.io;
     listener_lock.lockUncancelable(io);
     defer listener_lock.unlock(io);
+    if (shared.stopping()) return error.Unreachable;
     listener_until_ms = nowMs() + attempt_ms;
     if (listener_port != 0) return listener_port;
+    if (listener_thread) |thread| {
+        thread.join();
+        listener_thread = null;
+    }
     var listener = (std.Io.net.IpAddress.parse("127.0.0.1", 1455) catch unreachable).listen(io, .{ .reuse_address = true }) catch
         try (std.Io.net.IpAddress.parse("127.0.0.1", 0) catch unreachable).listen(io, .{});
     errdefer listener.deinit(io);
     const port = listener.socket.address.getPort();
-    const thread = try std.Thread.spawn(.{}, serveLoopback, .{ shared, listener });
-    thread.detach();
+    listener_thread = try std.Thread.spawn(.{}, serveLoopback, .{ shared, listener });
+    listener_handle = listener.socket.handle;
     listener_port = port;
     return port;
 }
@@ -375,8 +383,9 @@ fn serveLoopback(shared: *Shared, listener_value: std.Io.net.Server) void {
         {
             listener_lock.lockUncancelable(io);
             defer listener_lock.unlock(io);
-            if (nowMs() > listener_until_ms) {
+            if (shared.stopping() or nowMs() > listener_until_ms) {
                 listener.deinit(io);
+                listener_handle = -1;
                 listener_port = 0;
                 return;
             }
@@ -385,7 +394,19 @@ fn serveLoopback(shared: *Shared, listener_value: std.Io.net.Server) void {
         const stream = listener.accept(io) catch continue;
         // Each on its own thread: a browser's idle preconnection must not
         // hold up the callback behind it.
+        listener_lock.lockUncancelable(io);
+        if (active_callbacks >= 12 or shared.stopping()) {
+            listener_lock.unlock(io);
+            stream.close(io);
+            continue;
+        }
+        active_callbacks += 1;
+        listener_lock.unlock(io);
         const thread = std.Thread.spawn(.{}, serveCallback, .{ shared, stream }) catch {
+            listener_lock.lockUncancelable(io);
+            active_callbacks -= 1;
+            callbacks_done.broadcast(io);
+            listener_lock.unlock(io);
             stream.close(io);
             continue;
         };
@@ -394,8 +415,31 @@ fn serveLoopback(shared: *Shared, listener_value: std.Io.net.Server) void {
 }
 
 fn serveCallback(shared: *Shared, stream: std.Io.net.Stream) void {
+    defer {
+        listener_lock.lockUncancelable(shared.io);
+        active_callbacks -= 1;
+        callbacks_done.broadcast(shared.io);
+        listener_lock.unlock(shared.io);
+    }
     defer stream.close(shared.io);
-    callback(shared, stream) catch |err| std.log.warn("chatgpt_callback_failed code={s}", .{@errorName(err)});
+    callback(shared, stream) catch |err| {
+        if (!shared.stopping()) std.log.warn("chatgpt_callback_failed code={s}", .{@errorName(err)});
+    };
+}
+
+/// No callback may retain the server's state after it closes the database.
+pub fn shutdown(shared: *Shared) void {
+    listener_lock.lockUncancelable(shared.io);
+    // A readiness event can disappear before accept; wake a blocked accept
+    // before joining the listener thread.
+    if (listener_handle >= 0) _ = std.os.linux.shutdown(listener_handle, std.os.linux.SHUT.RDWR);
+    const pending = listener_thread;
+    listener_thread = null;
+    listener_lock.unlock(shared.io);
+    if (pending) |thread| thread.join();
+    listener_lock.lockUncancelable(shared.io);
+    defer listener_lock.unlock(shared.io);
+    while (active_callbacks != 0) callbacks_done.waitUncancelable(shared.io, &listener_lock);
 }
 
 fn callback(shared: *Shared, stream: std.Io.net.Stream) !void {

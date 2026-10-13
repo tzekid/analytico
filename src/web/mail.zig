@@ -54,7 +54,7 @@ const Session = struct {
             if (line.len < 3) return error.SmtpProtocol;
             if (line.len > 3 and line[3] == '-') continue;
             if (!std.mem.eql(u8, line[0..3], code)) {
-                std.log.warn("smtp_unexpected expected={s} got={s}", .{ code, line[0..@min(line.len, 120)] });
+                std.log.warn("smtp_unexpected expected={s}", .{code});
                 return error.SmtpRejected;
             }
             return;
@@ -90,11 +90,15 @@ fn headerSafe(value: []const u8) bool {
 }
 
 pub fn send(arena: std.mem.Allocator, io: std.Io, config: Config, message: Message) !void {
+    return @import("../net.zig").bounded(sendRequest, .{ arena, io, config, message }, 30_000);
+}
+
+fn sendRequest(arena: std.mem.Allocator, io: std.Io, config: Config, message: Message) !void {
     if (config.from.len == 0 or !headerSafe(config.from) or !headerSafe(message.subject)) return error.SmtpInvalidMessage;
     for (message.to) |to| if (!headerSafe(to) or std.mem.indexOfAny(u8, to, "<>") != null) return error.SmtpInvalidMessage;
     const host_name = std.Io.net.HostName.init(config.host) catch return error.SmtpInvalidHost;
-    // Zig 0.17's threaded I/O has no connect timeout; the kernel's applies,
-    // and socket timeouts below bound every read and write after that.
+    // The shared deadline bounds connection setup and the whole delivery;
+    // socket timeouts also bound individual reads and writes.
     const stream = host_name.connect(io, config.port, .{ .mode = .stream }) catch return error.SmtpConnectFailed;
     defer stream.close(io);
     setTimeouts(stream);

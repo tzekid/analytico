@@ -2,18 +2,14 @@
 // Apple's provider token with the publisher's key, forwards the ciphertext
 // untouched and reports devices Apple no longer knows.
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { generateKeyPairSync, verify } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http2";
-import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { freePort, listen } from "./harness.mjs";
 
 const relayBinary = join(dirname(resolve(process.argv[2])), "analytico-relay");
-const temporary = await mkdtemp(join(tmpdir(), "analytico-relay-"));
 const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
-await writeFile(join(temporary, "AuthKey.p8"), privateKey.export({ type: "pkcs8", format: "pem" }));
 
 const received = [];
 const apple = createServer((request, response) => {
@@ -29,10 +25,14 @@ const apple = createServer((request, response) => {
 const applePort = await listen(apple);
 const port = await freePort();
 let log = "";
-const relay = spawn(relayBinary, ["--listen", `127.0.0.1:${port}`, "--key", join(temporary, "AuthKey.p8"), "--key-id", "KEY1234567", "--team", "TEAM123456", "--topic", "ru.plosca.analytico", "--apns", `http://127.0.0.1:${applePort}`]);
+const relay = spawn(relayBinary, ["--listen", `127.0.0.1:${port}`, "--key", "-", "--key-id", "KEY1234567", "--team", "TEAM123456", "--topic", "ru.plosca.analytico", "--apns", `http://127.0.0.1:${applePort}`]);
+relay.stdin.end(privateKey.export({ type: "pkcs8", format: "pem" }));
 relay.stderr.on("data", (chunk) => (log += chunk));
 
 try {
+  const refused = spawnSync(relayBinary, ["--listen", "0.0.0.0:0"], { encoding: "utf8" });
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /ListenerMustBeLoopback/);
   const base = `http://127.0.0.1:${port}`;
   for (let tries = 0; ; tries++) {
     if ((await fetch(`${base}/healthz`).catch(() => null))?.ok) break;
@@ -69,5 +69,4 @@ try {
 } finally {
   relay.kill();
   apple.close();
-  await rm(temporary, { recursive: true, force: true });
 }

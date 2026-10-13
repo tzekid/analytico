@@ -654,6 +654,7 @@ pub fn dashboards(ctx: *Ctx, site: data.Site, id: ?i64) !void {
         try icon(&extra.writer, "pencil");
         try extra.writer.writeAll("<span class=\"btn-label\">Edit</span></a>");
     }
+    if (ctx.can(.admin)) try extra.writer.writeAll("<button class=\"btn\" type=\"button\" data-dialog=\"share-dialog\">Share publicly…</button>");
     try layout.head(ctx, .{ .title = current.name, .subtitle = if (editing) "Editing — drag to rearrange · changes save automatically" else try std.fmt.allocPrint(arena, "{f}", .{view.range}), .view = if (editing) null else view, .path = path, .extra = extra.written() });
     if (all.len > 1 or editing) {
         try w.writeAll("<nav class=\"tabs\">");
@@ -699,6 +700,7 @@ pub fn dashboards(ctx: *Ctx, site: data.Site, id: ?i64) !void {
         try icon(w, "trash");
         try render(w, "Delete dashboard</button></form><dialog class=\"dialog\" id=\"dashboard-dialog\"><form method=\"post\" action=\"/{slug}/dashboards\"><div class=\"dialog-head\"><div><h2>New dashboard</h2><p>Starts with the essentials; edit it right after.</p></div></div><div class=\"dialog-body\"><label class=\"field\">Name<input class=\"input\" name=\"name\" required maxlength=\"60\"></label></div><div class=\"dialog-foot\"><button class=\"btn\" type=\"button\" data-close>Cancel</button><button class=\"btn btn-primary\">Create</button></div></form></dialog>", .{ .slug = site.slug });
     } else try w.writeAll("</div>");
+    if (ctx.can(.admin)) try @import("share.zig").dialog(ctx, site, current.id, current.name);
     return layout.end(ctx);
 }
 
@@ -737,7 +739,7 @@ fn renderWidget(ctx: *Ctx, view: data.View, base: []const u8, key: []const u8, t
         const funnel_id = std.fmt.parseInt(i64, key[7..], 10) catch return;
         const funnel = try ctx.db.one(arena, struct { name: []const u8, window: i64 }, "SELECT name,window_ms FROM funnels WHERE id=? AND site_id=?", .{ funnel_id, view.site.id }) orelse return w.writeAll("<section class=\"card\"><p class=\"hint\">This funnel was deleted.</p></section>");
         const steps = try ctx.db.all(arena, journeys.Step, "SELECT kind,match_value FROM funnel_steps WHERE funnel_id=? ORDER BY step_index", .{funnel_id});
-        const counts = try journeys.computeFunnel(ctx, view, steps, funnel.window);
+        const counts = try journeys.computeFunnel(ctx.arena, ctx.db, view, steps, funnel.window);
         try w.writeAll("<section class=\"card\">");
         try ui.cardHead(w, funnel.name, try html.print(arena, "<a class=\"link\" href=\"/{slug}/funnels/{id}\">Open →</a>", .{ .slug = view.site.slug, .id = funnel_id }));
         try w.writeAll("<div class=\"rank\">");

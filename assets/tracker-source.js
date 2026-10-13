@@ -972,9 +972,7 @@
 
   function restore() {
     if (gpc) {
-      consent = "gpc";
-      save("visitor", null);
-      save("session", null);
+      clearIdentity("gpc");
       return;
     }
     var decided = load("consent");
@@ -1001,7 +999,13 @@
     if (value === "granted") {
       hideBanner();
       if (gpc || consent === "granted") return;
+      var freshPage = consent === "denied";
+      if (freshPage) {
+        summary();
+        begin();
+      }
       establish("granted");
+      if (freshPage) pageView();
       sendConsent();
     } else if (value === "denied") {
       hideBanner();
@@ -1031,7 +1035,7 @@
       if (visitorId || consent !== "gpc") clearIdentity("gpc");
       return;
     }
-    if (response.drop && !rejectedLink) clearIdentity("pending");
+    if (response.drop && !rejectedLink) clearIdentity(response.drop_state === "denied" ? "denied" : "pending");
     linkToken = response.link || null;
     excluded = Array.isArray(response.exclude) ? response.exclude : [];
     linkDomains = Array.isArray(response.domains) ? response.domains : [];

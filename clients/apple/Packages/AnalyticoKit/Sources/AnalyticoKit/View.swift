@@ -94,7 +94,8 @@ public struct ViewState: Hashable, Sendable, Codable {
 
     /// The same view over the days just before "from"…"to" (inclusive dates).
     public func previous(from: String, to: String) -> ViewState? {
-        let calendar = Calendar(identifier: .gregorian)
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
         guard let start = try? Date(from + "T00:00:00Z", strategy: .iso8601), let end = try? Date(to + "T00:00:00Z", strategy: .iso8601) else { return nil }
         let days = (calendar.dateComponents([.day], from: start, to: end).day ?? 0) + 1
         let format = Date.ISO8601FormatStyle().year().month().day()

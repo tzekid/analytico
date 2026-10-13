@@ -41,12 +41,12 @@ pub fn route(ctx: *Ctx, parts: []const []const u8) !bool {
 
 // ---------------------------------------------------------------- share links
 
-const Link = struct { id: i64, site: data.Site, label: []const u8, password_hash: ?[]const u8, allow_range: bool, show_details: bool };
+const Link = struct { id: i64, site: data.Site, label: []const u8, password_hash: ?[]const u8, allow_range: bool, show_details: bool, dashboard_id: ?i64 };
 
 fn findLink(ctx: *Ctx, token: []const u8) !?Link {
     if (token.len != 64) return null;
     const hashed = auth.hashToken(token);
-    var statement = try ctx.db.prepare(ctx.arena, "SELECT l.id,s.slug,l.label,l.password_hash,l.allow_range,l.show_details FROM share_links l JOIN sites s ON s.id=l.site_id WHERE l.token_hash=? AND (l.expires_at_ms IS NULL OR l.expires_at_ms>?) AND s.enabled=1");
+    var statement = try ctx.db.prepare(ctx.arena, "SELECT l.id,s.slug,l.label,l.password_hash,l.allow_range,l.show_details,l.dashboard_id FROM share_links l JOIN sites s ON s.id=l.site_id WHERE l.token_hash=? AND (l.expires_at_ms IS NULL OR l.expires_at_ms>?) AND s.enabled=1");
     defer statement.deinit();
     try statement.bindText(1, &hashed);
     try statement.bindInt(2, ctx.now());
@@ -59,6 +59,7 @@ fn findLink(ctx: *Ctx, token: []const u8) !?Link {
         .password_hash = if (statement.columnType(3) == db_mod.sqlite.SQLITE_NULL) null else try ctx.arena.dupe(u8, statement.columnText(3)),
         .allow_range = statement.columnBool(4),
         .show_details = statement.columnBool(5),
+        .dashboard_id = if (statement.columnType(6) == db_mod.sqlite.SQLITE_NULL) null else statement.columnInt(6),
     };
 }
 
@@ -122,28 +123,22 @@ fn sharePage(ctx: *Ctx, token: []const u8) !void {
         try w.writeAll("</nav>");
     }
     const range = view.range;
-    try render(w, "</header><h1 class=\"title mt-28\">Last {days} days</h1><p class=\"subtitle\">{range} · compared with {against}</p><div class=\"metrics mt-20\">", .{
+    if (link.dashboard_id) |id| {
+        const dash = try ctx.db.one(arena, struct { name: []const u8, widgets: []const u8 }, "SELECT name,widgets FROM dashboards WHERE id=? AND site_id=?", .{ id, site.id }) orelse return layout.message(ctx, .not_found, "This dashboard is unavailable", "It may have been deleted.");
+        try render(w, "</header><h1 class=\"title mt-28\">{name}</h1><p class=\"subtitle\">{range}</p>", .{ .name = dash.name, .range = range });
+        try dashboardWidgets(ctx, view, dash.widgets, link.show_details);
+        try w.writeAll("</main></body></html>");
+        return ctx.html();
+    }
+    try render(w, "</header><h1 class=\"title mt-28\">Last {days} days</h1><p class=\"subtitle\">{range} · compared with {against}</p>", .{
         .days = if (is(safe_range, "30d")) "30" else if (is(safe_range, "90d")) "90" else "7",
         .range = range,
         .against = try std.fmt.allocPrint(arena, "{f}", .{range.text(.compared)}),
     });
     const current = try data.totals(arena, ctx.db, view, range.start_ms, range.end_ms);
-    const previous = try data.totals(arena, ctx.db, view, range.prev_start_ms, range.prev_end_ms);
-    const now_sales = try customers.sales(ctx.arena, ctx.db, view, range.start_ms, range.end_ms);
-    const before_sales = try customers.sales(ctx.arena, ctx.db, view, range.prev_start_ms, range.prev_end_ms);
-    try tile(ctx, "Visitors / day", try std.fmt.allocPrint(arena, "{f}", .{html.int(@intFromFloat(@round(current.metric(.visitors, range))))}), try std.fmt.allocPrint(arena, "{f}", .{html.int(@intFromFloat(@round(previous.metric(.visitors, range))))}), current.metric(.visitors, range), previous.metric(.visitors, range));
-    try tile(ctx, "Page views", try std.fmt.allocPrint(arena, "{f}", .{html.int(current.views)}), try std.fmt.allocPrint(arena, "{f}", .{html.int(previous.views)}), @floatFromInt(current.views), @floatFromInt(previous.views));
-    if (now_sales.orders > 0 or before_sales.orders > 0) {
-        try tile(ctx, "Revenue", try std.fmt.allocPrint(arena, "{f}", .{html.money(now_sales.revenue, site.currency)}), try std.fmt.allocPrint(arena, "{f}", .{html.money(before_sales.revenue, site.currency)}), @floatFromInt(now_sales.revenue), @floatFromInt(before_sales.revenue));
-        try tile(ctx, "Orders", try std.fmt.allocPrint(arena, "{f}", .{html.int(now_sales.orders)}), try std.fmt.allocPrint(arena, "{f}", .{html.int(before_sales.orders)}), @floatFromInt(now_sales.orders), @floatFromInt(before_sales.orders));
-    } else {
-        try tile(ctx, "Active time", try std.fmt.allocPrint(arena, "{f}", .{html.duration(current.active_ms)}), try std.fmt.allocPrint(arena, "{f}", .{html.duration(previous.active_ms)}), @floatFromInt(current.active_ms), @floatFromInt(previous.active_ms));
-        try tile(ctx, "Visitor-days", try std.fmt.allocPrint(arena, "{f}", .{html.int(current.visitor_days)}), try std.fmt.allocPrint(arena, "{f}", .{html.int(previous.visitor_days)}), @floatFromInt(current.visitor_days), @floatFromInt(previous.visitor_days));
-    }
-    try w.print("</div><section class=\"card chart-card mt-16\"><div class=\"chart-head\"><h2>Page views</h2><div class=\"legend\"><span class=\"this\">{f}</span><span class=\"prev\">{f}</span></div></div>", .{ range.text(.this), range.text(.previous) });
-    const names = try overview.labels(arena, range);
-    try chart.trend(arena, w, .{ .current = try data.series(arena, ctx.db, view, .views, range.start_ms), .previous = try data.series(arena, ctx.db, view, .views, range.prev_start_ms), .labels = names[0], .long_labels = names[1], .unit = "views", .height = 200 });
-    try w.writeAll("</section><div class=\"grid grid-3 mt-16\">");
+    try metrics(ctx, view, current);
+    try trend(ctx, view, .views);
+    try w.writeAll("<div class=\"grid grid-3 mt-16\">");
     try countries(ctx, view, current.views);
     try devices(ctx, view, current.views);
     try goals(ctx, view);
@@ -156,6 +151,90 @@ fn sharePage(ctx: *Ctx, token: []const u8) !void {
     }
     try render(w, "<footer class=\"public-foot\"><span>Read-only view shared by {title} · no cookies are set on this page</span><span>Analytico</span></footer></main></body></html>", .{ .title = site.title() });
     return ctx.html();
+}
+
+fn metrics(ctx: *Ctx, view: data.View, current: data.Totals) !void {
+    const arena = ctx.arena;
+    const w = ctx.w();
+    const range = view.range;
+    const site = view.site;
+    try w.writeAll("<div class=\"metrics mt-20\">");
+    const previous = try data.totals(arena, ctx.db, view, range.prev_start_ms, range.prev_end_ms);
+    const now_sales = try customers.sales(ctx.arena, ctx.db, view, range.start_ms, range.end_ms);
+    const before_sales = try customers.sales(ctx.arena, ctx.db, view, range.prev_start_ms, range.prev_end_ms);
+    try tile(ctx, "Visitors / day", try std.fmt.allocPrint(arena, "{f}", .{html.int(@intFromFloat(@round(current.metric(.visitors, range))))}), try std.fmt.allocPrint(arena, "{f}", .{html.int(@intFromFloat(@round(previous.metric(.visitors, range))))}), current.metric(.visitors, range), previous.metric(.visitors, range));
+    try tile(ctx, "Page views", try std.fmt.allocPrint(arena, "{f}", .{html.int(current.views)}), try std.fmt.allocPrint(arena, "{f}", .{html.int(previous.views)}), @floatFromInt(current.views), @floatFromInt(previous.views));
+    if (now_sales.orders > 0 or before_sales.orders > 0) {
+        try tile(ctx, "Revenue", try std.fmt.allocPrint(arena, "{f}", .{html.money(now_sales.revenue, site.currency)}), try std.fmt.allocPrint(arena, "{f}", .{html.money(before_sales.revenue, site.currency)}), @floatFromInt(now_sales.revenue), @floatFromInt(before_sales.revenue));
+        try tile(ctx, "Orders", try std.fmt.allocPrint(arena, "{f}", .{html.int(now_sales.orders)}), try std.fmt.allocPrint(arena, "{f}", .{html.int(before_sales.orders)}), @floatFromInt(now_sales.orders), @floatFromInt(before_sales.orders));
+    } else {
+        try tile(ctx, "Active time", try std.fmt.allocPrint(arena, "{f}", .{html.duration(current.active_ms)}), try std.fmt.allocPrint(arena, "{f}", .{html.duration(previous.active_ms)}), @floatFromInt(current.active_ms), @floatFromInt(previous.active_ms));
+        try tile(ctx, "Visitor-days", try std.fmt.allocPrint(arena, "{f}", .{html.int(current.visitor_days)}), try std.fmt.allocPrint(arena, "{f}", .{html.int(previous.visitor_days)}), @floatFromInt(current.visitor_days), @floatFromInt(previous.visitor_days));
+    }
+    try w.writeAll("</div>");
+}
+
+fn trend(ctx: *Ctx, view: data.View, metric: data.Metric) !void {
+    const arena = ctx.arena;
+    const w = ctx.w();
+    const range = view.range;
+    try render(w, "<section class=\"card chart-card mt-16\"><div class=\"chart-head\"><h2>{title}</h2><div class=\"legend\"><span class=\"this\">{this}</span><span class=\"prev\">{previous}</span></div></div>", .{ .title = metric.chartTitle(), .this = range.text(.this), .previous = range.text(.previous) });
+    const names = try overview.labels(arena, range);
+    try chart.trend(arena, w, .{ .current = try data.series(arena, ctx.db, view, metric, range.start_ms), .previous = try data.series(arena, ctx.db, view, metric, range.prev_start_ms), .labels = names[0], .long_labels = names[1], .unit = metric.unit(), .height = 200 });
+    try w.writeAll("</section>");
+}
+
+fn dashboardWidgets(ctx: *Ctx, view: data.View, widgets: []const u8, details: bool) !void {
+    const arena = ctx.arena;
+    const w = ctx.w();
+    const journeys = @import("journeys.zig");
+    const total = try data.totals(arena, ctx.db, view, view.range.start_ms, view.range.end_ms);
+    try w.writeAll("<div class=\"grid grid-2 mt-20\">");
+    var keys = std.mem.splitScalar(u8, widgets, ',');
+    var shown: usize = 0;
+    while (keys.next()) |key| {
+        const known = for (@import("manage.zig").widget_catalog) |widget| {
+            const base = key[0 .. std.mem.findScalar(u8, key, ':') orelse key.len];
+            if (is(base, widget.key)) break widget;
+        } else continue;
+        if (!details and (is(key, "pages") or is(key, "sources"))) continue;
+        try render(w, "<div class=\"dash-tile{!wide}\" data-key=\"{key}\">", .{ .wide = if (known.wide) " span-all" else "", .key = key });
+        shown += 1;
+        if (is(key, "metrics")) {
+            const previous = try data.totals(arena, ctx.db, view, view.range.prev_start_ms, view.range.prev_end_ms);
+            try overview.metricStrip(ctx, view, ctx.path, total, previous);
+        } else if (is(key, "trend")) {
+            try trend(ctx, view, if (view.metric == .visitors) .visitor_days else view.metric);
+        } else if (is(key, "pages")) {
+            try rankCard(ctx, view, .page, "Top pages", total.views);
+        } else if (is(key, "sources")) {
+            try rankCard(ctx, view, .source, "Where visitors come from", total.views);
+        } else if (is(key, "devices")) {
+            try devices(ctx, view, total.views);
+        } else if (is(key, "goals")) {
+            try goals(ctx, view);
+        } else if (is(key, "vitals")) {
+            const samples = try journeys.loadSamples(arena, ctx.db, view);
+            try w.writeAll("<section class=\"card\"><h2>Web vitals · p75</h2><dl class=\"kv\">");
+            for (journeys.vitals, 0..) |vital, index| {
+                const values = journeys.summarize(vital, samples.all[index].items);
+                if (values.samples == 0) try render(w, "<dt>{name}</dt><dd>—</dd>", .{ .name = vital.name }) else try render(w, "<dt>{name}</dt><dd>{value}</dd>", .{ .name = vital.name, .value = journeys.VitalValue{ .vital = vital, .value = values.p75 } });
+            }
+            try w.writeAll("</dl></section>");
+        } else if (std.mem.startsWith(u8, key, "funnel:")) {
+            const id = std.fmt.parseInt(i64, key[7..], 10) catch 0;
+            if (try ctx.db.one(arena, struct { name: []const u8, window: i64 }, "SELECT name,window_ms FROM funnels WHERE id=? AND site_id=?", .{ id, view.site.id })) |funnel| {
+                const steps = try ctx.db.all(arena, journeys.Step, "SELECT kind,match_value FROM funnel_steps WHERE funnel_id=? ORDER BY step_index", .{id});
+                const counts = try journeys.computeFunnel(arena, ctx.db, view, steps, funnel.window);
+                try render(w, "<section class=\"card\"><h2>{name}</h2><dl class=\"kv\">", .{ .name = funnel.name });
+                for (steps, 0..) |step, index| try render(w, "<dt>{label}</dt><dd>{count}</dd>", .{ .label = if (details) step.value else try std.fmt.allocPrint(arena, "Step {d}", .{index + 1}), .count = html.int(counts[index]) });
+                try w.writeAll("</dl></section>");
+            }
+        }
+        try w.writeAll("</div>");
+    }
+    try w.writeAll("</div>");
+    if (shown == 0) try w.writeAll("<p class=\"hint\">Page and source details are hidden for this link.</p>");
 }
 
 fn passwordPage(ctx: *Ctx, link: Link, problem: []const u8) !void {
@@ -246,7 +325,9 @@ pub fn createLink(ctx: *Ctx, site: data.Site) !void {
     const days = std.fmt.parseInt(i64, try ctx.field("expires"), 10) catch 0;
     if (days < 0 or days > 365) return @import("overview.zig").failBack(ctx, site, "Choose an expiry up to one year.");
     const password = try ctx.field("password");
-    const dashboard_id: ?i64 = std.fmt.parseInt(i64, try ctx.field("dashboard"), 10) catch null;
+    const dashboard_field = try ctx.field("dashboard");
+    const dashboard_id: ?i64 = if (dashboard_field.len == 0) null else std.fmt.parseInt(i64, dashboard_field, 10) catch return @import("overview.zig").failBack(ctx, site, "Choose a dashboard on this website.");
+    if (dashboard_id) |id| if (try ctx.db.scalar(arena, i64, "SELECT count(*) FROM dashboards WHERE id=? AND site_id=?", .{ id, site.id }) != 1) return @import("overview.zig").failBack(ctx, site, "Choose a dashboard on this website.");
     const password_hash: ?[]const u8 = if (password.len != 0) try auth.hashPassword(ctx, password) else null;
     const token = try auth.newToken(ctx.shared.io);
     const hashed = auth.hashToken(&token);
@@ -429,7 +510,7 @@ fn api(ctx: *Ctx, parts: []const []const u8) !void {
     }
     if (parts.len == 3 and is(parts[2], "live") and ctx.method == .GET) {
         // The connection is handed to the live broadcaster, as for the workspace.
-        ctx.live_site = chosen.id;
+        ctx.live_site = .{ .site_id = chosen.id, .credential = .{ .kind = if (caller == .key) .key else .app, .hash = auth.hashToken(std.mem.trim(u8, ctx.head.authorization[7..], " ")) } };
         ctx.responded = true;
         return;
     }

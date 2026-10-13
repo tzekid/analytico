@@ -1,6 +1,7 @@
 // The HTTP server under hostile clients: stalled heads and bodies, trickled
 // input, malformed redirect state, and a clean shutdown mid-request.
 import assert from "node:assert/strict";
+import { request } from "node:http";
 import { createConnection } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
 import { journey } from "./harness.mjs";
@@ -19,7 +20,7 @@ async function bounded(promise, milliseconds, label) {
 await journey("http", async (t) => {
   let socket;
   let trickle;
-  t.init();
+  const setupLink = t.init(`http://127.0.0.1:${t.port}`);
   await t.serve();
   const ready = async () => {
     const response = await fetch(`http://127.0.0.1:${t.port}/readyz`, { signal: AbortSignal.timeout(500) });
@@ -76,6 +77,21 @@ await journey("http", async (t) => {
     const bad = await fetch(`${base}/oauth/authorize?client_id=${client.client_id}&redirect_uri=${encodeURIComponent("https://x.test/cb")}&state=%0d%0ainvalid`, { redirect: "manual" });
     assert.equal(bad.status, 303);
     assert.doesNotMatch(bad.headers.get("location"), /[\r\n]/);
+    await ready();
+
+    // An oversized account form is refused without putting its link in logs.
+    const setupPath = new URL(setupLink).pathname;
+    const refused = await new Promise((resolve, reject) => {
+      const upload = request(`${base}${setupPath}`, { method: "POST", headers: { origin: base, expect: "100-continue", "content-length": 2 * 1024 * 1024 + 1 } }, (response) => {
+        response.resume();
+        response.once("end", () => resolve(response.statusCode));
+      });
+      upload.once("error", reject);
+      upload.once("continue", () => upload.destroy(new Error("oversized form must be refused before upload")));
+      upload.flushHeaders();
+    });
+    assert.equal(refused, 413);
+    assert.ok(!t.log.includes(setupPath.split("/").at(-1)));
     await ready();
 
     const { closed } = await connect();
