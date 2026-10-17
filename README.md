@@ -75,7 +75,7 @@ the API, or by the visitor with `analytico.forget()`.
 
 ## Run it
 
-You need Linux, Zig 0.17 (the exact version is in `.zigversion`) and a
+You need Linux, Zig 0.18 development (the exact version is in `.zigversion`) and a
 reverse proxy such as Caddy in front.
 
 ```sh

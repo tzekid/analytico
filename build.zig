@@ -2,7 +2,7 @@ const std = @import("std");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-    const optimize = b.standardOptimizeOption(.{});
+    const optimize = b.standardOptimizeOption(.{}) orelse .debug;
 
     const sqlite_translate = b.addTranslateC(.{
         .root_source_file = b.path("vendor/sqlite/sqlite3.h"),
