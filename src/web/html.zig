@@ -241,12 +241,38 @@ pub const Money = struct {
             symbol = entry[1];
         };
         if (symbol) |value| try w.writeAll(value) else if (self.currency.len != 0) try w.print("{f} ", .{esc(self.currency)});
-        const whole = @divTrunc(self.minor, 100);
-        const cents = @abs(@rem(self.minor, 100));
+        const digits = minorDigits(self.currency);
+        const scale = std.math.pow(i64, 10, digits);
+        const whole = @divTrunc(self.minor, scale);
+        const fraction = @abs(@rem(self.minor, scale));
         try int(whole).format(w);
-        if (cents != 0 or (whole < 10 and whole > -10)) try w.print(".{d:0>2}", .{cents});
+        if (digits == 2 and (fraction != 0 or (whole < 10 and whole > -10))) try w.print(".{d:0>2}", .{fraction});
+        if (digits == 3 and (fraction != 0 or (whole < 10 and whole > -10))) try w.print(".{d:0>3}", .{fraction});
     }
 };
+
+/// ISO 4217 minor units: `value_minor` counts yen and won as they are, and
+/// Kuwaiti fils (a thousandth of a dinar).
+pub const zero_decimal = [_][]const u8{ "BIF", "CLP", "DJF", "GNF", "ISK", "JPY", "KMF", "KRW", "PYG", "RWF", "UGX", "UYI", "VND", "VUV", "XAF", "XOF", "XPF" };
+pub const three_decimal = [_][]const u8{ "BHD", "IQD", "JOD", "KWD", "LYD", "OMR", "TND" };
+
+pub fn minorDigits(currency: []const u8) u8 {
+    for (zero_decimal) |code| if (std.mem.eql(u8, code, currency)) return 0;
+    for (three_decimal) |code| if (std.mem.eql(u8, code, currency)) return 3;
+    return 2;
+}
+
+/// Minor units per major unit (100 for most currencies).
+pub fn minorScale(currency: []const u8) f64 {
+    return std.math.pow(f64, 10, @floatFromInt(minorDigits(currency)));
+}
+
+test "money in each currency's own minor unit" {
+    var buffer: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("€12.50", try std.fmt.bufPrint(&buffer, "{f}", .{money(1250, "EUR")}));
+    try std.testing.expectEqualStrings("¥1,200", try std.fmt.bufPrint(&buffer, "{f}", .{money(1200, "JPY")}));
+    try std.testing.expectEqualStrings("KWD 1.250", try std.fmt.bufPrint(&buffer, "{f}", .{money(1250, "KWD")}));
+}
 
 pub fn money(minor: i64, currency: []const u8) Money {
     return .{ .minor = minor, .currency = currency };

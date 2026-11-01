@@ -386,6 +386,16 @@
       if (id !== navigation) return;
       if (html === null) { location.reload(); return; }
       const finalUrl = new URL(response.url);
+      // From an upgraded server, the answer becomes the whole page: loading
+      // the page again would lose what it shows once (a new key or link).
+      if (assetsOf(new DOMParser().parseFromString(html, "text/html")) !== ownAssets) {
+        navigation++;
+        if (response.redirected) history.pushState({}, "", finalUrl.href);
+        document.open();
+        document.write(html);
+        document.close();
+        return;
+      }
       swap(html, finalUrl.href, response.redirected ? (finalUrl.pathname === location.pathname ? "replace" : "push") : "none", finalUrl.pathname === location.pathname);
     } catch {
       if (id === navigation) form.submit();

@@ -554,7 +554,13 @@ fn performanceReport(input: Input) !Table {
     return pageViewTable(input, performance_head, performance_tail);
 }
 
+/// For reports whose query takes no filters: refused, never silently ignored.
+fn unfiltered(input: Input) !void {
+    if (input.view.filters.len != 0) return error.UnsupportedFilter;
+}
+
 fn sessionsReport(input: Input) !Table {
+    try unfiltered(input);
     var statement = try input.db.prepare(input.arena, sessions_sql);
     defer statement.deinit();
     try statement.bindAll(.{ input.view.site.id, input.view.range.start_ms, input.view.range.end_ms, input.int("limit", 100, 1, 1000) });
@@ -571,6 +577,7 @@ fn sessionReport(input: Input) !Table {
 }
 
 fn flowReport(input: Input) !Table {
+    try unfiltered(input);
     const flow = input.get("flow").?;
     try domain.validateName(flow);
     var statement = try input.db.prepare(input.arena, flow_sql);
@@ -580,6 +587,7 @@ fn flowReport(input: Input) !Table {
 }
 
 fn frictionReport(input: Input) !Table {
+    try unfiltered(input);
     const flow = input.get("flow") orelse "";
     if (flow.len != 0) try domain.validateName(flow);
     var statement = try input.db.prepare(input.arena, friction_sql);
@@ -613,6 +621,8 @@ fn cameFromReport(input: Input) !Table {
 
 fn economicsReport(input: Input) !Table {
     const scope = try scoped(input);
+    // Its query is per campaign only.
+    if (scope.path.len != 0 or scope.release.len != 0) return error.UnsupportedFilter;
     var statement = try input.db.prepare(input.arena, economics_sql);
     defer statement.deinit();
     try statement.bindAll(.{ input.view.site.id, input.view.range.start_ms, input.view.range.end_ms, scope.campaign, input.int("limit", 100, 1, 1000) });

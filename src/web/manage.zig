@@ -85,12 +85,13 @@ pub fn addSitePost(ctx: *Ctx) !void {
     const name = std.mem.trim(u8, try ctx.field("name"), " ");
     domain.validateText(name, 60, true) catch return addSitePage(ctx, raw, "Display names can’t contain control characters.");
     const host = origin[(std.mem.find(u8, origin, "://") orelse 0) + 3 ..];
-    var slug = try slugFromHost(ctx.arena, host);
+    const base = try slugFromHost(ctx.arena, host);
+    var slug = base;
     const db = ctx.shared.lockWrite();
     defer ctx.shared.unlockWrite();
     var suffix: usize = 2;
     while (data.reservedSlug(slug) or try db.scalar(ctx.arena, i64, "SELECT count(*) FROM sites WHERE slug=?", .{slug}) != 0) : (suffix += 1) {
-        slug = try std.fmt.allocPrint(ctx.arena, "{s}-{d}", .{ (try slugFromHost(ctx.arena, host))[0..@min(40, host.len)], suffix });
+        slug = try std.fmt.allocPrint(ctx.arena, "{s}-{d}", .{ base, suffix });
     }
     var site = try ctx.shared.store.addSite(ctx.shared.io, slug, origin, mode);
     defer site.deinit(ctx.shared.store.allocator);

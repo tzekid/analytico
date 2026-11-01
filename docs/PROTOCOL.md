@@ -69,6 +69,8 @@ its identity:
 - Any other consent mode with an identity is rejected.
 - A `link` token must be valid, unexpired and name the record's visitor and
   session, or the identity is removed.
+- A forgotten visitor's ID is refused like a withdrawn one, so a tab or
+  domain that still holds it starts no new history.
 - A visitor who withdrew stays withdrawn for signed `/i` records too: they
   are stored without `visitor_id`, and an `identify` for them is accepted
   but links nothing. A server `identify` links only a visitor the browser

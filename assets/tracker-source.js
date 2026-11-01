@@ -63,6 +63,9 @@
     long_frame_count: null,
     blocking_ms: null
   };
+  // Web Vitals describe the document's load: they go with its first page
+  // view only, never again with SPA routes or a back/forward restore.
+  var rumSent = false;
   /* @rum-end */
 
   function uuid() {
@@ -130,7 +133,7 @@
         var value = query.get(searchParams[i]);
         if (value == null) continue;
         value = clean(value.trim().toLowerCase().replace(/\s+/g, " "), 100);
-        if (!value || value.indexOf("@") >= 0 || /\d{6,}/.test(value.replace(/[\s-]/g, ""))) return null;
+        if (!value || value.indexOf("@") >= 0 || /\d{6,}/.test(value.replace(/[\s\-.\/()+]/g, ""))) return null;
         return value;
       }
     } catch (_) {}
@@ -697,10 +700,11 @@
     });
     /* @rum-begin */
     // Measurements past ten minutes (or 100,000 shifts and frames) are left out.
-    Object.keys(rum).forEach(function (key) {
+    if (!rumSent) Object.keys(rum).forEach(function (key) {
       var value = Math.round(rum[key]);
       if (rum[key] !== null && value >= 0 && value <= (key === "cls_milli" || key === "long_frame_count" ? 100000 : 600000)) record[key] = value;
     });
+    rumSent = true;
     /* @rum-end */
     /* @full-begin */
     if (visitorId) {
@@ -999,6 +1003,12 @@
     save("replay", null);
     save("consent", state === "denied" ? "denied" : null);
     consent = state;
+    // Events queued for this page leave without the identity just cleared.
+    queued.forEach(function (record) {
+      record.visitor_id = undefined;
+      record.session_id = null;
+      record.consent_mode = consentMode();
+    });
     if (replay) {
       replay.stop();
       replay = null;

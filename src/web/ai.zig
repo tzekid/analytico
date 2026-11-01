@@ -746,7 +746,11 @@ fn driversText(arena: std.mem.Allocator, result: Drivers, period: []const u8, ba
 
 pub fn why(ctx: *Ctx, site: data.Site) !void {
     const arena = ctx.arena;
-    if ((try ctx.field("alert")).len != 0) return triage(ctx, site, std.fmt.parseInt(i64, try ctx.field("alert"), 10) catch 0);
+    // Explaining an alert stores the explanation on it, which editors do.
+    if ((try ctx.field("alert")).len != 0) {
+        if (!ctx.can(.editor)) return @import("app.zig").forbidden(ctx);
+        return triage(ctx, site, std.fmt.parseInt(i64, try ctx.field("alert"), 10) catch 0);
+    }
     const view_query = try ctx.field("view");
     const params = html.Params.parse(arena, if (std.mem.findScalar(u8, view_query, '?')) |index| view_query[index + 1 ..] else "") catch html.Params{};
     const view = try data.View.parse(arena, site, params, ctx.now());

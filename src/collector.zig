@@ -286,7 +286,7 @@ pub fn ingest(
     for (envelope.records) |original| {
         if (envelope.v == 1 and !std.mem.eql(u8, original.type, "page_view") and
             !std.mem.eql(u8, original.type, "page_summary") and !std.mem.eql(u8, original.type, "event")) return error.UnknownRecordType;
-        const digest = try recordHash(allocator, original);
+        const digest = try recordHash(allocator, master_key, original);
         var record = original;
         if (site.mode == .full and source == .browser) {
             if (try enforceConsent(&record, result.decision, client.gpc)) result.dropped = true;
@@ -309,6 +309,14 @@ pub fn ingest(
             }
         }
         try validateRecord(allocator, record, site.mode, source, received_at_ms);
+        // Email addresses in a URL (an unsubscribe link, a campaign tag) are
+        // never stored: such path segments are replaced, such UTM values dropped.
+        if (record.path) |path| record.path = try minimalPath(allocator, path);
+        inline for (.{ "utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term" }) |field| {
+            if (@field(record, field)) |value| if (emailShaped(value)) {
+                @field(record, field) = null;
+            };
+        }
         // A trusted application cannot bring a withdrawn visitor back either:
         // its record is kept without the identity, and identify links nothing.
         if (site.mode == .full and source == .server) if (record.visitor_id) |visitor_id| {
@@ -376,8 +384,9 @@ pub fn ingest(
     return result;
 }
 
+/// Withdrew consent, or was forgotten: either way no record keeps the ID.
 fn withdrawnVisitor(allocator: std.mem.Allocator, store: *store_mod.Store, site_id: i64, visitor_id: []const u8) !bool {
-    return try store.database.scalar(allocator, i64, "SELECT count(*) FROM visitors WHERE site_id=? AND visitor_id=? AND consent_state IN ('denied','gpc')", .{ site_id, visitor_id }) != 0;
+    return try store.database.scalar(allocator, i64, "SELECT EXISTS(SELECT 1 FROM visitors WHERE site_id=?1 AND visitor_id=?2 AND consent_state IN ('denied','gpc')) OR EXISTS(SELECT 1 FROM forgotten_visitors WHERE site_id=?1 AND visitor_id=?2)", .{ site_id, visitor_id }) != 0;
 }
 
 const Context = struct {
@@ -777,6 +786,8 @@ fn applyConsent(c: Context, record: Record) !void {
     if (std.mem.eql(u8, state, "denied") or std.mem.eql(u8, state, "gpc")) {
         try c.store.database.run(c.allocator, "UPDATE visitors SET consent_state=?3 WHERE site_id=?1 AND visitor_id IN (SELECT visitor_id FROM page_views WHERE site_id=?1 AND page_id=?2)", .{ c.site.id, record.page_id.?, state });
         try c.store.database.run(c.allocator, "UPDATE page_views SET consent_mode=?3,click_id=NULL WHERE site_id=?1 AND page_id=?2", .{ c.site.id, record.page_id.?, state });
+        // Ad click IDs leave with consent: none of the visitor's pages keeps one.
+        try c.store.database.run(c.allocator, "UPDATE page_views SET click_id=NULL WHERE site_id=?1 AND visitor_id IN (SELECT visitor_id FROM page_views WHERE site_id=?1 AND page_id=?2 AND visitor_id IS NOT NULL) AND click_id IS NOT NULL", .{ c.site.id, record.page_id.? });
         return;
     }
     var statement = try c.store.database.prepare(c.allocator, "UPDATE page_views SET visitor_id=?3,session_id=?4,consent_mode=?5,click_id=CASE WHEN ?3 IS NULL THEN NULL ELSE click_id END WHERE site_id=?1 AND page_id=?2 AND visitor_id IS NULL");
@@ -882,6 +893,10 @@ pub fn forgetUser(allocator: std.mem.Allocator, store: *store_mod.Store, site_id
 /// form fields) carry no identifier and stay.
 pub fn forgetVisitor(allocator: std.mem.Allocator, store: *store_mod.Store, site_id: i64, visitor_id: []const u8) !void {
     try noteExportRefresh(allocator, store, site_id, "SELECT received_at_ms FROM page_views WHERE site_id=?1 AND visitor_id=?2 UNION ALL SELECT received_at_ms FROM events WHERE site_id=?1 AND visitor_id=?2", visitor_id);
+    // The ID stays refused (see withdrawnVisitor): a tab or another of the
+    // site's domains still holding it cannot start the visitor again. Only
+    // IDs that were remembered, so made-up ones don't fill the table.
+    try store.database.run(allocator, "INSERT INTO forgotten_visitors(site_id,visitor_id,forgotten_at_ms) SELECT site_id,visitor_id,? FROM visitors WHERE site_id=? AND visitor_id=? ON CONFLICT DO NOTHING", .{ domain.nowMs(), site_id, visitor_id });
     inline for (.{
         "DELETE FROM page_summaries WHERE site_id=?1 AND (visitor_id=?2 OR page_id IN (SELECT page_id FROM page_views WHERE site_id=?1 AND visitor_id=?2))",
         "DELETE FROM event_items WHERE site_id=?1 AND event_id IN (SELECT event_id FROM events WHERE site_id=?1 AND visitor_id=?2)",
@@ -902,7 +917,7 @@ pub fn forgetVisitor(allocator: std.mem.Allocator, store: *store_mod.Store, site
 
 /// The days of the rows about to be erased, once a daily export may hold
 /// them: the jobs thread writes those days' files again without them
-/// (`export.refresh`, "site:day" entries).
+/// (`export.refresh`, "site:day" entries and a generation).
 fn noteExportRefresh(allocator: std.mem.Allocator, store: *store_mod.Store, site_id: i64, comptime rows: []const u8, key: []const u8) !void {
     const settings = @import("web/data.zig");
     if (try settings.setting(allocator, &store.database, .@"export.last") == null) return;
@@ -910,10 +925,17 @@ fn noteExportRefresh(allocator: std.mem.Allocator, store: *store_mod.Store, site
     defer days.deinit();
     try days.bindInt(1, site_id);
     try days.bindText(2, key);
+    // "site:day,…#generation": every deletion with exported days bumps the
+    // generation, so a rewrite that ran meanwhile (and may have read the rows
+    // just deleted) cannot clear the list.
     const pending = try settings.setting(allocator, &store.database, .@"export.refresh") orelse "";
+    const mark = std.mem.findScalar(u8, pending, '#') orelse pending.len;
+    const generation = if (mark < pending.len) std.fmt.parseInt(u64, pending[mark + 1 ..], 10) catch 0 else 0;
     var list: std.ArrayList(u8) = .empty;
-    try list.appendSlice(allocator, pending);
+    try list.appendSlice(allocator, pending[0..mark]);
+    var any = false;
     while (try days.step() == .row) {
+        any = true;
         const entry = try std.fmt.allocPrint(allocator, "{d}:{s}", .{ site_id, days.columnText(0) });
         var known = std.mem.tokenizeScalar(u8, list.items, ',');
         const noted = while (known.next()) |item| {
@@ -923,7 +945,7 @@ fn noteExportRefresh(allocator: std.mem.Allocator, store: *store_mod.Store, site
         if (list.items.len != 0) try list.append(allocator, ',');
         try list.appendSlice(allocator, entry);
     }
-    if (list.items.len != pending.len) try settings.putSetting(allocator, &store.database, .@"export.refresh", list.items);
+    if (any) try settings.putSetting(allocator, &store.database, .@"export.refresh", try std.fmt.allocPrint(allocator, "{s}#{d}", .{ list.items, generation + 1 }));
 }
 
 fn validateRecord(
@@ -1135,11 +1157,18 @@ fn authoritative(name: []const u8) bool {
     return false;
 }
 
-fn recordHash(allocator: std.mem.Allocator, record: Record) ![64]u8 {
+/// Keyed with the instance key: a receipt names the record's raw user ID
+/// among its fields, so a plain hash of it could be tested against guesses.
+fn recordHash(allocator: std.mem.Allocator, master_key: [32]u8, record: Record) ![64]u8 {
     var writer: std.Io.Writer.Allocating = .init(allocator);
     defer writer.deinit();
     try std.json.Stringify.value(record, .{}, &writer.writer);
-    return domain.payloadHash(writer.writer.buffered());
+    var digest: [32]u8 = undefined;
+    var hmac = std.crypto.auth.hmac.sha2.HmacSha256.init(&master_key);
+    hmac.update("analytico/receipt/v1\x00");
+    hmac.update(writer.writer.buffered());
+    hmac.final(&digest);
+    return std.fmt.bytesToHex(digest, .lower);
 }
 
 fn canonicalProperties(allocator: std.mem.Allocator, optional: ?std.json.Value) ![]const u8 {
@@ -1220,7 +1249,45 @@ fn lowercaseAscii(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
     return out;
 }
 
-/// The same minimization as the tracker, enforced before storage.
+/// Text shaped like an email address: something@something.something, with
+/// the @ written plainly or percent-encoded.
+fn emailShaped(text: []const u8) bool {
+    var at = std.mem.findScalar(u8, text, '@');
+    var after: usize = 1;
+    if (std.ascii.findIgnoreCase(text, "%40")) |encoded| if (at == null or encoded < at.?) {
+        at = encoded;
+        after = 3;
+    };
+    const index = at orelse return false;
+    return index > 0 and std.mem.findScalarPos(u8, text, index + after, '.') != null;
+}
+
+/// The path with every email-shaped segment replaced by "[email]".
+fn minimalPath(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
+    if (!emailShaped(path)) return path;
+    var out: std.ArrayList(u8) = .empty;
+    var segments = std.mem.splitScalar(u8, path, '/');
+    var first = true;
+    while (segments.next()) |segment| {
+        if (!first) try out.append(allocator, '/');
+        first = false;
+        try out.appendSlice(allocator, if (emailShaped(segment)) "[email]" else segment);
+    }
+    return out.items;
+}
+
+test "email addresses never reach a stored path or campaign" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try std.testing.expectEqualStrings("/unsubscribe/[email]/done", try minimalPath(arena, "/unsubscribe/jane.doe@example.com/done"));
+    try std.testing.expectEqualStrings("/@gardener/posts", try minimalPath(arena, "/@gardener/posts"));
+    try std.testing.expect(emailShaped("jane%40example.com") and !emailShaped("spring-sale"));
+}
+
+/// The same minimization as the tracker, enforced before storage. Digits
+/// separated by spaces, dashes, dots, slashes, parentheses or a plus still
+/// count as one number (phone numbers, card numbers, birth dates).
 fn searchTerm(allocator: std.mem.Allocator, raw: []const u8) !?[]const u8 {
     if (std.mem.findScalar(u8, raw, '@') != null) return null;
     var digits: usize = 0;
@@ -1228,7 +1295,7 @@ fn searchTerm(allocator: std.mem.Allocator, raw: []const u8) !?[]const u8 {
         if (std.ascii.isDigit(byte)) {
             digits += 1;
             if (digits >= 6) return null;
-        } else if (byte != ' ' and byte != '-') digits = 0;
+        } else if (std.mem.findScalar(u8, " -./()+", byte) == null) digits = 0;
     }
     var out: std.ArrayList(u8) = .empty;
     for (std.mem.trim(u8, raw, " ")) |byte| {

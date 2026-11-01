@@ -1395,7 +1395,9 @@ pub const GoalCount = struct { completions: i64, visitor_days: i64 };
 pub fn goalCount(arena: std.mem.Allocator, db: *db_mod.Db, view: View, kind: []const u8, match: []const u8, start: i64, end: i64, visitors: bool) !GoalCount {
     var sql = Sql.init(arena);
     if (std.mem.eql(u8, kind, "event")) {
-        try sql.add(if (visitors) "SELECT count(*),count(DISTINCT coalesce((SELECT pv2.visitor_day_id FROM page_views pv2 WHERE pv2.site_id=e.site_id AND pv2.page_id=e.page_id),e.event_id)) FROM events e WHERE " else "SELECT count(*),0 FROM events e WHERE ");
+        // An order the browser and the server both report counts once, for
+        // the browser copy's visitor-day.
+        try sql.add(if (visitors) "SELECT count(DISTINCT coalesce(e.order_id,e.event_id)),count(DISTINCT coalesce((SELECT pv2.visitor_day_id FROM page_views pv2 WHERE pv2.site_id=e.site_id AND pv2.page_id=e.page_id),(SELECT pv3.visitor_day_id FROM events b JOIN page_views pv3 ON pv3.site_id=b.site_id AND pv3.page_id=b.page_id WHERE b.site_id=e.site_id AND b.order_id=e.order_id AND b.source='browser' LIMIT 1),coalesce(e.order_id,e.event_id))) FROM events e WHERE " else "SELECT count(DISTINCT coalesce(e.order_id,e.event_id)),0 FROM events e WHERE ");
         try sql.events(view, start, end);
         try sql.add(" AND e.name=");
     } else {

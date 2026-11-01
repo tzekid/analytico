@@ -41,4 +41,7 @@ test {
     _ = @import("web/catalog.zig");
     _ = @import("web/push.zig");
     _ = @import("web/jobs.zig");
+    _ = @import("web/integrations.zig");
+    _ = @import("collector.zig");
+    _ = @import("web/overview.zig");
 }

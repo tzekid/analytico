@@ -275,6 +275,7 @@ pub fn pruneBefore(allocator: std.mem.Allocator, writer: anytype, cutoff_ms: i64
         "DELETE FROM rollups WHERE (site_id,dim,day,key) IN (SELECT site_id,dim,day,key FROM rollups WHERE day<strftime('%Y-%m-%d',?1/1000,'unixepoch') LIMIT ?2)",
         "DELETE FROM rollup_days WHERE (site_id,day) IN (SELECT site_id,day FROM rollup_days WHERE day<strftime('%Y-%m-%d',?1/1000,'unixepoch') LIMIT ?2)",
         "DELETE FROM vitals_daily WHERE (site_id,metric,day,path,value) IN (SELECT site_id,metric,day,path,value FROM vitals_daily WHERE day<strftime('%Y-%m-%d',?1/1000,'unixepoch') LIMIT ?2)",
+        "DELETE FROM forgotten_visitors WHERE (site_id,visitor_id) IN (SELECT site_id,visitor_id FROM forgotten_visitors WHERE forgotten_at_ms<?1 LIMIT ?2)",
     }) |sql| {
         while (true) {
             const database = writer.lockWrite();

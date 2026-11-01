@@ -79,7 +79,8 @@ pub fn sales(arena: std.mem.Allocator, db: *db_mod.Db, view: data.View, start: i
     var statement = try sql.prepare(db);
     defer statement.deinit();
     _ = try statement.step();
-    return .{ .revenue = statement.columnInt(0) - statement.columnInt(2), .orders = statement.columnInt(1), .refunds = statement.columnInt(2) };
+    // Saturating: sums of tracker-sent values must not take the server down.
+    return .{ .revenue = statement.columnInt(0) -| statement.columnInt(2), .orders = statement.columnInt(1), .refunds = statement.columnInt(2) };
 }
 
 fn conversionBase(ctx: *Ctx, view: data.View, start: i64, end: i64) !i64 {
@@ -168,17 +169,20 @@ fn revenueChart(ctx: *Ctx, view: data.View) !void {
         const bucket = statement.columnInt(0);
         if (bucket < 0 or bucket >= range.buckets) continue;
         const target = if (std.mem.eql(u8, statement.columnText(1), "server")) confirmed else browser;
-        target[@intCast(bucket)] += statement.columnInt(2);
+        target[@intCast(bucket)] +|= statement.columnInt(2);
     }
-    for (confirmed, browser) |a, b| peak = @max(peak, a + b);
+    for (confirmed, browser) |a, b| peak = @max(peak, a +| b);
     var best: usize = 0;
     for (confirmed, browser, 0..) |a, b, index| {
         if (a + b > confirmed[best] + browser[best]) best = index;
     }
     var label_buffer: [32]u8 = undefined;
-    try render(w, "<section class=\"card\"><div class=\"card-head\"><div><h2>Revenue by day</h2><p class=\"hint\">Best: {best} · {amount}</p></div><div class=\"legend\"><span><i class=\"swatch swatch-violet\"></i>Shop (confirmed)</span><span><i class=\"swatch swatch-violet-pale\"></i>Browser only</span></div></div><div class=\"barchart\">", .{
+    // Bars are what orders were worth when placed; the Revenue tile above is
+    // after refunds.
+    try render(w, "<section class=\"card\"><div class=\"card-head\"><div><h2>Orders by {unit}</h2><p class=\"hint\">Before refunds · best: {best} · {amount}</p></div><div class=\"legend\"><span><i class=\"swatch swatch-violet\"></i>Shop (confirmed)</span><span><i class=\"swatch swatch-violet-pale\"></i>Browser only</span></div></div><div class=\"barchart\">", .{
+        .unit = if (range.bucket_ms == data.hour_ms) "hour" else "day",
         .best = range.bucketLong(&label_buffer, best),
-        .amount = html.money(confirmed[best] + browser[best], view.site.currency),
+        .amount = html.money(confirmed[best] +| browser[best], view.site.currency),
     });
     // Long periods label every few days with just the day, naming the month
     // where it starts or changes, so labels fit their narrow columns.
@@ -521,8 +525,10 @@ pub fn people(ctx: *Ctx, site: data.Site) !void {
         return layout.end(ctx);
     }
     const range = view.range;
-    const identified = try ctx.db.scalar(arena, i64, "SELECT count(DISTINCT user_hash) FROM visitors WHERE site_id=? AND user_hash IS NOT NULL AND last_seen_ms>=?", .{ site.id, range.start_ms });
-    const remembered = try ctx.db.scalar(arena, i64, "SELECT count(*) FROM visitors WHERE site_id=? AND last_seen_ms>=?", .{ site.id, range.start_ms });
+    // People whose seen span overlaps the period: seen at or after its start,
+    // and first seen before its end.
+    const identified = try ctx.db.scalar(arena, i64, "SELECT count(DISTINCT user_hash) FROM visitors WHERE site_id=? AND user_hash IS NOT NULL AND last_seen_ms>=? AND first_seen_ms<?", .{ site.id, range.start_ms, range.end_ms });
+    const remembered = try ctx.db.scalar(arena, i64, "SELECT count(*) FROM visitors WHERE site_id=? AND last_seen_ms>=? AND first_seen_ms<?", .{ site.id, range.start_ms, range.end_ms });
     try layout.head(ctx, .{ .title = "People", .subtitle = try std.fmt.allocPrint(arena, "{f} identified · {f} remembered visitors · {f}", .{ html.int(identified), html.int(remembered), range }), .view = view, .path = path, .compare = false, .filter = false });
 
     const query = std.mem.trim(u8, ctx.param("q") orelse "", " ");
@@ -555,6 +561,8 @@ pub fn people(ctx: *Ctx, site: data.Site) !void {
         try sql.int(site.id);
         try sql.add(" AND last_seen_ms>=");
         try sql.int(range.start_ms);
+        try sql.add(" AND first_seen_ms<");
+        try sql.int(range.end_ms);
         try sql.add(" ORDER BY last_seen_ms DESC LIMIT 2000),v AS MATERIALIZED (SELECT visitor_id,coalesce(user_hash,visitor_id) k,user_hash,first_seen_ms,last_seen_ms,first_source FROM visitors WHERE site_id=");
         try sql.int(site.id);
         try sql.add(" AND visitor_id IN (SELECT visitor_id FROM recent) UNION SELECT visitor_id,user_hash,user_hash,first_seen_ms,last_seen_ms,first_source FROM visitors WHERE site_id=");
@@ -589,8 +597,12 @@ pub fn people(ctx: *Ctx, site: data.Site) !void {
     try sql.int(site.id);
     try sql.add(" AND e.received_at_ms>=");
     try sql.int(range.start_ms);
+    try sql.add(" AND e.received_at_ms<");
+    try sql.int(range.end_ms);
     try sql.add(" GROUP BY x.k) SELECT p.k,coalesce(p.u,''),p.f,p.l,p.devices,coalesce(src.first_source,'direct'),coalesce(s.sessions,0) sessions,coalesce(r.revenue,0) revenue,coalesce(s.systems,''),coalesce(er.n,0) FROM p LEFT JOIN src USING(k) LEFT JOIN s USING(k) LEFT JOIN r USING(k) LEFT JOIN er USING(k) WHERE p.l>=");
     try sql.int(range.start_ms);
+    try sql.add(" AND p.f<");
+    try sql.int(range.end_ms);
     switch (segment) {
         .everyone => {},
         .customers => try sql.add(" AND revenue>0"),
@@ -674,6 +686,22 @@ fn loadPerson(ctx: *Ctx, site: data.Site, key: []const u8) !?Person {
     return .{ .key = key, .user_hash = user_hash, .visitors = visitors.items };
 }
 
+/// A person for export and deletion: as `loadPerson`, or a user known only
+/// from their backend's events or an earlier identify (a device since
+/// identified as someone else), with the devices once linked to them.
+fn findPerson(ctx: *Ctx, site: data.Site, key: []const u8) !?Person {
+    if (try loadPerson(ctx, site, key)) |found| return found;
+    const traces = try ctx.db.scalar(ctx.arena, i64, "SELECT EXISTS(SELECT 1 FROM events WHERE site_id=?1 AND user_hash=?2) OR EXISTS(SELECT 1 FROM visitor_links WHERE site_id=?1 AND user_hash=?2)", .{ site.id, key });
+    if (traces == 0) return null;
+    var statement = try ctx.db.prepare(ctx.arena, "SELECT DISTINCT visitor_id FROM visitor_links WHERE site_id=? AND user_hash=? ORDER BY visitor_id");
+    defer statement.deinit();
+    try statement.bindInt(1, site.id);
+    try statement.bindText(2, key);
+    var visitors: std.ArrayList([]const u8) = .empty;
+    while (try statement.step() == .row) try visitors.append(ctx.arena, try ctx.arena.dupe(u8, statement.columnText(0)));
+    return .{ .key = key, .user_hash = key, .visitors = visitors.items };
+}
+
 /// SQL list of the person's visitor IDs, bound as text parameters.
 fn visitorList(sql: *data.Sql, someone: Person) !void {
     try sql.add("(");
@@ -687,8 +715,11 @@ fn visitorList(sql: *data.Sql, someone: Person) !void {
 pub fn person(ctx: *Ctx, site: data.Site, key: []const u8) !void {
     const arena = ctx.arena;
     const view = try data.View.parse(arena, site, ctx.query, ctx.now());
+    if (ctx.param("format")) |format| if (std.mem.eql(u8, format, "json")) {
+        const everything = try findPerson(ctx, site, key) orelse return layout.message(ctx, .not_found, "Person not found", "They may have been deleted on request, or never consented to be remembered.");
+        return exportPerson(ctx, site, everything);
+    };
     const found = try loadPerson(ctx, site, key) orelse return layout.message(ctx, .not_found, "Person not found", "They may have been deleted on request, or never consented to be remembered.");
-    if (ctx.param("format")) |format| if (std.mem.eql(u8, format, "json")) return exportPerson(ctx, site, found);
     const w = ctx.w();
     const label = try behaviour.personLabel(arena, found.visitors[0], found.user_hash);
 
@@ -794,7 +825,20 @@ pub fn person(ctx: *Ctx, site: data.Site, key: []const u8) !void {
     try consent_sql.add(" GROUP BY consent_mode ORDER BY 2 LIMIT 1");
     var consent = try consent_sql.prepare(ctx.db);
     defer consent.deinit();
-    if (try consent.step() == .row) {
+    // A withdrawal (or Global Privacy Control) outranks how consent began.
+    var withdrawn_sql = data.Sql.init(arena);
+    try withdrawn_sql.add("SELECT count(*) FROM visitors WHERE consent_state IN ('denied','gpc') AND site_id=");
+    try withdrawn_sql.int(site.id);
+    try withdrawn_sql.add(" AND visitor_id IN ");
+    try visitorList(&withdrawn_sql, found);
+    var withdrawn = try withdrawn_sql.prepare(ctx.db);
+    defer withdrawn.deinit();
+    _ = try withdrawn.step();
+    if (withdrawn.columnInt(0) != 0) {
+        try w.writeAll("<div class=\"callout callout-warn mt-8\">");
+        try icon(w, "alert");
+        try w.writeAll("<span><strong>Withdrawn</strong><br><small>Nothing new is collected for this person; what came before stays until you delete it</small></span></div>");
+    } else if (try consent.step() == .row) {
         const granted = std.mem.eql(u8, consent.columnText(0), "granted");
         try w.writeAll("<div class=\"callout callout-good mt-8\">");
         try icon(w, "shield-check");
@@ -845,9 +889,14 @@ fn exportPerson(ctx: *Ctx, site: data.Site, found: Person) !void {
         try sql.add(table[1]);
         try sql.add(" WHERE site_id=");
         try sql.int(site.id);
-        try sql.add(" AND visitor_id IN ");
+        try sql.add(" AND (visitor_id IN ");
         try visitorList(&sql, found);
-        try sql.add(" ORDER BY received_at_ms");
+        // The backend's events for the user carry no visitor.
+        if (found.user_hash.len != 0 and std.mem.eql(u8, table[0], "events")) {
+            try sql.add(" OR user_hash=");
+            try sql.str(found.user_hash);
+        }
+        try sql.add(") ORDER BY received_at_ms");
         var statement = try sql.prepare(ctx.db);
         defer statement.deinit();
         try w.print(",\"{s}\":[", .{table[0]});
@@ -882,26 +931,31 @@ fn exportPerson(ctx: *Ctx, site: data.Site, found: Person) !void {
 
 pub fn forget(ctx: *Ctx, site: data.Site, key: []const u8) !void {
     const arena = ctx.arena;
-    const found = try loadPerson(ctx, site, key) orelse return layout.message(ctx, .not_found, "Person not found", "They may already have been deleted.");
-    const label = try behaviour.personLabel(arena, found.visitors[0], found.user_hash);
+    const found = try findPerson(ctx, site, key) orelse return layout.message(ctx, .not_found, "Person not found", "They may already have been deleted.");
+    const label = try behaviour.personLabel(arena, if (found.visitors.len != 0) found.visitors[0] else "", found.user_hash);
+    // Every device the user was ever linked to goes, with its replays.
+    var erased: std.ArrayList([]const u8) = .empty;
+    try erased.appendSlice(arena, found.visitors);
     {
         const db = ctx.shared.lockWrite();
         defer ctx.shared.unlockWrite();
         try db.exec("BEGIN IMMEDIATE");
         errdefer db.exec("ROLLBACK") catch {};
-        if (found.user_hash.len != 0) {
-            _ = try collector.forgetUser(arena, ctx.shared.store, site.id, found.user_hash);
-        }
+        if (found.user_hash.len != 0) for (try collector.forgetUser(arena, ctx.shared.store, site.id, found.user_hash)) |visitor| {
+            for (erased.items) |known| {
+                if (std.mem.eql(u8, known, visitor)) break;
+            } else try erased.append(arena, visitor);
+        };
         for (found.visitors) |visitor| try collector.forgetVisitor(arena, ctx.shared.store, site.id, visitor);
-        try audit.record(ctx, db, site.id, "person.deleted", try std.fmt.allocPrint(arena, "{s} · {d} visitor(s)", .{ label, found.visitors.len }));
+        try audit.record(ctx, db, site.id, "person.deleted", try std.fmt.allocPrint(arena, "{s} · {d} visitor(s)", .{ label, erased.items.len }));
         try db.exec("COMMIT");
     }
     {
         const replays = ctx.shared.lockReplays();
         defer ctx.shared.unlockReplays();
-        try replay.forgetVisitors(arena, replays, site.id, found.visitors);
+        try replay.forgetVisitors(arena, replays, site.id, erased.items);
     }
-    return ctx.done(try std.fmt.allocPrint(arena, "Deleted {s}: {d} device{s}, their events and replays.", .{ label, found.visitors.len, if (found.visitors.len == 1) "" else "s" }), "/{s}/people", .{site.slug});
+    return ctx.done(try std.fmt.allocPrint(arena, "Deleted {s}: {d} device{s}, their events and replays.", .{ label, erased.items.len, if (erased.items.len == 1) "" else "s" }), "/{s}/people", .{site.slug});
 }
 
 fn capitalized(arena: std.mem.Allocator, value: []const u8) []const u8 {

@@ -16,10 +16,33 @@ const std = @import("std");
 const db_mod = @import("db.zig");
 
 const baseline_version: i64 = 6;
-pub const current_version: i64 = 12;
+pub const current_version: i64 = 13;
 
 /// Migrations after the baseline: index 0 takes schema 6 to 7.
-const migrations = [_][]const u8{ chatgpt_sql, draft_notes_sql, scale_sql, apps_sql, push_sql, consent_state_sql };
+const migrations = [_][]const u8{ chatgpt_sql, draft_notes_sql, scale_sql, apps_sql, push_sql, consent_state_sql, forgotten_sql };
+
+/// 13: a forgotten visitor's ID stays refused, so a tab or another of the
+/// site's domains that still holds it cannot start them again. Only the
+/// random ID is kept; retention removes it like any other record. Receipts
+/// and daily aggregates get an index by time, so retention's short batches
+/// each read only the rows they delete instead of scanning from the start.
+const forgotten_sql =
+    \\BEGIN IMMEDIATE;
+    \\CREATE INDEX record_receipts_time ON record_receipts(received_at_ms);
+    \\CREATE INDEX click_cells_day ON click_cells(day);
+    \\CREATE INDEX form_fields_day ON form_fields(day);
+    \\CREATE INDEX rollups_day ON rollups(day);
+    \\CREATE INDEX vitals_daily_day ON vitals_daily(day);
+    \\CREATE TABLE forgotten_visitors (
+    \\  site_id INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+    \\  visitor_id TEXT NOT NULL,
+    \\  forgotten_at_ms INTEGER NOT NULL,
+    \\  PRIMARY KEY(site_id,visitor_id)
+    \\) STRICT, WITHOUT ROWID;
+    \\INSERT INTO schema_migrations VALUES(13,'forgotten-visitors',unixepoch('subsec')*1000);
+    \\PRAGMA user_version=13;
+    \\COMMIT;
+;
 
 /// 12: a withdrawn consent remains withdrawn for that remembered visitor.
 const consent_state_sql =

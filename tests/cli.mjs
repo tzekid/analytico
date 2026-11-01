@@ -121,6 +121,10 @@ await journey("cli", async (t) => {
   for (const kind of ["pages", "acquisition", "campaigns", "sections", "actions", "events", "recent"]) {
     assert.deepEqual(report(kind, "--path", "/absent"), [], `${kind}: empty filtered result`);
   }
+  // Reports whose query can't filter say so instead of answering unfiltered.
+  for (const args of [["sessions"], ["friction"], ["campaign-economics", "--path", "/landing"]]) {
+    assert.throws(() => execFileSync(t.app, ["report", args[0], "example", ...(args.length > 1 ? args.slice(1) : ["--path", "/landing"]), "--data", t.data], { stdio: ["ignore", "pipe", "pipe"] }), /UnsupportedFilter/, args[0]);
+  }
   const emptyCoverage = report("coverage", "--path", "/absent")[0];
   assert.deepEqual([emptyCoverage.page_views, emptyCoverage.summaries, emptyCoverage.rum_samples], [0, 0, 0]);
 
@@ -183,12 +187,13 @@ await journey("cli", async (t) => {
   assert.match(execFileSync(t.app, ["doctor", "--data", restored], { encoding: "utf8" }), /page_views=1 summaries=1 events=6/);
   // An older schema migrates only after a verified backup of the new copy.
   const old = new DatabaseSync(join(restored, "analytico.db"));
-  old.exec("ALTER TABLE visitors DROP COLUMN consent_state; DELETE FROM schema_migrations WHERE version=12; PRAGMA user_version=11");
+  old.exec("DROP TABLE forgotten_visitors; DROP INDEX record_receipts_time; DROP INDEX click_cells_day; DROP INDEX form_fields_day; DROP INDEX rollups_day; DROP INDEX vitals_daily_day; ALTER TABLE visitors DROP COLUMN consent_state; DELETE FROM schema_migrations WHERE version>=12; PRAGMA user_version=11");
   old.close();
   assert.throws(() => execFileSync(t.app, ["doctor", "--data", restored], { stdio: ["ignore", "pipe", "pipe"] }), /MigrationRequired/);
   execFileSync(t.app, ["migrate", "--data", restored, "--backup", join(t.temporary, "before-migrate.db")]);
   const migrated = new DatabaseSync(join(restored, "analytico.db"));
-  assert.equal(migrated.prepare("PRAGMA user_version").get().user_version, 12);
+  assert.equal(migrated.prepare("PRAGMA user_version").get().user_version, 13);
+  assert.equal(migrated.prepare("SELECT count(*) n FROM forgotten_visitors").get().n, 0);
   migrated.exec("INSERT INTO vitals_daily(site_id,day,metric,path,value,samples) VALUES(1,'2000-01-01','lcp','/old',100,1)");
   migrated.exec("INSERT INTO cache(site_id,name,day,value) VALUES(1,'retention','2000-01-01','{}')");
   migrated.close();

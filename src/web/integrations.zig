@@ -154,6 +154,13 @@ fn jsonText(value: ?std.json.Value) []const u8 {
     return if (inner == .string) inner.string else "";
 }
 
+/// A provider's count or amount as a whole number: anything not finite or
+/// outside 0..10^12 (after scaling) is a malformed answer and counts as 0.
+fn whole(value: ?std.json.Value, scale: f64) i64 {
+    const scaled = number(value) * scale;
+    return if (std.math.isFinite(scaled) and scaled >= 0 and scaled <= 1e12) @intFromFloat(scaled) else 0;
+}
+
 fn number(value: ?std.json.Value) f64 {
     const inner = value orelse return 0;
     return switch (inner) {
@@ -533,12 +540,31 @@ pub fn channels(arena: std.mem.Allocator, db: *db_mod.Db, master: [32]u8) ![]Cha
     return out.items;
 }
 
+/// Slack reads <…> as mentions and links: text from visitors (a source name,
+/// a page) must not ping the channel or disguise a link.
+fn slackEscape(arena: std.mem.Allocator, text: []const u8) ![]const u8 {
+    var escaped: std.ArrayList(u8) = .empty;
+    for (text) |byte| switch (byte) {
+        '&' => try escaped.appendSlice(arena, "&amp;"),
+        '<' => try escaped.appendSlice(arena, "&lt;"),
+        '>' => try escaped.appendSlice(arena, "&gt;"),
+        else => try escaped.append(arena, byte),
+    };
+    return escaped.items;
+}
+
+test "visitor text cannot mention or link in Slack" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    try std.testing.expectEqualStrings("*Alert* mostly from &lt;!channel&gt; &lt;https://x.example|login&gt; &amp; more", try slackEscape(arena_state.allocator(), "*Alert* mostly from <!channel> <https://x.example|login> & more"));
+}
+
 /// Slack gets text; webhooks get JSON signed like `/i`:
 /// hex HMAC-SHA256 of `timestamp + "." + body` with the channel's secret.
 pub fn send(arena: std.mem.Allocator, channel: Channel, slack_text: []const u8, notice: Notice) !void {
     var body: std.Io.Writer.Allocating = .init(arena);
     if (std.mem.eql(u8, channel.kind, "slack")) {
-        try std.json.Stringify.value(.{ .text = slack_text }, .{}, &body.writer);
+        try std.json.Stringify.value(.{ .text = try slackEscape(arena, slack_text) }, .{}, &body.writer);
         const response = try fetch(arena, .POST, channel.url, body.written(), "application/json", &.{});
         if (response.status >= 300) return error.IntegrationRejected;
         return;
@@ -676,7 +702,7 @@ fn syncSearchConsole(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, 
         if (day.len != 10 or query.len == 0 or query.len > 200) continue;
         // Pages are kept as paths, like everywhere else.
         const path = pathOf(page_url);
-        try write.run(arena, "INSERT INTO search_queries(site_id,day,query,page,clicks,impressions,position_x10) VALUES(?,?,?,?,?,?,?) ON CONFLICT(site_id,day,query,page) DO UPDATE SET clicks=excluded.clicks,impressions=excluded.impressions,position_x10=excluded.position_x10", .{ site.id, day, query, path, @as(i64, @intFromFloat(number(item.object.get("clicks")))), @as(i64, @intFromFloat(number(item.object.get("impressions")))), @as(i64, @intFromFloat(number(item.object.get("position")) * 10)) });
+        try write.run(arena, "INSERT INTO search_queries(site_id,day,query,page,clicks,impressions,position_x10) VALUES(?,?,?,?,?,?,?) ON CONFLICT(site_id,day,query,page) DO UPDATE SET clicks=excluded.clicks,impressions=excluded.impressions,position_x10=excluded.position_x10", .{ site.id, day, query, path, whole(item.object.get("clicks"), 1), whole(item.object.get("impressions"), 1), whole(item.object.get("position"), 10) });
         stored += 1;
     }
     try write.exec("COMMIT");
@@ -725,7 +751,7 @@ fn importGa4(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, site: da
                 if (row != .object) continue;
                 const dimension_values = row.object.get("dimensionValues") orelse continue;
                 const metric_values = row.object.get("metricValues") orelse continue;
-                if (dimension_values != .array or metric_values != .array or metric_values.array.items.len < 2) continue;
+                if (dimension_values != .array or metric_values != .array or dimension_values.array.items.len == 0 or metric_values.array.items.len < 2) continue;
                 const raw_day = if (dimension_values.array.items[0] == .object) jsonText(dimension_values.array.items[0].object.get("value")) else "";
                 if (raw_day.len != 8) continue;
                 const key = if (dim[1].len == 0) "" else if (dimension_values.array.items.len > 1 and dimension_values.array.items[1] == .object) jsonText(dimension_values.array.items[1].object.get("value")) else "";
@@ -769,7 +795,8 @@ fn pendingConversions(arena: std.mem.Allocator, db: *db_mod.Db, site: data.Site,
     try sql.int(site.id);
     try sql.add(" AND pv.click_id LIKE ");
     try sql.str(try std.fmt.allocPrint(arena, "{s}:%", .{prefix}));
-    try sql.add(" AND ((o.session_id IS NOT NULL AND pv.session_id=o.session_id) OR pv.page_id=o.page_id) ORDER BY pv.occurred_at_ms LIMIT 1) cid FROM o WHERE cid IS NOT NULL AND NOT EXISTS(SELECT 1 FROM conversion_uploads u WHERE u.site_id=");
+    // Only for visitors whose consent stands ("from consented visitors").
+    try sql.add(" AND ((o.session_id IS NOT NULL AND pv.session_id=o.session_id) OR pv.page_id=o.page_id) AND NOT EXISTS(SELECT 1 FROM visitors v WHERE v.site_id=pv.site_id AND v.visitor_id=pv.visitor_id AND v.consent_state IN ('denied','gpc')) ORDER BY pv.occurred_at_ms LIMIT 1) cid FROM o WHERE cid IS NOT NULL AND NOT EXISTS(SELECT 1 FROM conversion_uploads u WHERE u.site_id=");
     try sql.int(site.id);
     try sql.add(" AND u.event_id=o.event_id AND u.destination=");
     try sql.str(destination);
@@ -826,7 +853,8 @@ fn syncGoogleAds(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, site
                 const name = jsonText(campaign.object.get("name"));
                 if (day.len != 10 or name.len == 0) continue;
                 const currency = if (customer) |value| (if (value == .object) jsonText(value.object.get("currencyCode")) else "") else "";
-                try upsertSpend(arena, write, site, day, "google", name, @intFromFloat(number(metrics.object.get("costMicros")) / 10_000), if (currency.len == 3) currency else site.currency, domain.nowMs());
+                const spent_in = if (currency.len == 3) currency else site.currency;
+                try upsertSpend(arena, write, site, day, "google", name, whole(metrics.object.get("costMicros"), html.minorScale(spent_in) / 1_000_000.0), spent_in, domain.nowMs());
                 days += 1;
             }
         }
@@ -848,7 +876,7 @@ fn syncGoogleAds(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, site
                 try std.json.Stringify.value(conversion.click, .{}, &body.writer);
                 try body.writer.writeAll(",\"conversionAction\":");
                 try std.json.Stringify.value(config.conversion_action, .{}, &body.writer);
-                try body.writer.print(",\"conversionDateTime\":\"{s} {d:0>2}:{d:0>2}:{d:0>2}+00:00\",\"conversionValue\":{d:.2},\"currencyCode\":\"{s}\",\"orderId\":", .{ &date, @as(u64, @intCast(@divFloor(clock, 3600))), @as(u64, @intCast(@mod(@divFloor(clock, 60), 60))), @as(u64, @intCast(@mod(clock, 60))), @as(f64, @floatFromInt(conversion.value)) / 100, conversion.currency });
+                try body.writer.print(",\"conversionDateTime\":\"{s} {d:0>2}:{d:0>2}:{d:0>2}+00:00\",\"conversionValue\":{d},\"currencyCode\":\"{s}\",\"orderId\":", .{ &date, @as(u64, @intCast(@divFloor(clock, 3600))), @as(u64, @intCast(@mod(@divFloor(clock, 60), 60))), @as(u64, @intCast(@mod(clock, 60))), @as(f64, @floatFromInt(conversion.value)) / html.minorScale(conversion.currency), conversion.currency });
                 try std.json.Stringify.value(conversion.order, .{}, &body.writer);
                 try body.writer.writeByte('}');
             }
@@ -883,7 +911,8 @@ fn syncMeta(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, site: dat
             const name = jsonText(row.object.get("campaign_name"));
             if (day.len != 10 or name.len == 0) continue;
             const currency = jsonText(row.object.get("account_currency"));
-            try upsertSpend(arena, write, site, day, "meta", name, @intFromFloat(number(row.object.get("spend")) * 100), if (currency.len == 3) currency else site.currency, domain.nowMs());
+            const spent_in = if (currency.len == 3) currency else site.currency;
+            try upsertSpend(arena, write, site, day, "meta", name, whole(row.object.get("spend"), html.minorScale(spent_in)), spent_in, domain.nowMs());
             days += 1;
         }
         try write.exec("COMMIT");
@@ -901,7 +930,7 @@ fn syncMeta(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, site: dat
                 try std.json.Stringify.value(conversion.order, .{}, &body.writer);
                 try body.writer.print(",\"user_data\":{{\"fbc\":\"fb.1.{d}.", .{conversion.at_ms});
                 try body.writer.writeAll(conversion.click);
-                try body.writer.print("\"}},\"custom_data\":{{\"value\":{d:.2},\"currency\":\"{s}\"}}}}", .{ @as(f64, @floatFromInt(conversion.value)) / 100, conversion.currency });
+                try body.writer.print("\"}},\"custom_data\":{{\"value\":{d},\"currency\":\"{s}\"}}}}", .{ @as(f64, @floatFromInt(conversion.value)) / html.minorScale(conversion.currency), conversion.currency });
             }
             try body.writer.writeAll("]}");
             var url: std.Io.Writer.Allocating = .init(arena);
@@ -1007,7 +1036,7 @@ fn exportSiteDay(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, site
 pub fn refreshExports(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db) !void {
     const pending = try data.setting(arena, db, .@"export.refresh") orelse return;
     const sites = try data.sites(arena, db);
-    var entries = std.mem.tokenizeScalar(u8, pending, ',');
+    var entries = std.mem.tokenizeScalar(u8, pending[0 .. std.mem.findScalar(u8, pending, '#') orelse pending.len], ',');
     while (entries.next()) |entry| {
         const split = std.mem.findScalar(u8, entry, ':') orelse return error.CorruptExportRefresh;
         const site_id = try std.fmt.parseInt(i64, entry[0..split], 10);
@@ -1075,10 +1104,16 @@ pub fn searchPage(ctx: *Ctx, site: data.Site) !void {
     const path = try std.fmt.allocPrint(arena, "/{s}/search", .{site.slug});
     const range = view.range;
     try layout.head(ctx, .{ .title = "Search", .subtitle = try std.fmt.allocPrint(arena, "What people searched on Google before they arrived · Search Console · {f}", .{range}), .view = view, .path = path, .filter = false });
+    // Google publishes these numbers days late: both periods end as many days
+    // early as the newest stored day trails the period, so a comparison never
+    // shows the missing days as a drop.
+    const newest = try ctx.db.scalar(arena, []const u8, "SELECT coalesce(max(day),'') FROM search_queries WHERE site_id=?", .{site.id});
+    const last_day = (range.end_ms - 1) - @mod(range.end_ms - 1, data.day_ms);
+    const lag = if (data.parseDate(newest)) |at| std.math.clamp(@divFloor(last_day - at, data.day_ms), 0, @as(i64, @intFromFloat(range.days())) - 1) else |_| 0;
     const from = data.dateText(range.start_ms);
-    const to = data.dateText(range.end_ms - 1);
+    const to = data.dateText(range.end_ms - 1 - lag * data.day_ms);
     const prev_from = data.dateText(range.prev_start_ms);
-    const prev_to = data.dateText(range.prev_end_ms - 1);
+    const prev_to = data.dateText(range.prev_end_ms - 1 - lag * data.day_ms);
     const connected = try ctx.db.scalar(arena, i64, "SELECT count(*) FROM integrations WHERE site_id=? AND kind='search_console'", .{site.id}) != 0;
     if (!connected) {
         try w.writeAll("<div class=\"card\">");

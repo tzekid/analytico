@@ -167,7 +167,8 @@ fn summarise(arena: std.mem.Allocator, shared: *server.Shared, db: *db_mod.Db, s
         for (entry.row.values, 5..) |value, index| try insert.bindInt(index, value);
         _ = try insert.step();
     }
-    var week_insert = try write.prepare(arena, "INSERT INTO visitor_weeks(site_id,week,visitor_id) VALUES(?,?,?) ON CONFLICT DO NOTHING");
+    // Read before the write lock: a visitor forgotten since gets no week back.
+    var week_insert = try write.prepare(arena, "INSERT INTO visitor_weeks(site_id,week,visitor_id) SELECT ?1,?2,?3 WHERE EXISTS(SELECT 1 FROM visitors WHERE site_id=?1 AND visitor_id=?3) ON CONFLICT DO NOTHING");
     defer week_insert.deinit();
     for (active.items) |visitor_id| {
         try week_insert.reset();

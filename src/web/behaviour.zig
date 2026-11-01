@@ -328,13 +328,22 @@ pub const Moment = struct { at: i64, kind: []const u8, title: []const u8, detail
 
 /// Everything that happened in a session, in order: pages, events (rage
 /// clicks and payments marked) and errors. Never anything typed.
+/// SQL list of the currencies with no minor unit, and with three.
+fn currencyList(comptime codes: []const []const u8) []const u8 {
+    comptime var out: []const u8 = "";
+    inline for (codes, 0..) |code, index| out = out ++ (if (index == 0) "'" else ",'") ++ code ++ "'";
+    return out;
+}
+
 pub fn momentsOf(ctx: *Ctx, site_id: i64, session_id: []const u8) ![]Moment {
-    return ctx.db.all(ctx.arena, Moment,
+    return ctx.db.all(ctx.arena, Moment, comptime
         \\SELECT at,kind,title,detail FROM (
         \\ SELECT occurred_at_ms at,'page' kind,path title,'' detail FROM page_views WHERE site_id=?1 AND session_id=?2
         \\ UNION ALL SELECT occurred_at_ms,CASE WHEN name='rage_click' THEN 'rage' WHEN value_minor IS NOT NULL THEN 'money' ELSE 'event' END,name,
         \\   coalesce(json_extract(properties_json,'$.element'),json_extract(properties_json,'$.action'),json_extract(properties_json,'$.host'),json_extract(properties_json,'$.file'),'') ||
-        \\   CASE WHEN value_minor IS NOT NULL THEN ' · ' || currency || ' ' || printf('%.2f',value_minor/100.0) ELSE '' END
+        \\   CASE WHEN value_minor IS NULL THEN '' WHEN currency IN (
+    ++ currencyList(&html.zero_decimal) ++ ") THEN ' · ' || currency || ' ' || value_minor WHEN currency IN (" ++ currencyList(&html.three_decimal) ++
+        \\) THEN ' · ' || currency || ' ' || printf('%.3f',value_minor/1000.0) ELSE ' · ' || currency || ' ' || printf('%.2f',value_minor/100.0) END
         \\   FROM events WHERE site_id=?1 AND session_id=?2
         \\ UNION ALL SELECT occurred_at_ms,'error',message,coalesce(file,'') || coalesce(':' || line,'') FROM errors WHERE site_id=?1 AND session_id=?2
         \\) ORDER BY at LIMIT 300

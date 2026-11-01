@@ -65,6 +65,8 @@ function fake({ incoming, outgoing, url, base, body, json }) {
     return json({ rows: [
       { keys: [day, "urban garden ideas", "https://shop.example/pricing"], clicks: 82, impressions: 2100, position: 4.2 },
       { keys: [day, "how to start seeds indoors", "https://shop.example/"], clicks: 38, impressions: 1800, position: 8.7 },
+      // A malformed answer is stored as zeros, never trusted as a number.
+      { keys: [day, "malformed numbers", "https://shop.example/"], clicks: "NaN", impressions: "1e30", position: "inf" },
     ] });
   }
   if (url.pathname.endsWith(":runReport")) {
@@ -76,6 +78,7 @@ function fake({ incoming, outgoing, url, base, body, json }) {
     const day = start.toISOString().slice(0, 10).replaceAll("-", "");
     const value = { pagePath: "/old-post", sessionSource: "google", countryId: "fr", deviceCategory: "mobile" }[second];
     rows.push({ dimensionValues: [{ value: day }, ...(second ? [{ value }] : [])], metricValues: [{ value: "120" }, { value: "40" }] });
+    rows.push({ dimensionValues: [], metricValues: [{ value: "1" }, { value: "1" }] });
     return json({ rows });
   }
   if (url.pathname.endsWith("googleAds:searchStream")) {
@@ -371,7 +374,10 @@ await journey("v3", async (t) => {
   };
   await visit("/shop", "Returning visitors");
   await page.locator(".country-row", { hasText: "Germany" }).waitFor();
-  await page.locator(".product-row", { hasText: "Seed starter kit" }).waitFor();
+  // Sent by the browser and the server, the order counts once, everywhere.
+  await page.locator(".product-row", { hasText: "Seed starter kit" }).getByText("1 order", { exact: true }).waitFor();
+  const purchased = JSON.parse(t.cli("report", "goals", "shop", "--json")).find((goal) => goal.goal === "purchased");
+  assert.equal(purchased.completions, 1, JSON.stringify(purchased));
   assert.match(await page.locator(".sidebar-meta").textContent(), /Full · \d+% consented · UTC/);
   await visit("/shop/revenue", "Orders");
   assert.equal((await page.locator(".metric", { hasText: "Orders" }).locator(".metric-value").textContent()).trim(), "1");
@@ -534,7 +540,8 @@ await journey("v3", async (t) => {
     return page.locator(".toast").textContent();
   };
   await connect("search_console");
-  assert.match(await configure("search_console", { property: "sc-domain:shop.example" }, "Sync now"), /2 query rows/);
+  assert.match(await configure("search_console", { property: "sc-domain:shop.example" }, "Sync now"), /3 query rows/);
+  assert.deepEqual({ ...row("SELECT clicks,impressions,position_x10 p FROM search_queries WHERE query='malformed numbers'") }, { clicks: 0, impressions: 0, p: 0 });
   await visit("/shop/search", "urban garden ideas");
 
   await connect("ga4");
@@ -553,6 +560,15 @@ await journey("v3", async (t) => {
     await Promise.all([decision(buyer), buyer.goto(`${originB}/welcome`)]);
     await t.until(() => row("SELECT count(*) n FROM events WHERE order_id=?", order).n === 1, "ad purchase");
   }
+  // A buyer who withdraws before the sync sends the ad platforms nothing.
+  const withdrawing = await (await newContext()).newPage();
+  await Promise.all([decision(withdrawing), withdrawing.goto(`${originB}/checkout?gclid=EAIaIQ-withdrawn`)]);
+  await t.until(() => withdrawing.evaluate((site) => !!localStorage.getItem(`analytico:${site}:visitor`), publicId), "withdrawing buyer remembered");
+  await withdrawing.evaluate(() => analytico.track("purchase", {}, { value_minor: 500, currency: "EUR", order_id: "G-2" }));
+  await Promise.all([decision(withdrawing), withdrawing.goto(`${originB}/welcome`)]);
+  await t.until(() => row("SELECT count(*) n FROM events WHERE order_id='G-2'").n === 1, "withdrawing buyer's purchase");
+  await withdrawing.evaluate(() => analytico.consent("denied"));
+  await t.until(() => row("SELECT count(*) n FROM page_views WHERE click_id LIKE '%withdrawn'").n === 0, "click ID gone with consent");
   await connect("google_ads");
   assert.match(await configure("google_ads", { customer_id: "123-456-7890", developer_token: "dev-token", conversion_action: "customers/1234567890/conversionActions/1" }, "Sync now"), /1 cost rows in, 1 conversion out/);
   assert.equal(row("SELECT amount_minor a FROM campaign_spend WHERE source='google'").a, 1250);
@@ -740,12 +756,14 @@ await journey("v3", async (t) => {
   const privacyNow = Date.now();
   const privacyBase = { occurred_at_ms: privacyNow, tracking_mode: "full", consent_mode: "pending", tracker_version: "2", release_id: "", internal: false };
   const privacyRecords = [
-    ...[["/privacy/email", "reader@example.test"], ["/privacy/number", "12 34-56"], ["/privacy/term", "  GARDEN   TOOLS  "]].map(([path, search_term]) => ({ ...privacyBase, event_id: randomUUID(), page_id: randomUUID(), type: "page_view", path, search_term, search_results: 0 })),
+    ...[["/privacy/email", "reader@example.test"], ["/privacy/number", "12 34-56"], ["/privacy/phone", "06.12.34.56.78"], ["/privacy/term", "  GARDEN   TOOLS  "]].map(([path, search_term]) => ({ ...privacyBase, event_id: randomUUID(), page_id: randomUUID(), type: "page_view", path, search_term, search_results: 0 })),
     { ...privacyBase, event_id: randomUUID(), page_id: randomUUID(), type: "error", path: "/privacy/error", message: "ReferenceError: reader@example.test", file: "https://assets.example.test/app.js?version=fixture" },
+    { ...privacyBase, event_id: randomUUID(), page_id: randomUUID(), type: "page_view", path: "/privacy/unsubscribe/reader@example.test", utm_source: "newsletter", utm_content: "reader%40example.test" },
   ];
   const minimized = await fetch(`${originA}/e`, { method: "POST", headers: { origin: originA, "content-type": "text/plain", "user-agent": "Chrome/140" }, body: JSON.stringify({ v: 2, site: publicId, sent_at_ms: privacyNow, records: privacyRecords }) });
   assert.equal(minimized.status, 200);
-  assert.deepEqual(rows("SELECT search_term FROM page_views WHERE path LIKE '/privacy/%' ORDER BY path").map((item) => item.search_term), [null, null, "garden tools"]);
+  assert.deepEqual(rows("SELECT search_term FROM page_views WHERE path LIKE '/privacy/%' ORDER BY path").map((item) => item.search_term), [null, null, null, "garden tools", null]);
+  assert.deepEqual({ ...row("SELECT path,utm_source,utm_content FROM page_views WHERE path LIKE '/privacy/unsubscribe/%'") }, { path: "/privacy/unsubscribe/[email]", utm_source: "newsletter", utm_content: null });
   assert.deepEqual({ ...row("SELECT message,file FROM errors WHERE path='/privacy/error'") }, { message: "ReferenceError", file: "app.js" });
   // A page the site never records keeps no heatmap or form detail, even from
   // a consented batch sent without the tracker.
@@ -779,6 +797,8 @@ await journey("v3", async (t) => {
   const withdrawn = await (await withdrawalDecision).json();
   assert.deepEqual([withdrawn.upgrade, withdrawn.drop_state], ["never", "denied"]);
   await t.until(() => row("SELECT consent_state FROM visitors WHERE visitor_id=?", originalVisitor)?.consent_state === "denied", "withdrawal stored");
+  await page.goto(`${originA}/shop/people/${originalVisitor}`);
+  await page.getByText("Withdrawn", { exact: true }).waitFor();
   recordedUrl.searchParams.set("seq", "99999");
   recordedUrl.searchParams.set("first", String(Date.now()));
   recordedUrl.searchParams.set("last", String(Date.now()));
@@ -804,6 +824,12 @@ await journey("v3", async (t) => {
   await consentPage.evaluate(() => analytico.forget());
   await t.until(() => !row("SELECT visitor_id FROM visitors WHERE visitor_id=?", newVisitor), "new visitor forgotten");
   await consentContext.close();
+  // A tab or domain that still holds the forgotten ID cannot start them again.
+  const staleAt = Date.now();
+  const staleRecord = { ...privacyBase, occurred_at_ms: staleAt, consent_mode: "granted", event_id: randomUUID(), type: "page_view", page_id: randomUUID(), path: "/home", visitor_id: newVisitor, session_id: randomUUID() };
+  const stale = await fetch(`${originA}/e`, { method: "POST", headers: { origin: originA, "content-type": "text/plain", "user-agent": "Chrome/140" }, body: JSON.stringify({ v: 2, site: publicId, sent_at_ms: staleAt, records: [staleRecord] }) });
+  assert.equal((await stale.json()).drop_state, "denied");
+  assert.deepEqual([row("SELECT count(*) n FROM page_views WHERE visitor_id=?", newVisitor).n, row("SELECT count(*) n FROM visitors WHERE visitor_id=?", newVisitor).n], [0, 0]);
   // Signed server records cannot attach a withdrawn or forgotten visitor
   // either: the event is kept without the identity, identify links nothing.
   const serverAt = Date.now();

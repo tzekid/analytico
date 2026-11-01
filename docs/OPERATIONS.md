@@ -60,6 +60,10 @@ analytico migrate --data ~/.local/share/analytico-sqlite \
 systemctl --user start analytico.service
 ```
 
+Schema 13 remembers forgotten visitor IDs (the ID only) so a tab or another
+of the site's domains that still holds one cannot start that visitor again,
+and indexes receipts and daily aggregates by time so retention deletes in
+short batches; building them reads each of those tables once.
 Schema 12 records the current consent state on remembered visitors so withdrawn
 consent also stops queued replay uploads; it is instant.
 Schema 11 adds the `devices` table for app notifications; it is instant.

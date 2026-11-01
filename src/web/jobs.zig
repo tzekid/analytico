@@ -164,15 +164,15 @@ pub fn renderReport(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, s
     const query_start = std.mem.findScalar(u8, view_path, '?');
     const params = html.Params.parse(arena, if (query_start) |index| view_path[index + 1 ..] else "") catch html.Params{};
     var view = try data.View.parse(arena, site, params, at);
-    // Reports cover the last complete period.
+    // Reports cover the last complete period, in whole days up to today: a
+    // view saved from one day (hour by hour) covers yesterday each time.
     const today = at - @mod(at, data.day_ms);
-    if (view.range.bucket_ms == data.day_ms) {
-        const length = view.range.end_ms - view.range.start_ms;
-        view.range.end_ms = today;
-        view.range.start_ms = today - length;
-        view.range.prev_end_ms = view.range.start_ms;
-        view.range.prev_start_ms = view.range.start_ms - length;
-    }
+    const span = view.range.end_ms - view.range.start_ms;
+    const length = @max(data.day_ms, @divFloor(span + data.day_ms - 1, data.day_ms) * data.day_ms);
+    view.range.end_ms = today;
+    view.range.start_ms = today - length;
+    view.range.prev_end_ms = view.range.start_ms;
+    view.range.prev_start_ms = view.range.start_ms - length;
     const base = try origin(arena, db);
     const current = try data.totals(arena, db, view, view.range.start_ms, view.range.end_ms);
     const previous = try data.totals(arena, db, view, view.range.prev_start_ms, view.range.prev_end_ms);

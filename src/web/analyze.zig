@@ -491,9 +491,9 @@ fn campaigns(ctx: *Ctx, view: data.View, path: []const u8) !void {
     try sql.str(&from);
     try sql.add(" AND spend_date<=");
     try sql.str(&to);
-    try sql.add(" GROUP BY campaign), k AS (SELECT c FROM cv UNION SELECT c FROM sp), vis AS (SELECT c,count(DISTINCT visitor_day_id) n FROM cv GROUP BY c), conv AS (SELECT c,sum(name IN (SELECT match_value FROM goals WHERE kind='event' AND site_id=");
+    try sql.add(" GROUP BY campaign), k AS (SELECT c FROM cv UNION SELECT c FROM sp), vis AS (SELECT c,count(DISTINCT visitor_day_id) n FROM cv GROUP BY c), conv AS (SELECT c,count(DISTINCT CASE WHEN name IN (SELECT match_value FROM goals WHERE kind='event' AND site_id=");
     try sql.int(site.id);
-    try sql.add(")) n,max(currency) cur FROM ev GROUP BY c), orders AS (SELECT coalesce(json_extract(o.properties_json,'$.campaign'),cs.c,cv.c) c,sum(o.v) v FROM o LEFT JOIN cs ON cs.session_id=o.session_id LEFT JOIN cv ON cv.page_id=o.page_id WHERE o.source='server' GROUP BY 1), refunds AS (SELECT c,sum(abs(value_minor)) v FROM ev WHERE name IN " ++ customers.refund_names ++ " AND value_minor IS NOT NULL AND source='server' GROUP BY c) SELECT k.c,coalesce(vis.n,0),coalesce(conv.n,0),coalesce(orders.v,0)-coalesce(refunds.v,0),coalesce(sp.a,0),coalesce(sp.cur,conv.cur,'') FROM k LEFT JOIN vis ON vis.c=k.c LEFT JOIN conv ON conv.c=k.c LEFT JOIN orders ON orders.c=k.c LEFT JOIN refunds ON refunds.c=k.c LEFT JOIN sp ON sp.c=k.c ORDER BY 4 DESC,2 DESC LIMIT 100");
+    try sql.add(") THEN o END) n,max(currency) cur FROM ev GROUP BY c), orders AS (SELECT coalesce(json_extract(o.properties_json,'$.campaign'),cs.c,cv.c) c,sum(o.v) v FROM o LEFT JOIN cs ON cs.session_id=o.session_id LEFT JOIN cv ON cv.page_id=o.page_id WHERE o.source='server' GROUP BY 1), refunds AS (SELECT c,sum(abs(value_minor)) v FROM ev WHERE name IN " ++ customers.refund_names ++ " AND value_minor IS NOT NULL AND source='server' GROUP BY c) SELECT k.c,coalesce(vis.n,0),coalesce(conv.n,0),coalesce(orders.v,0)-coalesce(refunds.v,0),coalesce(sp.a,0),coalesce(sp.cur,conv.cur,'') FROM k LEFT JOIN vis ON vis.c=k.c LEFT JOIN conv ON conv.c=k.c LEFT JOIN orders ON orders.c=k.c LEFT JOIN refunds ON refunds.c=k.c LEFT JOIN sp ON sp.c=k.c ORDER BY 4 DESC,2 DESC LIMIT 100");
     var statement = try sql.prepare(ctx.db);
     defer statement.deinit();
     var rows: std.ArrayList(Campaign) = .empty;
@@ -511,9 +511,9 @@ fn campaigns(ctx: *Ctx, view: data.View, path: []const u8) !void {
             .currency = try arena.dupe(u8, statement.columnText(5)),
         };
         if (row.currency.len == 3) currency = row.currency;
-        spend += row.spend;
-        revenue += row.revenue;
-        conversions += row.conversions;
+        spend +|= row.spend;
+        revenue +|= row.revenue;
+        conversions +|= row.conversions;
         try rows.append(arena, row);
     }
     try w.writeAll("<div class=\"grid grid-4 mb-16\">");
@@ -534,7 +534,7 @@ fn campaigns(ctx: *Ctx, view: data.View, path: []const u8) !void {
             \\<button type="button" class="edit-cell" data-edit>{spend}
         , .{ .name = row.name, .visitors = html.int(row.visitors), .conversions = html.int(row.conversions), .revenue = html.money(row.revenue, row_currency), .slug = site.slug, .from = &from, .to = &to, .currency = row_currency, .spend = html.money(row.spend, row_currency) });
         try icon(w, "pencil");
-        try render(w, "</button><input class=\"input inline-input\" name=\"amount\" inputmode=\"decimal\" value=\"{whole}.{cents}\" hidden aria-label=\"Spend for {name}\"></form></td><td class=\"r\">", .{ .whole = @divTrunc(row.spend, 100), .cents = try std.fmt.allocPrint(arena, "{d:0>2}", .{@as(u64, @intCast(@mod(row.spend, 100)))}), .name = row.name });
+        try render(w, "</button><input class=\"input inline-input\" name=\"amount\" inputmode=\"decimal\" value=\"{amount}\" hidden aria-label=\"Spend for {name}\"></form></td><td class=\"r\">", .{ .amount = try moneyText(arena, row.spend, row_currency), .name = row.name });
         if (row.spend > 0) {
             const roas = @as(f64, @floatFromInt(row.revenue)) / @as(f64, @floatFromInt(row.spend));
             try render(w, "<span class=\"{class}\">{roas:.1}×</span>", .{ .class = if (roas < 3) "warn" else "", .roas = roas });
@@ -557,7 +557,9 @@ fn campaigns(ctx: *Ctx, view: data.View, path: []const u8) !void {
     );
 }
 
-fn parseMoney(text: []const u8) !i64 {
+/// An amount typed in major units ("1,200.50"), in the currency's minor unit:
+/// at most as many decimals as it has (none for yen, three for dinars).
+fn parseMoney(text: []const u8, digits: u8) !i64 {
     const trimmed = std.mem.trim(u8, text, " ");
     if (trimmed.len == 0 or trimmed.len > 16) return error.InvalidAmount;
     var whole: i64 = 0;
@@ -573,16 +575,28 @@ fn parseMoney(text: []const u8) !i64 {
         }
         if (!std.ascii.isDigit(byte)) return error.InvalidAmount;
         if (seen_point) {
-            if (decimals == 2) return error.InvalidAmount;
+            if (decimals == digits) return error.InvalidAmount;
             cents = cents * 10 + (byte - '0');
             decimals += 1;
         } else whole = whole * 10 + (byte - '0');
     }
-    if (decimals == 1) cents *= 10;
-    return whole * 100 + cents;
+    while (decimals < digits) : (decimals += 1) cents *= 10;
+    return whole * std.math.pow(i64, 10, digits) + cents;
+}
+
+/// The amount as `parseMoney` reads it back.
+fn moneyText(arena: std.mem.Allocator, minor: i64, currency: []const u8) ![]const u8 {
+    return switch (html.minorDigits(currency)) {
+        0 => std.fmt.allocPrint(arena, "{d}", .{minor}),
+        3 => std.fmt.allocPrint(arena, "{d}.{d:0>3}", .{ @divTrunc(minor, 1000), @as(u64, @intCast(@mod(minor, 1000))) }),
+        else => std.fmt.allocPrint(arena, "{d}.{d:0>2}", .{ @divTrunc(minor, 100), @as(u64, @intCast(@mod(minor, 100))) }),
+    };
 }
 
 /// An ISO 4217 code as the collector takes it: three letters A–Z.
+/// The collector's bound on money values, for spend entered or imported.
+pub const max_spend_minor: i64 = 1_000_000_000_000;
+
 fn isCurrency(code: []const u8) bool {
     if (code.len != 3) return false;
     for (code) |byte| if (!std.ascii.isUpper(byte)) return false;
@@ -591,7 +605,7 @@ fn isCurrency(code: []const u8) bool {
 
 pub fn setSpend(ctx: *Ctx, site: data.Site) !void {
     const campaign = try ctx.field("campaign");
-    const amount = parseMoney(try ctx.field("amount")) catch return overview.failBack(ctx, site, "Spend must be a number like 1200 or 1200.50.");
+    const typed = try ctx.field("amount");
     const from = try ctx.field("from");
     const to = try ctx.field("to");
     const currency = try ctx.field("currency");
@@ -599,6 +613,8 @@ pub fn setSpend(ctx: *Ctx, site: data.Site) !void {
     _ = data.parseDate(to) catch return overview.failBack(ctx, site, "Invalid period.");
     domain.validateText(campaign, 128, false) catch return overview.failBack(ctx, site, "Invalid campaign.");
     if (!isCurrency(currency)) return overview.failBack(ctx, site, "Invalid currency.");
+    const amount = parseMoney(typed, html.minorDigits(currency)) catch return overview.failBack(ctx, site, "Spend must be a number like 1200 or 1200.50.");
+    if (amount > max_spend_minor) return overview.failBack(ctx, site, "That spend is too large.");
     const db = ctx.shared.lockWrite();
     defer ctx.shared.unlockWrite();
     // The edited number is the period's total: replace that period's rows.
@@ -637,7 +653,7 @@ pub fn importSpend(ctx: *Ctx, site: data.Site) !void {
         const upper = if (count == 6) try std.ascii.allocUpperString(ctx.arena, fields[5]) else "";
         const bad = count != 6 or (data.parseDate(fields[0]) catch null) == null or fields[2].len == 0 or !isCurrency(upper);
         const amount = if (bad) -1 else std.fmt.parseInt(i64, fields[4], 10) catch -1;
-        if (bad or amount < 0) {
+        if (bad or amount < 0 or amount > max_spend_minor) {
             db.exec("ROLLBACK") catch {};
             return overview.failBack(ctx, site, try std.fmt.allocPrint(ctx.arena, "Line {d} doesn’t match date,source,campaign,content,amount_minor,currency.", .{line_number}));
         }
@@ -909,7 +925,9 @@ test "experiment significance" {
 }
 
 test "money parsing" {
-    try std.testing.expectEqual(@as(i64, 120050), try parseMoney("1,200.5"));
-    try std.testing.expectEqual(@as(i64, 600), try parseMoney("6"));
-    try std.testing.expectError(error.InvalidAmount, parseMoney("1.234"));
+    try std.testing.expectEqual(@as(i64, 120050), try parseMoney("1,200.5", 2));
+    try std.testing.expectEqual(@as(i64, 600), try parseMoney("6", 2));
+    try std.testing.expectError(error.InvalidAmount, parseMoney("1.234", 2));
+    try std.testing.expectEqual(@as(i64, 1200), try parseMoney("1,200", 0));
+    try std.testing.expectEqual(@as(i64, 1250), try parseMoney("1.25", 3));
 }

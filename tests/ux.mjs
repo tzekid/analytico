@@ -207,6 +207,22 @@ await journey("ux", async (t) => {
   await page.unroute(upgraded);
   await page.locator("h1", { hasText: "Events" }).waitFor();
   assert.equal(await page.evaluate(() => window.sameDocument), undefined);
+  // A form's answer from an upgraded server is shown, not loaded again: a
+  // key shown once stays on screen.
+  await page.goto(`${base}/settings/api`);
+  const created = (url) => url.pathname === "/settings/api/create";
+  const newStyles = (url) => url.pathname === "/_/app.0000000000.css";
+  await page.route(newStyles, (route) => route.fulfill({ status: 200, contentType: "text/css", body: "" }));
+  await page.route(created, async (route) => {
+    const response = await route.fetch();
+    await route.fulfill({ response, body: (await response.text()).replace(/\/_\/app\.\w+\.css/, "/_/app.0000000000.css") });
+  });
+  await page.locator("input[name=name]").fill("after upgrade");
+  await page.locator("form[action='/settings/api/create'] button").click();
+  await page.locator("input[readonly][value^='an_']").waitFor();
+  await page.unroute(created);
+  await page.unroute(newStyles);
+  await page.goto(`${base}/ux`);
 
   // Each website opens the way it was last viewed (30 days here), also on a
   // full load; going back to the default forgets it.
@@ -541,6 +557,8 @@ await journey("ux", async (t) => {
   const spend = (form, to = "spend") => page.request.post(`${base}/ux/${to}`, { form, headers: { origin: base } });
   await spend({ campaign: "launch", amount: "12", from: day(1), to: day(1), currency: "<s>" });
   await spend({ csv: `${day(1)},meta,launch,,1200,e<r` }, "spend-import");
+  // Amounts past the collector's money bound are refused like bad currencies.
+  await spend({ csv: `${day(1)},meta,launch,,10000000000000,EUR` }, "spend-import");
   assert.equal(row("SELECT count(*) n FROM campaign_spend").n, 0);
   await spend({ csv: `${day(1)},meta,launch,,1200,eur` }, "spend-import");
   assert.equal(row("SELECT currency FROM campaign_spend").currency, "EUR");

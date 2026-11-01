@@ -493,6 +493,8 @@ await journey("access", async (t) => {
   // A member limited to one website doesn't see another one's name in settings.
   const settingsPage = await (await viewer.request.get(`${origin}/settings/signin?site=hidden`)).text();
   assert.doesNotMatch(settingsPage, /hidden\.example/);
+  // Viewers may ask why a chart moved, but not rewrite an alert's explanation.
+  assert.equal((await post(viewer, "/shop/why", { alert: "1" })).status(), 403);
 
   // Scheduled emails follow access: narrowing and removal take the member off.
   await post(context, `/settings/team/sites/${viewerId}`, [["site", shop], ["site", hidden]]);
@@ -532,6 +534,10 @@ await journey("access", async (t) => {
   await page.goto(`${origin}/settings/backups`);
   await page.getByText("stays on while data retention is set").waitFor();
 
+  // A second address with the same name (www. and without) gets its own slug.
+  for (const address of ["https://example.com", "https://www.example.com"]) assert.equal((await post(context, "/setup", { origin: address, mode: "lite" })).status(), 303);
+  assert.deepEqual(read("SELECT slug FROM sites WHERE slug LIKE 'example-com%' ORDER BY id").map((row) => row.slug), ["example-com", "example-com-2"]);
+
   // An alert whose filters can't be read is refused instead of stored.
   await post(context, "/shop/alerts", { name: "Broken", metric: "page_views", direction: "drops", threshold: "20", filters: "f=%" });
   assert.equal(read("SELECT count(*) n FROM alerts")[0].n, 0);
@@ -564,6 +570,13 @@ await journey("access", async (t) => {
   const viaApi = await audited(() => signed({ type: "forget", visitor_id: erased }));
   assert.deepEqual([viaApi.action, viaApi.actor, viaApi.detail], ["person.deleted", "api", `Visitor ${erased.slice(0, 4)} · 1 visitor(s)`]);
   assert.equal(read("SELECT count(*) n FROM page_views WHERE visitor_id=?", erased)[0].n, 0);
+  // A user known only from the backend's events can be exported and deleted.
+  await signed({ type: "event", name: "registration_confirmed", user_id: "lite-user-7" });
+  const liteExport = await context.request.get(`${origin}/settings/consent/export?site=shop&person=lite-user-7`);
+  assert.equal(liteExport.status(), 200);
+  assert.deepEqual((await liteExport.json()).events.map((event) => event.name), ["registration_confirmed"]);
+  assert.equal((await post(context, "/settings/consent/forget", { site: "shop", person: "lite-user-7" })).status(), 303);
+  assert.equal(read("SELECT count(*) n FROM events WHERE name='registration_confirmed'")[0].n, 0);
 
   // The CLI's deletions are logged too, once the server has stopped.
   await admin.close();

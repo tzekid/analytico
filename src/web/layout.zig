@@ -447,9 +447,16 @@ fn actionsMenu(ctx: *Ctx, view: data.View, path: []const u8) !void {
     try icon(w, "more");
     try w.writeAll("<span class=\"btn-label phone-only\">Actions</span></button><div id=\"actions-pop\" popover class=\"pop\" data-anchor=\"[popovertarget=actions-pop]\"><button class=\"menu-item accent\" type=\"button\" data-palette data-ask-view>");
     try icon(w, "sparkles");
-    try render(w, "Ask about this view…<kbd>⌘J</kbd></button><div class=\"menu-sep\"></div><a class=\"menu-item\" href=\"{href}\" download>", .{ .href = try view.href(ctx.arena, try std.fmt.allocPrint(ctx.arena, "/{s}/export.csv", .{site.slug}), &.{.{ "view", path }}) });
+    const tab = ctx.param("tab") orelse "";
+    const tech = ctx.param("tech") orelse "";
+    try render(w, "Ask about this view…<kbd>⌘J</kbd></button><div class=\"menu-sep\"></div><a class=\"menu-item\" href=\"{href}\" download>", .{ .href = try view.href(ctx.arena, try std.fmt.allocPrint(ctx.arena, "/{s}/export.csv", .{site.slug}), &.{ .{ "view", path }, .{ "tab", tab }, .{ "tech", tech }, .{ "q", ctx.param("q") orelse "" } }) });
     try icon(w, "download");
-    try w.writeAll("Download CSV</a><button class=\"menu-item\" type=\"button\" data-print>");
+    const exported = if (@import("overview.zig").exportDim(path, tab, tech)) |dim| switch (dim) {
+        .page => "pages",
+        .source => "sources",
+        else => "devices",
+    } else "daily totals";
+    try render(w, "Download {what} (CSV)</a><button class=\"menu-item\" type=\"button\" data-print>", .{ .what = exported });
     try icon(w, "print");
     try w.writeAll("Download PDF</button><div class=\"menu-sep\"></div><button class=\"menu-item\" type=\"button\" data-dialog=\"schedule-dialog\" commandfor=\"schedule-dialog\" command=\"show-modal\">");
     try icon(w, "mail");

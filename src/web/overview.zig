@@ -70,8 +70,10 @@ pub fn sourceLabels(arena: std.mem.Allocator, keys: []const []const u8) ![]const
 pub fn channel(key: []const u8, medium: []const u8) []const u8 {
     if (std.mem.eql(u8, key, "direct")) return "Direct";
     if (std.mem.eql(u8, key, self_referrer)) return "Within the site";
-    if (std.mem.indexOf(u8, medium, "email") != null or std.mem.indexOf(u8, medium, "newsletter") != null) return "Email";
-    if (std.mem.indexOf(u8, medium, "cpc") != null or std.mem.indexOf(u8, medium, "paid") != null or std.mem.indexOf(u8, medium, "ads") != null) return "Paid";
+    // utm_medium keeps the sender's case ("CPC", "Email"); every screen and
+    // report groups it the same way.
+    if (std.ascii.findIgnoreCase(medium, "email") != null or std.ascii.findIgnoreCase(medium, "newsletter") != null) return "Email";
+    if (std.ascii.findIgnoreCase(medium, "cpc") != null or std.ascii.findIgnoreCase(medium, "paid") != null or std.ascii.findIgnoreCase(medium, "ads") != null) return "Paid";
     // Whole labels of the host ("chatgpt" in chatgpt.com, never "t.co" inside it).
     const has = struct {
         fn label(host: []const u8, names: []const []const u8) bool {
@@ -406,19 +408,20 @@ pub fn sellsCard(ctx: *Ctx, view: data.View) !void {
     const arena = ctx.arena;
     const w = ctx.w();
     const customers = @import("customers.zig");
-    var sql = data.Sql.init(arena);
-    try sql.add("SELECT max(i.name),count(DISTINCT e.event_id),sum(coalesce(i.price_minor,0)*i.quantity) FROM events e JOIN event_items i ON i.site_id=e.site_id AND i.event_id=e.event_id WHERE ");
-    try sql.events(view, view.range.start_ms, view.range.end_ms);
-    try sql.add(" AND e.name IN " ++ customers.purchase_names ++ " GROUP BY i.item_id ORDER BY 3 DESC LIMIT 4");
+    // The Products table's numbers: one copy of each order's items.
+    var sql = try customers.productSql(arena, view, 4);
     var statement = try sql.prepare(ctx.db);
     defer statement.deinit();
     try w.writeAll("<section class=\"card\">");
     try ui.cardHead(w, "What sells", try html.print(arena, "<a class=\"link\" href=\"{href}\">Open revenue →</a>", .{ .href = try view.href(arena, try std.fmt.allocPrint(arena, "/{s}/revenue", .{view.site.slug}), &.{}) }));
     try w.writeAll("<div class=\"stack-s\">");
     var index: usize = 0;
-    while (try statement.step() == .row) : (index += 1) {
-        const orders = statement.columnInt(1);
-        try render(w, "<div class=\"product-row\"><span class=\"n\">{n}</span><span class=\"grow\"><strong>{name}</strong><small>{orders} order{plural}</small></span><strong>{revenue}</strong></div>", .{ .n = index + 1, .name = statement.columnText(0), .orders = orders, .plural = if (orders == 1) "" else "s", .revenue = html.money(statement.columnInt(2), view.site.currency) });
+    // Columns: product_id, product, views, add_to_carts, orders, revenue_minor.
+    while (try statement.step() == .row) {
+        const orders = statement.columnInt(4);
+        if (orders == 0) continue;
+        index += 1;
+        try render(w, "<div class=\"product-row\"><span class=\"n\">{n}</span><span class=\"grow\"><strong>{name}</strong><small>{orders} order{plural}</small></span><strong>{revenue}</strong></div>", .{ .n = index, .name = statement.columnText(1), .orders = orders, .plural = if (orders == 1) "" else "s", .revenue = html.money(statement.columnInt(5), view.site.currency) });
     }
     if (index == 0) try w.writeAll("<p class=\"hint\">Orders arrived without items. Add <code>items</code> to purchase events to see products.</p>");
     try w.writeAll("</div></section>");
@@ -792,13 +795,26 @@ fn csvField(w: *std.Io.Writer, value: []const u8) !void {
     try w.writeByte('"');
 }
 
+/// What "Download CSV" holds for a screen: its table where it is one
+/// dimension (the first tab of Pages, Acquisition, Audience), else the view's
+/// daily totals. The menu names it, so the file is what was promised.
+pub fn exportDim(path: []const u8, tab: []const u8, tech: []const u8) ?data.Dim {
+    if (tab.len != 0 or tech.len != 0) return null;
+    if (std.mem.endsWith(u8, path, "/pages")) return .page;
+    if (std.mem.endsWith(u8, path, "/acquisition")) return .source;
+    if (std.mem.endsWith(u8, path, "/audience")) return .device;
+    return null;
+}
+
 pub fn exportCsv(ctx: *Ctx, site: data.Site) !void {
     const arena = ctx.arena;
     const view = try data.View.parse(arena, site, ctx.query, ctx.now());
-    const source_path = ctx.param("view") orelse "";
     const w = ctx.w();
-    const which: data.Dim = if (std.mem.endsWith(u8, source_path, "/pages")) .page else if (std.mem.endsWith(u8, source_path, "/acquisition")) .source else if (std.mem.endsWith(u8, source_path, "/audience")) .device else .page;
-    const daily = !(std.mem.endsWith(u8, source_path, "/pages") or std.mem.endsWith(u8, source_path, "/acquisition") or std.mem.endsWith(u8, source_path, "/audience"));
+    const chosen = exportDim(ctx.param("view") orelse "", ctx.param("tab") orelse "", ctx.param("tech") orelse "");
+    const which = chosen orelse .page;
+    const daily = chosen == null;
+    // The Pages search box narrows the table, as it does on screen.
+    const query = if (which == .page) ctx.param("q") orelse "" else "";
     if (daily) {
         try w.writeAll("period,page_views,visitors,active_seconds\n");
         const views = try data.series(arena, ctx.db, view, .views, view.range.start_ms);
@@ -815,6 +831,7 @@ pub fn exportCsv(ctx: *Ctx, site: data.Site) !void {
     } else {
         try w.print("{s},page_views,visitors,previous_page_views\n", .{@tagName(which)});
         for (try data.top(arena, ctx.db, view, which, 1000)) |row| {
+            if (query.len != 0 and std.ascii.findIgnoreCase(row.key, query) == null) continue;
             try csvField(w, row.key);
             try w.print(",{d},{d},{d}\n", .{ row.value, row.extra, row.previous });
         }
@@ -894,4 +911,9 @@ pub fn referer(ctx: *Ctx, site: data.Site) []const u8 {
 
 pub fn failBack(ctx: *Ctx, site: data.Site, text: []const u8) !void {
     return ctx.done(try std.fmt.allocPrint(ctx.arena, "!{s}", .{text}), "{s}", .{referer(ctx, site)});
+}
+
+test "channels group utm_medium whatever its case" {
+    try std.testing.expectEqualStrings("Paid", channel("google", "CPC"));
+    try std.testing.expectEqualStrings("Email", channel("news.example", "Email"));
 }
