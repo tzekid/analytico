@@ -422,6 +422,10 @@ await journey("ux", async (t) => {
   await page.locator("#filter-pop").getByRole("button", { name: "Apply" }).click();
   await page.waitForURL(/f=country%3ADE/);
   assert.doesNotMatch(page.url(), /f[dov]=/);
+  // A filter popover set up on one page is not kept for the next one.
+  await page.locator("a.nav", { hasText: "Pages" }).click();
+  await page.waitForURL(/\/spike\/pages/);
+  assert.equal(await page.locator("#filter-pop form").getAttribute("action"), "/spike/pages");
 
   // The daily check drafted a note for the spike; kept, it joins the chart.
   await t.until(() => row("SELECT count(*) n FROM annotations WHERE draft=1").n === 1, "anomaly drafted", 20000);

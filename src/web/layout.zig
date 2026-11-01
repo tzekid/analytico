@@ -383,11 +383,13 @@ pub fn hiddenState(ctx: *Ctx, view: data.View, skip: []const []const u8) !void {
 
 fn filterPopover(ctx: *Ctx, view: data.View, path: []const u8) !void {
     const w = ctx.w();
+    // `data-for` names the page and view: the script keeps a popover it set up
+    // across patches only while that stays the same.
     try render(w, "<button class=\"btn\" type=\"button\" popovertarget=\"filter-pop\" aria-label=\"Filter\"{!pressed}>", .{ .pressed = if (view.filters.len != 0) " aria-pressed=\"true\"" else "" });
     try icon(w, "filter");
     try render(w,
-        \\<span class="btn-label">Filter{!count}</span></button><div id="filter-pop" popover class="pop pop-wide" data-anchor="[popovertarget=filter-pop]"><form method="get" action="{path}" data-filter-form data-match="/{slug}/match.json">
-    , .{ .path = path, .slug = view.site.slug, .count = if (view.filters.len != 0) try std.fmt.allocPrint(ctx.arena, " · {d}", .{view.filters.len}) else "" });
+        \\<span class="btn-label">Filter{!count}</span></button><div id="filter-pop" popover class="pop pop-wide" data-anchor="[popovertarget=filter-pop]" data-for="{view}"><form method="get" action="{path}" data-filter-form data-match="/{slug}/match.json">
+    , .{ .path = path, .slug = view.site.slug, .count = if (view.filters.len != 0) try std.fmt.allocPrint(ctx.arena, " · {d}", .{view.filters.len}) else "", .view = try view.href(ctx.arena, path, &.{}) });
     try hiddenState(ctx, view, &.{ "f", "fm" });
     try render(w,
         \\<div class="pop-section" data-describe="/{slug}/describe"><div class="row nowrap"><input class="input grow" data-describe-q maxlength="200" autocomplete="off" placeholder="Describe them: mobile visitors from Germany last month" aria-label="Describe the visitors"><button type="button" class="btn" data-describe-go>Go</button></div><div class="mt-10" data-describe-out hidden></div></div>
