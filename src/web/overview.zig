@@ -821,6 +821,11 @@ pub fn exportCsv(ctx: *Ctx, site: data.Site) !void {
     }
     const from = data.dateText(view.range.start_ms);
     const to = data.dateText(view.range.end_ms - 1);
+    {
+        const db = ctx.shared.lockWrite();
+        defer ctx.shared.unlockWrite();
+        try @import("audit.zig").record(ctx, db, site.id, "report.exported", try std.fmt.allocPrint(arena, "CSV of {s} from {s} to {s}", .{ if (daily) "daily totals" else @tagName(which), &from, &to }));
+    }
     try ctx.header("content-disposition", try std.fmt.allocPrint(arena, "attachment; filename=\"{s}-{s}-{s}.csv\"", .{ site.slug, &from, &to }));
     try ctx.header("cache-control", "no-store");
     return ctx.finish("text/csv; charset=utf-8");

@@ -792,6 +792,9 @@ pub fn providerCallback(ctx: *Ctx, method: Method) !void {
     try ctx.setCookie(oidc_cookie, "", 0);
     if (state.len != 64 or (cookie.len != 64 and cookie.len != 128) or !std.mem.eql(u8, state, cookie[0..64])) return failTo(ctx, "login", "expired", "");
     const challenge = try consumeChallenge(ctx, &auth.hashToken(state)) orelse return failTo(ctx, "login", "expired", "");
+    // Integrations and ChatGPT plans keep their own OpenID attempts; only a
+    // sign-in, a link or an invite finishes here.
+    if (!(std.mem.eql(u8, challenge.intent, "login") or std.mem.eql(u8, challenge.intent, "link") or std.mem.eql(u8, challenge.intent, "invite"))) return failTo(ctx, "login", "expired", "");
     const token = if (std.mem.eql(u8, challenge.intent, "invite") and cookie.len == 128) cookie[64..] else "";
     if (std.mem.eql(u8, challenge.intent, "invite") and !std.mem.eql(u8, challenge.binding, &auth.hashToken(token))) return failTo(ctx, "login", "expired", "");
     if (!std.mem.eql(u8, challenge.purpose, "oidc") or !std.mem.eql(u8, challenge.provider, @tagName(provider))) return failTo(ctx, "login", "expired", "");

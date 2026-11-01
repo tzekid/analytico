@@ -94,9 +94,13 @@ fn plan(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, user_id: i64,
 }
 
 /// Interactive AI: the person's own ChatGPT plan, else the instance's key.
-/// A plan that fails never falls back to the key.
+/// A plan that fails never falls back to the key, not even once its sign-in
+/// has ended; signing out of the plan is the way back to the key.
 pub fn forPerson(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, user_id: i64, now_ms: i64) !Config {
-    if (try chatgpt.account(arena, db, shared.master_key, user_id)) |account| if (account.tokens != null) return plan(arena, shared, db, user_id, account);
+    if (try chatgpt.account(arena, db, shared.master_key, user_id)) |account| {
+        if (account.tokens != null) return plan(arena, shared, db, user_id, account);
+        if (account.ended) return error.AiSignInAgain;
+    }
     return instance(arena, db, shared.master_key, now_ms);
 }
 
@@ -104,7 +108,7 @@ pub fn forPerson(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, user
 /// admin who chose to lend it.
 pub fn forBackground(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, now_ms: i64) !Config {
     if (instance(arena, db, shared.master_key, now_ms)) |config| return config else |err| if (err != error.AiNotConfigured) return err;
-    const user_id = try db.scalar(arena, ?i64, "SELECT a.user_id FROM chatgpt_accounts a JOIN users u ON u.id=a.user_id WHERE a.background=1 AND a.tokens IS NOT NULL AND u.role IN ('owner','admin') ORDER BY a.user_id LIMIT 1", .{}) orelse return error.AiNotConfigured;
+    const user_id = try db.scalar(arena, ?i64, "SELECT a.user_id FROM chatgpt_accounts a JOIN users u ON u.id=a.user_id WHERE a.background=1 AND a.tokens<>'' AND u.role IN ('owner','admin') ORDER BY a.user_id LIMIT 1", .{}) orelse return error.AiNotConfigured;
     const account = try chatgpt.account(arena, db, shared.master_key, user_id) orelse return error.AiNotConfigured;
     return plan(arena, shared, db, user_id, account);
 }

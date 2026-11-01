@@ -24,7 +24,7 @@ const render = html.render;
 
 fn instanceShell(ctx: *Ctx, title: []const u8, nav: layout.Nav) !layout.Shell {
     const sites = try ctx.visibleSites();
-    const site: ?data.Site = if (ctx.param("site")) |slug| try data.siteBySlug(ctx.arena, ctx.db, slug) else if (sites.len != 0) sites[0] else null;
+    const site: ?data.Site = if (ctx.param("site")) |slug| try ctx.visibleSite(slug) else if (sites.len != 0) sites[0] else null;
     return .{ .title = title, .nav = nav, .site = site, .sites = sites, .health = if (site) |value| try healthLevel(ctx, value) else .ok };
 }
 
@@ -364,6 +364,9 @@ pub fn addAlert(ctx: *Ctx, site: data.Site) !void {
     if (threshold < 1 or threshold > 1000) return overview.failBack(ctx, site, "The threshold must be between 1 and 1000%.");
     domain.validateText(name, 80, false) catch return overview.failBack(ctx, site, "Give the alert a name.");
     if (filters.len > 2048) return overview.failBack(ctx, site, "Too many filters.");
+    // The daily check reads the filters the same way.
+    const params = html.Params.parse(ctx.arena, filters) catch return overview.failBack(ctx, site, "Those filters can’t be read.");
+    _ = data.View.parse(ctx.arena, site, params, ctx.now()) catch return overview.failBack(ctx, site, "Those filters can’t be read.");
     const db = ctx.shared.lockWrite();
     defer ctx.shared.unlockWrite();
     try db.run(ctx.arena, "INSERT INTO alerts(site_id,name,metric,direction,threshold_percent,filters,email,created_at_ms) VALUES(?,?,?,?,?,?,?,?)", .{ site.id, name, metric, direction, threshold, filters, @intFromBool((try ctx.field("email")).len != 0), ctx.now() });

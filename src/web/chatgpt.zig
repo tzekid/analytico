@@ -56,6 +56,9 @@ pub const Account = struct {
     welcomed: bool,
     /// Null after signing out; the issued client stays for the next sign-in.
     tokens: ?Tokens,
+    /// OpenAI ended the sign-in (stored as empty tokens): AI asks to sign in
+    /// again instead of falling back to the instance's key.
+    ended: bool,
 
     /// The chosen model, or the plan's first one.
     pub fn activeModel(self: Account) []const u8 {
@@ -69,11 +72,11 @@ pub fn account(arena: std.mem.Allocator, db: *db_mod.Db, master: [32]u8, user_id
     const Row = struct { client_id: []const u8, subject: []const u8, email: []const u8, model: []const u8, models: []const u8, background: bool, welcomed: bool, tokens: ?[]const u8 };
     const row = try db.one(arena, Row, "SELECT client_id,subject,email,model,models,background,welcomed,tokens FROM chatgpt_accounts WHERE user_id=?", .{user_id}) orelse return null;
     var tokens: ?Tokens = null;
-    if (row.tokens) |sealed| {
+    if (row.tokens) |sealed| if (sealed.len != 0) {
         const plain = try secret.open(arena, master, sealed);
         tokens = try std.json.parseFromSliceLeaky(Tokens, arena, plain, .{});
-    }
-    return .{ .client_id = row.client_id, .subject = row.subject, .email = row.email, .model = row.model, .models = row.models, .background = row.background, .welcomed = row.welcomed, .tokens = tokens };
+    };
+    return .{ .client_id = row.client_id, .subject = row.subject, .email = row.email, .model = row.model, .models = row.models, .background = row.background, .welcomed = row.welcomed, .tokens = tokens, .ended = row.tokens != null and row.tokens.?.len == 0 };
 }
 
 fn seal(arena: std.mem.Allocator, io: std.Io, master: [32]u8, tokens: Tokens) ![]const u8 {
@@ -321,7 +324,7 @@ pub fn accessToken(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, us
         // The grant is gone (expired, revoked or reused): sign in again.
         const write = shared.lockWrite();
         defer shared.unlockWrite();
-        try write.run(arena, "UPDATE chatgpt_accounts SET tokens=NULL,updated_at_ms=? WHERE user_id=?", .{ now, user_id });
+        try write.run(arena, "UPDATE chatgpt_accounts SET tokens='',updated_at_ms=? WHERE user_id=?", .{ now, user_id });
         return error.AiSignInAgain;
     }
     const object = body orelse return error.AiUnreachable;
@@ -543,6 +546,7 @@ pub fn card(ctx: *Ctx) !void {
     if (ctx.param("chatgpt")) |outcome| if (std.meta.stringToEnum(Problem, outcome)) |problem| {
         try render(w, "<div class=\"callout callout-warn mb-16\"><span>{problem}</span></div>", .{ .problem = problem.text() });
     };
+    if (current != null and current.?.ended) try w.writeAll("<div class=\"callout callout-warn mb-16\"><span>Your ChatGPT sign-in ended, so Ask and Why? are paused for you. Continue with ChatGPT to sign in again, or stop using your plan to use the team’s API key.</span><form method=\"post\" action=\"/settings/ai/chatgpt/sign-out\"><button class=\"btn\">Stop using my plan</button></form></div>");
     try w.writeAll("<section class=\"card mb-16\"><div class=\"row-between top\"><div class=\"row nowrap gap-12\"><span class=\"mark mark-chatgpt\">");
     try icon(w, "chatgpt");
     try w.writeAll("</span><div>");

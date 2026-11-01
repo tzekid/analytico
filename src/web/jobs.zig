@@ -232,7 +232,6 @@ fn alerts(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, at: i64) !v
     var statement = try db.prepare(arena, "SELECT id,site_id,name,metric,direction,threshold_percent,filters,email,state FROM alerts WHERE enabled=1 AND coalesce(checked_at_ms,0)<? LIMIT 20");
     defer statement.deinit();
     try statement.bindInt(1, today + alert_hour * data.hour_ms);
-    const Alert = struct { id: i64, site_id: i64, name: []const u8, metric: []const u8, direction: []const u8, threshold: i64, filters: []const u8, email: bool, state: []const u8 };
     var list: std.ArrayList(Alert) = .empty;
     while (try statement.step() == .row) try list.append(arena, .{
         .id = statement.columnInt(0),
@@ -247,43 +246,55 @@ fn alerts(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, at: i64) !v
     });
     const sites = try data.sites(arena, db);
     for (list.items) |alert| {
-        var site: ?data.Site = null;
-        for (sites) |candidate| if (candidate.id == alert.site_id) {
-            site = candidate;
+        // One alert that can’t be checked must not hold up the others.
+        checkAlert(arena, shared, db, sites, alert, today, at) catch |err| {
+            std.log.warn("alert_check_failed id={d} code={s}", .{ alert.id, @errorName(err) });
+            const write = shared.lockWrite();
+            defer shared.unlockWrite();
+            try write.run(arena, "UPDATE alerts SET checked_at_ms=? WHERE id=?", .{ at, alert.id });
         };
-        if (site == null) continue;
-        const values = try manage.alertSeries(arena, db, site.?, .{ .metric = alert.metric, .filters = alert.filters }, today, 2);
-        const fired = manage.alertTriggered(alert.direction, alert.threshold, values[0], values[1]);
-        const change_milli: i64 = if (values[0] > 0) @intFromFloat((values[1] - values[0]) / values[0] * 1000) else 0;
-        var triage_text: ?[]const u8 = null;
-        var log: ?ai.LogEntry = null;
-        if (fired) {
-            const result = try ai.triageText(arena, shared.io, db, ai.forBackground(arena, shared, db, at) catch null, site.?, alert.filters, at);
-            triage_text = result.text;
-            log = result.log;
-            const headline_text = try std.fmt.allocPrint(arena, "{s} · {s}: {f} yesterday ({d:.0} vs {d:.0})", .{ site.?.title(), alert.name, html.change(values[1], values[0]), values[1], values[0] });
-            integrations.broadcast(arena, shared, db, try std.fmt.allocPrint(arena, "*Alert* {s}\n{s}", .{ headline_text, result.text }), .{ .kind = "alert", .site = site.?.slug, .text = headline_text, .at_ms = at }, false) catch |err| std.log.warn("alert_channels_failed id={d} code={s}", .{ alert.id, @errorName(err) });
-            push.send(arena, shared, db, .{ .kind = .alert, .site_id = site.?.id, .site = site.?.slug, .title = site.?.title(), .body = try std.fmt.allocPrint(arena, "{s}: {f} yesterday ({d:.0} vs {d:.0})", .{ alert.name, html.change(values[1], values[0]), values[1], values[0] }) }) catch |err| std.log.warn("alert_push_failed id={d} code={s}", .{ alert.id, @errorName(err) });
-            if (alert.email) if (try mail.load(arena, db, shared.master_key)) |config| {
-                const recipients = try teamEmails(arena, db, site.?.id);
-                const link = try std.fmt.allocPrint(arena, "{s}/{s}/reports?tab=alerts", .{ try origin(arena, db), site.?.slug });
-                const headline = try std.fmt.allocPrint(arena, "{s}: {f} yesterday ({d:.0} vs {d:.0})", .{ alert.name, html.change(values[1], values[0]), values[1], values[0] });
-                if (recipients.len != 0) mail.send(arena, shared.io, config, .{
-                    .to = recipients,
-                    .subject = try std.fmt.allocPrint(arena, "Alert · {s} · {s}", .{ site.?.title(), alert.name }),
-                    .text = try std.fmt.allocPrint(arena, "{s}\n\n{s}\n\n{s}\n", .{ headline, result.text, link }),
-                    .html = try std.fmt.allocPrint(arena, "<p style=\"font:600 15px sans-serif\">{f}</p><p style=\"font:14px/21px sans-serif\">{f}</p><p><a href=\"{f}\">Inspect in Analytico</a></p>", .{ html.esc(headline), html.esc(result.text), html.esc(link) }),
-                }) catch |err| std.log.warn("alert_mail_failed id={d} code={s}", .{ alert.id, @errorName(err) });
-            };
-        }
-        const write = shared.lockWrite();
-        defer shared.unlockWrite();
-        if (log) |entry| _ = try ai.log(arena, write, at, entry);
-        if (fired) {
-            try write.run(arena, "UPDATE alerts SET state='triggered',triggered_at_ms=?,last_change_milli=?,triage=?,checked_at_ms=? WHERE id=?", .{ at, change_milli, triage_text.?, at, alert.id });
-        } else {
-            try write.run(arena, "UPDATE alerts SET state='quiet',checked_at_ms=? WHERE id=?", .{ at, alert.id });
-        }
+    }
+}
+
+const Alert = struct { id: i64, site_id: i64, name: []const u8, metric: []const u8, direction: []const u8, threshold: i64, filters: []const u8, email: bool, state: []const u8 };
+
+fn checkAlert(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, sites: []const data.Site, alert: Alert, today: i64, at: i64) !void {
+    var site: ?data.Site = null;
+    for (sites) |candidate| if (candidate.id == alert.site_id) {
+        site = candidate;
+    };
+    if (site == null) return;
+    const values = try manage.alertSeries(arena, db, site.?, .{ .metric = alert.metric, .filters = alert.filters }, today, 2);
+    const fired = manage.alertTriggered(alert.direction, alert.threshold, values[0], values[1]);
+    const change_milli: i64 = if (values[0] > 0) @intFromFloat((values[1] - values[0]) / values[0] * 1000) else 0;
+    var triage_text: ?[]const u8 = null;
+    var log: ?ai.LogEntry = null;
+    if (fired) {
+        const result = try ai.triageText(arena, shared.io, db, ai.forBackground(arena, shared, db, at) catch null, site.?, alert.filters, at);
+        triage_text = result.text;
+        log = result.log;
+        const headline_text = try std.fmt.allocPrint(arena, "{s} · {s}: {f} yesterday ({d:.0} vs {d:.0})", .{ site.?.title(), alert.name, html.change(values[1], values[0]), values[1], values[0] });
+        integrations.broadcast(arena, shared, db, try std.fmt.allocPrint(arena, "*Alert* {s}\n{s}", .{ headline_text, result.text }), .{ .kind = "alert", .site = site.?.slug, .text = headline_text, .at_ms = at }, false) catch |err| std.log.warn("alert_channels_failed id={d} code={s}", .{ alert.id, @errorName(err) });
+        push.send(arena, shared, db, .{ .kind = .alert, .site_id = site.?.id, .site = site.?.slug, .title = site.?.title(), .body = try std.fmt.allocPrint(arena, "{s}: {f} yesterday ({d:.0} vs {d:.0})", .{ alert.name, html.change(values[1], values[0]), values[1], values[0] }) }) catch |err| std.log.warn("alert_push_failed id={d} code={s}", .{ alert.id, @errorName(err) });
+        if (alert.email) if (try mail.load(arena, db, shared.master_key)) |config| {
+            const recipients = try teamEmails(arena, db, site.?.id);
+            const link = try std.fmt.allocPrint(arena, "{s}/{s}/reports?tab=alerts", .{ try origin(arena, db), site.?.slug });
+            const headline = try std.fmt.allocPrint(arena, "{s}: {f} yesterday ({d:.0} vs {d:.0})", .{ alert.name, html.change(values[1], values[0]), values[1], values[0] });
+            if (recipients.len != 0) mail.send(arena, shared.io, config, .{
+                .to = recipients,
+                .subject = try std.fmt.allocPrint(arena, "Alert · {s} · {s}", .{ site.?.title(), alert.name }),
+                .text = try std.fmt.allocPrint(arena, "{s}\n\n{s}\n\n{s}\n", .{ headline, result.text, link }),
+                .html = try std.fmt.allocPrint(arena, "<p style=\"font:600 15px sans-serif\">{f}</p><p style=\"font:14px/21px sans-serif\">{f}</p><p><a href=\"{f}\">Inspect in Analytico</a></p>", .{ html.esc(headline), html.esc(result.text), html.esc(link) }),
+            }) catch |err| std.log.warn("alert_mail_failed id={d} code={s}", .{ alert.id, @errorName(err) });
+        };
+    }
+    const write = shared.lockWrite();
+    defer shared.unlockWrite();
+    if (log) |entry| _ = try ai.log(arena, write, at, entry);
+    if (fired) {
+        try write.run(arena, "UPDATE alerts SET state='triggered',triggered_at_ms=?,last_change_milli=?,triage=?,checked_at_ms=? WHERE id=?", .{ at, change_milli, triage_text.?, at, alert.id });
+    } else {
+        try write.run(arena, "UPDATE alerts SET state='quiet',checked_at_ms=? WHERE id=?", .{ at, alert.id });
     }
 }
 
@@ -359,15 +370,16 @@ fn nightly(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, at: i64) !
     if (at < today + backup_hour * data.hour_ms) return;
     const last = std.fmt.parseInt(i64, (try data.setting(arena, db, .@"jobs.nightly_at")) orelse "0", 10) catch 0;
     if (last >= today + backup_hour * data.hour_ms) return;
+    const retention = try data.setting(arena, db, .@"retention.days");
     var backed_up = false;
-    if (!std.mem.eql(u8, (try data.setting(arena, db, .@"backup.daily")) orelse "1", "0")) {
+    // Retention needs the verified backup, so it backs up whatever the toggle says.
+    if (retention != null or !std.mem.eql(u8, (try data.setting(arena, db, .@"backup.daily")) orelse "1", "0")) {
         if (settings.backupNow(arena, shared.io, shared.data, db, "daily", at)) |path| {
             backed_up = true;
             std.log.info("backup_created path={s}", .{path});
             settings.pruneBackups(arena, shared.io, shared.data, 14) catch {};
         } else |err| std.log.warn("backup_failed code={s}", .{@errorName(err)});
     }
-    const retention = try data.setting(arena, db, .@"retention.days");
     {
         const write = shared.lockWrite();
         defer shared.unlockWrite();
@@ -378,6 +390,7 @@ fn nightly(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, at: i64) !
             if (days >= 30) {
                 const removed = try settings.prune(arena, write, at - days * data.day_ms);
                 std.log.info("retention_pruned rows={d}", .{removed});
+                if (removed != 0) try @import("audit.zig").recordAs(arena, write, "system", null, "retention.pruned", try std.fmt.allocPrint(arena, "Removed {d} records older than {d} days", .{ removed, days }), at);
             }
         };
         try data.putSetting(arena, write, .@"jobs.nightly_at", try std.fmt.allocPrint(arena, "{d}", .{at}));

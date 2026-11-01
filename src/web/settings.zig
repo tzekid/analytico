@@ -113,7 +113,7 @@ pub fn route(ctx: *Ctx, parts: []const []const u8) !void {
 }
 
 fn currentSite(ctx: *Ctx) !?data.Site {
-    if (ctx.param("site")) |slug| if (try data.siteBySlug(ctx.arena, ctx.db, slug)) |site| return site;
+    if (ctx.param("site")) |slug| if (try ctx.visibleSite(slug)) |site| return site;
     const sites = try ctx.visibleSites();
     return if (sites.len == 0) null else sites[0];
 }
@@ -211,10 +211,12 @@ fn sitePost(ctx: *Ctx, action: []const u8) !void {
     } else if (is(action, "origin-add")) {
         const origin = domain.normalizeOrigin(arena, std.mem.trim(u8, try ctx.field("origin"), " /")) catch return fail(ctx, "sites", "Origins look like https://example.com — no path.");
         db.run(arena, "INSERT INTO site_origins(site_id,origin) VALUES(?,?)", .{ site.id, origin }) catch return fail(ctx, "sites", "That origin is already allowed.");
+        try @import("audit.zig").record(ctx, db, site.id, "site.origin_added", try std.fmt.allocPrint(arena, "Accepts events from {s}", .{origin}));
         try ctx.flash("Origin added.", "", "");
     } else if (is(action, "origin-remove")) {
         if (try db.scalar(arena, i64, "SELECT count(*) FROM site_origins WHERE site_id=?", .{site.id}) <= 1) return fail(ctx, "sites", "Keep at least one origin.");
         try db.run(arena, "DELETE FROM site_origins WHERE site_id=? AND origin=?", .{ site.id, try ctx.field("origin") });
+        if (db.changes() != 0) try @import("audit.zig").record(ctx, db, site.id, "site.origin_removed", try std.fmt.allocPrint(arena, "Stopped accepting events from {s}", .{try ctx.field("origin")}));
         try ctx.flash("Origin removed.", "", "");
     } else return fail(ctx, "sites", "Unknown action.");
     return ctx.redirect(try backTo(ctx, "sites"));
@@ -257,6 +259,7 @@ fn emailPost(ctx: *Ctx, action: []const u8) !void {
         const db = ctx.shared.lockWrite();
         defer ctx.shared.unlockWrite();
         inline for (.{ .@"smtp.host", .@"smtp.port", .@"smtp.security", .@"smtp.username", .@"smtp.password", .@"smtp.from" }) |name| try data.putSetting(arena, db, name, null);
+        try @import("audit.zig").record(ctx, db, null, "email.removed", "Removed the email settings");
         return ctx.done("Email settings removed.", "{s}", .{"/settings/email"});
     }
     if (!is(action, "save") and !is(action, "test")) return fail(ctx, "email", "Unknown action.");
@@ -276,6 +279,7 @@ fn emailPost(ctx: *Ctx, action: []const u8) !void {
         try data.putSetting(arena, db, .@"smtp.username", std.mem.trim(u8, try ctx.field("username"), " "));
         try data.putSetting(arena, db, .@"smtp.from", from);
         if (password.len != 0) try data.putSetting(arena, db, .@"smtp.password", try secret.seal(arena, ctx.shared.io, ctx.shared.master_key, password));
+        try @import("audit.zig").record(ctx, db, null, "email.changed", try std.fmt.allocPrint(arena, "Mail through {s}:{d} ({s}) from {s}{s}", .{ host, port, @tagName(security), from, if (password.len != 0) ", new password" else "" }));
     }
     if (is(action, "test")) {
         const config = try mail.load(arena, ctx.db, ctx.shared.master_key) orelse return fail(ctx, "email", "Email settings were removed meanwhile.");
@@ -349,13 +353,20 @@ fn backupsSection(ctx: *Ctx) !void {
     const w = ctx.w();
     const arena = ctx.arena;
     try ui.sectionHead(w, "Backups", "Verified copies of your database. Restores never overwrite current data.", "<form method=\"post\" action=\"/settings/backups/now\" data-busy=\"Backing up…\"><button class=\"btn btn-primary\">Back up now</button></form>");
-    const daily = !is((try data.setting(arena, ctx.db, .@"backup.daily")) orelse "1", "0");
+    // Data retention runs right after the nightly backup, so it keeps it on.
+    const retention = (try data.setting(arena, ctx.db, .@"retention.days")) != null;
+    const daily = retention or !is((try data.setting(arena, ctx.db, .@"backup.daily")) orelse "1", "0");
     const now = ctx.now();
     const next = now - @mod(now, data.day_ms) + 3 * data.hour_ms + (if (@mod(now, data.day_ms) >= 3 * data.hour_ms) data.day_ms else 0);
     try render(w,
-        \\<form class="card row-between mb-16" method="post" action="/settings/backups/daily"><div><strong>Automatic daily backup</strong><div class="hint">Every day at 03:00 UTC · keeps the last 14{next}</div></div><span class="switch"><input type="checkbox" name="enabled" value="1" data-autosubmit aria-label="Automatic daily backup"{!checked}></span></form>
+        \\<form class="card row-between mb-16" method="post" action="/settings/backups/daily"><div><strong>Automatic daily backup</strong><div class="hint">Every day at 03:00 UTC · keeps the last 14{next}{retention}</div></div><span class="switch"><input type="checkbox" name="enabled" value="1" data-autosubmit aria-label="Automatic daily backup"{!checked}{!locked}></span></form>
         \\<section class="card card-flush"><div class="table-wrap"><table class="table"><thead><tr><th>Backup</th><th class="r hide-m">Size</th><th>Status</th><th></th></tr></thead><tbody>
-    , .{ .next = if (daily) try std.fmt.allocPrint(arena, " · next in {d} h", .{@divFloor(next - now + data.hour_ms - 1, data.hour_ms)}) else "", .checked = if (daily) " checked" else "" });
+    , .{
+        .next = if (daily) try std.fmt.allocPrint(arena, " · next in {d} h", .{@divFloor(next - now + data.hour_ms - 1, data.hour_ms)}) else "",
+        .retention = if (retention) " · stays on while data retention is set" else "",
+        .checked = if (daily) " checked" else "",
+        .locked = if (retention) " disabled" else "",
+    });
     const files = try listBackups(arena, ctx.shared.io, ctx.shared.data);
     for (files[0..@min(files.len, 30)]) |file| try render(w,
         \\<tr><td class="strong mono t-13">{name}</td><td class="r secondary hide-m">{megabytes:.1} MB</td><td><span class="pill pill-good">✓ Verified</span></td><td class="r"><button class="link" type="button" data-dialog="restore-dialog" data-restore="{name}">Restore…</button></td></tr>
@@ -373,10 +384,12 @@ fn backupsSection(ctx: *Ctx) !void {
 fn backupPost(ctx: *Ctx, action: []const u8) !void {
     const arena = ctx.arena;
     if (is(action, "daily")) {
+        const enabled = (try ctx.field("enabled")).len != 0;
+        if (!enabled and (try data.setting(arena, ctx.db, .@"retention.days")) != null) return fail(ctx, "backups", "Daily backups stay on while data retention is set: old records are deleted only right after one.");
         const db = ctx.shared.lockWrite();
         defer ctx.shared.unlockWrite();
-        const enabled = (try ctx.field("enabled")).len != 0;
         try data.putSetting(arena, db, .@"backup.daily", if (enabled) "1" else "0");
+        try @import("audit.zig").record(ctx, db, null, "backup.daily", if (enabled) "Turned on daily backups" else "Turned off daily backups");
         return ctx.done(if (enabled) "Daily backups on." else "Daily backups off.", "{s}", .{"/settings/backups"});
     }
     if (!is(action, "now")) return fail(ctx, "backups", "Unknown action.");
@@ -385,6 +398,7 @@ fn backupPost(ctx: *Ctx, action: []const u8) !void {
     const db = ctx.shared.lockWrite();
     defer ctx.shared.unlockWrite();
     try data.putSetting(arena, db, .@"backup.last_at", try std.fmt.allocPrint(arena, "{d}", .{ctx.now()}));
+    try @import("audit.zig").record(ctx, db, null, "backup.created", try std.fmt.allocPrint(arena, "Backed up to {s}", .{std.fs.path.basename(path)}));
     return ctx.done(try std.fmt.allocPrint(arena, "Backup verified: {s}", .{std.fs.path.basename(path)}), "{s}", .{"/settings/backups"});
 }
 
@@ -443,6 +457,7 @@ fn retentionPost(ctx: *Ctx) !void {
         const db = ctx.shared.lockWrite();
         defer ctx.shared.unlockWrite();
         try data.putSetting(arena, db, .@"retention.days", null);
+        try @import("audit.zig").record(ctx, db, null, "retention.changed", "Keep detailed records forever");
         return ctx.done("Keeping everything.", "{s}", .{"/settings/retention"});
     }
     if (days < 30 or days > 3650) return fail(ctx, "retention", "Pick one of the options.");
@@ -453,6 +468,7 @@ fn retentionPost(ctx: *Ctx) !void {
     const removed = try prune(arena, db, ctx.now() - days * data.day_ms);
     try data.putSetting(arena, db, .@"retention.days", try std.fmt.allocPrint(arena, "{d}", .{days}));
     try data.putSetting(arena, db, .@"backup.last_at", try std.fmt.allocPrint(arena, "{d}", .{ctx.now()}));
+    try @import("audit.zig").record(ctx, db, null, "retention.changed", try std.fmt.allocPrint(arena, "Keep detailed records for {d} days · removed {d} after backup {s}", .{ days, removed, std.fs.path.basename(path) }));
     return ctx.done(try std.fmt.allocPrint(arena, "Removed {d} old rows after backup {s}.", .{ removed, std.fs.path.basename(path) }), "{s}", .{"/settings/retention"});
 }
 
@@ -669,20 +685,25 @@ fn aiPost(ctx: *Ctx, action: []const u8) !void {
     if (is(action, "sharing")) {
         const db = ctx.shared.lockWrite();
         defer ctx.shared.unlockWrite();
-        try data.putSetting(arena, db, .@"ai.share_paths", if ((try ctx.field("paths")).len != 0) "1" else "0");
-        try data.putSetting(arena, db, .@"ai.share_sources", if ((try ctx.field("sources")).len != 0) "1" else "0");
+        const paths = (try ctx.field("paths")).len != 0;
+        const sources = (try ctx.field("sources")).len != 0;
+        try data.putSetting(arena, db, .@"ai.share_paths", if (paths) "1" else "0");
+        try data.putSetting(arena, db, .@"ai.share_sources", if (sources) "1" else "0");
+        try @import("audit.zig").record(ctx, db, null, "ai.sharing", try std.fmt.allocPrint(arena, "AI sees page paths: {s} · referrers and campaigns: {s}", .{ if (paths) "yes" else "no", if (sources) "yes" else "no" }));
         return ctx.done("Saved. Answers and connected apps use the new setting right away.", "{s}", .{back});
     }
     if (is(action, "disconnect")) {
         const db = ctx.shared.lockWrite();
         defer ctx.shared.unlockWrite();
         try db.run(arena, "DELETE FROM oauth_grants WHERE client_id IN (SELECT client_id FROM oauth_clients WHERE name=? AND client_id NOT LIKE 'analytico-%')", .{try ctx.field("client")});
+        if (db.changes() != 0) try @import("audit.zig").record(ctx, db, null, "ai.disconnected", try std.fmt.allocPrint(arena, "Disconnected {s}", .{try ctx.field("client")}));
         return ctx.done("Disconnected. The app can no longer read your analytics.", "{s}", .{back});
     }
     if (is(action, "remove-key")) {
         const db = ctx.shared.lockWrite();
         defer ctx.shared.unlockWrite();
         inline for (.{ .@"ai.provider", .@"ai.key", .@"ai.model", .@"ai.base_url" }) |name| try data.putSetting(arena, db, name, null);
+        try @import("audit.zig").record(ctx, db, null, "ai.key_removed", "Removed the AI API key");
         return ctx.done("API key removed.", "{s}", .{back});
     }
     if (!is(action, "key")) return fail(ctx, "ai", "Unknown action.");
@@ -714,6 +735,7 @@ fn aiPost(ctx: *Ctx, action: []const u8) !void {
     try data.putSetting(arena, db, .@"ai.base_url", if (provider == .compatible) base_url else null);
     try data.putSetting(arena, db, .@"ai.key", if (key.len == 0) null else try secret.seal(arena, ctx.shared.io, ctx.shared.master_key, key));
     try data.putSetting(arena, db, .@"ai.budget_cents", try std.fmt.allocPrint(arena, "{d}", .{config.budget_cents}));
+    try @import("audit.zig").record(ctx, db, null, "ai.key", try std.fmt.allocPrint(arena, "AI uses {s} · {s} · ${d} a month", .{ if (provider == .compatible) base_url else if (provider == .anthropic) "an Anthropic key" else "an OpenAI key", model, @divFloor(config.budget_cents, 100) }));
     return ctx.done(try std.fmt.allocPrint(arena, "Works · answered in {d} ms. Press ⌘K and ask away.", .{reply.elapsed_ms}), "{s}", .{back});
 }
 

@@ -402,7 +402,14 @@ fn post(ctx: *Ctx, action: []const u8) !void {
     if (std.mem.eql(u8, action, "export")) {
         if ((try ctx.field("now")).len != 0) {
             ctx.extendDeadline(300);
-            const files = try exportDay(arena, ctx.shared, ctx.db, ctx.now() - data.day_ms);
+            const day_ms = ctx.now() - data.day_ms;
+            const files = try exportDay(arena, ctx.shared, ctx.db, day_ms);
+            {
+                const db = ctx.shared.lockWrite();
+                defer ctx.shared.unlockWrite();
+                const day = data.dateText(day_ms);
+                try audit.record(ctx, db, null, "export.created", try std.fmt.allocPrint(arena, "Exported {s}: {d} files", .{ &day, files }));
+            }
             return back(ctx, site, try std.fmt.allocPrint(arena, "Exported {d} files.", .{files}));
         }
         const db = ctx.shared.lockWrite();
@@ -1058,7 +1065,14 @@ pub fn searchPage(ctx: *Ctx, site: data.Site) !void {
         const ctr = if (impressions == 0) 0 else @as(f64, @floatFromInt(clicks)) / @as(f64, @floatFromInt(impressions)) * 100;
         const engaged = statement.columnFloat(5) * 100;
         try render(w, "<tr><td class=\"strong\" title=\"{page}\">{query}</td><td class=\"r\">{clicks}</td><td class=\"r hide-m\">{impressions}</td><td class=\"r hide-m\">{ctr:.1}%</td><td class=\"r\">{position:.1}</td><td class=\"r hide-m onsite\">{engaged:.0}%</td><td class=\"r hide-m onsite\">{goals}</td></tr>", .{
-            .page = statement.columnText(4), .query = statement.columnText(0), .clicks = html.int(clicks), .impressions = html.int(impressions), .ctr = ctr, .position = statement.columnFloat(3), .engaged = engaged, .goals = statement.columnInt(6),
+            .page = statement.columnText(4),
+            .query = statement.columnText(0),
+            .clicks = html.int(clicks),
+            .impressions = html.int(impressions),
+            .ctr = ctr,
+            .position = statement.columnFloat(3),
+            .engaged = engaged,
+            .goals = statement.columnInt(6),
         });
         // Seen often but rarely clicked: a better title could win clicks.
         if (impressions >= 100 and ctr < 2.5 and looks.items.len < 4) try looks.append(arena, .{ .query = try arena.dupe(u8, statement.columnText(0)), .clicks = clicks, .impressions = impressions, .position = statement.columnFloat(3), .page = try arena.dupe(u8, statement.columnText(4)), .engaged = engaged });

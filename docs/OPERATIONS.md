@@ -39,7 +39,9 @@ a worker indefinitely. Outbound HTTP calls use the configured endpoint URLs
 directly and return redirects to their callers. A background thread sends scheduled emails, checks
 alerts daily at 06:00 UTC, delivers goal webhooks every thirty seconds, and
 at 03:00 UTC takes the automatic backup, applies retention, prunes replays,
-syncs integrations and writes the daily export. Database transactions finish synchronously before
+syncs integrations and writes the daily export. While data retention is set,
+that backup runs even with automatic daily backups off, because retention
+deletes only right after a verified backup. Database transactions finish synchronously before
 graceful checkpointing.
 
 ## Upgrading the schema

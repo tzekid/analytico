@@ -260,11 +260,13 @@ pub fn post(ctx: *Ctx, action: []const u8) !void {
             if (stranded != 0) return fail(ctx, try std.fmt.allocPrint(arena, "{d} {s} only sign in with {s}. Ask them to add another method first.", .{ stranded, if (stranded == 1) "person can" else "people can", method.label() }));
         }
         try data.putSettingNamed(arena, db, try std.fmt.allocPrint(arena, "auth.enabled.{s}", .{@tagName(method)}), if (turn_on) "1" else "0");
+        try @import("audit.zig").record(ctx, db, null, "signin.method", try std.fmt.allocPrint(arena, "{s} {s} for everyone", .{ method.label(), if (turn_on) "turned on" else "turned off" }));
         try ctx.flash(try std.fmt.allocPrint(arena, "{s} {s} for everyone.", .{ method.label(), if (turn_on) "turned on" else "turned off" }), "", "");
     } else if (is(action, "primary")) {
         const method = std.meta.stringToEnum(Method, try ctx.field("method")) orelse return fail(ctx, "Unknown method.");
         if (!try signin.enabled(arena, db, method)) return fail(ctx, "Turn that method on first.");
         try data.putSetting(arena, db, .@"auth.primary", @tagName(method));
+        try @import("audit.zig").record(ctx, db, null, "signin.primary", try std.fmt.allocPrint(arena, "{s} is shown first", .{method.label()}));
         try ctx.flash(try std.fmt.allocPrint(arena, "{s} is now shown first.", .{method.label()}), "", "");
     } else return fail(ctx, "Unknown action.");
     return ctx.redirect("/settings/signin");
@@ -300,6 +302,7 @@ fn saveProvider(ctx: *Ctx) !void {
         if (client_secret.len != 0) try data.putSettingNamed(arena, db, try std.fmt.allocPrint(arena, "auth.{s}.secret", .{prefix}), try secret.seal(arena, ctx.shared.io, ctx.shared.master_key, client_secret));
         try data.putSettingNamed(arena, db, try std.fmt.allocPrint(arena, "auth.{s}.issuer", .{prefix}), if (std.mem.eql(u8, issuer, provider.defaultIssuer())) null else issuer);
         try data.putSettingNamed(arena, db, try std.fmt.allocPrint(arena, "auth.enabled.{s}", .{prefix}), "1");
+        try @import("audit.zig").record(ctx, db, null, "signin.provider", try std.fmt.allocPrint(arena, "{s} sign-in uses client {s} at {s}{s}", .{ provider.label(), client_id, issuer, if (client_secret.len != 0) ", new secret" else "" }));
     }
     // A form's redirects may not leave the site (CSP form-action), so the
     // hand-off to the provider starts from a page of our own.

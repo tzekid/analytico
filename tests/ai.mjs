@@ -339,6 +339,29 @@ await journey("ai", async (t) => {
   assert.equal(await teammate.getByText("For the whole team").count(), 0);
   await teammateContext.close();
 
+  // A plan whose sign-in ended asks to sign in again; it never falls back to the key.
+  await page.goto(`${origin}/settings/ai`);
+  await page.locator("form[action='/settings/ai/chatgpt/sign-out'] button").click();
+  await page.getByText("Use your ChatGPT plan").waitFor();
+  popup = await continueWith();
+  await page.getByText("Using ChatGPT plan").waitFor();
+  await popup.close();
+  live.clear();
+  const keyCalls = seen.anthropic.length;
+  for (const question of ["Which page do visitors land on?", "And now?"]) {
+    await page.goto(`${origin}/shop`);
+    await page.keyboard.press("Control+k");
+    await page.locator("#palette input").fill(question);
+    await page.keyboard.press("Enter");
+    await page.locator("#ask-sheet").getByText("Sign in to ChatGPT again").waitFor();
+  }
+  assert.equal(seen.anthropic.length, keyCalls);
+  await page.goto(`${origin}/settings/ai`);
+  await page.getByText("Your ChatGPT sign-in ended").waitFor();
+  popup = await continueWith();
+  await page.getByText("Using ChatGPT plan").waitFor();
+  await popup.close();
+
   // Graceful shutdown finishes an outstanding provider request and callback.
   await page.goto(`${origin}/settings/ai`);
   await page.locator("form[action='/settings/ai/chatgpt/sign-out'] button").click();

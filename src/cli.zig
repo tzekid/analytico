@@ -203,16 +203,21 @@ fn runForget(allocator: std.mem.Allocator, io: std.Io, output: *std.Io.Writer, a
     var site = try store.siteBySlug(args[2]);
     defer site.deinit(allocator);
     var visitors: std.ArrayList([]const u8) = .empty;
+    var label: []const u8 = undefined;
     try store.database.exec("BEGIN IMMEDIATE");
     errdefer store.database.exec("ROLLBACK") catch {};
     if (option(args, "--visitor")) |visitor_id| {
         try domain.validateUuid(visitor_id);
         try collector.forgetVisitor(allocator, &store, site.id, visitor_id);
         try visitors.append(allocator, visitor_id);
+        label = try std.fmt.allocPrint(allocator, "Visitor {s}", .{visitor_id[0..4]});
     } else if (option(args, "--user")) |user_id| {
         const hash = domain.userHash(master, site.public_id, user_id);
         try visitors.appendSlice(allocator, try collector.forgetUser(allocator, &store, site.id, &hash));
+        label = try std.fmt.allocPrint(allocator, "user {s}", .{hash[0..4]});
     } else return error.MissingVisitorOrUser;
+    // Like a deletion from the workspace; only the short label, never the ID.
+    try @import("web/audit.zig").recordAs(allocator, &store.database, "cli", site.id, "person.deleted", try std.fmt.allocPrint(allocator, "{s} · {d} visitor(s)", .{ label, visitors.items.len }), domain.nowMs());
     try store.database.exec("COMMIT");
     var replays = try replay.open(allocator, paths.replays, true);
     defer replays.close();

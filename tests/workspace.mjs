@@ -2,7 +2,7 @@
 // tracker, a browser with a virtual passkey authenticator, and stand-ins for
 // an OpenAI-compatible AI endpoint and an OpenID provider.
 import assert from "node:assert/strict";
-import { createDecipheriv, createECDH, createHash, hkdfSync, randomBytes } from "node:crypto";
+import { createDecipheriv, createECDH, createHash, hkdfSync, randomBytes, randomUUID } from "node:crypto";
 import { createServer } from "node:net";
 import { journey, signer } from "./harness.mjs";
 
@@ -334,6 +334,11 @@ await journey("workspace", async (t) => {
   await provider.getByRole("button", { name: "Save and link Google" }).click();
   await page.waitForURL(/\/settings\/signin$/);
   await page.locator(".method-row", { hasText: "Google · owner@example.test" }).waitFor();
+  // An integration's Google attempt can't finish a sign-in or a link.
+  const integrationStart = await page.context().request.get(`${origin}/integrations/google/start?site=shop&kind=search_console`, { maxRedirects: 0 });
+  const integrationState = new URL(integrationStart.headers().location).searchParams.get("state");
+  const crossed = await fetch(`${origin}/auth/google/callback?state=${integrationState}`, { headers: { cookie: `an_oidc=${integrationState}` }, redirect: "manual" });
+  assert.equal(crossed.headers.get("location"), "/login?error=expired");
 
   // An invited Google account completes without storing its invite value.
   await page.goto(`${origin}/settings/team`);
@@ -424,4 +429,134 @@ await journey("workspace", async (t) => {
   }
 
   return "passkey first run, pages, goals, funnels, filters, alerts, notes, BYOK ask, MCP connector, app sign-in and API, encrypted push, Google linking and sign-in, teammate invite, graceful mail shutdown";
+});
+
+// Who may do what to whom, and the audit trail it leaves.
+await journey("access", async (t) => {
+  const origin = `http://localhost:${t.port}`;
+  const setupLink = t.init(origin);
+  const publicId = /public_id=([^ ]+)/.exec(t.cli("site", "add", "shop", origin, "--mode", "full"))[1];
+  t.cli("site", "add", "hidden", "https://hidden.example", "--mode", "lite");
+  await t.serve();
+  const context = await t.context();
+  const page = await t.signUp(context, setupLink);
+  await page.waitForURL(`${origin}/shop`);
+  const read = (sql, ...args) => {
+    const db = t.db();
+    try { return db.prepare(sql).all(...args).map((row) => ({ ...row })); } finally { db.close(); }
+  };
+  const audit = () => read("SELECT action,detail,actor FROM audit_log ORDER BY id");
+  const post = (as, path, fields = {}) => as.request.post(`${origin}${path}`, {
+    data: new URLSearchParams(fields).toString(),
+    headers: { origin, "content-type": "application/x-www-form-urlencoded" },
+    maxRedirects: 0,
+  });
+  /** Runs an action and returns the one audit row it added. */
+  const audited = async (action) => {
+    const before = audit().length;
+    await action();
+    const after = audit();
+    assert.equal(after.length, before + 1, JSON.stringify(after.slice(before)));
+    return after.at(-1);
+  };
+  const invite = async (email, role, site = "") => {
+    const response = await post(context, "/settings/team/invite", { email, role, site });
+    return /value="(http[^"]+\/invite\/[0-9a-f]{64})"/.exec(await response.text())?.[1];
+  };
+  const join = async (link) => {
+    const joiner = await t.context();
+    const joined = await joiner.newPage();
+    await joined.goto(link);
+    await joined.getByRole("button", { name: "Other ways to sign in" }).click();
+    await joined.getByRole("link", { name: /Choose a password/ }).click();
+    await joined.getByLabel("Password").fill("correct horse battery");
+    await joined.getByRole("button", { name: "Continue" }).click();
+    await joined.waitForURL(`${origin}/shop`);
+    return joiner;
+  };
+  const [shop, hidden] = ["shop", "hidden"].map((slug) => read("SELECT id FROM sites WHERE slug=?", slug)[0].id);
+  const admin = await join(await invite("admin@example.test", "admin"));
+  const viewer = await join(await invite("viewer@example.test", "viewer", String(shop)));
+  const viewerId = read("SELECT id FROM users WHERE email='viewer@example.test'")[0].id;
+
+  // An admin gets sign-in links only for people below admin, and each is logged.
+  const adminPage = await admin.newPage();
+  await adminPage.goto(`${origin}/settings/team`);
+  assert.equal(await adminPage.locator("tr", { hasText: "owner@example.test" }).getByRole("button", { name: "Sign-in link" }).count(), 0);
+  await adminPage.locator("tr", { hasText: "viewer@example.test" }).getByRole("button", { name: "Sign-in link" }).waitFor();
+  const refused = await post(admin, "/settings/team/invite", { email: "owner@example.test" });
+  assert.equal(refused.status(), 303);
+  assert.equal(read("SELECT count(*) n FROM user_invites i JOIN users u ON u.id=i.user_id WHERE u.role='owner'")[0].n, 0);
+  const linked = await audited(async () => assert.match(await (await post(admin, "/settings/team/invite", { email: "viewer@example.test" })).text(), /\/invite\/[0-9a-f]{64}/));
+  assert.deepEqual(linked, { action: "team.signin_link", detail: "Created a sign-in link for viewer@example.test", actor: "admin@example.test" });
+
+  // A member limited to one website doesn't see another one's name in settings.
+  const settingsPage = await (await viewer.request.get(`${origin}/settings/signin?site=hidden`)).text();
+  assert.doesNotMatch(settingsPage, /hidden\.example/);
+
+  // Scheduled emails follow access: narrowing and removal take the member off.
+  await post(context, `/settings/team/sites/${viewerId}`, [["site", shop], ["site", hidden]]);
+  const schedule = (slug, name, recipients) => post(context, `/${slug}/schedules`, { name, frequency: "weekly", weekday: "1", hour: "9", view: `/${slug}`, recipients });
+  await schedule("shop", "Shop weekly", "viewer@example.test, Partner@Example.test");
+  await schedule("shop", "Viewer only", "VIEWER@example.test");
+  await schedule("hidden", "Hidden weekly", "viewer@example.test, partner@example.test");
+  const schedules = () => Object.fromEntries(read("SELECT name,recipients FROM schedules").map((row) => [row.name, row.recipients]));
+  await post(context, `/settings/team/sites/${viewerId}`, [["site", shop]]);
+  assert.deepEqual(schedules(), { "Shop weekly": "viewer@example.test, Partner@Example.test", "Viewer only": "VIEWER@example.test", "Hidden weekly": "partner@example.test" });
+  await post(context, `/settings/team/remove/${viewerId}`);
+  assert.deepEqual(schedules(), { "Shop weekly": "Partner@Example.test", "Hidden weekly": "partner@example.test" });
+  assert.deepEqual(audit().filter((row) => row.action === "schedule.recipients").map((row) => row.detail), ["viewer@example.test no longer receives 1 scheduled email", "viewer@example.test no longer receives 2 scheduled emails"]);
+  await viewer.close();
+
+  // Settings changes, keys, links and exports each leave one audit row; secrets stay out.
+  assert.equal((await audited(() => post(context, "/settings/sites/origin-add", { site: "shop", origin: "https://staging.example" }))).action, "site.origin_added");
+  assert.equal((await audited(() => post(context, "/settings/sites/origin-remove", { site: "shop", origin: "https://staging.example" }))).action, "site.origin_removed");
+  const smtp = await audited(() => post(context, "/settings/email/save", { host: "smtp.example.test", port: "587", security: "starttls", username: "mailer", password: "smtp-secret-value", from: "analytics@example.test" }));
+  assert.equal(smtp.action, "email.changed");
+  assert.doesNotMatch(smtp.detail, /smtp-secret-value/);
+  assert.equal((await audited(() => post(context, "/settings/email/clear"))).action, "email.removed");
+  assert.equal((await audited(() => post(context, "/settings/ai/sharing", { site: "shop", paths: "1" }))).action, "ai.sharing");
+  assert.equal((await audited(() => post(context, "/settings/ai/remove-key", { site: "shop" }))).action, "ai.key_removed");
+  assert.equal((await audited(() => post(context, "/settings/signin/primary", { method: "passkey" }))).action, "signin.primary");
+  assert.equal((await audited(() => post(context, "/shop/shares", { label: "Board", expires: "30" }))).action, "share.created");
+  const shareId = read("SELECT id FROM share_links")[0].id;
+  assert.equal((await audited(() => post(context, `/shop/shares/${shareId}/revoke`))).action, "share.revoked");
+  assert.equal((await audited(async () => assert.equal((await context.request.get(`${origin}/shop/export.csv?view=/shop/pages`)).status(), 200))).action, "report.exported");
+
+  // Data retention keeps the nightly backup on: turning it off is refused.
+  assert.equal((await audited(() => post(context, "/settings/retention", { days: "90" }))).action, "retention.changed");
+  const before = audit().length;
+  assert.equal((await post(context, "/settings/backups/daily")).status(), 303);
+  assert.equal(audit().length, before);
+  assert.notEqual(read("SELECT value FROM settings WHERE name='backup.daily'")[0]?.value, "0");
+  await page.goto(`${origin}/settings/backups`);
+  await page.getByText("stays on while data retention is set").waitFor();
+
+  // An alert whose filters can't be read is refused instead of stored.
+  await post(context, "/shop/alerts", { name: "Broken", metric: "page_views", direction: "drops", threshold: "20", filters: "f=%" });
+  assert.equal(read("SELECT count(*) n FROM alerts")[0].n, 0);
+
+  // A user ID shaped like a UUID is hashed like any other user ID.
+  const visitorId = randomUUID();
+  const userId = randomUUID();
+  const now = Date.now();
+  const identify = JSON.stringify({ v: 2, site: publicId, sent_at_ms: now, records: [{ event_id: randomUUID(), type: "identify", occurred_at_ms: now, tracking_mode: "full", consent_mode: "server", tracker_version: "backend", release_id: "", internal: false, visitor_id: visitorId, user_id: userId }] });
+  assert.equal((await fetch(`${origin}/i`, { method: "POST", headers: { "content-type": "application/json", ...t.sign("shop", identify) }, body: identify })).status, 204);
+  const exported = await context.request.get(`${origin}/settings/consent/export?site=shop&person=${userId}`);
+  assert.equal(exported.status(), 200);
+  assert.match(exported.headers()["content-type"], /json/);
+  assert.equal((await post(context, "/settings/consent/forget", { site: "shop", person: userId })).status(), 303);
+  assert.equal(read("SELECT count(*) n FROM visitors WHERE visitor_id=?", visitorId)[0].n, 0);
+  assert.equal(audit().at(-1).action, "person.deleted");
+
+  // The CLI's deletions are logged too, once the server has stopped.
+  await admin.close();
+  t.server.kill("SIGTERM");
+  assert.equal(await t.exited, 0);
+  t.cli("forget", "shop", "--visitor", visitorId);
+  const forgotten = audit().at(-1);
+  assert.deepEqual([forgotten.action, forgotten.actor], ["person.deleted", "cli"]);
+  assert.match(forgotten.detail, /^Visitor [0-9a-f]{4} · 1 visitor\(s\)$/);
+
+  return "admin sign-in links, settings frame per site, schedules follow access, audit of settings, keys, links, exports and deletions, retention keeps backups, unreadable alert filters, UUID-shaped user IDs";
 });

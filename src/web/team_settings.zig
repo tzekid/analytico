@@ -73,7 +73,7 @@ pub fn teamSection(ctx: *Ctx, notice: []const u8) !void {
         if (person.active) |at| try render(w, "{ago}", .{ .ago = data.ago(at, ctx.now()) }) else try w.writeAll("—");
         try w.writeAll("</td><td class=\"r nobreak\">");
         if (ctx.can(.admin)) {
-            try render(w,
+            if (linkAllowed(ctx, role)) try render(w,
                 \\<form class="inline" method="post" action="/settings/team/invite"><input type="hidden" name="email" value="{email}"><button class="btn btn-quiet">{label}</button></form>
             , .{ .email = person.email, .label = if (person.joined) "Sign-in link" else "New invite link" });
             if (!me and role != .owner) {
@@ -115,6 +115,43 @@ fn shownOnce(arena: std.mem.Allocator, title: []const u8, label: []const u8, val
     , .{ .title = title, .label = label, .value = value, .copy = copy, .help = help });
 }
 
+/// A link for an existing account adds a way into it, so only the owner may
+/// create one for an admin or for the owner.
+fn linkAllowed(ctx: *Ctx, role: Role) bool {
+    return ctx.can(.owner) or !role.atLeast(.admin);
+}
+
+/// Scheduled emails follow access, as alerts do: a person's address leaves
+/// the schedules of every website they can no longer see (all of them once
+/// removed). A schedule left without recipients is deleted.
+fn dropFromSchedules(ctx: *Ctx, db: *db_mod.Db, user_id: i64, email: []const u8) !void {
+    const arena = ctx.arena;
+    const Schedule = struct { id: i64, recipients: []const u8 };
+    const schedules = try db.all(arena, Schedule, "SELECT s.id,s.recipients FROM schedules s WHERE instr(lower(s.recipients),?2)>0 AND NOT EXISTS(SELECT 1 FROM users u WHERE u.id=?1 AND (u.role IN ('owner','admin') OR u.all_sites=1 OR EXISTS(SELECT 1 FROM user_sites us WHERE us.user_id=u.id AND us.site_id=s.site_id)))", .{ user_id, email });
+    var changed: usize = 0;
+    for (schedules) |schedule| {
+        var kept: std.ArrayList(u8) = .empty;
+        var dropped = false;
+        var parts = std.mem.splitScalar(u8, schedule.recipients, ',');
+        while (parts.next()) |part| {
+            const address = std.mem.trim(u8, part, " ");
+            if (std.ascii.eqlIgnoreCase(address, email)) {
+                dropped = true;
+                continue;
+            }
+            if (address.len == 0) continue;
+            if (kept.items.len != 0) try kept.appendSlice(arena, ", ");
+            try kept.appendSlice(arena, address);
+        }
+        if (!dropped) continue;
+        changed += 1;
+        if (kept.items.len == 0) {
+            try db.run(arena, "DELETE FROM schedules WHERE id=?", .{schedule.id});
+        } else try db.run(arena, "UPDATE schedules SET recipients=? WHERE id=?", .{ kept.items, schedule.id });
+    }
+    if (changed != 0) try audit.record(ctx, db, null, "schedule.recipients", try std.fmt.allocPrint(arena, "{s} no longer receives {d} scheduled email{s}", .{ email, changed, if (changed == 1) "" else "s" }));
+}
+
 pub fn teamPost(ctx: *Ctx, action: []const u8, target: []const u8, page: anytype) !void {
     const arena = ctx.arena;
     if (!ctx.can(.admin)) return @import("app.zig").forbidden(ctx);
@@ -136,22 +173,22 @@ pub fn teamPost(ctx: *Ctx, action: []const u8, target: []const u8, page: anytype
         if (try person.step() != .row) return fail(ctx, "team", "Unknown person.");
         const email = try arena.dupe(u8, person.columnText(0));
         if (std.mem.eql(u8, person.columnText(1), "owner")) return fail(ctx, "team", "The owner’s access can’t be changed.");
+        const role: Role = if (std.mem.eql(u8, action, "role")) (std.meta.stringToEnum(Role, try ctx.field("role")) orelse return fail(ctx, "team", "Unknown role.")) else .viewer;
+        if (role == .owner) return fail(ctx, "team", "There is one owner.");
         const db = ctx.shared.lockWrite();
         defer ctx.shared.unlockWrite();
+        try db.exec("BEGIN IMMEDIATE");
+        errdefer db.exec("ROLLBACK") catch {};
         if (std.mem.eql(u8, action, "remove")) {
             try db.run(arena, "DELETE FROM users WHERE id=?", .{id});
             try audit.record(ctx, db, null, "team.removed", try std.fmt.allocPrint(arena, "Removed {s}", .{email}));
             try ctx.flash("Removed from the team.", "", "");
         } else if (std.mem.eql(u8, action, "role")) {
-            const role = std.meta.stringToEnum(Role, try ctx.field("role")) orelse return fail(ctx, "team", "Unknown role.");
-            if (role == .owner) return fail(ctx, "team", "There is one owner.");
             try db.run(arena, "UPDATE users SET role=? WHERE id=?", .{ @tagName(role), id });
             try audit.record(ctx, db, null, "team.role", try std.fmt.allocPrint(arena, "{s} is now {s}", .{ email, role.label() }));
             try ctx.flash(try std.fmt.allocPrint(arena, "{s} is now {s}.", .{ email, role.label() }), "", "");
         } else {
             const all = (try ctx.field("all")).len != 0;
-            try db.exec("BEGIN IMMEDIATE");
-            errdefer db.exec("ROLLBACK") catch {};
             try db.run(arena, "UPDATE users SET all_sites=? WHERE id=?", .{ @intFromBool(all), id });
             try db.run(arena, "DELETE FROM user_sites WHERE user_id=?", .{id});
             var names: std.ArrayList(u8) = .empty;
@@ -162,9 +199,10 @@ pub fn teamPost(ctx: *Ctx, action: []const u8, target: []const u8, page: anytype
                 try names.print(arena, "{s}{d}", .{ if (names.items.len == 0) "" else ",", site_id });
             }
             try audit.record(ctx, db, null, "team.sites", try std.fmt.allocPrint(arena, "{s} sees {s}", .{ email, if (all) "all websites" else if (names.items.len == 0) "no websites" else names.items }));
-            try db.exec("COMMIT");
             try ctx.flash("Access saved.", "", "");
         }
+        try dropFromSchedules(ctx, db, id, email);
+        try db.exec("COMMIT");
         return ctx.redirect("/settings/team");
     }
     if (!std.mem.eql(u8, action, "invite")) return fail(ctx, "team", "Unknown action.");
@@ -176,21 +214,22 @@ pub fn teamPost(ctx: *Ctx, action: []const u8, target: []const u8, page: anytype
     const token = blk: {
         const db = ctx.shared.lockWrite();
         defer ctx.shared.unlockWrite();
+        const normalized = try auth.normalizeEmail(arena, email);
+        const existing = try db.scalar(arena, ?[]const u8, "SELECT role FROM users WHERE email=?", .{normalized});
+        if (existing) |value| if (!linkAllowed(ctx, std.meta.stringToEnum(Role, value) orelse .owner)) break :blk null;
         try db.exec("BEGIN IMMEDIATE");
         errdefer db.exec("ROLLBACK") catch {};
-        const normalized = try auth.normalizeEmail(arena, email);
-        const is_new = try db.scalar(arena, i64, "SELECT count(*) FROM users WHERE email=?", .{normalized}) == 0;
         const token = try auth.createInvite(arena, ctx.shared.io, db, email, ctx.now());
         // A new invite carries a role and websites; a fresh link for an
         // existing person never changes their access.
-        if (is_new) {
+        if (existing == null) {
             try db.run(arena, "UPDATE users SET role=?,all_sites=? WHERE email=?", .{ @tagName(role), @intFromBool(site_id == null), normalized });
             if (site_id) |value| try db.run(arena, "INSERT INTO user_sites(user_id,site_id) SELECT id,? FROM users WHERE email=?", .{ value, normalized });
             try audit.record(ctx, db, site_id, "team.invited", try std.fmt.allocPrint(arena, "Invited {s} as {s}", .{ normalized, role.label() }));
-        }
+        } else try audit.record(ctx, db, null, "team.signin_link", try std.fmt.allocPrint(arena, "Created a sign-in link for {s}", .{normalized}));
         try db.exec("COMMIT");
         break :blk token;
-    };
+    } orelse return fail(ctx, "team", "Only the owner can create sign-in links for admins and the owner.");
     const origin = (try @import("signin.zig").pinnedOrigin(arena, ctx.db)) orelse try ctx.publicOrigin();
     const link = try std.fmt.allocPrint(arena, "{s}/invite/{s}", .{ origin, &token });
     var mailed = false;

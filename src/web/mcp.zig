@@ -254,6 +254,8 @@ fn authorize(ctx: *Ctx) !void {
         try db.run(arena, "DELETE FROM oauth_grants WHERE expires_at_ms<?", .{ctx.now()});
         try db.run(arena, "DELETE FROM devices WHERE device_id NOT IN (SELECT device_id FROM oauth_grants WHERE device_id IS NOT NULL)", .{});
         try db.run(arena, "INSERT INTO oauth_grants(token_hash,kind,client_id,user_id,sites,redirect_uri,code_challenge,expires_at_ms,created_at_ms,device_id,device_name) VALUES(?,'code',?,?,?,?,?,?,?,?,?)", .{ &hashed, client_id, user.id, allowed.items, redirect_uri, challenge, ctx.now() + code_ms, ctx.now(), if (app) @as(?[]const u8, &device_id) else null, if (app) @as(?[]const u8, deviceName(params)) else null });
+        // A connector is a key held by another company's app.
+        if (!app) try @import("audit.zig").record(ctx, db, null, "ai.connected", try std.fmt.allocPrint(arena, "Allowed {s} to read {s}", .{ client.name, if (is(allowed.items, "*")) "all websites" else try std.fmt.allocPrint(arena, "websites {s}", .{allowed.items}) }));
         return ctx.redirectFmt("{s}{s}code={s}&state={f}", .{ redirect_uri, separator, &code, html.url(state) });
     }
     // Consent screen. Its form redirects to the client, which CSP must allow.

@@ -110,10 +110,13 @@ pub fn consentSection(ctx: *Ctx, maybe_site: ?data.Site) !void {
     , .{ .deletions = deletions, .plural = if (deletions == 1) "" else "s", .slug = site.slug });
 }
 
-/// The person key for a typed user ID or visitor ID.
+/// The person key for a typed user ID or visitor ID. A user ID may look like
+/// a visitor ID; it is one only when such a visitor exists.
 fn personKey(ctx: *Ctx, site: data.Site, raw: []const u8) ![]const u8 {
     const value = std.mem.trim(u8, raw, " ");
-    if (domain.validateUuid(value)) |_| return value else |_| {}
+    if (domain.validateUuid(value)) |_| {
+        if (try ctx.db.scalar(ctx.arena, i64, "SELECT count(*) FROM visitors WHERE site_id=? AND visitor_id=?", .{ site.id, value }) != 0) return value;
+    } else |_| {}
     const hash = domain.userHash(ctx.shared.master_key, site.public_id, value);
     return ctx.arena.dupe(u8, &hash);
 }
