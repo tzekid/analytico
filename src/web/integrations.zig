@@ -562,11 +562,17 @@ pub fn send(arena: std.mem.Allocator, channel: Channel, slack_text: []const u8, 
 pub fn broadcast(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, slack_text: []const u8, notice: Notice, goals_only_webhooks: bool) !void {
     for (try channels(arena, db, shared.master_key)) |channel| {
         if (goals_only_webhooks and std.mem.eql(u8, channel.kind, "slack")) continue;
-        const failure: ?[]const u8 = if (send(arena, channel, slack_text, notice)) |_| null else |err| errorText(err);
-        const write = shared.lockWrite();
-        defer shared.unlockWrite();
-        try write.run(arena, "UPDATE channels SET last_sent_at_ms=?,last_error=? WHERE id=?", .{ notice.at_ms, if (failure) |value| value else "", channel.id });
+        _ = try deliver(arena, shared, channel, slack_text, notice);
     }
+}
+
+/// Sends to one channel and records the outcome on it; false if it failed.
+fn deliver(arena: std.mem.Allocator, shared: *Shared, channel: Channel, slack_text: []const u8, notice: Notice) !bool {
+    const failure: ?[]const u8 = if (send(arena, channel, slack_text, notice)) |_| null else |err| errorText(err);
+    const write = shared.lockWrite();
+    defer shared.unlockWrite();
+    try write.run(arena, "UPDATE channels SET last_sent_at_ms=?,last_error=? WHERE id=?", .{ notice.at_ms, if (failure) |value| value else "", channel.id });
+    return failure == null;
 }
 
 /// Goal events since the last delivery go to webhooks, oldest first.
@@ -586,9 +592,19 @@ pub fn deliverGoals(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, n
     while (try statement.step() == .row) {
         try items.append(arena, .{ .site = try arena.dupe(u8, statement.columnText(0)), .event = try arena.dupe(u8, statement.columnText(1)), .value = if (statement.columnType(2) == db_mod.sqlite.SQLITE_NULL) null else statement.columnInt(2), .currency = try arena.dupe(u8, statement.columnText(3)), .at = statement.columnInt(4), .goal = try arena.dupe(u8, statement.columnText(5)), .site_id = statement.columnInt(6) });
     }
+    // A webhook that fails misses the rest of this run's goals, as it
+    // would have anyway, so a dead endpoint costs one timeout per run
+    // instead of one per goal while every other job waits.
+    const hooks = try channels(arena, db, shared.master_key);
+    const working = try arena.alloc(bool, hooks.len);
+    @memset(working, true);
     for (items.items) |item| {
         latest = @max(latest, item.at);
-        try broadcast(arena, shared, db, "", .{ .kind = "goal", .site = item.site, .text = try std.fmt.allocPrint(arena, "Goal reached: {s}", .{item.goal}), .event = item.event, .value_minor = item.value, .currency = item.currency, .at_ms = item.at }, true);
+        const notice: Notice = .{ .kind = "goal", .site = item.site, .text = try std.fmt.allocPrint(arena, "Goal reached: {s}", .{item.goal}), .event = item.event, .value_minor = item.value, .currency = item.currency, .at_ms = item.at };
+        for (hooks, working) |channel, *up| {
+            if (!up.* or std.mem.eql(u8, channel.kind, "slack")) continue;
+            up.* = try deliver(arena, shared, channel, "", notice);
+        }
     }
     try pushGoals(arena, shared, db, items.items);
     const write = shared.lockWrite();
@@ -935,52 +951,109 @@ pub fn nightly(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db) !void 
 /// CSV files under `<data>/exports/<site>/<day>/`. Returns the file count.
 pub fn exportDay(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, day_ms: i64) !usize {
     const day_start = day_ms - @mod(day_ms, data.day_ms);
-    const day = data.dateText(day_start);
+    var files: usize = 0;
+    for (try data.sites(arena, db)) |site| files += try exportSiteDay(arena, shared, db, site, day_start);
+    const write = shared.lockWrite();
+    defer shared.unlockWrite();
+    try data.putSetting(arena, write, .@"export.last", try std.fmt.allocPrint(arena, "{s} · {d} files", .{ &data.dateText(day_start), files }));
+    return files;
+}
+
+/// One website's day, replacing any earlier files of it.
+fn exportSiteDay(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, site: data.Site, day_start: i64) !usize {
     const tables = [_][2][]const u8{
         .{ "page_views", "SELECT received_at_ms,page_id,session_id,visitor_id,path,referrer_host,utm_source,utm_medium,utm_campaign,utm_content,utm_term,country,region,city,browser,operating_system,device,viewport_class,language,consent_mode,tracking_mode,traffic_class,search_term FROM page_views WHERE site_id=?1 AND received_at_ms>=?2 AND received_at_ms<?3 AND internal=0 ORDER BY received_at_ms" },
         .{ "events", "SELECT received_at_ms,event_id,page_id,session_id,visitor_id,source,name,path,value_minor,currency,order_id,properties_json,consent_mode FROM events WHERE site_id=?1 AND received_at_ms>=?2 AND received_at_ms<?3 AND internal=0 ORDER BY received_at_ms" },
         .{ "order_items", "SELECT e.received_at_ms,e.event_id,e.order_id,e.name,i.item_id,i.name,i.category,i.price_minor,i.quantity FROM event_items i JOIN events e ON e.site_id=i.site_id AND e.event_id=i.event_id WHERE i.site_id=?1 AND e.received_at_ms>=?2 AND e.received_at_ms<?3 ORDER BY e.received_at_ms" },
     };
-    var files: usize = 0;
-    for (try data.sites(arena, db)) |site| {
-        const directory = try std.fs.path.join(arena, &.{ shared.data, "exports", site.slug, &day });
-        try std.Io.Dir.cwd().createDirPath(shared.io, directory);
-        for (tables) |table| {
-            const path = try std.fmt.allocPrint(arena, "{s}/{s}.csv.gz", .{ directory, table[0] });
-            const file = try std.Io.Dir.cwd().createFile(shared.io, path, .{ .truncate = true, .permissions = @fromBackingInt(@intCast(0o600)) });
-            defer file.close(shared.io);
-            const file_buffer = try arena.alloc(u8, 64 * 1024);
-            var file_writer = file.writer(shared.io, file_buffer);
-            const window = try arena.alloc(u8, std.compress.flate.max_window_len);
-            var gzip = try std.compress.flate.Compress.init(&file_writer.interface, window, .gzip, .default);
-            const w = &gzip.writer;
-            var statement = try db.prepare(arena, table[1]);
-            defer statement.deinit();
-            try statement.bindInt(1, site.id);
-            try statement.bindInt(2, day_start);
-            try statement.bindInt(3, day_start + data.day_ms);
+    const directory = try std.fs.path.join(arena, &.{ shared.data, "exports", site.slug, &data.dateText(day_start) });
+    try std.Io.Dir.cwd().createDirPath(shared.io, directory);
+    for (tables) |table| {
+        const path = try std.fmt.allocPrint(arena, "{s}/{s}.csv.gz", .{ directory, table[0] });
+        const file = try std.Io.Dir.cwd().createFile(shared.io, path, .{ .truncate = true, .permissions = @fromBackingInt(@intCast(0o600)) });
+        defer file.close(shared.io);
+        const file_buffer = try arena.alloc(u8, 64 * 1024);
+        var file_writer = file.writer(shared.io, file_buffer);
+        const window = try arena.alloc(u8, std.compress.flate.max_window_len);
+        var gzip = try std.compress.flate.Compress.init(&file_writer.interface, window, .gzip, .default);
+        const w = &gzip.writer;
+        var statement = try db.prepare(arena, table[1]);
+        defer statement.deinit();
+        try statement.bindInt(1, site.id);
+        try statement.bindInt(2, day_start);
+        try statement.bindInt(3, day_start + data.day_ms);
+        for (0..statement.columnCount()) |index| {
+            if (index != 0) try w.writeByte(',');
+            try w.writeAll(statement.columnName(index));
+        }
+        try w.writeByte('\n');
+        while (try statement.step() == .row) {
             for (0..statement.columnCount()) |index| {
                 if (index != 0) try w.writeByte(',');
-                try w.writeAll(statement.columnName(index));
+                if (statement.columnType(index) == db_mod.sqlite.SQLITE_NULL) continue;
+                try csvField(w, statement.columnText(index));
             }
             try w.writeByte('\n');
-            while (try statement.step() == .row) {
-                for (0..statement.columnCount()) |index| {
-                    if (index != 0) try w.writeByte(',');
-                    if (statement.columnType(index) == db_mod.sqlite.SQLITE_NULL) continue;
-                    try csvField(w, statement.columnText(index));
-                }
-                try w.writeByte('\n');
-            }
-            try gzip.finish();
-            try file_writer.interface.flush();
-            files += 1;
         }
+        try gzip.finish();
+        try file_writer.interface.flush();
+    }
+    return tables.len;
+}
+
+/// Exported days that a deletion touched (`export.refresh`, noted by the
+/// forget transaction as "site:day,...") are written again, so an erased
+/// visitor leaves the files too. Days never exported stay unwritten.
+pub fn refreshExports(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db) !void {
+    const pending = try data.setting(arena, db, .@"export.refresh") orelse return;
+    const sites = try data.sites(arena, db);
+    var entries = std.mem.tokenizeScalar(u8, pending, ',');
+    while (entries.next()) |entry| {
+        const split = std.mem.findScalar(u8, entry, ':') orelse return error.CorruptExportRefresh;
+        const site_id = try std.fmt.parseInt(i64, entry[0..split], 10);
+        const day = entry[split + 1 ..];
+        const day_start = try data.parseDate(day);
+        const site = for (sites) |candidate| {
+            if (candidate.id == site_id) break candidate;
+        } else continue;
+        const directory = try std.fs.path.join(arena, &.{ shared.data, "exports", site.slug, day });
+        std.Io.Dir.cwd().access(shared.io, directory, .{}) catch |err| switch (err) {
+            error.FileNotFound => continue,
+            else => return err,
+        };
+        _ = try exportSiteDay(arena, shared, db, site, day_start);
+        std.log.info("export_refreshed site={s} day={s}", .{ site.slug, day });
     }
     const write = shared.lockWrite();
     defer shared.unlockWrite();
-    try data.putSetting(arena, write, .@"export.last", try std.fmt.allocPrint(arena, "{s} · {d} files", .{ &day, files }));
-    return files;
+    // A deletion noted meanwhile keeps the list for the next run.
+    try write.run(arena, "DELETE FROM settings WHERE name=? AND value=?", .{ @tagName(data.Setting.@"export.refresh"), pending });
+}
+
+/// Retention covers the export: a day goes once retention starts deleting
+/// its records.
+pub fn pruneExports(arena: std.mem.Allocator, shared: *Shared, cutoff_ms: i64) !void {
+    const root = try std.fs.path.join(arena, &.{ shared.data, "exports" });
+    var exports = std.Io.Dir.cwd().openDir(shared.io, root, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    defer exports.close(shared.io);
+    var old: std.ArrayList([]const u8) = .empty;
+    var sites = exports.iterate();
+    while (try sites.next(shared.io)) |site| {
+        if (site.kind != .directory) continue;
+        var site_dir = try exports.openDir(shared.io, site.name, .{ .iterate = true });
+        defer site_dir.close(shared.io);
+        var days = site_dir.iterate();
+        while (try days.next(shared.io)) |day| {
+            if (day.kind != .directory) continue;
+            const day_start = data.parseDate(day.name) catch continue;
+            if (day_start < cutoff_ms) try old.append(arena, try std.fs.path.join(arena, &.{ site.name, day.name }));
+        }
+    }
+    for (old.items) |path| try exports.deleteTree(shared.io, path);
+    if (old.items.len != 0) std.log.info("exports_pruned days={d}", .{old.items.len});
 }
 
 fn csvField(w: *std.Io.Writer, value: []const u8) !void {

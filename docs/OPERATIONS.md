@@ -41,7 +41,11 @@ alerts daily at 06:00 UTC, delivers goal webhooks every thirty seconds, and
 at 03:00 UTC takes the automatic backup, applies retention, prunes replays,
 syncs integrations and writes the daily export. While data retention is set,
 that backup runs even with automatic daily backups off, because retention
-deletes only right after a verified backup. Database transactions finish synchronously before
+deletes only right after a verified backup. Retention deletes in short
+transactions of a few thousand rows, releasing the write lock between them,
+so collection keeps running; it also removes exported days older than the
+window. A webhook that fails is skipped for the rest of that delivery run
+and misses its goals. Database transactions finish synchronously before
 graceful checkpointing.
 
 ## Upgrading the schema
@@ -209,6 +213,12 @@ Once a day closes, a website whose page views were at least twice or at most
 half the previous two weeks' mean (and well outside their spread) gets a draft
 chart note naming the largest source, page or device behind it. Editors see
 drafts above the overview's chart to keep or dismiss; no AI is involved.
+Notes are free text, so with page paths or referrers hidden under "What the
+AI can see", none are sent to the AI.
+
+Every call that may have reached the provider is logged, including one
+that failed part-way: the text and tool results sent, the tokens used and
+the error. The monthly limit counts them.
 
 A plan answers only for its owner. Alerts and scheduled emails use the
 instance's API key, or, without one, the plan of an admin who ticked "Use my
@@ -311,7 +321,9 @@ analytico forget shop --visitor 7f3a…-uuid --data ~/.local/share/analytico-sql
 
 The workspace does the same from a person's page or Settings → Consent &
 privacy, and your backend can send a `forget` record to `/i`. Everything
-linked is removed: page views, events, orders, errors, replays. Aggregated
+linked is removed: page views, events, orders, errors, replays. Days of the
+daily export that held their rows are written again by the background job
+on its next run (after a CLI deletion, once the service starts). Aggregated
 heatmaps and form statistics hold no identifier and stay. Deletion is
 recorded in the audit log.
 

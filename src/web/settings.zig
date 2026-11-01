@@ -404,8 +404,9 @@ fn backupPost(ctx: *Ctx, action: []const u8) !void {
 
 // ---------------------------------------------------------------- Retention
 
-pub fn prune(arena: std.mem.Allocator, db: *db_mod.Db, cutoff_ms: i64) !usize {
-    return @import("../store.zig").pruneBefore(arena, db, cutoff_ms);
+/// Takes the write lock for one short transaction at a time.
+pub fn prune(arena: std.mem.Allocator, shared: *ctx_mod.Shared, cutoff_ms: i64) !usize {
+    return @import("../store.zig").pruneBefore(arena, shared, cutoff_ms);
 }
 
 const retention_options = [_]struct { []const u8, []const u8 }{ .{ "90", "3 months" }, .{ "180", "6 months" }, .{ "365", "12 months" }, .{ "730", "24 months" }, .{ "", "Forever" } };
@@ -463,9 +464,9 @@ fn retentionPost(ctx: *Ctx) !void {
     if (days < 30 or days > 3650) return fail(ctx, "retention", "Pick one of the options.");
     ctx.extendDeadline(600);
     const path = backupNow(arena, ctx.shared.io, ctx.shared.data, ctx.db, "pre-retention", ctx.now()) catch |err| return fail(ctx, "retention", try std.fmt.allocPrint(arena, "Nothing deleted: the backup failed ({s}).", .{@errorName(err)}));
+    const removed = try prune(arena, ctx.shared, ctx.now() - days * data.day_ms);
     const db = ctx.shared.lockWrite();
     defer ctx.shared.unlockWrite();
-    const removed = try prune(arena, db, ctx.now() - days * data.day_ms);
     try data.putSetting(arena, db, .@"retention.days", try std.fmt.allocPrint(arena, "{d}", .{days}));
     try data.putSetting(arena, db, .@"backup.last_at", try std.fmt.allocPrint(arena, "{d}", .{ctx.now()}));
     try @import("audit.zig").record(ctx, db, null, "retention.changed", try std.fmt.allocPrint(arena, "Keep detailed records for {d} days · removed {d} after backup {s}", .{ days, removed, std.fs.path.basename(path) }));

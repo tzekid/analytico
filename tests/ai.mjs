@@ -92,6 +92,13 @@ function stand({ incoming, outgoing, url, base, body, json }) {
       if (/Question: .*limit/.test(question)) {
         return sse(outgoing, [{ type: "response.created" }, { type: "response.failed", response: { error: { code: "subscription_sharing_usage_limit_exceeded", message: "limit" } } }]);
       }
+      // A model that never stops calling tools.
+      if (/Question: .*in circles/.test(question)) {
+        return sse(outgoing, [
+          { type: "response.output_item.done", item: { type: "function_call", call_id: `call_${request.input.length}`, namespace: "analytico", name: "pages", arguments: "{}" } },
+          { type: "response.completed", response: { usage: { input_tokens: 100, output_tokens: 5 } } },
+        ]);
+      }
       const result = request.input.find((item) => item.type === "function_call_output");
       if (!result) {
         return sse(outgoing, [
@@ -152,6 +159,8 @@ await journey("ai", async (t) => {
   const seededAt = Date.now() - 86_400_000;
   db.prepare(`INSERT INTO page_views(site_id,event_id,page_id,session_id,occurred_at_ms,received_at_ms,received_date,visitor_day_id,tracking_mode,path,referrer_host,
     viewport_class,language,tracker_version,consent_mode,internal,country,browser,operating_system,device,traffic_class) VALUES((SELECT id FROM sites WHERE slug='shop'),'seed-event','seed-page','seed-session',?,?,?,'seedvisitor00001','session','/',NULL,'desktop','en','1','analytics',0,'DE','chrome','linux','desktop','human_like')`).run(seededAt, seededAt, new Date(seededAt).toISOString().slice(0, 10));
+  // A daily anomaly note an editor kept: it names a page.
+  db.prepare("INSERT INTO annotations(site_id,day,label,created_at_ms,draft) VALUES((SELECT id FROM sites WHERE slug='shop'),?,'Traffic 2.3× usual, mostly on /account/close',?,0)").run(new Date(seededAt).toISOString().slice(0, 10), seededAt);
   db.close();
   await t.serve();
 
@@ -268,6 +277,7 @@ await journey("ai", async (t) => {
   assert.equal(call.request.tools[0].type, "namespace");
   assert.ok(call.request.tools[0].tools.some((tool) => tool.name === "pages" && !("site" in tool.parameters.properties)));
   assert.match(call.request.input[0].content, /\nScreen: overview\nQuestion: Which page do visitors land on\?/);
+  assert.match(call.request.input[0].content, /Notes the team added: \d{4}-\d{2}-\d{2} Traffic 2\.3× usual, mostly on \/account\/close/);
   const output = answer.request.input.find((item) => item.type === "function_call_output");
   assert.equal(output.call_id, "call_1");
   assert.match(output.output, /^Pages for /);
@@ -279,6 +289,13 @@ await journey("ai", async (t) => {
   await sheet.getByRole("link", { name: "Manage usage" }).waitFor();
 
   // A spent plan stops with its own message, never falling back to the key.
+  const aiLog = () => {
+    const log = t.db();
+    const rows = log.prepare("SELECT question,payload,answer,input_tokens FROM ai_log ORDER BY id").all();
+    log.close();
+    return rows;
+  };
+  const loggedBefore = aiLog().length;
   const anthropicBefore = seen.anthropic.length;
   await sheet.getByPlaceholder("Ask a follow-up…").fill("Have I hit the limit?");
   await sheet.getByRole("button", { name: "Ask", exact: true }).click();
@@ -286,6 +303,43 @@ await journey("ai", async (t) => {
   assert.equal(await page.locator("#ask-sheet").getByRole("link", { name: "Manage usage" }).getAttribute("href"), "https://chatgpt.com/settings/usage");
   assert.match(await page.locator("#ask-sheet .callout use").getAttribute("href"), /#chatgpt$/);
   assert.equal(seen.anthropic.length, anthropicBefore);
+  // Failed answers are logged too, with what was sent and the error.
+  const spent = aiLog().at(-1);
+  assert.equal(aiLog().length, loggedBefore + 1);
+  assert.deepEqual([spent.question, spent.answer], ["Have I hit the limit?", "Usage limit reached on your ChatGPT plan. It resets on its own — see Manage usage."]);
+  assert.match(spent.payload, /\nQuestion: Have I hit the limit\?$/);
+  // A model that keeps calling tools runs out of rounds: the log holds
+  // every tool result the last request carried and the tokens so far.
+  await page.goto(`${origin}/shop`);
+  await page.keyboard.press("Control+k");
+  await page.locator("#palette input").fill("Why do we go in circles?");
+  await page.keyboard.press("Enter");
+  await page.locator("#ask-sheet").getByText("That needed too many steps").waitFor();
+  const looped = aiLog().at(-1);
+  assert.equal(aiLog().length, loggedBefore + 2);
+  assert.deepEqual([looped.question, looped.answer, looped.input_tokens], ["Why do we go in circles?", "That needed too many steps. Try a narrower question.", 600]);
+  assert.equal(looped.payload.split("\n\n[pages {}]\nPages for ").length, 6);
+  const lastRound = seen.responses.at(-1).request.input.filter((item) => item.type === "function_call_output");
+  assert.equal(lastRound.length, 5);
+  assert.ok(lastRound.every((item) => looped.payload.includes(item.output)));
+
+  // With page paths hidden, notes stay out too: they can name any page.
+  await page.goto(`${origin}/settings/ai`);
+  await page.getByLabel("Share page paths").uncheck();
+  await t.until(() => { const settings = t.db(); const row = settings.prepare("SELECT value FROM settings WHERE name='ai.share_paths'").get(); settings.close(); return row?.value === "0"; }, "paths hidden");
+  const hiddenFrom = seen.responses.length;
+  await page.goto(`${origin}/shop`);
+  await page.keyboard.press("Control+k");
+  await page.locator("#palette input").fill("Which page do visitors land on?");
+  await page.keyboard.press("Enter");
+  await page.locator("#ask-sheet").getByText("Which source sends them?").waitFor();
+  const hidden = JSON.stringify(seen.responses.slice(hiddenFrom).map((entry) => entry.request));
+  assert.equal(seen.responses.length, hiddenFrom + 2);
+  assert.doesNotMatch(hidden, /account\/close|Notes the team added/);
+  assert.match(hidden, /page #1/);
+  await page.goto(`${origin}/settings/ai`);
+  await page.getByLabel("Share page paths").check();
+  await t.until(() => { const settings = t.db(); const row = settings.prepare("SELECT value FROM settings WHERE name='ai.share_paths'").get(); settings.close(); return row?.value === "1"; }, "paths shared again");
 
   // Plain-language filters: the description becomes chips, then the view.
   await page.keyboard.press("Escape");
@@ -374,5 +428,5 @@ await journey("ai", async (t) => {
   assert.equal(await t.exited, 0, t.server.signalCode || "server exit status");
   for (const pendingPage of context.pages()) if (pendingPage !== page) await pendingPage.close();
 
-  return "ChatGPT plan sign-in (signature, scope, loopback, reuse), revoke, refresh rotation, streamed Ask with aggregate tools and the screen, usage limit, plain-language filters, teammate on the instance key (Anthropic tools)";
+  return "ChatGPT plan sign-in (signature, scope, loopback, reuse), revoke, refresh rotation, streamed Ask with aggregate tools and the screen, usage limit, failed answers logged (limit, tool rounds), notes hidden with paths, plain-language filters, teammate on the instance key (Anthropic tools)";
 });

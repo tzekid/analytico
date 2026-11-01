@@ -863,6 +863,7 @@ pub fn forgetUser(allocator: std.mem.Allocator, store: *store_mod.Store, site_id
     var visitors: std.ArrayList([]const u8) = .empty;
     while (try statement.step() == .row) try visitors.append(allocator, try allocator.dupe(u8, statement.columnText(0)));
     for (visitors.items) |visitor_id| try forgetVisitor(allocator, store, site_id, visitor_id);
+    try noteExportRefresh(allocator, store, site_id, "SELECT received_at_ms FROM events WHERE site_id=?1 AND user_hash=?2", hash);
     inline for (.{
         "DELETE FROM event_items WHERE site_id=?1 AND event_id IN (SELECT event_id FROM events WHERE site_id=?1 AND user_hash=?2)",
         "DELETE FROM events WHERE site_id=?1 AND user_hash=?2",
@@ -880,6 +881,7 @@ pub fn forgetUser(allocator: std.mem.Allocator, store: *store_mod.Store, site_id
 /// Removes everything stored about one visitor. Aggregates (click cells,
 /// form fields) carry no identifier and stay.
 pub fn forgetVisitor(allocator: std.mem.Allocator, store: *store_mod.Store, site_id: i64, visitor_id: []const u8) !void {
+    try noteExportRefresh(allocator, store, site_id, "SELECT received_at_ms FROM page_views WHERE site_id=?1 AND visitor_id=?2 UNION ALL SELECT received_at_ms FROM events WHERE site_id=?1 AND visitor_id=?2", visitor_id);
     inline for (.{
         "DELETE FROM page_summaries WHERE site_id=?1 AND (visitor_id=?2 OR page_id IN (SELECT page_id FROM page_views WHERE site_id=?1 AND visitor_id=?2))",
         "DELETE FROM event_items WHERE site_id=?1 AND event_id IN (SELECT event_id FROM events WHERE site_id=?1 AND visitor_id=?2)",
@@ -896,6 +898,32 @@ pub fn forgetVisitor(allocator: std.mem.Allocator, store: *store_mod.Store, site
         try statement.bindText(2, visitor_id);
         _ = try statement.step();
     }
+}
+
+/// The days of the rows about to be erased, once a daily export may hold
+/// them: the jobs thread writes those days' files again without them
+/// (`export.refresh`, "site:day" entries).
+fn noteExportRefresh(allocator: std.mem.Allocator, store: *store_mod.Store, site_id: i64, comptime rows: []const u8, key: []const u8) !void {
+    const settings = @import("web/data.zig");
+    if (try settings.setting(allocator, &store.database, .@"export.last") == null) return;
+    var days = try store.database.prepare(allocator, "SELECT DISTINCT strftime('%Y-%m-%d',received_at_ms/1000,'unixepoch') FROM (" ++ rows ++ ")");
+    defer days.deinit();
+    try days.bindInt(1, site_id);
+    try days.bindText(2, key);
+    const pending = try settings.setting(allocator, &store.database, .@"export.refresh") orelse "";
+    var list: std.ArrayList(u8) = .empty;
+    try list.appendSlice(allocator, pending);
+    while (try days.step() == .row) {
+        const entry = try std.fmt.allocPrint(allocator, "{d}:{s}", .{ site_id, days.columnText(0) });
+        var known = std.mem.tokenizeScalar(u8, list.items, ',');
+        const noted = while (known.next()) |item| {
+            if (std.mem.eql(u8, item, entry)) break true;
+        } else false;
+        if (noted) continue;
+        if (list.items.len != 0) try list.append(allocator, ',');
+        try list.appendSlice(allocator, entry);
+    }
+    if (list.items.len != pending.len) try settings.putSetting(allocator, &store.database, .@"export.refresh", list.items);
 }
 
 fn validateRecord(

@@ -144,8 +144,25 @@ pub const Reply = struct { text: []const u8, input_tokens: i64, output_tokens: i
 /// One answer without tools.
 pub fn call(arena: std.mem.Allocator, io: std.Io, config: Config, system: []const u8, user: []const u8, max_tokens: u32) !Reply {
     const started = std.Io.Clock.awake.now(io);
-    const result = try agent.run(arena, config, system, user, null, null, max_tokens);
+    var result: agent.Result = undefined;
+    try agent.run(arena, config, system, user, null, null, max_tokens, &result);
     return .{ .text = result.text, .input_tokens = result.input_tokens, .output_tokens = result.output_tokens, .elapsed_ms = @intCast(@divFloor(started.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds(), 1_000_000)) };
+}
+
+const Logged = struct { reply: anyerror![]const u8, log: LogEntry };
+
+/// One answer without tools, and its AI log entry either way: a call that
+/// fails may already have reached the provider, so it is logged with the
+/// text sent, the tokens used so far and the error as the answer.
+fn logged(arena: std.mem.Allocator, config: Config, system: []const u8, user: []const u8, max_tokens: u32, entry: LogEntry) Logged {
+    var result: agent.Result = undefined;
+    const outcome = agent.run(arena, config, system, user, null, null, max_tokens, &result);
+    var out = entry;
+    out.input_tokens = result.input_tokens;
+    out.output_tokens = result.output_tokens;
+    out.cost_micro = cost(config, result.input_tokens, result.output_tokens);
+    out.answer = if (outcome) |_| result.text else |err| errorText(err);
+    return .{ .reply = if (outcome) |_| result.text else |err| err, .log = out };
 }
 
 pub fn errorText(err: anyerror) []const u8 {
@@ -269,20 +286,24 @@ pub fn packet(arena: std.mem.Allocator, db: *db_mod.Db, view: data.View, share_p
         any_goal = true;
     }
     if (!any_goal) try w.writeAll("none");
-    var notes = try db.prepare(arena, "SELECT day,label FROM annotations WHERE site_id=? AND day>=? AND day<=? AND draft=0 ORDER BY day");
-    defer notes.deinit();
-    const from = data.dateText(range.prev_start_ms);
-    const to = data.dateText(range.end_ms - 1);
-    try notes.bindInt(1, site.id);
-    try notes.bindText(2, &from);
-    try notes.bindText(3, &to);
-    try w.writeAll("\nNotes the team added: ");
-    var any_note = false;
-    while (try notes.step() == .row) {
-        try w.print("{s}{s} {s}", .{ if (any_note) "; " else "", notes.columnText(0), notes.columnText(1) });
-        any_note = true;
+    // Notes are free text that can name any page or source (the daily
+    // anomaly note names its largest driver), so they go only when both may.
+    if (share_paths and share_sources) {
+        var notes = try db.prepare(arena, "SELECT day,label FROM annotations WHERE site_id=? AND day>=? AND day<=? AND draft=0 ORDER BY day");
+        defer notes.deinit();
+        const from = data.dateText(range.prev_start_ms);
+        const to = data.dateText(range.end_ms - 1);
+        try notes.bindInt(1, site.id);
+        try notes.bindText(2, &from);
+        try notes.bindText(3, &to);
+        try w.writeAll("\nNotes the team added: ");
+        var any_note = false;
+        while (try notes.step() == .row) {
+            try w.print("{s}{s} {s}", .{ if (any_note) "; " else "", notes.columnText(0), notes.columnText(1) });
+            any_note = true;
+        }
+        if (!any_note) try w.writeAll("none");
     }
-    if (!any_note) try w.writeAll("none");
     try w.writeByte('\n');
     return out.written();
 }
@@ -408,11 +429,9 @@ pub fn ask(ctx: *Ctx, site: data.Site) !void {
     const instructions = try askInstructions(arena, site);
     const input = try std.fmt.allocPrint(arena, "{s}\nScreen: {s}\nQuestion: {s}", .{ try packet(arena, ctx.db, view, config.share_paths, config.share_sources), screenOf(back, site.slug), question });
     const scope: agent.Scope = .{ .db = ctx.db, .site = site, .now_ms = ctx.now(), .paths = config.share_paths, .sources = config.share_sources };
-    const result = agent.run(arena, config, instructions, input, scope, .{ .context = &stream, .emitFn = AskStream.emit }, 1500) catch |err| {
-        // The browser left; nothing to tell it.
-        if (err == error.WriteFailed) return;
-        return stream.fail(err);
-    };
+    var result: agent.Result = undefined;
+    const outcome = agent.run(arena, config, instructions, input, scope, .{ .context = &stream, .emitFn = AskStream.emit }, 1500, &result);
+    // Logged whether or not it finished: what was sent has left.
     const id = blk: {
         const db = ctx.shared.lockWrite();
         defer ctx.shared.unlockWrite();
@@ -426,8 +445,13 @@ pub fn ask(ctx: *Ctx, site: data.Site) !void {
             .output_tokens = result.output_tokens,
             .cost_micro = cost(config, result.input_tokens, result.output_tokens),
             .payload = try std.mem.concat(arena, u8, &.{ input, result.tools }),
-            .answer = result.text,
+            .answer = if (outcome) |_| result.text else |err| if (err == error.WriteFailed) "The browser left before the answer finished." else errorText(err),
         });
+    };
+    outcome catch |err| {
+        // The browser left; nothing to tell it.
+        if (err == error.WriteFailed) return;
+        return stream.fail(err);
     };
     try stream.send("done", .{ .href = try std.fmt.allocPrint(arena, "{s}{s}ask={d}", .{ back, if (std.mem.findScalar(u8, back, '?') == null) "?" else "&", id }) });
     try body.end();
@@ -450,13 +474,14 @@ pub fn describe(ctx: *Ctx, site: data.Site) !void {
     const today = data.dateText(ctx.now());
     const system = try std.fmt.allocPrint(arena, describe_system, .{&today});
     ctx.extendDeadline(60);
-    const reply = call(arena, ctx.shared.io, config, system, text, 300) catch |err| return jsonFailed(ctx, errorText(err));
+    const sent = logged(arena, config, system, text, 300, .{ .origin = "Filter from a description", .site_id = site.id, .question = text, .data_used = "None", .model = try logModel(arena, config), .payload = text, .answer = "" });
     {
         const db = ctx.shared.lockWrite();
         defer ctx.shared.unlockWrite();
-        _ = try log(arena, db, ctx.now(), .{ .origin = "Filter from a description", .site_id = site.id, .question = text, .data_used = "None", .model = try logModel(arena, config), .input_tokens = reply.input_tokens, .output_tokens = reply.output_tokens, .cost_micro = cost(config, reply.input_tokens, reply.output_tokens), .payload = text, .answer = reply.text });
+        _ = try log(arena, db, ctx.now(), sent.log);
     }
-    const object = jsonObject(arena, reply.text) orelse return jsonFailed(ctx, "Couldn’t turn that into filters. Try naming a period, country, device, source or page.");
+    const reply = sent.reply catch |err| return jsonFailed(ctx, errorText(err));
+    const object = jsonObject(arena, reply) orelse return jsonFailed(ctx, "Couldn’t turn that into filters. Try naming a period, country, device, source or page.");
     var overrides: std.ArrayList([2][]const u8) = .empty;
     try overrides.append(arena, .{ "f!", "" });
     const range = jsonString(object, "range");
@@ -747,12 +772,18 @@ pub fn why(ctx: *Ctx, site: data.Site) !void {
         };
         const sent = try driversText(arena, result, label, base_label, config.share_paths, config.share_sources);
         ctx.extendDeadline(60);
-        const reply = call(arena, ctx.shared.io, config, why_system, sent, 400) catch |err| {
+        const outcome = logged(arena, config, why_system, sent, 400, .{ .origin = "Why?", .site_id = site.id, .question = try std.fmt.allocPrint(arena, "Why did {s} change?", .{label}), .data_used = "Sources, pages, devices · 2 periods", .model = try logModel(arena, config), .payload = sent, .answer = "" });
+        {
+            const db = ctx.shared.lockWrite();
+            defer ctx.shared.unlockWrite();
+            _ = try log(arena, db, ctx.now(), outcome.log);
+        }
+        cost_micro = outcome.log.cost_micro;
+        const reply = outcome.reply catch |err| {
             ai_error = errorText(err);
             break :ai;
         };
-        cost_micro = cost(config, reply.input_tokens, reply.output_tokens);
-        if (jsonObject(arena, reply.text)) |object| {
+        if (jsonObject(arena, reply)) |object| {
             headline = jsonString(object, "headline");
             if (object.get("reasons")) |value| if (value == .array) {
                 var list: std.ArrayList([]const u8) = .empty;
@@ -760,9 +791,6 @@ pub fn why(ctx: *Ctx, site: data.Site) !void {
                 reasons = list.items;
             };
         }
-        const db = ctx.shared.lockWrite();
-        defer ctx.shared.unlockWrite();
-        _ = try log(arena, db, ctx.now(), .{ .origin = "Why?", .site_id = site.id, .question = try std.fmt.allocPrint(arena, "Why did {s} change?", .{label}), .data_used = "Sources, pages, devices · 2 periods", .model = try logModel(arena, config), .input_tokens = reply.input_tokens, .output_tokens = reply.output_tokens, .cost_micro = cost_micro, .payload = sent, .answer = reply.text });
     }
     const w = ctx.w();
     const verb = if (total >= 0) "rise" else "drop";
@@ -801,7 +829,7 @@ pub fn why(ctx: *Ctx, site: data.Site) !void {
 
 /// Explains a triggered alert: yesterday against the day before.
 /// `config` is null without AI: the explanation is then the numbers alone.
-pub fn triageText(arena: std.mem.Allocator, io: std.Io, db: *db_mod.Db, maybe_config: ?Config, site: data.Site, filters: []const u8, now_ms: i64) !struct { text: []const u8, log: ?LogEntry } {
+pub fn triageText(arena: std.mem.Allocator, _: std.Io, db: *db_mod.Db, maybe_config: ?Config, site: data.Site, filters: []const u8, now_ms: i64) !struct { text: []const u8, log: ?LogEntry } {
     const today = now_ms - @mod(now_ms, data.day_ms);
     const params = try html.Params.parse(arena, filters);
     const view = try data.View.parse(arena, site, params, now_ms);
@@ -815,15 +843,17 @@ pub fn triageText(arena: std.mem.Allocator, io: std.Io, db: *db_mod.Db, maybe_co
     if (result.list.len != 0) try deterministic.writer.writeByte('.');
     const config = maybe_config orelse return .{ .text = deterministic.written(), .log = null };
     const sent = try driversText(arena, result, "yesterday", "The day before", config.share_paths, config.share_sources);
-    const reply = call(arena, io, config, why_system, sent, 300) catch return .{ .text = deterministic.written(), .log = null };
-    const object = jsonObject(arena, reply.text) orelse return .{ .text = deterministic.written(), .log = null };
+    // Whatever comes back, the call is logged.
+    const outcome = logged(arena, config, why_system, sent, 300, .{ .origin = "Alert triage", .site_id = site.id, .question = "Why did this alert trigger?", .data_used = "Sources, pages, devices · 2 days", .model = try logModel(arena, config), .payload = sent, .answer = "" });
+    const reply = outcome.reply catch return .{ .text = deterministic.written(), .log = outcome.log };
+    const object = jsonObject(arena, reply) orelse return .{ .text = deterministic.written(), .log = outcome.log };
     var out: std.Io.Writer.Allocating = .init(arena);
     try out.writer.writeAll(jsonString(object, "headline"));
     if (object.get("reasons")) |value| if (value == .array) for (value.array.items, 0..) |item, index| {
         if (item != .string or index >= result.list.len) continue;
         try out.writer.print(" {s}: {s}.", .{ try driverLabel(arena, result.list[index]), std.mem.trimEnd(u8, item.string, ".") });
     };
-    return .{ .text = out.written(), .log = .{ .origin = "Alert triage", .site_id = site.id, .question = "Why did this alert trigger?", .data_used = "Sources, pages, devices · 2 days", .model = try logModel(arena, config), .input_tokens = reply.input_tokens, .output_tokens = reply.output_tokens, .cost_micro = cost(config, reply.input_tokens, reply.output_tokens), .payload = sent, .answer = reply.text } };
+    return .{ .text = out.written(), .log = outcome.log };
 }
 
 fn triage(ctx: *Ctx, site: data.Site, alert_id: i64) !void {
@@ -852,11 +882,18 @@ const digest_system =
 ;
 
 /// A short AI-written summary for scheduled emails, or null without AI.
-pub fn digest(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, view: data.View, now_ms: i64) !?struct { text: []const u8, log: LogEntry } {
+/// The call is logged at once, whatever happens to the email.
+pub fn digest(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, view: data.View, now_ms: i64) !?[]const u8 {
     const config = forBackground(arena, shared, db, now_ms) catch return null;
     const sent = try packet(arena, db, view, config.share_paths, config.share_sources);
-    const reply = call(arena, shared.io, config, digest_system, sent, 300) catch return null;
-    return .{ .text = std.mem.trim(u8, reply.text, " \n"), .log = .{ .origin = "Scheduled email", .site_id = view.site.id, .question = "Summarize this period", .data_used = try dataUsed(arena, view), .model = try logModel(arena, config), .input_tokens = reply.input_tokens, .output_tokens = reply.output_tokens, .cost_micro = cost(config, reply.input_tokens, reply.output_tokens), .payload = sent, .answer = reply.text } };
+    const outcome = logged(arena, config, digest_system, sent, 300, .{ .origin = "Scheduled email", .site_id = view.site.id, .question = "Summarize this period", .data_used = try dataUsed(arena, view), .model = try logModel(arena, config), .payload = sent, .answer = "" });
+    {
+        const write = shared.lockWrite();
+        defer shared.unlockWrite();
+        _ = try log(arena, write, now_ms, outcome.log);
+    }
+    const reply = outcome.reply catch return null;
+    return std.mem.trim(u8, reply, " \n");
 }
 
 test "strip parameter" {

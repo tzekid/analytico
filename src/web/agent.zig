@@ -39,14 +39,16 @@ pub const Result = struct {
 
 const max_rounds = 6;
 
-pub fn run(arena: std.mem.Allocator, config: ai.Config, instructions: []const u8, input: []const u8, scope: ?Scope, sink: ?Sink, max_tokens: u32) !Result {
+/// Fills `result` as it goes, so a run that fails part-way still tells the
+/// AI log the tokens used and the tool results sent so far.
+pub fn run(arena: std.mem.Allocator, config: ai.Config, instructions: []const u8, input: []const u8, scope: ?Scope, sink: ?Sink, max_tokens: u32, result: *Result) !void {
+    result.* = .{ .text = "" };
     return switch (config.provider) {
-        .openai, .chatgpt => responses(arena, config, instructions, input, scope, sink, max_tokens),
-        .anthropic => messages(arena, config, instructions, input, scope, sink, max_tokens),
+        .openai, .chatgpt => responses(arena, config, instructions, input, scope, sink, max_tokens, result),
+        .anthropic => messages(arena, config, instructions, input, scope, sink, max_tokens, result),
         .compatible => {
-            const result = try chat(arena, config, instructions, input, max_tokens);
+            result.* = try chat(arena, config, instructions, input, max_tokens);
             try Sink.emit(sink, .{ .delta = result.text });
-            return result;
         },
     };
 }
@@ -255,14 +257,13 @@ const ResponsesStream = struct {
     }
 };
 
-fn responses(arena: std.mem.Allocator, config: ai.Config, instructions: []const u8, input: []const u8, scope: ?Scope, sink: ?Sink, max_tokens: u32) !Result {
+fn responses(arena: std.mem.Allocator, config: ai.Config, instructions: []const u8, input: []const u8, scope: ?Scope, sink: ?Sink, max_tokens: u32, result: *Result) !void {
     const plan = config.provider == .chatgpt;
     const url = if (plan) try std.fmt.allocPrint(arena, "{s}/responses", .{config.base_url}) else "https://api.openai.com/v1/responses";
     var items: std.ArrayList([]const u8) = .empty;
     try items.append(arena, try json(arena, .{ .role = "user", .content = input }));
     var text: std.ArrayList(u8) = .empty;
     var log: std.Io.Writer.Allocating = .init(arena);
-    var result: Result = .{ .text = "" };
     for (0..max_rounds) |_| {
         var body: std.Io.Writer.Allocating = .init(arena);
         const w = &body.writer;
@@ -281,8 +282,13 @@ fn responses(arena: std.mem.Allocator, config: ai.Config, instructions: []const 
             try w.writeAll(if (plan) "]}]" else "]");
         }
         try w.writeByte('}');
+        // What this request carries, should it be the last.
+        result.tools = log.written();
         var stream: ResponsesStream = .{ .arena = arena, .sink = sink, .text = &text };
-        const response = net.stream(arena, url, .{ .method = .POST, .body = body.written(), .headers = &.{ .{ .name = "authorization", .value = try bearer(arena, config.key) }, .{ .name = "accept", .value = "text/event-stream" } } }, &stream) catch |err| switch (err) {
+        const sent = net.stream(arena, url, .{ .method = .POST, .body = body.written(), .headers = &.{ .{ .name = "authorization", .value = try bearer(arena, config.key) }, .{ .name = "accept", .value = "text/event-stream" } } }, &stream);
+        result.input_tokens += stream.input_tokens;
+        result.output_tokens += stream.output_tokens;
+        const response = sent catch |err| switch (err) {
             error.Unreachable => return error.AiUnreachable,
             else => return err,
         };
@@ -290,12 +296,9 @@ fn responses(arena: std.mem.Allocator, config: ai.Config, instructions: []const 
         if (stream.failure) |err| return err;
         // Only a completed response counts.
         if (!stream.completed) return error.AiFailed;
-        result.input_tokens += stream.input_tokens;
-        result.output_tokens += stream.output_tokens;
         if (stream.calls.items.len == 0 or scope == null) {
             result.text = text.items;
-            result.tools = log.written();
-            return result;
+            return;
         }
         const outputs = try runCalls(arena, scope.?, stream.calls.items, sink, &log.writer);
         // No stored conversation: the calls and their results go back in full.
@@ -359,12 +362,11 @@ const MessagesStream = struct {
     }
 };
 
-fn messages(arena: std.mem.Allocator, config: ai.Config, instructions: []const u8, input: []const u8, scope: ?Scope, sink: ?Sink, max_tokens: u32) !Result {
+fn messages(arena: std.mem.Allocator, config: ai.Config, instructions: []const u8, input: []const u8, scope: ?Scope, sink: ?Sink, max_tokens: u32, result: *Result) !void {
     var turns: std.ArrayList([]const u8) = .empty;
     try turns.append(arena, try json(arena, .{ .role = "user", .content = input }));
     var text: std.ArrayList(u8) = .empty;
     var log: std.Io.Writer.Allocating = .init(arena);
-    var result: Result = .{ .text = "" };
     for (0..max_rounds) |_| {
         var body: std.Io.Writer.Allocating = .init(arena);
         const w = &body.writer;
@@ -380,23 +382,24 @@ fn messages(arena: std.mem.Allocator, config: ai.Config, instructions: []const u
             try w.writeByte(']');
         }
         try w.writeByte('}');
+        result.tools = log.written();
         var stream: MessagesStream = .{ .arena = arena, .sink = sink, .text = &text };
         const url = if (config.base_url.len != 0) try std.fmt.allocPrint(arena, "{s}/messages", .{config.base_url}) else "https://api.anthropic.com/v1/messages";
-        const response = net.stream(arena, url, .{ .method = .POST, .body = body.written(), .headers = &.{ .{ .name = "x-api-key", .value = config.key }, .{ .name = "anthropic-version", .value = "2023-06-01" }, .{ .name = "accept", .value = "text/event-stream" } } }, &stream) catch |err| switch (err) {
+        const sent = net.stream(arena, url, .{ .method = .POST, .body = body.written(), .headers = &.{ .{ .name = "x-api-key", .value = config.key }, .{ .name = "anthropic-version", .value = "2023-06-01" }, .{ .name = "accept", .value = "text/event-stream" } } }, &stream);
+        result.input_tokens += stream.input_tokens;
+        result.output_tokens += stream.output_tokens;
+        const response = sent catch |err| switch (err) {
             error.Unreachable => return error.AiUnreachable,
             else => return err,
         };
         if (response.status != .ok) return httpError(arena, config.provider, response);
         if (stream.failure) |err| return err;
         if (!stream.completed) return error.AiFailed;
-        result.input_tokens += stream.input_tokens;
-        result.output_tokens += stream.output_tokens;
         var calls: std.ArrayList(Call) = .empty;
         for (stream.blocks.items) |item| if (item.tool) try calls.append(arena, .{ .id = item.id, .name = item.name, .arguments = item.input.items });
         if (calls.items.len == 0 or scope == null) {
             result.text = text.items;
-            result.tools = log.written();
-            return result;
+            return;
         }
         const outputs = try runCalls(arena, scope.?, calls.items, sink, &log.writer);
         var assistant: std.Io.Writer.Allocating = .init(arena);

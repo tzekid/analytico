@@ -198,7 +198,7 @@ pub fn prune(
     try cutoff_query.bindText(1, before);
     if (try cutoff_query.step() != .row or cutoff_query.columnType(0) == db_mod.sqlite.SQLITE_NULL) return error.InvalidDate;
     const cutoff = cutoff_query.columnInt(0);
-    const removed = try store_mod.pruneBefore(allocator, &store.database, cutoff);
+    const removed = try store_mod.pruneBefore(allocator, store_mod.Unlocked{ .database = &store.database }, cutoff);
     try @import("web/audit.zig").recordAs(allocator, &store.database, "cli", null, "retention.pruned", try std.fmt.allocPrint(allocator, "Removed {d} records received before {s}", .{ removed, before }), @import("domain.zig").nowMs());
     try store.checkpoint();
     try output.print("prune complete before={s} removed={d} backup={s}\n", .{ before, removed, backup_path });

@@ -1348,6 +1348,7 @@ pub const Setting = enum {
     currency,
     @"export.daily",
     @"export.last",
+    @"export.refresh",
     @"jobs.last_run",
     @"jobs.nightly_at",
     public_origin,

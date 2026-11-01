@@ -229,35 +229,116 @@ pub const Store = struct {
 };
 
 /// Retention: removes detailed records received before the cutoff, plus the
-/// aggregates and remembered visitors that only describe that time. One
-/// transaction; callers back up first.
-pub fn pruneBefore(allocator: std.mem.Allocator, database: *db_mod.Db, cutoff_ms: i64) !usize {
+/// aggregates and remembered visitors that only describe that time. Callers
+/// back up first. It runs as many short transactions so collection keeps
+/// going: `writer` (the server's shared state, or `Unlocked` from the CLI)
+/// holds the write lock for one at a time.
+pub fn pruneBefore(allocator: std.mem.Allocator, writer: anytype, cutoff_ms: i64) !usize {
+    var removed: usize = 0;
+    var sites: std.ArrayList(i64) = .empty;
+    defer sites.deinit(allocator);
+    {
+        const database = writer.lockWrite();
+        defer writer.unlockWrite();
+        var statement = try database.prepare(allocator, "SELECT id FROM sites ORDER BY id");
+        defer statement.deinit();
+        while (try statement.step() == .row) try sites.append(allocator, statement.columnInt(0));
+    }
+    for (sites.items) |site_id| {
+        while (true) {
+            const database = writer.lockWrite();
+            defer writer.unlockWrite();
+            removed += try pruneSlice(allocator, database, site_id, cutoff_ms) orelse break;
+        }
+        // Remembered visitors with their identity links, a batch at a time.
+        while (true) {
+            const database = writer.lockWrite();
+            defer writer.unlockWrite();
+            try database.exec("BEGIN IMMEDIATE");
+            errdefer database.exec("ROLLBACK") catch {};
+            const oldest = "(SELECT visitor_id FROM visitors WHERE site_id=?1 AND last_seen_ms<?2 ORDER BY last_seen_ms,visitor_id LIMIT ?3)";
+            try database.run(allocator, "DELETE FROM visitor_links WHERE site_id=?1 AND visitor_id IN " ++ oldest, .{ site_id, cutoff_ms, prune_batch });
+            removed += database.changes();
+            try database.run(allocator, "DELETE FROM visitors WHERE site_id=?1 AND visitor_id IN " ++ oldest, .{ site_id, cutoff_ms, prune_batch });
+            const visitors = database.changes();
+            try database.exec("COMMIT");
+            removed += visitors;
+            if (visitors < prune_batch) break;
+        }
+    }
+    // What is left only describes that time: receipts and daily aggregates.
+    inline for (.{
+        "DELETE FROM record_receipts WHERE (site_id,event_id) IN (SELECT site_id,event_id FROM record_receipts WHERE received_at_ms<?1 LIMIT ?2)",
+        "DELETE FROM click_cells WHERE (site_id,path,day,viewport_class,element,x,y) IN (SELECT site_id,path,day,viewport_class,element,x,y FROM click_cells WHERE day<strftime('%Y-%m-%d',?1/1000,'unixepoch') LIMIT ?2)",
+        "DELETE FROM form_fields WHERE (site_id,path,day,form,field) IN (SELECT site_id,path,day,form,field FROM form_fields WHERE day<strftime('%Y-%m-%d',?1/1000,'unixepoch') LIMIT ?2)",
+        "DELETE FROM visitor_weeks WHERE (site_id,week,visitor_id) IN (SELECT site_id,week,visitor_id FROM visitor_weeks WHERE week<(?1/86400000+3)/7 LIMIT ?2)",
+        "DELETE FROM rollups WHERE (site_id,dim,day,key) IN (SELECT site_id,dim,day,key FROM rollups WHERE day<strftime('%Y-%m-%d',?1/1000,'unixepoch') LIMIT ?2)",
+        "DELETE FROM rollup_days WHERE (site_id,day) IN (SELECT site_id,day FROM rollup_days WHERE day<strftime('%Y-%m-%d',?1/1000,'unixepoch') LIMIT ?2)",
+        "DELETE FROM vitals_daily WHERE (site_id,metric,day,path,value) IN (SELECT site_id,metric,day,path,value FROM vitals_daily WHERE day<strftime('%Y-%m-%d',?1/1000,'unixepoch') LIMIT ?2)",
+    }) |sql| {
+        while (true) {
+            const database = writer.lockWrite();
+            defer writer.unlockWrite();
+            try database.run(allocator, sql, .{ cutoff_ms, prune_batch });
+            const changed = database.changes();
+            removed += changed;
+            if (changed < prune_batch) break;
+        }
+    }
+    const database = writer.lockWrite();
+    defer writer.unlockWrite();
+    try database.exec("DELETE FROM cache");
+    return removed;
+}
+
+/// For the CLI, which has the database to itself.
+pub const Unlocked = struct {
+    database: *db_mod.Db,
+
+    pub fn lockWrite(self: Unlocked) *db_mod.Db {
+        return self.database;
+    }
+
+    pub fn unlockWrite(_: Unlocked) void {}
+};
+
+const prune_batch = 5000;
+
+/// One transaction: a website's oldest records before the cutoff, at most
+/// `prune_batch` rows per table. The tables are kept in time order, so this
+/// is one contiguous read each, and a slice's events go with their items.
+/// Null once nothing before the cutoff is left.
+fn pruneSlice(allocator: std.mem.Allocator, database: *db_mod.Db, site_id: i64, cutoff_ms: i64) !?usize {
     try database.exec("BEGIN IMMEDIATE");
     errdefer database.exec("ROLLBACK") catch {};
+    const first = try database.scalar(allocator, ?i64,
+        \\SELECT min(m) FROM (SELECT min(received_at_ms) m FROM page_views WHERE site_id=?1 UNION ALL SELECT min(received_at_ms) FROM page_summaries WHERE site_id=?1
+        \\ UNION ALL SELECT min(received_at_ms) FROM events WHERE site_id=?1 UNION ALL SELECT min(received_at_ms) FROM errors WHERE site_id=?1)
+    , .{site_id});
+    if (first == null or first.? >= cutoff_ms) {
+        try database.exec("COMMIT");
+        return null;
+    }
+    // The slice ends at whichever table reaches the batch size first.
+    const next = try database.scalar(allocator, ?i64,
+        \\SELECT min(m) FROM (SELECT (SELECT received_at_ms FROM page_views WHERE site_id=?1 AND received_at_ms<?2 ORDER BY received_at_ms LIMIT 1 OFFSET ?3) m
+        \\ UNION ALL SELECT (SELECT received_at_ms FROM page_summaries WHERE site_id=?1 AND received_at_ms<?2 ORDER BY received_at_ms LIMIT 1 OFFSET ?3)
+        \\ UNION ALL SELECT (SELECT received_at_ms FROM events WHERE site_id=?1 AND received_at_ms<?2 ORDER BY received_at_ms LIMIT 1 OFFSET ?3)
+        \\ UNION ALL SELECT (SELECT received_at_ms FROM errors WHERE site_id=?1 AND received_at_ms<?2 ORDER BY received_at_ms LIMIT 1 OFFSET ?3))
+    , .{ site_id, cutoff_ms, prune_batch });
+    // Rows that share the first timestamp go together.
+    const end = if (next) |value| @max(value, first.? + 1) else cutoff_ms;
     var removed: usize = 0;
     inline for (.{
-        "DELETE FROM page_summaries WHERE received_at_ms<?1",
-        "DELETE FROM page_views WHERE received_at_ms<?1",
-        "DELETE FROM event_items WHERE (site_id,event_id) IN (SELECT site_id,event_id FROM events WHERE received_at_ms<?1)",
-        "DELETE FROM events WHERE received_at_ms<?1",
-        "DELETE FROM errors WHERE received_at_ms<?1",
-        "DELETE FROM record_receipts WHERE received_at_ms<?1",
-        "DELETE FROM click_cells WHERE day<strftime('%Y-%m-%d',?1/1000,'unixepoch')",
-        "DELETE FROM form_fields WHERE day<strftime('%Y-%m-%d',?1/1000,'unixepoch')",
-        "DELETE FROM visitor_links WHERE (site_id,visitor_id) IN (SELECT site_id,visitor_id FROM visitors WHERE last_seen_ms<?1)",
-        "DELETE FROM visitor_weeks WHERE week<(?1/86400000+3)/7",
-        "DELETE FROM visitors WHERE last_seen_ms<?1",
-        "DELETE FROM rollups WHERE day<strftime('%Y-%m-%d',?1/1000,'unixepoch')",
-        "DELETE FROM rollup_days WHERE day<strftime('%Y-%m-%d',?1/1000,'unixepoch')",
-        "DELETE FROM vitals_daily WHERE day<strftime('%Y-%m-%d',?1/1000,'unixepoch')",
+        "DELETE FROM page_summaries WHERE site_id=?1 AND received_at_ms<?2",
+        "DELETE FROM page_views WHERE site_id=?1 AND received_at_ms<?2",
+        "DELETE FROM event_items WHERE site_id=?1 AND event_id IN (SELECT event_id FROM events WHERE site_id=?1 AND received_at_ms<?2)",
+        "DELETE FROM events WHERE site_id=?1 AND received_at_ms<?2",
+        "DELETE FROM errors WHERE site_id=?1 AND received_at_ms<?2",
     }) |sql| {
-        var statement = try database.prepare(allocator, sql);
-        defer statement.deinit();
-        try statement.bindInt(1, cutoff_ms);
-        _ = try statement.step();
+        try database.run(allocator, sql, .{ site_id, end });
         removed += database.changes();
     }
-    try database.exec("DELETE FROM cache");
     try database.exec("COMMIT");
     return removed;
 }

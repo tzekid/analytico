@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHmac, randomBytes, randomUUID } from "node:crypto";
-import { readdir, writeFile } from "node:fs/promises";
+import { readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { gunzipSync, gzipSync } from "node:zlib";
@@ -596,6 +596,35 @@ await journey("v3", async (t) => {
   await page.locator(".toast", { hasText: "Exported 6 files" }).waitFor();
   const day = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
   assert.deepEqual((await readdir(join(t.data, "exports", "shop", day))).sort(), ["events.csv.gz", "order_items.csv.gz", "page_views.csv.gz"]);
+  // Erasing someone rewrites the exported days they were in (an event of
+  // theirs yesterday, so yesterday's page views stay as the rollups expect),
+  // and a webhook that fails is tried once per delivery run, not per goal.
+  let refused = 0;
+  const refusing = await t.standIn(({ json }) => { refused += 1; json({}, 500); });
+  await page.goto(`${originA}/settings/integrations?site=shop`);
+  await integration("channels").locator("summary.btn").click();
+  await integration("channels").getByRole("radio", { name: /^Webhook/ }).check();
+  await integration("channels").getByRole("textbox", { name: "Name" }).fill("Refusing");
+  await integration("channels").getByRole("textbox", { name: "URL" }).fill(`${refusing}/hook`);
+  await integration("channels").getByRole("button", { name: "Add and send a test" }).click();
+  await page.locator(".toast", { hasText: "Webhook added" }).waitFor();
+  const erased = randomUUID();
+  const exportedAt = Date.parse(day) + 7200000;
+  const seeding = t.db("analytico.db", {});
+  seeding.prepare("INSERT INTO events(site_id,event_id,source,occurred_at_ms,received_at_ms,received_date,tracking_mode,name,tracker_version,consent_mode,internal,properties_json,visitor_id) VALUES(1,?,'browser',?,?,?,'full','exported_check','2','analytics',0,'{}',?)").run(randomUUID(), exportedAt, exportedAt, day, erased);
+  seeding.close();
+  await page.goto(`${originA}/settings/integrations?site=shop`);
+  await integration("export").getByRole("button", { name: "Export yesterday now" }).click();
+  await page.locator(".toast", { hasText: "Exported 6 files" }).waitFor();
+  const exportedEvents = async () => { try { return gunzipSync(await readFile(join(t.data, "exports", "shop", day, "events.csv.gz"))).toString(); } catch { return null; } };
+  assert.ok((await exportedEvents()).includes(erased));
+  const delivered = received.hook.length;
+  const batch = JSON.stringify({ v: 2, site: publicId, sent_at_ms: Date.now(), records: [{ type: "forget", visitor_id: erased }, { type: "event", name: "purchase", properties: {} }, { type: "event", name: "purchase", properties: {} }].map((record) => ({ event_id: randomUUID(), occurred_at_ms: Date.now(), tracking_mode: "full", consent_mode: "server", tracker_version: "backend", release_id: "", internal: false, ...record })) });
+  assert.equal((await fetch(`http://127.0.0.1:${t.port}/i`, { method: "POST", headers: { "content-type": "application/json", ...t.sign("shop", batch) }, body: batch })).status, 204);
+  await t.until(async () => { const text = await exportedEvents(); return text !== null && !text.includes(erased); }, "export rewritten without the erased visitor", 45000);
+  assert.match(await exportedEvents(), /^received_at_ms,event_id,page_id,session_id,visitor_id,/);
+  await t.until(() => received.hook.length === delivered + 2, "two goals delivered", 45000);
+  assert.equal(refused, 2);
 
   // Rollups: a closed day is summarised once by the background job and reads
   // exactly like its raw rows (25 views by 10 visitor-days from NL).
@@ -795,6 +824,27 @@ await journey("v3", async (t) => {
   execFileSync(t.app, ["backup", t.data, backup]);
   execFileSync(t.app, ["restore", backup, join(t.temporary, "restored")]);
   assert.match(execFileSync(t.app, ["doctor", "--data", join(t.temporary, "restored")], { encoding: "utf8" }), /replays=\d+/);
+  // Retention deletes in short batches: more old rows than one batch, an
+  // order with its items and a linked visitor go; recent records stay.
+  const oldAt = Date.now() - 200 * 86400000;
+  const cutoff = Date.now() - 90 * 86400000;
+  const aged = t.db("analytico.db", {});
+  const agedView = aged.prepare("INSERT INTO page_views(site_id,event_id,page_id,occurred_at_ms,received_at_ms,received_date,visitor_day_id,tracking_mode,path,tracker_version,consent_mode,internal,country,browser,operating_system,device,traffic_class) VALUES(1,?,?,?,?,?,'0000000000000000','full','/aged','2','pending',0,'NL','chrome','linux','desktop','human_like')");
+  aged.exec("BEGIN");
+  for (let index = 0; index < 12000; index++) agedView.run(randomUUID(), randomUUID(), oldAt + Math.floor(index / 3), oldAt + Math.floor(index / 3), new Date(oldAt).toISOString().slice(0, 10));
+  aged.prepare("INSERT INTO events(site_id,event_id,source,occurred_at_ms,received_at_ms,received_date,tracking_mode,name,tracker_version,consent_mode,internal,properties_json,visitor_id,order_id) VALUES(1,'aged-order','server',?,?,?,'full','purchase','backend','server',0,'{}','aged-visitor','OLD-1')").run(oldAt, oldAt, new Date(oldAt).toISOString().slice(0, 10));
+  aged.exec("INSERT INTO event_items(site_id,event_id,position,item_id,name,quantity) VALUES(1,'aged-order',0,'kit','Kit',1),(1,'aged-order',1,'guide','Guide',1)");
+  aged.prepare("INSERT INTO visitors(site_id,visitor_id,first_seen_ms,last_seen_ms,first_source,user_hash) VALUES(1,'aged-visitor',?,?,'direct','aged-user')").run(oldAt, oldAt);
+  aged.prepare("INSERT INTO visitor_links(site_id,user_hash,visitor_id,linked_at_ms) VALUES(1,'aged-user','aged-visitor',?)").run(oldAt);
+  aged.exec("COMMIT");
+  aged.close();
+  const kept = row("SELECT (SELECT count(*) FROM page_views WHERE received_at_ms>=?1)+(SELECT count(*) FROM events WHERE received_at_ms>=?1)+(SELECT count(*) FROM visitors WHERE last_seen_ms>=?1) n", cutoff).n;
+  await page.goto(`${originA}/settings/retention?keep=90`);
+  await page.getByRole("button", { name: "Back up and apply" }).click();
+  const pruned = Number(/Removed (\d+) old rows/.exec(await page.locator(".toast", { hasText: "Removed" }).textContent())[1]);
+  assert.ok(pruned >= 12000 + 1 + 2 + 2, `removed ${pruned}`);
+  assert.deepEqual({ ...row("SELECT (SELECT count(*) FROM page_views WHERE received_at_ms<?1) views,(SELECT count(*) FROM events WHERE received_at_ms<?1) events,(SELECT count(*) FROM event_items WHERE event_id='aged-order') items,(SELECT count(*) FROM visitors WHERE visitor_id='aged-visitor')+(SELECT count(*) FROM visitor_links WHERE visitor_id='aged-visitor') visitors", cutoff) }, { views: 0, events: 0, items: 0, visitors: 0 });
+  assert.equal(row("SELECT (SELECT count(*) FROM page_views WHERE received_at_ms>=?1)+(SELECT count(*) FROM events WHERE received_at_ms>=?1)+(SELECT count(*) FROM visitors WHERE last_seen_ms>=?1) n", cutoff).n, kept);
 
-  return "full mode consent (regional, banner, GPC, decline, withdraw, forget), geography, SPA, errors, ecommerce, identity across devices and domains, heatmaps and overlay, forms, masked replay, people deletion, roles, public links, API, audit, Search Console, GA4 import, Ads and Meta, Slack and webhooks, export, backups";
+  return "full mode consent (regional, banner, GPC, decline, withdraw, forget), geography, SPA, errors, ecommerce, identity across devices and domains, heatmaps and overlay, forms, masked replay, people deletion, roles, public links, API, audit, Search Console, GA4 import, Ads and Meta, Slack and webhooks, export (rewritten after deletion), backups, retention in batches";
 });

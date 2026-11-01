@@ -48,6 +48,7 @@ fn tick(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db) !void {
     nightly(arena, shared, db, at) catch |err| std.log.warn("jobs_nightly_failed code={s}", .{@errorName(err)});
     anomalies(arena, shared, db, at) catch |err| std.log.warn("jobs_anomalies_failed code={s}", .{@errorName(err)});
     integrations.deliverGoals(arena, shared, db, at) catch |err| std.log.warn("jobs_webhooks_failed code={s}", .{@errorName(err)});
+    integrations.refreshExports(arena, shared, db) catch |err| std.log.warn("jobs_export_refresh_failed code={s}", .{@errorName(err)});
     @import("rollups.zig").run(arena, shared, db, at, 10_000) catch |err| std.log.warn("jobs_rollups_failed code={s}", .{@errorName(err)});
     retentionReports(arena, shared, db, at) catch |err| std.log.warn("jobs_retention_failed code={s}", .{@errorName(err)});
     const write = shared.lockWrite();
@@ -116,7 +117,6 @@ fn schedules(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, at: i64)
     });
     for (due.items) |item| {
         var failure: []const u8 = "";
-        var log: ?ai.LogEntry = null;
         send: {
             const config = try mail.load(arena, db, shared.master_key) orelse {
                 failure = "Email delivery isn’t set up";
@@ -135,7 +135,6 @@ fn schedules(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, at: i64)
                 failure = @errorName(err);
                 break :send;
             };
-            log = report.log;
             var recipients: std.ArrayList([]const u8) = .empty;
             var parts = std.mem.splitScalar(u8, item.recipients, ',');
             while (parts.next()) |part| {
@@ -148,7 +147,6 @@ fn schedules(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, at: i64)
         }
         const write = shared.lockWrite();
         defer shared.unlockWrite();
-        if (log) |entry| _ = try ai.log(arena, write, at, entry);
         const next = manage.nextRun(item.frequency, item.weekday, item.hour, at);
         if (failure.len == 0) {
             try write.run(arena, "UPDATE schedules SET next_run_at_ms=?,last_sent_at_ms=?,last_error=NULL WHERE id=?", .{ next, at, item.id });
@@ -159,7 +157,7 @@ fn schedules(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, at: i64)
     }
 }
 
-const Report = struct { subject: []const u8, html: []const u8, text: []const u8, log: ?ai.LogEntry };
+const Report = struct { subject: []const u8, html: []const u8, text: []const u8 };
 
 /// Email-safe summary of a saved view: tables and inline styles only.
 pub fn renderReport(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, site: data.Site, name: []const u8, view_path: []const u8, at: i64) !Report {
@@ -187,8 +185,8 @@ pub fn renderReport(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, s
     try w.print("<!doctype html><html><body style=\"margin:0;background:#F7F5F4;font-family:-apple-system,'Segoe UI',Roboto,sans-serif;color:#282421\"><table width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"background:#F7F5F4\"><tr><td align=\"center\" style=\"padding:24px 12px\"><table width=\"600\" cellpadding=\"0\" cellspacing=\"0\" style=\"max-width:600px;background:#fff;border:1px solid #E9E4E1;border-radius:12px\"><tr><td style=\"padding:24px 28px 8px\"><div style=\"font-size:12px;color:#A0948E;font-weight:600;letter-spacing:.06em;text-transform:uppercase\">{f}</div><h1 style=\"margin:6px 0 2px;font:400 24px/30px Georgia,serif\">{f}</h1><div style=\"font-size:13px;color:#6F625D\">{f} · {f}</div></td></tr>", .{ esc(site.title()), esc(name), view.range, esc(try manage.viewLabel(arena, site, view_path)) });
     try t.print("{s} — {s}\n{f}\n\n", .{ site.title(), name, view.range });
     if (summary) |value| {
-        try w.print("<tr><td style=\"padding:12px 28px\"><div style=\"background:#FBEDEA;border-radius:10px;padding:14px 16px;font-size:14px;line-height:21px\">{f}<div style=\"font-size:11px;color:#A0948E;margin-top:6px\">Written by AI from your numbers</div></div></td></tr>", .{esc(value.text)});
-        try t.print("{s}\n\n", .{value.text});
+        try w.print("<tr><td style=\"padding:12px 28px\"><div style=\"background:#FBEDEA;border-radius:10px;padding:14px 16px;font-size:14px;line-height:21px\">{f}<div style=\"font-size:11px;color:#A0948E;margin-top:6px\">Written by AI from your numbers</div></div></td></tr>", .{esc(value)});
+        try t.print("{s}\n\n", .{value});
     }
     try w.writeAll("<tr><td style=\"padding:8px 28px\"><table width=\"100%\" cellpadding=\"0\" cellspacing=\"0\"><tr>");
     const tiles = [_]struct { []const u8, f64, f64, bool }{
@@ -221,7 +219,7 @@ pub fn renderReport(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, s
     const link = try std.fmt.allocPrint(arena, "{s}{s}", .{ base, view_path });
     try w.print("<tr><td style=\"padding:20px 28px 26px\"><a href=\"{f}\" style=\"display:inline-block;background:#B53A2B;color:#fff;text-decoration:none;font-weight:600;font-size:14px;padding:10px 18px;border-radius:8px\">Open in Analytico</a></td></tr></table><div style=\"font-size:11px;color:#A0948E;margin-top:12px\">Sent by Analytico · change or stop this email under Reports &amp; alerts</div></td></tr></table></body></html>", .{esc(link)});
     try t.print("\nOpen in Analytico: {s}\n", .{link});
-    return .{ .subject = try std.fmt.allocPrint(arena, "{s} · {s}", .{ name, try std.fmt.allocPrint(arena, "{f}", .{view.range}) }), .html = out.written(), .text = text.written(), .log = if (summary) |value| value.log else null };
+    return .{ .subject = try std.fmt.allocPrint(arena, "{s} · {s}", .{ name, try std.fmt.allocPrint(arena, "{f}", .{view.range}) }), .html = out.written(), .text = text.written() };
 }
 
 // ---------------------------------------------------------------- alerts
@@ -380,19 +378,29 @@ fn nightly(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, at: i64) !
             settings.pruneBackups(arena, shared.io, shared.data, 14) catch {};
         } else |err| std.log.warn("backup_failed code={s}", .{@errorName(err)});
     }
+    if (backed_up) {
+        const write = shared.lockWrite();
+        defer shared.unlockWrite();
+        try data.putSetting(arena, write, .@"backup.last_at", try std.fmt.allocPrint(arena, "{d}", .{at}));
+    }
+    // Retention only runs right after a verified backup, in short
+    // transactions, and covers the daily export's files too.
+    if (retention) |value| if (backed_up) {
+        const days = std.fmt.parseInt(i64, value, 10) catch 0;
+        if (days >= 30) {
+            const removed = try settings.prune(arena, shared, at - days * data.day_ms);
+            std.log.info("retention_pruned rows={d}", .{removed});
+            integrations.pruneExports(arena, shared, at - days * data.day_ms) catch |err| std.log.warn("export_prune_failed code={s}", .{@errorName(err)});
+            if (removed != 0) {
+                const write = shared.lockWrite();
+                defer shared.unlockWrite();
+                try @import("audit.zig").recordAs(arena, write, "system", null, "retention.pruned", try std.fmt.allocPrint(arena, "Removed {d} records older than {d} days", .{ removed, days }), at);
+            }
+        }
+    };
     {
         const write = shared.lockWrite();
         defer shared.unlockWrite();
-        if (backed_up) try data.putSetting(arena, write, .@"backup.last_at", try std.fmt.allocPrint(arena, "{d}", .{at}));
-        // Retention only runs right after a verified backup.
-        if (retention) |value| if (backed_up) {
-            const days = std.fmt.parseInt(i64, value, 10) catch 0;
-            if (days >= 30) {
-                const removed = try settings.prune(arena, write, at - days * data.day_ms);
-                std.log.info("retention_pruned rows={d}", .{removed});
-                if (removed != 0) try @import("audit.zig").recordAs(arena, write, "system", null, "retention.pruned", try std.fmt.allocPrint(arena, "Removed {d} records older than {d} days", .{ removed, days }), at);
-            }
-        };
         try data.putSetting(arena, write, .@"jobs.nightly_at", try std.fmt.allocPrint(arena, "{d}", .{at}));
         // Fresh table statistics keep the query planner on the right indexes.
         write.exec("PRAGMA optimize") catch |err| std.log.warn("optimize_failed code={s}", .{@errorName(err)});
