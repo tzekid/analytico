@@ -16,13 +16,14 @@ pub const Place = struct {
 };
 
 /// Visitors here are asked before anything beyond Lite is collected under the
-/// default "ask in the EU, UK and Switzerland" policy.
+/// default "ask in the EU, UK and Switzerland" policy. The EU's outermost
+/// regions and Åland have country codes of their own (listed last).
 pub fn consentRegion(country: ?[]const u8) bool {
     const code = country orelse return true;
     const listed = [_][]const u8{
         "AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR", "DE", "GR", "HU", "IE", "IT",
         "LV", "LT", "LU", "MT", "NL", "PL", "PT", "RO", "SK", "SI", "ES", "SE", "IS", "LI", "NO",
-        "GB", "CH", "GG", "JE", "IM", "GI",
+        "GB", "CH", "GG", "JE", "IM", "GI", "RE", "GP", "MQ", "GF", "YT", "MF", "AX",
     };
     for (listed) |item| if (std.mem.eql(u8, item, code)) return true;
     return false;
@@ -336,6 +337,7 @@ test "csv fields" {
     try std.testing.expectEqualStrings("Maputo (Polana Cimento\"A\")", fields[5]);
     try std.testing.expect(consentRegion("DE"));
     try std.testing.expect(consentRegion(null));
+    try std.testing.expect(consentRegion("RE") and consentRegion("AX"));
     try std.testing.expect(!consentRegion("US"));
 }
 

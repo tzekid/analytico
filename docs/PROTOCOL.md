@@ -69,6 +69,10 @@ its identity:
 - Any other consent mode with an identity is rejected.
 - A `link` token must be valid, unexpired and name the record's visitor and
   session, or the identity is removed.
+- A visitor who withdrew stays withdrawn for signed `/i` records too: they
+  are stored without `visitor_id`, and an `identify` for them is accepted
+  but links nothing. A server `identify` links only a visitor the browser
+  established; it never creates or restores one.
 
 For a Full-mode site, a v2 browser batch that commits returns `200` with
 JSON instead of `204`:

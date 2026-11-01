@@ -60,5 +60,34 @@ await journey("browser", async (t) => {
   await session.goto(`${origin}/done`);
   const actions = await t.until(() => { const rows = report("actions", "session"); return rows.length && rows; }, "action reported", 5000);
   assert.deepEqual(actions, [{ name: "action_started", action: "register", occurrences: 1 }]);
-  return "Lite persists without storage; Session persists the same identity and the visit's source across navigation; Lite files internal pages as within the site";
+
+  // Within the collector's bounds: a long non-ASCII campaign is cut to whole
+  // characters within 128 bytes; a section name with a space, and sections
+  // past 32, are left out, so the summary and its queued event still land.
+  const db = t.db();
+  snippets.set("/bounds", snippets.get("/session") + `<h2 data-analytics-section="our team">Team</h2>${Array.from({ length: 40 }, (_, index) => `<span data-analytics-section="part-${index}">${index}</span>`).join(" ")}`);
+  const bounded = await context.newPage();
+  await visit(bounded, `/bounds?utm_campaign=${encodeURIComponent("春".repeat(60))}`);
+  await bounded.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+  await bounded.evaluate(() => analytico.track("signup_started"));
+  await bounded.goto(`${origin}/done`);
+  const stored = await t.until(() => db.prepare("SELECT pv.utm_campaign c,ps.sections_json s FROM page_views pv JOIN page_summaries ps ON ps.page_id=pv.page_id WHERE pv.path='/bounds'").get(), "bounded summary");
+  assert.equal(stored.c, "春".repeat(42));
+  assert.deepEqual([JSON.parse(stored.s).length, JSON.parse(stored.s).includes("our team")], [32, false]);
+  assert.equal(db.prepare("SELECT count(*) n FROM events WHERE name='signup_started'").get().n, 1);
+
+  // Back to a page kept in the back/forward cache: a new view with the
+  // visit's source, and what it tracks still goes out. (Playwright runs
+  // Chromium without that cache, so the page gets the same two events.)
+  const restored = await context.newPage();
+  await visit(restored, "/session?utm_source=podcast");
+  await Promise.all([collected(restored, "page_view"), restored.evaluate(() => {
+    dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true }));
+    dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true }));
+  })]);
+  await restored.evaluate(() => analytico.track("restored_click"));
+  await restored.goto(`${origin}/done`);
+  await t.until(() => db.prepare("SELECT count(*) n FROM events WHERE name='restored_click'").get().n === 1, "event tracked after the restore");
+  assert.deepEqual({ ...db.prepare("SELECT utm_source,count(*) n FROM page_views WHERE navigation_type='back_forward'").get() }, { utm_source: "podcast", n: 1 });
+  return "Lite persists without storage; Session persists the same identity and the visit's source across navigation; Lite files internal pages as within the site; values past the collector's bounds are trimmed; a back/forward restore is a new view";
 });

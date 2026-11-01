@@ -237,8 +237,17 @@ await journey("v3", async (t) => {
   await Promise.all([decision(eu), eu.goto(`${originA}/home`)]);
   await eu.locator("a.ext", { hasText: "Partner" }).click();
   await eu.locator("a.ext", { hasText: "Menu" }).click();
+  // The token never stays in a link: a right click ("Copy link") leaves it
+  // out, and a click carries it only while that click is followed.
+  const toOther = eu.locator("#to-other");
+  await toOther.click({ button: "right" });
+  assert.equal(await toOther.getAttribute("href"), `${originB}/welcome`);
+  await toOther.evaluate((link) => link.addEventListener("click", (event) => { window.followed = link.href; event.preventDefault(); }, { once: true }));
+  await toOther.click();
+  assert.match(await eu.evaluate(() => window.followed), /[?&]_an=/);
+  await t.until(async () => await toOther.getAttribute("href") === `${originB}/welcome`, "token removed after the click");
   // Cross-domain: the link to the other domain carries the visit along.
-  await Promise.all([decision(eu), eu.locator("#to-other").click()]);
+  await Promise.all([decision(eu), toOther.click()]);
   await eu.waitForURL(`${originB}/welcome`);
   assert.equal(new URL(eu.url()).searchParams.get("_an"), null);
   await t.until(() => row("SELECT visitor_id v FROM page_views WHERE path='/welcome'")?.v === visitorA, "same visitor on the other domain");
@@ -708,6 +717,18 @@ await journey("v3", async (t) => {
   assert.equal(minimized.status, 200);
   assert.deepEqual(rows("SELECT search_term FROM page_views WHERE path LIKE '/privacy/%' ORDER BY path").map((item) => item.search_term), [null, null, "garden tools"]);
   assert.deepEqual({ ...row("SELECT message,file FROM errors WHERE path='/privacy/error'") }, { message: "ReferenceError", file: "app.js" });
+  // A page the site never records keeps no heatmap or form detail, even from
+  // a consented batch sent without the tracker.
+  const excludedPage = randomUUID();
+  const consented = { ...privacyBase, visitor_id: randomUUID(), session_id: randomUUID(), consent_mode: "granted", page_id: excludedPage };
+  const excludedRecords = [
+    { ...consented, event_id: randomUUID(), type: "page_view", path: "/checkout" },
+    { ...consented, event_id: randomUUID(), type: "page_summary", visible_ms: 1000, active_ms: 1000, interaction_count: 1, max_scroll: 0, sections: [], selection_count: 0, copy_count: 0, outbound_clicks: 0, downloads: 0, form_attempts: 0, clicks: [{ el: "body", x: 50, y: 50, n: 1, rage: 0 }], attention: [1000, 0, 0, 0, 0, 0, 0, 0, 0, 0], form_fields: [{ form: "pay", field: "card", ms: 1000 }] },
+  ];
+  const excludedBatch = await fetch(`${originA}/e`, { method: "POST", headers: { origin: originA, "content-type": "text/plain", "user-agent": "Chrome/140" }, body: JSON.stringify({ v: 2, site: publicId, sent_at_ms: privacyNow, records: excludedRecords }) });
+  assert.equal(excludedBatch.status, 200);
+  assert.deepEqual({ ...row("SELECT attention_json a FROM page_summaries WHERE page_id=?", excludedPage) }, { a: null });
+  assert.deepEqual([row("SELECT count(*) n FROM click_cells WHERE path='/checkout'").n, row("SELECT count(*) n FROM form_fields WHERE path='/checkout'").n], [0, 0]);
 
   // Withdrawal ends replay authorization; a new grant gets a new identity.
   const consentContext = await newContext();
@@ -717,6 +738,12 @@ await journey("v3", async (t) => {
   await consentPage.getByRole("dialog", { name: "Analytics consent" }).getByRole("button", { name: "Allow", exact: true }).click();
   const recordedUrl = new URL((await recordedRequest).url());
   const originalVisitor = recordedUrl.searchParams.get("visitor");
+  // The visit continues on the other domain, which keeps the identity there.
+  const storedOn = (target, name) => target.evaluate(([site, key]) => localStorage.getItem(`analytico:${site}:${key}`), [publicId, name]);
+  await consentPage.locator("#to-other").click();
+  await consentPage.waitForURL(`${originB}/welcome`);
+  await t.until(async () => (await storedOn(consentPage, "visitor") || "").startsWith(originalVisitor), "identity continued on the other domain");
+  await Promise.all([decision(consentPage), consentPage.goto(`${originA}/home`)]);
   const withdrawalDecision = consentPage.waitForResponse((response) => new URL(response.url()).pathname === "/e" && response.request().postData()?.includes('"state":"denied"'));
   await consentPage.evaluate(() => analytico.consent("denied"));
   const withdrawn = await (await withdrawalDecision).json();
@@ -727,6 +754,19 @@ await journey("v3", async (t) => {
   recordedUrl.searchParams.set("last", String(Date.now()));
   const stoppedReplay = await consentContext.request.post(recordedUrl.href, { headers: { origin: originA, "content-type": "text/plain" }, data: "[]" });
   assert.equal(stoppedReplay.status(), 403);
+  // The other domain still holds the old identity. Told there that it was
+  // withdrawn, it stays declined: a later "grant" (a US address) must not
+  // start a new identity.
+  const pageViewDecision = (target) => target.waitForResponse((response) => new URL(response.url()).pathname === "/e" && response.status() === 200 && response.request().postData()?.includes('"type":"page_view"'));
+  const otherDomain = await consentContext.newPage();
+  const [staleView] = await Promise.all([pageViewDecision(otherDomain), otherDomain.goto(`${originB}/welcome`)]);
+  assert.equal((await staleView.json()).drop_state, "denied");
+  await t.until(async () => await storedOn(otherDomain, "consent") === "denied", "withdrawal kept on the other domain");
+  const [laterView] = await Promise.all([pageViewDecision(otherDomain), otherDomain.goto(`${originB}/checkout`)]);
+  assert.equal((await laterView.json()).upgrade, "grant");
+  await delay(500);
+  assert.deepEqual([await storedOn(otherDomain, "visitor"), await storedOn(otherDomain, "consent")], [null, "denied"]);
+  await otherDomain.close();
   await consentPage.evaluate(() => analytico.consent("granted"));
   const newVisitor = await t.until(() => consentPage.evaluate((site) => (localStorage.getItem(`analytico:${site}:visitor`) || "").split(".")[0], publicId), "consent granted again");
   assert.notEqual(newVisitor, originalVisitor);
@@ -734,6 +774,20 @@ await journey("v3", async (t) => {
   await consentPage.evaluate(() => analytico.forget());
   await t.until(() => !row("SELECT visitor_id FROM visitors WHERE visitor_id=?", newVisitor), "new visitor forgotten");
   await consentContext.close();
+  // Signed server records cannot attach a withdrawn or forgotten visitor
+  // either: the event is kept without the identity, identify links nothing.
+  const serverAt = Date.now();
+  const serverRecord = { occurred_at_ms: serverAt, tracking_mode: "full", consent_mode: "server", tracker_version: "backend", release_id: "", internal: false };
+  const afterWithdrawal = JSON.stringify({ v: 2, site: publicId, sent_at_ms: serverAt, records: [
+    { ...serverRecord, event_id: randomUUID(), type: "event", name: "plan_renewed", visitor_id: originalVisitor, user_id: "user-77", properties: {} },
+    { ...serverRecord, event_id: randomUUID(), type: "identify", visitor_id: originalVisitor, user_id: "user-77" },
+    { ...serverRecord, event_id: randomUUID(), type: "identify", visitor_id: newVisitor, user_id: "user-77" },
+  ] });
+  assert.equal((await fetch(`http://127.0.0.1:${t.port}/i`, { method: "POST", headers: { "content-type": "application/json", ...t.sign("shop", afterWithdrawal) }, body: afterWithdrawal })).status, 204);
+  assert.equal(row("SELECT visitor_id v FROM events WHERE name='plan_renewed'").v, null);
+  assert.equal(row("SELECT count(*) n FROM visitor_links WHERE visitor_id IN (?,?)", originalVisitor, newVisitor).n, 0);
+  assert.deepEqual({ ...row("SELECT consent_state,user_hash FROM visitors WHERE visitor_id=?", originalVisitor) }, { consent_state: "denied", user_hash: null });
+  assert.equal(row("SELECT count(*) n FROM visitors WHERE visitor_id=?", newVisitor).n, 0);
 
   // Backups cover the replay database too.
   const backup = join(t.temporary, "backup.db");

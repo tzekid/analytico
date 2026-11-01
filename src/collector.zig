@@ -292,7 +292,7 @@ pub fn ingest(
             if (try enforceConsent(&record, result.decision, client.gpc)) result.dropped = true;
             if (record.visitor_id) |visitor_id| {
                 const granting = std.mem.eql(u8, record.type, "consent") and record.state != null and (std.mem.eql(u8, record.state.?, "granted") or std.mem.eql(u8, record.state.?, "not_required"));
-                if (!granting and !std.mem.eql(u8, record.type, "forget") and try store.database.scalar(allocator, i64, "SELECT count(*) FROM visitors WHERE site_id=? AND visitor_id=? AND consent_state IN ('denied','gpc')", .{ site.id, visitor_id }) != 0) {
+                if (!granting and !std.mem.eql(u8, record.type, "forget") and try withdrawnVisitor(allocator, store, site.id, visitor_id)) {
                     strip(&record, client.gpc);
                     record.consent_mode = if (client.gpc) "gpc" else "denied";
                     result.dropped = true;
@@ -309,6 +309,14 @@ pub fn ingest(
             }
         }
         try validateRecord(allocator, record, site.mode, source, received_at_ms);
+        // A trusted application cannot bring a withdrawn visitor back either:
+        // its record is kept without the identity, and identify links nothing.
+        if (site.mode == .full and source == .server) if (record.visitor_id) |visitor_id| {
+            if (!std.mem.eql(u8, record.type, "forget") and try withdrawnVisitor(allocator, store, site.id, visitor_id)) {
+                record.visitor_id = null;
+                record.session_id = null;
+            }
+        };
         const receipt = try receiptState(allocator, store, site.id, record.event_id, &digest);
         switch (receipt) {
             .duplicate => {
@@ -359,6 +367,10 @@ pub fn ingest(
     try incrementCounter(allocator, store, "duplicate_records", @intCast(result.duplicates));
     try incrementCounter(allocator, store, "late_events", @intCast(result.late));
     return result;
+}
+
+fn withdrawnVisitor(allocator: std.mem.Allocator, store: *store_mod.Store, site_id: i64, visitor_id: []const u8) !bool {
+    return try store.database.scalar(allocator, i64, "SELECT count(*) FROM visitors WHERE site_id=? AND visitor_id=? AND consent_state IN ('denied','gpc')", .{ site_id, visitor_id }) != 0;
 }
 
 const Context = struct {
@@ -561,8 +573,29 @@ fn touchVisitor(c: Context, visitor_id: []const u8, page_id: []const u8) !void {
 
 fn insertPageSummary(c: Context, record: Record) !void {
     const allocator = c.allocator;
+    // Heatmap and form detail are kept per page path, and never for a page the
+    // site does not record ("Replays and heatmaps skip them").
+    var clicks = record.clicks;
+    var attention = record.attention;
+    var form_fields = record.form_fields;
+    var path: []const u8 = "";
+    var viewport: []const u8 = "";
+    if (clicks != null or attention != null or form_fields != null) {
+        var page = try c.store.database.prepare(allocator, "SELECT path,coalesce(viewport_class,'desktop') FROM page_views WHERE site_id=? AND page_id=?");
+        defer page.deinit();
+        try page.bindInt(1, c.site.id);
+        try page.bindText(2, record.page_id.?);
+        if (try page.step() == .row and !recordExcluded(c.site.record_exclude, page.columnText(0))) {
+            path = try allocator.dupe(u8, page.columnText(0));
+            viewport = try allocator.dupe(u8, page.columnText(1));
+        } else {
+            clicks = null;
+            attention = null;
+            form_fields = null;
+        }
+    }
     const sections_json = try canonicalJson(allocator, record.sections.?);
-    const attention_json: ?[]const u8 = if (record.attention) |values| try canonicalJson(allocator, values) else null;
+    const attention_json: ?[]const u8 = if (attention) |values| try canonicalJson(allocator, values) else null;
     var statement = try c.store.database.prepare(allocator,
         \\INSERT INTO page_summaries(site_id,event_id,page_id,session_id,occurred_at_ms,received_at_ms,tracking_mode,visible_ms,
         \\ active_ms,first_interaction_ms,interaction_count,max_scroll,sections_json,last_section,selection_count,copy_count,
@@ -612,23 +645,15 @@ fn insertPageSummary(c: Context, record: Record) !void {
     try engagement.bindInt(4, c.site.id);
     try engagement.bindText(5, record.page_id.?);
     _ = try engagement.step();
-    if (record.clicks == null and record.form_fields == null) return;
 
     // Heatmap and form aggregates are kept per page path and day.
-    var page = try c.store.database.prepare(allocator, "SELECT path,coalesce(viewport_class,'desktop') FROM page_views WHERE site_id=? AND page_id=?");
-    defer page.deinit();
-    try page.bindInt(1, c.site.id);
-    try page.bindText(2, record.page_id.?);
-    if (try page.step() != .row) return;
-    const path = try allocator.dupe(u8, page.columnText(0));
-    const viewport = try allocator.dupe(u8, page.columnText(1));
-    if (record.clicks) |clicks| {
+    if (clicks) |cells| {
         var upsert = try c.store.database.prepare(allocator,
             \\INSERT INTO click_cells(site_id,path,day,viewport_class,element,x,y,clicks,rage) VALUES(?,?,?,?,?,?,?,?,?)
             \\ON CONFLICT(site_id,path,day,viewport_class,element,x,y) DO UPDATE SET clicks=clicks+excluded.clicks,rage=rage+excluded.rage
         );
         defer upsert.deinit();
-        for (clicks) |click| {
+        for (cells) |click| {
             try upsert.reset();
             try upsert.bindInt(1, c.site.id);
             try upsert.bindText(2, path);
@@ -642,7 +667,7 @@ fn insertPageSummary(c: Context, record: Record) !void {
             _ = try upsert.step();
         }
     }
-    if (record.form_fields) |fields| {
+    if (form_fields) |fields| {
         var upsert = try c.store.database.prepare(allocator,
             \\INSERT INTO form_fields(site_id,path,day,form,field,starts,ms,errors,abandons,submits) VALUES(?,?,?,?,?,?,?,?,?,?)
             \\ON CONFLICT(site_id,path,day,form,field) DO UPDATE SET starts=starts+excluded.starts,ms=ms+excluded.ms,
@@ -769,6 +794,9 @@ fn applyIdentify(c: Context, record: Record) !void {
 /// A visitor belongs to the most recent identify() until reset(); links are
 /// never rewritten, so earlier history stays with the user it was linked to.
 fn linkVisitor(c: Context, visitor_id: []const u8, hash: []const u8) !void {
+    // A server batch names a visitor it cannot vouch for: it may link one the
+    // browser established, never create one or bring back a forgotten one.
+    if (c.source == .server and try c.store.database.scalar(c.allocator, i64, "SELECT count(*) FROM visitors WHERE site_id=? AND visitor_id=?", .{ c.site.id, visitor_id }) == 0) return;
     var link = try c.store.database.prepare(c.allocator, "INSERT INTO visitor_links(site_id,user_hash,visitor_id,linked_at_ms) VALUES(?,?,?,?) ON CONFLICT DO NOTHING");
     defer link.deinit();
     try link.bindInt(1, c.site.id);
@@ -1019,6 +1047,40 @@ fn validateRecord(
         }
     }
     _ = try canonicalProperties(allocator, record.properties);
+}
+
+/// Whether a path matches one of the site's "never record" patterns (one per
+/// line, `*` matches anything): no replay, heatmap or form detail there.
+pub fn recordExcluded(patterns: []const u8, path: []const u8) bool {
+    var lines = std.mem.tokenizeAny(u8, patterns, "\r\n");
+    while (lines.next()) |raw| {
+        const pattern = std.mem.trim(u8, raw, " ");
+        if (pattern.len != 0 and wildcard(pattern, path)) return true;
+    }
+    return false;
+}
+
+fn wildcard(pattern: []const u8, value: []const u8) bool {
+    var p: usize = 0;
+    var v: usize = 0;
+    var star: ?usize = null;
+    var retry: usize = 0;
+    while (v < value.len) {
+        if (p < pattern.len and pattern[p] == value[v]) {
+            p += 1;
+            v += 1;
+        } else if (p < pattern.len and pattern[p] == '*') {
+            star = p;
+            p += 1;
+            retry = v;
+        } else if (star) |at| {
+            retry += 1;
+            v = retry;
+            p = at + 1;
+        } else return false;
+    }
+    while (p < pattern.len and pattern[p] == '*') p += 1;
+    return p == pattern.len;
 }
 
 fn validateClickId(value: []const u8) !void {

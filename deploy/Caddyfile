@@ -28,6 +28,9 @@ analytics.example.com {
 		reverse_proxy 127.0.0.1:4318 {
 			header_up X-Forwarded-For {http.request.remote.host}
 			header_up -CF-IPCountry
+			# Caddy reads the whole body before the request reaches one of the
+			# backend's shared workers, so slow uploads wait here (likewise below).
+			request_buffers 8KiB
 
 			transport http {
 				dial_timeout 2s
@@ -45,6 +48,7 @@ analytics.example.com {
 		reverse_proxy 127.0.0.1:4318 {
 			header_up X-Forwarded-For {http.request.remote.host}
 			header_up -CF-IPCountry
+			request_buffers 256KiB
 
 			transport http {
 				dial_timeout 2s
@@ -67,6 +71,7 @@ analytics.example.com {
 		reverse_proxy 127.0.0.1:4318 {
 			header_up X-Forwarded-For {http.request.remote.host}
 			header_up -CF-IPCountry
+			request_buffers 2MiB
 
 			transport http {
 				dial_timeout 2s

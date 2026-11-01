@@ -649,38 +649,6 @@ fn replaySite(arena: std.mem.Allocator, read_db: *db_mod.Db, public_id: []const 
     return .{ .id = statement.columnInt(0), .mode = try arena.dupe(u8, statement.columnText(1)), .enabled = statement.columnBool(2), .recording = statement.columnBool(3), .record_exclude = try arena.dupe(u8, statement.columnText(4)), .consent_policy = try domain.parseConsentPolicy(statement.columnText(5)) };
 }
 
-fn wildcard(pattern: []const u8, value: []const u8) bool {
-    var p: usize = 0;
-    var v: usize = 0;
-    var star: ?usize = null;
-    var retry: usize = 0;
-    while (v < value.len) {
-        if (p < pattern.len and pattern[p] == value[v]) {
-            p += 1;
-            v += 1;
-        } else if (p < pattern.len and pattern[p] == '*') {
-            star = p;
-            p += 1;
-            retry = v;
-        } else if (star) |at| {
-            retry += 1;
-            v = retry;
-            p = at + 1;
-        } else return false;
-    }
-    while (p < pattern.len and pattern[p] == '*') p += 1;
-    return p == pattern.len;
-}
-
-fn replayExcluded(patterns: []const u8, path: []const u8) bool {
-    var lines = std.mem.tokenizeAny(u8, patterns, "\r\n");
-    while (lines.next()) |raw| {
-        const pattern = std.mem.trim(u8, raw, " ");
-        if (pattern.len != 0 and wildcard(pattern, path)) return true;
-    }
-    return false;
-}
-
 /// POST /r: one gzip-compressed chunk of rrweb events for a consented,
 /// identified session that the site records. Metadata travels in the query.
 fn replayChunk(arena: std.mem.Allocator, shared: *Shared, read_db: *db_mod.Db, request: *std.http.Server.Request, headers: Headers, target: []const u8) !void {
@@ -726,7 +694,7 @@ fn replayChunk(arena: std.mem.Allocator, shared: *Shared, read_db: *db_mod.Db, r
             const ask = current_site.consent_policy == .everyone or (current_site.consent_policy == .regional and geo_mod.consentRegion(country));
             if (ask) return respondError(request, .forbidden, "consent_required", origin);
         }
-        if (replayExcluded(current_site.record_exclude, session.columnText(0))) return respondError(request, .forbidden, "replay_excluded", origin);
+        if (collector.recordExcluded(current_site.record_exclude, session.columnText(0))) return respondError(request, .forbidden, "replay_excluded", origin);
         const chunk: replay.Chunk = .{
             .site_id = site.id,
             .session_id = session_id,

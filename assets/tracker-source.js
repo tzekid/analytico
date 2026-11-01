@@ -21,8 +21,11 @@
   if (!sessionId) return;
   /* @sessiononly-end */
   var pageId = "";
-  var spaNavigation = false;
-  var currentPath = location.pathname;
+  // How the current page view began, past the first load: "spa" or
+  // "back_forward" (restored from the back/forward cache).
+  var navigation = "";
+  // The server takes paths of at most 512 bytes; pathname is ASCII.
+  var currentPath = location.pathname.slice(0, 512);
 
   var startedAt, lastTick, lastActivity, visibleMs, activeMs, firstInteractionMs, interactions;
   var maxScroll, scrollScheduled = false, sectionOrder, sectionSeen, lastSection;
@@ -97,10 +100,23 @@
   }
   /* @sessiononly-end */
 
+  // The server limits UTF-8 bytes, so this cuts whole characters until the
+  // text fits. Text that is not valid UTF-8 (a lone surrogate) is dropped.
   function clean(value, limit) {
     if (typeof value !== "string") return "";
-    value = value.slice(0, limit);
+    try {
+      utf8(value);
+      value = value.slice(0, limit).replace(/[\ud800-\udbff]$/, "");
+      while (utf8(value) > limit) value = value.slice(0, /[\udc00-\udfff]$/.test(value) ? -2 : -1);
+    } catch (_) {
+      return "";
+    }
     return /[\u0000-\u001f\u007f]/.test(value) ? "" : value;
+  }
+
+  // UTF-8 length; throws on a lone surrogate.
+  function utf8(text) {
+    return encodeURIComponent(text).replace(/%../g, "-").length;
   }
 
   function campaign() {
@@ -166,7 +182,7 @@
   }
 
   function visitSource() {
-    if (spaNavigation && arrival) return arrival;
+    if (navigation && arrival) return arrival;
     var fields = campaign();
     var host = referrerHost();
     if (host) fields.referrer_host = host;
@@ -315,7 +331,7 @@
       path: currentPath,
       page_type: pageType,
       content_id: contentId,
-      navigation_type: spaNavigation ? "spa" : navigationType(),
+      navigation_type: navigation || navigationType(),
       viewport_class: viewportClass(),
       language: clean(navigator.language || "", 32) || null
     });
@@ -324,7 +340,7 @@
       record.search_term = term;
       var results = document.querySelector("[data-analytics-search-results]");
       var count = results && parseInt(results.getAttribute("data-analytics-search-results"), 10);
-      if (count >= 0) record.search_results = count;
+      if (count >= 0 && count <= 1000000) record.search_results = count;
     }
     /* @full-begin */
     if (linkArrival) {
@@ -363,9 +379,11 @@
         return null;
       }
     }
-    return out;
+    return byteLength(JSON.stringify(out)) <= 2048 ? out : null;
   }
 
+  // Money and quantities past the server's bounds would fail the whole batch
+  // the event travels in, so such an event is refused here.
   function safeItems(items) {
     if (!Array.isArray(items) || !items.length || items.length > 32) return null;
     var out = [];
@@ -375,8 +393,12 @@
       var name = clean(String(item.name == null ? id : item.name), 128);
       if (!id || !name) return null;
       var entry = { id: id, name: name, quantity: Number.isSafeInteger(item.quantity) && item.quantity > 0 ? item.quantity : 1 };
+      if (entry.quantity > 10000) return null;
       if (item.category) entry.category = clean(String(item.category), 64);
-      if (Number.isSafeInteger(item.price_minor)) entry.price_minor = item.price_minor;
+      if (Number.isSafeInteger(item.price_minor)) {
+        if (Math.abs(item.price_minor) > 1e12) return null;
+        entry.price_minor = item.price_minor;
+      }
       out.push(entry);
     }
     return out;
@@ -397,7 +419,7 @@
     });
     if (details != null) {
       if (details.value_minor != null || details.currency != null) {
-        if (!Number.isSafeInteger(details.value_minor) || !/^[A-Z]{3}$/.test(details.currency || "")) return "";
+        if (!Number.isSafeInteger(details.value_minor) || Math.abs(details.value_minor) > 1e12 || !/^[A-Z]{3}$/.test(details.currency || "")) return "";
         record.value_minor = details.value_minor;
         record.currency = details.currency;
       }
@@ -539,7 +561,7 @@
       steps.unshift(tag + ":nth-of-type(" + index + ")");
     }
     var key = steps.join(">");
-    return key.length <= 160 ? key : null;
+    return byteLength(key) <= 160 ? key : null;
   }
 
   // Operator-listed pages ("/account/*") are never recorded or heat-mapped.
@@ -590,7 +612,7 @@
     var now = Date.now();
     var elapsed = Math.min(2000, now - lastAttention);
     lastAttention = now;
-    if (document.hidden || now - lastActivity > 30000) return;
+    if (document.hidden || now - lastActivity > 30000 || isExcluded(currentPath)) return;
     var height = documentHeight();
     if (height <= 0) return;
     var top = (window.scrollY || 0) / height;
@@ -665,22 +687,29 @@
     actionTimers.forEach(function (state) { clearTimeout(state.timer); });
     actionTimers.clear();
     /* @session-end */
+    // Within the server's bounds (a day of time, 10,000 of each count): one
+    // value past them would fail the batch and the events queued with it.
+    var day = 86400000;
     var record = Object.assign(base(uuid(), "page_summary"), {
-      visible_ms: Math.round(visibleMs),
-      active_ms: Math.round(activeMs),
-      first_interaction_ms: firstInteractionMs,
-      interaction_count: interactions,
+      visible_ms: Math.min(day, Math.round(visibleMs)),
+      active_ms: Math.min(day, Math.round(activeMs)),
+      first_interaction_ms: firstInteractionMs === null ? null : Math.min(day, firstInteractionMs),
+      interaction_count: Math.min(10000, interactions),
       max_scroll: maxScroll,
       sections: sectionOrder,
       last_section: lastSection,
-      selection_count: selectionCount,
-      copy_count: copyCount,
-      outbound_clicks: outboundClicks,
-      downloads: downloads,
-      form_attempts: formAttempts
+      selection_count: Math.min(10000, selectionCount),
+      copy_count: Math.min(10000, copyCount),
+      outbound_clicks: Math.min(10000, outboundClicks),
+      downloads: Math.min(10000, downloads),
+      form_attempts: Math.min(10000, formAttempts)
     });
     /* @rum-begin */
-    Object.keys(rum).forEach(function (key) { if (rum[key] !== null) record[key] = Math.round(rum[key]); });
+    // Measurements past ten minutes (or 100,000 shifts and frames) are left out.
+    Object.keys(rum).forEach(function (key) {
+      var value = Math.round(rum[key]);
+      if (rum[key] !== null && value >= 0 && value <= (key === "cls_milli" || key === "long_frame_count" ? 100000 : 600000)) record[key] = value;
+    });
     /* @rum-end */
     /* @full-begin */
     if (visitorId) {
@@ -824,10 +853,11 @@
   var observer = "IntersectionObserver" in window ? new IntersectionObserver(function (entries) {
     entries.forEach(function (entry) {
       if (!entry.isIntersecting || entry.intersectionRatio < 0.5) return;
-      var id = clean(entry.target.dataset.analyticsSection || "", 64);
-      if (!id || sectionSeen[id]) return;
+      // Section names are kept like event names, at most 32 per page.
+      var id = entry.target.dataset.analyticsSection || "";
+      if (!/^[A-Za-z0-9_.:-]{1,64}$/.test(id) || sectionSeen[id]) return;
       sectionSeen[id] = true;
-      sectionOrder.push(id);
+      if (sectionOrder.length < 32) sectionOrder.push(id);
       lastSection = id;
     });
   }, { threshold: [0.5] }) : null;
@@ -841,11 +871,12 @@
   // Single-page apps: each route change ends the previous page with its
   // summary and starts a new page view. Opt out with data-spa="false".
   function routeChanged() {
-    if (location.pathname === currentPath) return;
+    var path = location.pathname.slice(0, 512);
+    if (path === currentPath) return;
     summary();
-    currentPath = location.pathname;
+    currentPath = path;
     begin();
-    spaNavigation = true;
+    navigation = "spa";
     pageView();
     /* @full-begin */
     if (replay && isExcluded(currentPath)) {
@@ -867,6 +898,19 @@
     });
     addEventListener("popstate", function () { setTimeout(routeChanged, 0); });
   }
+
+  // Back to a page kept in the back/forward cache: its previous view ended
+  // with pagehide, so this is a new page view with the visit's source.
+  addEventListener("pageshow", function (event) {
+    if (!event.persisted) return;
+    /* @full-begin */
+    resume();
+    /* @full-end */
+    begin();
+    navigation = "back_forward";
+    pageView();
+    observeSections();
+  });
 
   /* @rum-begin */
   if ("PerformanceObserver" in window) {
@@ -990,6 +1034,22 @@
     save("click", null);
   }
 
+  // Consent or identity may have changed in another page while this one was
+  // in the back/forward cache: start again from what is stored. A recording
+  // ends with the old view; the new view's answer starts one again.
+  function resume() {
+    identityGeneration += 1;
+    linkArrival = null;
+    linkToken = null;
+    visitorId = null;
+    consent = "pending";
+    if (replay) {
+      replay.stop();
+      replay = null;
+    }
+    restore();
+  }
+
   function sendConsent() {
     var generation = identityGeneration;
     send([Object.assign(base(uuid(), "consent"), { state: consent === "granted" ? "granted" : "not_required" })], function (response) { decision(response, null, generation); });
@@ -1031,11 +1091,17 @@
       if (response.continued && !gpc && consent !== "denied") establish(claim.consent, { visitor: claim.visitor, session: claim.session });
       else rejectedLink = true;
     }
+    // The visitor withdrew (in another tab, or on another of the site's
+    // domains): keep the refusal stored, so no later answer starts again.
+    if (response.drop_state === "denied") {
+      clearIdentity("denied");
+      return;
+    }
     if (response.upgrade === "never") {
       if (visitorId || consent !== "gpc") clearIdentity("gpc");
       return;
     }
-    if (response.drop && !rejectedLink) clearIdentity(response.drop_state === "denied" ? "denied" : "pending");
+    if (response.drop && !rejectedLink) clearIdentity("pending");
     linkToken = response.link || null;
     excluded = Array.isArray(response.exclude) ? response.exclude : [];
     linkDomains = Array.isArray(response.domains) ? response.domains : [];
@@ -1123,28 +1189,40 @@
     } catch (_) {}
   }
 
+  // The token names this visitor and their consent, so only the navigation a
+  // click starts carries it: right clicks ("Copy link"), drags and links
+  // left on the page never do.
+  var decorated = [];
   function decorate(event) {
     var link = event.target && event.target.closest && event.target.closest("a[href]");
-    if (!link) return;
+    if (!link || event.button > 1) return;
     try {
       var url = new URL(link.href, location.href);
-      url.searchParams.delete("_an");
-      if (linkToken && visitorId && url.origin !== location.origin && linkDomains.indexOf(url.origin) >= 0) url.searchParams.set("_an", linkToken);
-      link.href = url.href;
+      if (linkToken && visitorId && url.origin !== location.origin && linkDomains.indexOf(url.origin) >= 0) {
+        decorated.push([link, link.getAttribute("href")]);
+        url.searchParams.set("_an", linkToken);
+        link.href = url.href;
+      }
     } catch (_) {}
   }
-  function clearDecoratedLinks() {
-    document.querySelectorAll("a[href*='_an=']").forEach(function (link) {
-      try {
-        var url = new URL(link.href, location.href);
-        url.searchParams.delete("_an");
-        link.href = url.href;
-      } catch (_) {}
-    });
+  function decorateOnce(event) {
+    decorate(event);
+    setTimeout(clearDecoratedLinks, 0);
   }
-  document.addEventListener("mousedown", decorate, true);
-  document.addEventListener("keydown", function (event) { if (event.key === "Enter") decorate(event); }, true);
-  document.addEventListener("click", decorate, true);
+  // Puts every decorated link back exactly as it was, newest first.
+  function clearDecoratedLinks() {
+    while (decorated.length) {
+      var entry = decorated.pop();
+      entry[0].setAttribute("href", entry[1]);
+    }
+  }
+  // Clicks, Enter and middle clicks (auxclick). Some browsers open a middle
+  // click's tab before auxclick, so its press decorates too; the release
+  // cleans up once the click has been handled.
+  document.addEventListener("click", decorateOnce, true);
+  document.addEventListener("auxclick", decorateOnce, true);
+  document.addEventListener("mousedown", function (event) { if (event.button === 1) decorate(event); }, true);
+  document.addEventListener("mouseup", function () { setTimeout(clearDecoratedLinks, 0); }, true);
 
   // ---------------------------------------------------------- replay
 
