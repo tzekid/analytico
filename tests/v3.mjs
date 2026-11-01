@@ -136,7 +136,8 @@ await journey("v3", async (t) => {
   }
 
   await t.serve();
-  assert.match(t.log, /geo=on/);
+  // The startup line can reach the log just after readiness answers.
+  await t.until(() => /geo=on/.test(t.log), "startup line with geo=on");
   const db = t.db();
   const replays = t.db("replays.db");
   const row = (sql, ...args) => db.prepare(sql).get(...args);

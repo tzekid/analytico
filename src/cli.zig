@@ -8,6 +8,7 @@ const html = @import("web/html.zig");
 const store_mod = @import("store.zig");
 const trackers = @import("assets.zig");
 const server = @import("server.zig");
+const audit = @import("web/audit.zig");
 
 pub const version = "1.0.0-dev";
 
@@ -100,6 +101,7 @@ fn runInvite(allocator: std.mem.Allocator, io: std.Io, output: *std.Io.Writer, e
     defer store.close();
     try pinOrigin(allocator, &store, origin);
     const token = try @import("web/auth.zig").createInvite(allocator, io, &store.database, email, domain.nowMs());
+    try audit.recordAs(allocator, &store.database, "cli", null, "team.signin_link", try std.fmt.allocPrint(allocator, "Created a sign-in link for {s}", .{try @import("web/auth.zig").normalizeEmail(allocator, email)}), domain.nowMs());
     try output.print("invite created email={s} expires_in_days=7\n{s}/invite/{s}\n", .{ email, origin, &token });
 }
 
@@ -122,7 +124,9 @@ fn runUserKey(allocator: std.mem.Allocator, io: std.Io, output: *std.Io.Writer, 
         defer site.deinit(allocator);
         break :blk site.id;
     } else null;
-    try output.print("{s}\n", .{try @import("web/auth.zig").createApiKey(allocator, io, &store.database, user_id, site_id, name, domain.nowMs())});
+    const key = try @import("web/auth.zig").createApiKey(allocator, io, &store.database, user_id, site_id, name, domain.nowMs());
+    try audit.recordAs(allocator, &store.database, "cli", site_id, "api.created", try std.fmt.allocPrint(allocator, "Created API key “{s}”", .{name}), domain.nowMs());
+    try output.print("{s}\n", .{key});
 }
 
 /// Configures SMTP from the shell. The password comes from stdin so it never
@@ -164,6 +168,7 @@ fn runEmailSet(allocator: std.mem.Allocator, io: std.Io, output: *std.Io.Writer,
     try web_data.putSetting(allocator, db, .@"smtp.username", username);
     try web_data.putSetting(allocator, db, .@"smtp.from", from);
     if (password.len != 0) try web_data.putSetting(allocator, db, .@"smtp.password", try @import("web/secret.zig").seal(allocator, io, master, password));
+    try audit.recordAs(allocator, db, "cli", null, "email.changed", try std.fmt.allocPrint(allocator, "Email delivery via {s}:{d}", .{ host, port }), domain.nowMs());
     try output.print("email delivery configured host={s} port={d} security={s} from={s}\ntest email sent to={s}\n", .{ host, port, @tagName(security), from, to });
 }
 
@@ -217,7 +222,7 @@ fn runForget(allocator: std.mem.Allocator, io: std.Io, output: *std.Io.Writer, a
         label = try std.fmt.allocPrint(allocator, "user {s}", .{hash[0..4]});
     } else return error.MissingVisitorOrUser;
     // Like a deletion from the workspace; only the short label, never the ID.
-    try @import("web/audit.zig").recordAs(allocator, &store.database, "cli", site.id, "person.deleted", try std.fmt.allocPrint(allocator, "{s} · {d} visitor(s)", .{ label, visitors.items.len }), domain.nowMs());
+    try audit.recordAs(allocator, &store.database, "cli", site.id, "person.deleted", try std.fmt.allocPrint(allocator, "{s} · {d} visitor(s)", .{ label, visitors.items.len }), domain.nowMs());
     try store.database.exec("COMMIT");
     var replays = try replay.open(allocator, paths.replays, true);
     defer replays.close();

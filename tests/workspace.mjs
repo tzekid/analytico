@@ -536,18 +536,34 @@ await journey("access", async (t) => {
   await post(context, "/shop/alerts", { name: "Broken", metric: "page_views", direction: "drops", threshold: "20", filters: "f=%" });
   assert.equal(read("SELECT count(*) n FROM alerts")[0].n, 0);
 
-  // A user ID shaped like a UUID is hashed like any other user ID.
+  // A user ID shaped like a UUID is hashed like any other user ID. The
+  // browser establishes the visitor; the backend's identify links it.
+  const now = Date.now();
+  const browserVisit = async (visitor) => {
+    const record = { event_id: randomUUID(), type: "page_view", occurred_at_ms: now, tracking_mode: "full", consent_mode: "granted", tracker_version: "2", release_id: "", internal: false, visitor_id: visitor, session_id: randomUUID(), page_id: randomUUID(), path: "/account" };
+    const response = await fetch(`${origin}/e`, { method: "POST", headers: { origin, "content-type": "text/plain", "user-agent": "Chrome/140", "x-forwarded-for": "203.0.113.9" }, body: JSON.stringify({ v: 2, site: publicId, sent_at_ms: now, records: [record] }) });
+    assert.equal(response.status, 200);
+  };
+  const signed = async (record) => {
+    const body = JSON.stringify({ v: 2, site: publicId, sent_at_ms: now, records: [{ event_id: randomUUID(), occurred_at_ms: now, tracking_mode: "full", consent_mode: "server", tracker_version: "backend", release_id: "", internal: false, ...record }] });
+    assert.equal((await fetch(`${origin}/i`, { method: "POST", headers: { "content-type": "application/json", ...t.sign("shop", body) }, body })).status, 204);
+  };
   const visitorId = randomUUID();
   const userId = randomUUID();
-  const now = Date.now();
-  const identify = JSON.stringify({ v: 2, site: publicId, sent_at_ms: now, records: [{ event_id: randomUUID(), type: "identify", occurred_at_ms: now, tracking_mode: "full", consent_mode: "server", tracker_version: "backend", release_id: "", internal: false, visitor_id: visitorId, user_id: userId }] });
-  assert.equal((await fetch(`${origin}/i`, { method: "POST", headers: { "content-type": "application/json", ...t.sign("shop", identify) }, body: identify })).status, 204);
+  await browserVisit(visitorId);
+  await signed({ type: "identify", visitor_id: visitorId, user_id: userId });
   const exported = await context.request.get(`${origin}/settings/consent/export?site=shop&person=${userId}`);
   assert.equal(exported.status(), 200);
   assert.match(exported.headers()["content-type"], /json/);
   assert.equal((await post(context, "/settings/consent/forget", { site: "shop", person: userId })).status(), 303);
   assert.equal(read("SELECT count(*) n FROM visitors WHERE visitor_id=?", visitorId)[0].n, 0);
   assert.equal(audit().at(-1).action, "person.deleted");
+  // So are the backend's, through /i.
+  const erased = randomUUID();
+  await browserVisit(erased);
+  const viaApi = await audited(() => signed({ type: "forget", visitor_id: erased }));
+  assert.deepEqual([viaApi.action, viaApi.actor, viaApi.detail], ["person.deleted", "api", `Visitor ${erased.slice(0, 4)} · 1 visitor(s)`]);
+  assert.equal(read("SELECT count(*) n FROM page_views WHERE visitor_id=?", erased)[0].n, 0);
 
   // The CLI's deletions are logged too, once the server has stopped.
   await admin.close();

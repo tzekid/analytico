@@ -346,14 +346,21 @@ pub fn ingest(
         } else if (std.mem.eql(u8, kind, "identify")) {
             if (record.visitor_id != null) try applyIdentify(context, record);
         } else if (std.mem.eql(u8, kind, "forget")) {
+            const before = result.forgotten.items.len;
+            var label: []const u8 = "";
             if (record.visitor_id) |visitor_id| {
                 try forgetVisitor(allocator, store, site.id, visitor_id);
                 try result.forgotten.append(allocator, visitor_id);
+                label = try std.fmt.allocPrint(allocator, "Visitor {s}", .{visitor_id[0..4]});
             }
             if (record.user_id) |user_id| {
                 const hash = domain.userHash(master_key, site.public_id, user_id);
                 for (try forgetUser(allocator, store, site.id, &hash)) |visitor_id| try result.forgotten.append(allocator, visitor_id);
+                label = try std.fmt.allocPrint(allocator, "user {s}", .{hash[0..4]});
             }
+            // The operator's backend erasing someone is a deletion like any
+            // other; a visitor's own forget() is not an operator's action.
+            if (source == .server) try @import("web/audit.zig").recordAs(allocator, &store.database, "api", site.id, "person.deleted", try std.fmt.allocPrint(allocator, "{s} · {d} visitor(s)", .{ label, result.forgotten.items.len - before }), received_at_ms);
         } else unreachable;
         if (record.visitor_id) |visitor_id| if (record.session_id) |session_id| {
             if (!std.mem.eql(u8, kind, "forget") and !(std.mem.eql(u8, kind, "consent") and std.mem.eql(u8, record.state.?, "denied"))) {
