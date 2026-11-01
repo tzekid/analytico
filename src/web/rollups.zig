@@ -1,10 +1,12 @@
 //! Daily rollups. A UTC day's page views never change once the day is over
 //! (acceptance uses server receipt time), so each closed day is summarised
-//! once per dimension. Visitor-day pseudonyms are per day, so summed visitor
+//! once per dimension, 30 minutes after it ends so late commits and page
+//! summaries are in. Visitor-day pseudonyms are per day, so summed visitor
 //! counts stay exact. The current day is summarised up to a recent cut every
 //! few minutes; reports read raw rows only after that cut and leave out
-//! people the partial summary already counted. Filtered views with more than
-//! one condition read raw rows. Deleting a person leaves these anonymous
+//! people the partial summary already counted. Until a day closes, its last
+//! partial summary stays the cut and today's waits. Filtered views with more
+//! than one condition read raw rows. Deleting a person leaves these anonymous
 //! totals, like heatmap cells.
 const std = @import("std");
 const data = @import("data.zig");
@@ -19,12 +21,18 @@ const Row = struct { key: []const u8, values: [7]i64 };
 /// behind the clock so batches still being written are not skipped.
 const partial_every_ms = 5 * 60_000;
 const partial_lag_ms = 30_000;
+/// How long after midnight a day closes: batches received before midnight
+/// have committed, and most page summaries (sent when a page is left, often
+/// minutes later) have updated its page views.
+const close_lag_ms = 30 * 60_000;
 
 /// Summarises closed days oldest first, then refreshes today's partial
 /// summary, for at most `budget_ms`.
 pub fn run(arena: std.mem.Allocator, shared: *server.Shared, db: *db_mod.Db, now_ms: i64, budget_ms: i64) !void {
     const started = now_ms;
     const today = now_ms - @mod(now_ms, data.day_ms);
+    // Days before this one have closed.
+    const closing = now_ms - close_lag_ms - @mod(now_ms - close_lag_ms, data.day_ms);
     var sites = try db.prepare(arena,
         \\SELECT s.id,(SELECT min(received_at_ms) FROM page_views pv WHERE pv.site_id=s.id),
         \\ (SELECT max(day) FROM rollup_days r WHERE r.site_id=s.id AND r.until_ms%86400000=0),
@@ -40,15 +48,17 @@ pub fn run(arena: std.mem.Allocator, shared: *server.Shared, db: *db_mod.Db, now
         const first = sites.columnInt(1);
         const next = if (sites.columnType(2) == db_mod.sqlite.SQLITE_NULL) first - @mod(first, data.day_ms) else (try data.parseDate(sites.columnText(2))) + data.day_ms;
         const partial = sites.columnInt(3) >= today and sites.columnInt(4) < now_ms - partial_every_ms;
-        if (next < today or partial) try pending.append(arena, .{ .site_id = sites.columnInt(0), .next = next, .partial = partial });
+        if (next < closing or partial) try pending.append(arena, .{ .site_id = sites.columnInt(0), .next = next, .partial = partial });
     }
     for (pending.items) |item| {
         var day = item.next;
-        while (day < today) : (day += data.day_ms) {
+        while (day < closing) : (day += data.day_ms) {
             try summarise(arena, shared, db, item.site_id, day, day + data.day_ms);
             if (overBudget(started, budget_ms)) return;
         }
-        if (item.partial and now_ms - partial_lag_ms > today) {
+        // Reports read summaries up to the latest cut, so today's waits
+        // until yesterday has closed.
+        if (item.partial and day == today and now_ms - partial_lag_ms > today) {
             try summarise(arena, shared, db, item.site_id, today, now_ms - partial_lag_ms);
             if (overBudget(started, budget_ms)) return;
         }
@@ -193,4 +203,52 @@ test "weeks start on Monday" {
     const monday = try data.parseDate("2026-09-28");
     try std.testing.expectEqual(weekIndex(monday), weekIndex(monday + 6 * data.day_ms + data.day_ms - 1));
     try std.testing.expectEqual(weekIndex(monday) - 1, weekIndex(monday - 1));
+}
+
+test "a day closes 30 minutes after it ends, and reads exactly until then" {
+    const testing = std.testing;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var store: @import("../store.zig").Store = .{ .allocator = testing.allocator, .io = testing.io, .database = try db_mod.Db.open(testing.allocator, ":memory:", true), .writer_lock = null };
+    defer store.database.close();
+    const db = &store.database;
+    try @import("../schema.zig").initialize(db);
+    var shared: server.Shared = .{ .gpa = testing.allocator, .readers = undefined, .io = testing.io, .data = "", .master_key = @splat(0), .store = &store, .replays = undefined, .replay_path = "" };
+    try db.exec("INSERT INTO sites(id,public_id,slug,tracking_mode,internal_secret,created_at_ms) VALUES(1,'550e8400-e29b-41d4-a716-446655440000','one','session',zeroblob(32),0)");
+    const today = try data.parseDate("2026-10-08");
+    const minute: i64 = 60_000;
+    const view = struct {
+        fn add(d: *db_mod.Db, a: std.mem.Allocator, id: []const u8, at: i64) !void {
+            const date = data.dateText(at);
+            // One visit across midnight, one visitor-day per day.
+            try d.run(a, "INSERT INTO page_views(site_id,event_id,page_id,session_id,occurred_at_ms,received_at_ms,received_date,visitor_day_id,tracking_mode,path,tracker_version,consent_mode,internal,browser,operating_system,device,traffic_class) VALUES(1,?1,?1,'visit',?2,?2,?3,?3,'session','/','1','analytics',0,'chrome','linux','desktop','human_like')", .{ id, at, &date });
+        }
+    }.add;
+    const budget = std.math.maxInt(i64);
+    try view(db, arena, "a", today - 10 * minute);
+    try run(arena, &shared, db, today - 5 * minute, budget);
+    // After midnight: a batch received before it commits late, the visit goes on.
+    try view(db, arena, "b", today - 2 * minute);
+    try view(db, arena, "late", today - 1);
+    try view(db, arena, "c", today + 5 * minute);
+    try run(arena, &shared, db, today + 10 * minute, budget);
+    // Yesterday is not closed yet, and today's summary waits for it.
+    try testing.expectEqual(today - 5 * minute - partial_lag_ms, try data.rolledUntil(arena, db, 1));
+    try testing.expectEqual(@as(i64, 1), try db.scalar(arena, i64, "SELECT count(*) FROM rollup_days", .{}));
+    const params = try @import("html.zig").Params.parse(arena, "");
+    const site = (try data.siteBySlug(arena, db, "one")).?;
+    var reading: data.View = .{ .site = site, .range = data.Range.parse(params, today + 10 * minute), .filters = &.{}, .any = false, .compare = false, .metric = .views, .params = params };
+    const during = try data.totals(arena, db, reading, reading.range.start_ms, reading.range.end_ms);
+    try testing.expectEqual(@as(i64, 4), during.views);
+    try testing.expectEqual(@as(i64, 2), during.visitor_days);
+    try testing.expectEqual(@as(i64, 2), during.sessions);
+    try run(arena, &shared, db, today + 31 * minute, budget);
+    // Closed with the late batch; today's summary runs.
+    try testing.expectEqual(@as(i64, 3), try db.scalar(arena, i64, "SELECT views FROM rollups WHERE day='2026-10-07' AND dim='total'", .{}));
+    try testing.expectEqual(today, try db.scalar(arena, i64, "SELECT until_ms FROM rollup_days WHERE day='2026-10-07'", .{}));
+    try testing.expectEqual(today + 31 * minute - partial_lag_ms, try data.rolledUntil(arena, db, 1));
+    reading.range = data.Range.parse(params, today + 31 * minute);
+    const after = try data.totals(arena, db, reading, reading.range.start_ms, reading.range.end_ms);
+    try testing.expectEqual(during, after);
 }

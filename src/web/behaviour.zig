@@ -480,7 +480,7 @@ pub fn errorScope(sql: *data.Sql, view: data.View, start: i64, end: i64) !void {
     try sql.int(end);
     if (view.filters.len != 0) {
         try sql.add(" AND EXISTS(SELECT 1 FROM page_views pv WHERE pv.site_id=x.site_id AND pv.page_id=x.page_id");
-        try sql.filters(view.filters, view.any);
+        try sql.filters(view);
         try sql.add(")");
     }
 }

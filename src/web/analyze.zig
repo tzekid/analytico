@@ -178,7 +178,7 @@ fn pageSheet(ctx: *Ctx, base_view: data.View, path: []const u8, page_path: []con
     try with_page.appendSlice(arena, base_view.filters);
     try with_page.append(arena, .{ .dim = .page, .value = page_path });
     view.filters = with_page.items;
-    view.any = false;
+    view.pinned = true;
     const close = try base_view.href(arena, path, &.{ .{ "q", ctx.param("q") orelse "" }, .{ "sort", ctx.param("sort") orelse "" } });
     try sheetOpen(w, try std.fmt.allocPrint(arena, "Page · {f}", .{base_view.range.text(.this)}), page_path, close);
     // What to do with the page comes first, where a half-height sheet shows it.
@@ -478,12 +478,12 @@ fn campaigns(ctx: *Ctx, view: data.View, path: []const u8) !void {
     const from = data.dateText(view.range.start_ms);
     const to = data.dateText(view.range.end_ms - 1);
     var sql = data.Sql.init(arena);
-    // Each set once, then joined by campaign. Revenue is orders (one per order
-    // ID, whether seen from the browser, the server or both) minus refunds.
+    // Each set once, then joined by campaign. Revenue is confirmed: orders the
+    // server reported (one per order ID) minus the server's refunds.
     try customers.ordersCte(&sql, view, view.range.start_ms, view.range.end_ms);
     try sql.add(", cv AS MATERIALIZED (SELECT pv.utm_campaign c,pv.session_id,pv.page_id,pv.visitor_day_id FROM page_views pv WHERE ");
     try sql.pageViews(view, view.range.start_ms, view.range.end_ms);
-    try sql.add(" AND pv.utm_campaign>''), cs AS MATERIALIZED (SELECT session_id,max(c) c FROM cv WHERE session_id IS NOT NULL GROUP BY session_id), ev AS MATERIALIZED (SELECT coalesce(json_extract(e.properties_json,'$.campaign'),cs.c,cv.c) c,e.name,e.value_minor,e.currency,coalesce(e.order_id,e.event_id) o FROM events e LEFT JOIN cs ON cs.session_id=e.session_id LEFT JOIN cv ON cv.page_id=e.page_id WHERE ");
+    try sql.add(" AND pv.utm_campaign>''), cs AS MATERIALIZED (SELECT session_id,max(c) c FROM cv WHERE session_id IS NOT NULL GROUP BY session_id), ev AS MATERIALIZED (SELECT coalesce(json_extract(e.properties_json,'$.campaign'),cs.c,cv.c) c,e.name,e.value_minor,e.currency,coalesce(e.order_id,e.event_id) o,e.source FROM events e LEFT JOIN cs ON cs.session_id=e.session_id LEFT JOIN cv ON cv.page_id=e.page_id WHERE ");
     try sql.events(view, view.range.start_ms, view.range.end_ms);
     try sql.add("), sp AS (SELECT campaign c,sum(amount_minor) a,max(currency) cur FROM campaign_spend WHERE site_id=");
     try sql.int(site.id);
@@ -493,7 +493,7 @@ fn campaigns(ctx: *Ctx, view: data.View, path: []const u8) !void {
     try sql.str(&to);
     try sql.add(" GROUP BY campaign), k AS (SELECT c FROM cv UNION SELECT c FROM sp), vis AS (SELECT c,count(DISTINCT visitor_day_id) n FROM cv GROUP BY c), conv AS (SELECT c,sum(name IN (SELECT match_value FROM goals WHERE kind='event' AND site_id=");
     try sql.int(site.id);
-    try sql.add(")) n,max(currency) cur FROM ev GROUP BY c), orders AS (SELECT coalesce(json_extract(o.properties_json,'$.campaign'),cs.c,cv.c) c,sum(o.v) v FROM o LEFT JOIN cs ON cs.session_id=o.session_id LEFT JOIN cv ON cv.page_id=o.page_id WHERE o.source='server' GROUP BY 1), refunds AS (SELECT c,sum(abs(value_minor)) v FROM ev WHERE name IN " ++ customers.refund_names ++ " AND value_minor IS NOT NULL GROUP BY c) SELECT k.c,coalesce(vis.n,0),coalesce(conv.n,0),coalesce(orders.v,0)-coalesce(refunds.v,0),coalesce(sp.a,0),coalesce(sp.cur,conv.cur,'') FROM k LEFT JOIN vis ON vis.c=k.c LEFT JOIN conv ON conv.c=k.c LEFT JOIN orders ON orders.c=k.c LEFT JOIN refunds ON refunds.c=k.c LEFT JOIN sp ON sp.c=k.c ORDER BY 4 DESC,2 DESC LIMIT 100");
+    try sql.add(")) n,max(currency) cur FROM ev GROUP BY c), orders AS (SELECT coalesce(json_extract(o.properties_json,'$.campaign'),cs.c,cv.c) c,sum(o.v) v FROM o LEFT JOIN cs ON cs.session_id=o.session_id LEFT JOIN cv ON cv.page_id=o.page_id WHERE o.source='server' GROUP BY 1), refunds AS (SELECT c,sum(abs(value_minor)) v FROM ev WHERE name IN " ++ customers.refund_names ++ " AND value_minor IS NOT NULL AND source='server' GROUP BY c) SELECT k.c,coalesce(vis.n,0),coalesce(conv.n,0),coalesce(orders.v,0)-coalesce(refunds.v,0),coalesce(sp.a,0),coalesce(sp.cur,conv.cur,'') FROM k LEFT JOIN vis ON vis.c=k.c LEFT JOIN conv ON conv.c=k.c LEFT JOIN orders ON orders.c=k.c LEFT JOIN refunds ON refunds.c=k.c LEFT JOIN sp ON sp.c=k.c ORDER BY 4 DESC,2 DESC LIMIT 100");
     var statement = try sql.prepare(ctx.db);
     defer statement.deinit();
     var rows: std.ArrayList(Campaign) = .empty;

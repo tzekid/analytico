@@ -25,6 +25,15 @@ const render = html.render;
 pub const purchase_names = "('purchase','payment_confirmed')";
 pub const refund_names = "('refund','payment_refunded','refund_confirmed')";
 
+/// Which refund events (aliased `e`) count: for an order the server refunded,
+/// only the server's refunds (each partial refund counts); otherwise the
+/// browser's; a refund without an order ID counts as itself. `deciding`
+/// narrows the server refunds that decide to the copy a report reads (an
+/// amount, or items), as orders pick their copy.
+pub fn refundCounts(comptime deciding: []const u8) []const u8 {
+    return "(e.source='server' OR e.order_id IS NULL OR NOT EXISTS(SELECT 1 FROM events r WHERE r.site_id=e.site_id AND r.order_id=e.order_id AND r.source='server' AND r.name IN " ++ refund_names ++ " AND " ++ deciding ++ "))";
+}
+
 /// One row per order: an order ID seen from the server and the browser counts
 /// once, and the server's copy wins. The visit comes from whichever copy
 /// knows it, usually the browser's.
@@ -38,7 +47,7 @@ pub fn ordersCte(sql: *data.Sql, view: data.View, start: i64, end: i64) !void {
         try sql.add(" AND EXISTS(SELECT 1 FROM page_views pv WHERE pv.site_id=");
         try sql.int(view.site.id);
         try sql.add(" AND pv.internal=0 AND pv.traffic_class IN ('human_like','unknown') AND (pv.page_id=picked.page_id OR (picked.page_id IS NULL AND pv.session_id=picked.session_id))");
-        try sql.filters(view.filters, view.any);
+        try sql.filters(view);
         try sql.add(")");
     }
     try sql.add(")");
@@ -51,7 +60,8 @@ pub fn productSql(arena: std.mem.Allocator, view: data.View, limit: usize) !data
     try ordersCte(&sql, view, view.range.start_ms, view.range.end_ms);
     try sql.add(", it AS (SELECT 'purchase' name,i.item_id,i.name iname,i.price_minor,i.quantity,o.event_id FROM o JOIN event_items i ON i.site_id=");
     try sql.int(view.site.id);
-    try sql.add(" AND i.event_id=o.items_event_id UNION ALL SELECT e.name,i.item_id,i.name,i.price_minor,i.quantity,e.event_id FROM events e JOIN event_items i ON i.site_id=e.site_id AND i.event_id=e.event_id WHERE e.name NOT IN " ++ purchase_names ++ " AND ");
+    try sql.add(" AND i.event_id=o.items_event_id UNION ALL SELECT e.name,i.item_id,i.name,i.price_minor,i.quantity,e.event_id FROM events e JOIN event_items i ON i.site_id=e.site_id AND i.event_id=e.event_id WHERE e.name NOT IN " ++ purchase_names ++
+        " AND (e.name NOT IN " ++ refund_names ++ " OR " ++ comptime refundCounts("EXISTS(SELECT 1 FROM event_items ri WHERE ri.site_id=r.site_id AND ri.event_id=r.event_id)") ++ ") AND ");
     try sql.events(view, view.range.start_ms, view.range.end_ms);
     try sql.add(") SELECT item_id AS product_id,max(iname) AS product,sum(name='view_item') AS views,sum(name='add_to_cart') AS add_to_carts,count(DISTINCT CASE WHEN name IN " ++ purchase_names ++ " THEN event_id END) AS orders,coalesce(sum(CASE WHEN name IN " ++ purchase_names ++ " THEN coalesce(price_minor,0)*quantity END),0) AS revenue_minor,coalesce(sum(CASE WHEN name IN " ++ refund_names ++ " THEN abs(coalesce(price_minor,0)*quantity) END),0) AS refunds_minor FROM it GROUP BY item_id ORDER BY 6 DESC,3 DESC LIMIT ");
     try sql.int(@intCast(limit));
@@ -65,7 +75,7 @@ pub fn sales(arena: std.mem.Allocator, db: *db_mod.Db, view: data.View, start: i
     try ordersCte(&sql, view, start, end);
     try sql.add(" SELECT coalesce(sum(v),0),count(*),coalesce((SELECT sum(abs(e.value_minor)) FROM events e WHERE ");
     try sql.events(view, start, end);
-    try sql.add(" AND e.name IN " ++ refund_names ++ " AND e.value_minor IS NOT NULL),0) FROM o");
+    try sql.add(" AND e.name IN " ++ refund_names ++ " AND e.value_minor IS NOT NULL AND " ++ comptime refundCounts("r.value_minor IS NOT NULL") ++ "),0) FROM o");
     var statement = try sql.prepare(db);
     defer statement.deinit();
     _ = try statement.step();

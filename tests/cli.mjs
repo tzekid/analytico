@@ -1,8 +1,9 @@
 // The command line and the collector without a browser: sites, goals,
 // funnels and spend from the CLI; browser and server batches over HTTP
 // (no client address, duplicates, a foreign origin, a conflicting replay, a
-// signed server event); the reports' values; every catalog report alike
-// through the CLI and the read API; backup, restore and doctor.
+// signed server event, a refund from both sides); the reports' values; a
+// breakdown the summaries leave out; every catalog report alike through the
+// CLI and the read API; backup, restore and doctor.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
@@ -42,10 +43,10 @@ await journey("cli", async (t) => {
     { ...onPage, event_id: "550e8400-e29b-41d4-a716-446655440006", type: "event", name: "flow_started", path: "/register", properties: { flow: "registration", step: "start" } },
     { ...onPage, event_id: "550e8400-e29b-41d4-a716-446655440004", type: "page_summary", visible_ms: 12000, active_ms: 10000, interaction_count: 2, max_scroll: 75, sections: ["hero"], last_section: "hero", selection_count: 0, copy_count: 0, outbound_clicks: 0, downloads: 0, form_attempts: 1, lcp_ms: 500 },
   ];
-  const collect = async (batch, origin, address) => (await fetch(`${base}/e`, {
+  const collect = async (batch, origin, address, v = 1) => (await fetch(`${base}/e`, {
     method: "POST",
     headers: { origin, "content-type": "text/plain;charset=UTF-8", ...(address ? { "x-forwarded-for": address } : {}) },
-    body: JSON.stringify({ v: 1, site, sent_at_ms: now, records: batch }),
+    body: JSON.stringify({ v, site, sent_at_ms: now, records: batch }),
   })).status;
   assert.equal(await collect(records, "https://example.test"), 400, "no client address");
   assert.equal(await collect(records, "https://example.test", "198.51.100.10"), 204);
@@ -56,6 +57,18 @@ await journey("cli", async (t) => {
   const serverBatch = JSON.stringify({ v: 1, site, sent_at_ms: Date.now(), records: [{ ...common, event_id: "550e8400-e29b-41d4-a716-446655440005", type: "event", occurred_at_ms: Date.now(), consent_mode: "server", tracker_version: "backend-1", name: "payment_confirmed", value_minor: 4900, currency: "EUR", properties: { source: "search", campaign: "launch", content: "hero" } }] });
   const signed = await fetch(`${base}/i`, { method: "POST", headers: { "content-type": "application/json", ...t.sign("example", serverBatch) }, body: serverBatch });
   assert.ok(signed.ok, await signed.text());
+
+  // One refund of order A-1 seen by the browser and confirmed by the server,
+  // which also refunds shipping: 1000 + 500 come off, not 2500.
+  const kit = [{ id: "kit", name: "Kit", price_minor: 1000, quantity: 1 }];
+  assert.equal(await collect([{ ...onPage, event_id: "550e8400-e29b-41d4-a716-446655440007", type: "event", name: "refund", path: "/register", order_id: "A-1", value_minor: 1000, currency: "EUR", items: kit }], "https://example.test", "198.51.100.10", 2), 204);
+  const confirmed = { ...common, type: "event", occurred_at_ms: Date.now(), consent_mode: "server", tracker_version: "backend-1", name: "refund_confirmed", order_id: "A-1", currency: "EUR" };
+  const refundBatch = JSON.stringify({ v: 2, site, sent_at_ms: Date.now(), records: [
+    { ...confirmed, event_id: "550e8400-e29b-41d4-a716-446655440008", value_minor: 1000, items: kit },
+    { ...confirmed, event_id: "550e8400-e29b-41d4-a716-446655440009", value_minor: 500 },
+  ] });
+  const refunded = await fetch(`${base}/i`, { method: "POST", headers: { "content-type": "application/json", ...t.sign("example", refundBatch) }, body: refundBatch });
+  assert.ok(refunded.ok, await refunded.text());
 
   // ---------------------------------------------------------------- reports
 
@@ -77,6 +90,8 @@ await journey("cli", async (t) => {
   const [totals] = report("overview");
   assert.equal(totals.engaged_views, 1);
   assert.equal(totals.previous_engaged_views, 0);
+  assert.equal(totals.revenue_minor, 4900 - 1000 - 500);
+  assert.deepEqual(report("revenue").map(({ product_id, refunds_minor }) => [product_id, refunds_minor]), [["kit", 1000]]);
   assert.deepEqual(report("breakdown", "--dimension", "language"), [{ value: "en", page_views: 1, visitor_days: 1, previous_page_views: 0, label: "English", channel: null }]);
   assert.deepEqual(report("breakdown", "--dimension", "viewport"), [{ value: "desktop", page_views: 1, visitor_days: 1, previous_page_views: 0, label: "Desktop", channel: null }]);
   assert.deepEqual(report("campaigns"), [{ source: "search", campaign: "launch", content: "hero", views: 1, visitors: 1, sessions: 1 }]);
@@ -84,17 +99,20 @@ await journey("cli", async (t) => {
   // The browser journey separately checks an actual click produces an action.
   assert.deepEqual(report("actions"), []);
   assert.deepEqual(report("events"), [
+    { name: "refund_confirmed", source: "server", occurrences: 2, sessions: 1, value_minor: 1500, currency: "EUR" },
     { name: "flow_started", source: "browser", occurrences: 1, sessions: 1, value_minor: 0, currency: "" },
     { name: "payment_confirmed", source: "server", occurrences: 1, sessions: 1, value_minor: 4900, currency: "EUR" },
+    { name: "refund", source: "browser", occurrences: 1, sessions: 1, value_minor: 1000, currency: "EUR" },
     { name: "registration_started", source: "browser", occurrences: 1, sessions: 1, value_minor: 0, currency: "" },
   ]);
   const recent = report("recent");
-  assert.deepEqual(recent.map(({ name }) => name).sort(), ["flow_started", "page_view", "payment_confirmed", "registration_started"]);
+  assert.deepEqual(recent.map(({ name }) => name).sort(), ["flow_started", "page_view", "payment_confirmed", "refund", "refund_confirmed", "refund_confirmed", "registration_started"]);
   for (const row of recent) {
     assert.ok(Number.isInteger(row.received_at_ms) && row.received_at_ms > 0);
     assert.equal(row.session_id, sessionId);
-    assert.equal(row.source, row.name === "payment_confirmed" ? "server" : "browser");
-    assert.equal(row.path, row.name === "page_view" ? "/landing" : row.name === "payment_confirmed" ? "" : "/register");
+    const server = row.name === "payment_confirmed" || row.name === "refund_confirmed";
+    assert.equal(row.source, server ? "server" : "browser");
+    assert.equal(row.path, row.name === "page_view" ? "/landing" : server ? "" : "/register");
   }
   assert.deepEqual(report("coverage"), [{
     page_views: 1, summaries: 1, summary_percent: 100, unknown_traffic: 0,
@@ -129,6 +147,24 @@ await journey("cli", async (t) => {
     assert.equal(filtered.status, 200, filter);
     assert.ok(Array.isArray((await filtered.json()).rows), filter);
   }
+  // A breakdown by release, which the daily summaries leave out, still
+  // counts the visit once today's summary covers it. A summary cut before
+  // the visit (under 30 s old then) is forgotten so the job cuts again.
+  const visited = t.db().prepare("SELECT max(received_at_ms) n FROM page_views").get().n;
+  await t.until(() => {
+    const db = t.db("analytico.db", { timeout: 5000 });
+    try {
+      const cut = db.prepare("SELECT max(until_ms) n FROM rollup_days").get().n;
+      if (cut > visited) return true;
+      if (cut !== null) db.exec("DELETE FROM rollup_days");
+    } finally {
+      db.close();
+    }
+  }, "today summarised past the visit", 90000);
+  const releases = [{ value: "test", page_views: 1, visitor_days: 1, previous_page_views: 0, label: "test", channel: null }];
+  assert.deepEqual(report("breakdown", "--dimension", "release"), releases);
+  const releaseApi = await fetch(`${base}/api/v1/sites/example/breakdown?range=7d&dimension=release`, { headers: { authorization: `Bearer ${token}` } });
+  assert.deepEqual((await releaseApi.json()).rows, releases);
   const minutes = JSON.parse(t.cli("report", "minutes", "example", "--json"));
   assert.equal(minutes.length, 30);
   assert.match(minutes[29].at, /^\d{4}-\d\d-\d\dT\d\d:\d\dZ$/);
@@ -144,7 +180,7 @@ await journey("cli", async (t) => {
   assert.match(t.log, /serve_stopped/);
   const restored = join(t.temporary, "restored");
   execFileSync(t.app, ["restore", backup, restored]);
-  assert.match(execFileSync(t.app, ["doctor", "--data", restored], { encoding: "utf8" }), /page_views=1 summaries=1 events=3/);
+  assert.match(execFileSync(t.app, ["doctor", "--data", restored], { encoding: "utf8" }), /page_views=1 summaries=1 events=6/);
   // An older schema migrates only after a verified backup of the new copy.
   const old = new DatabaseSync(join(restored, "analytico.db"));
   old.exec("ALTER TABLE visitors DROP COLUMN consent_state; DELETE FROM schema_migrations WHERE version=12; PRAGMA user_version=11");
@@ -161,5 +197,5 @@ await journey("cli", async (t) => {
   assert.equal(pruned.prepare("SELECT count(*) n FROM vitals_daily WHERE day<'2020-01-01'").get().n, 0);
   assert.equal(pruned.prepare("SELECT count(*) n FROM cache").get().n, 0);
   pruned.close();
-  return `collector over HTTP, ${catalog.length} catalog reports alike in the CLI and the API, report values, backup, restore and doctor`;
+  return `collector over HTTP, ${catalog.length} catalog reports alike in the CLI and the API, report values, refunds counted once, release breakdown over summaries, backup, restore and doctor`;
 });

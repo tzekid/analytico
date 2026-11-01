@@ -11,7 +11,7 @@
 //! - The visitor-day index is partial (`received_at_ms>0`): only the
 //!   exact-count lookup names that term, so the planner never walks it for an
 //!   ordinary count(DISTINCT ...).
-//! - Rollups cover the current day up to `rollup_days.until_ms`.
+//! - Rollups cover a day that has not closed up to `rollup_days.until_ms`.
 const std = @import("std");
 const db_mod = @import("db.zig");
 

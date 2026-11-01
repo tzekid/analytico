@@ -53,33 +53,37 @@ pub const Cache = struct {
 /// The overlay's data, from the cache when it was warmed in the last minute.
 pub fn cachedAggregates(arena: std.mem.Allocator, shared: *@import("../server.zig").Shared, db: *db_mod.Db, site_id: i64, path: []const u8, viewport: []const u8, days: i64, now_ms: i64) ![]const u8 {
     if (try shared.heat_cache.get(shared.io, arena, site_id, path, viewport, days, now_ms)) |body| return body;
-    const body = try aggregatesJson(arena, db, site_id, path, viewport, days, now_ms);
+    const body = try aggregatesJson(arena, db, site_id, path, viewport, now_ms - days * data.day_ms, now_ms + 1);
     try shared.heat_cache.put(shared.io, shared.gpa, site_id, path, viewport, days, body, now_ms);
     return body;
 }
 
-/// The overlay's data for one page and viewport class over `days` days.
-pub fn aggregatesJson(arena: std.mem.Allocator, db: *db_mod.Db, site_id: i64, path: []const u8, viewport: []const u8, days: i64, now_ms: i64) ![]const u8 {
-    const since_ms = now_ms - days * data.day_ms;
+/// The data for one page and viewport class received in [since_ms, until_ms)
+/// (click cells by whole days): human page views outside the team, like the
+/// workspace's page list.
+pub fn aggregatesJson(arena: std.mem.Allocator, db: *db_mod.Db, site_id: i64, path: []const u8, viewport: []const u8, since_ms: i64, until_ms: i64) ![]const u8 {
     const since_day = data.dateText(since_ms);
+    const until_day = data.dateText(until_ms - 1);
     var out: std.Io.Writer.Allocating = .init(arena);
     const w = &out.writer;
 
-    var views = try db.prepare(arena, "SELECT count(*) FROM page_views WHERE site_id=? AND path=? AND coalesce(viewport_class,'desktop')=? AND received_at_ms>=? AND internal=0 AND traffic_class IN ('human_like','unknown')");
+    var views = try db.prepare(arena, "SELECT count(*) FROM page_views WHERE site_id=? AND path=? AND coalesce(viewport_class,'desktop')=? AND received_at_ms>=? AND received_at_ms<? AND internal=0 AND traffic_class IN ('human_like','unknown')");
     defer views.deinit();
     try views.bindInt(1, site_id);
     try views.bindText(2, path);
     try views.bindText(3, viewport);
     try views.bindInt(4, since_ms);
+    try views.bindInt(5, until_ms);
     _ = try views.step();
     try w.print("{{\"views\":{d},\"clicks\":[", .{views.columnInt(0)});
 
-    var clicks = try db.prepare(arena, "SELECT element,x,y,sum(clicks),sum(rage) FROM click_cells WHERE site_id=? AND path=? AND viewport_class=? AND day>=? GROUP BY element,x,y ORDER BY 4 DESC LIMIT 3000");
+    var clicks = try db.prepare(arena, "SELECT element,x,y,sum(clicks),sum(rage) FROM click_cells WHERE site_id=? AND path=? AND viewport_class=? AND day>=? AND day<=? GROUP BY element,x,y ORDER BY 4 DESC LIMIT 3000");
     defer clicks.deinit();
     try clicks.bindInt(1, site_id);
     try clicks.bindText(2, path);
     try clicks.bindText(3, viewport);
     try clicks.bindText(4, &since_day);
+    try clicks.bindText(5, &until_day);
     var first = true;
     while (try clicks.step() == .row) {
         if (!first) try w.writeByte(',');
@@ -92,13 +96,15 @@ pub fn aggregatesJson(arena: std.mem.Allocator, db: *db_mod.Db, site_id: i64, pa
     // Scroll reach: share of views reaching each 5% step of the page.
     var scroll = try db.prepare(arena,
         \\SELECT pv.max_scroll FROM page_views pv
-        \\WHERE pv.site_id=? AND pv.path=? AND coalesce(pv.viewport_class,'desktop')=? AND pv.received_at_ms>=? AND pv.internal=0 AND pv.max_scroll IS NOT NULL
+        \\WHERE pv.site_id=? AND pv.path=? AND coalesce(pv.viewport_class,'desktop')=? AND pv.received_at_ms>=? AND pv.received_at_ms<?
+        \\ AND pv.internal=0 AND pv.traffic_class IN ('human_like','unknown') AND pv.max_scroll IS NOT NULL
     );
     defer scroll.deinit();
     try scroll.bindInt(1, site_id);
     try scroll.bindText(2, path);
     try scroll.bindText(3, viewport);
     try scroll.bindInt(4, since_ms);
+    try scroll.bindInt(5, until_ms);
     var reached: [21]i64 = @splat(0);
     var samples: i64 = 0;
     var total_scroll: i64 = 0;
@@ -124,13 +130,15 @@ pub fn aggregatesJson(arena: std.mem.Allocator, db: *db_mod.Db, site_id: i64, pa
         \\ coalesce(avg(json_extract(ps.attention_json,'$[6]')),0),coalesce(avg(json_extract(ps.attention_json,'$[7]')),0),
         \\ coalesce(avg(json_extract(ps.attention_json,'$[8]')),0),coalesce(avg(json_extract(ps.attention_json,'$[9]')),0)
         \\FROM page_views pv JOIN page_summaries ps ON ps.site_id=pv.site_id AND ps.page_id=pv.page_id
-        \\WHERE pv.site_id=? AND pv.path=? AND coalesce(pv.viewport_class,'desktop')=? AND pv.received_at_ms>=? AND ps.attention_json IS NOT NULL
+        \\WHERE pv.site_id=? AND pv.path=? AND coalesce(pv.viewport_class,'desktop')=? AND pv.received_at_ms>=? AND pv.received_at_ms<?
+        \\ AND pv.internal=0 AND pv.traffic_class IN ('human_like','unknown') AND ps.attention_json IS NOT NULL
     );
     defer attention.deinit();
     try attention.bindInt(1, site_id);
     try attention.bindText(2, path);
     try attention.bindText(3, viewport);
     try attention.bindInt(4, since_ms);
+    try attention.bindInt(5, until_ms);
     _ = try attention.step();
     for (0..10) |index| {
         if (index != 0) try w.writeByte(',');
@@ -240,8 +248,8 @@ pub fn page(ctx: *Ctx, site: data.Site) !void {
         try w.writeAll("<section class=\"card heat-card\"><div class=\"heat-preview\">");
         switch (kind) {
             .clicks => try topElements(ctx, site.id, page_path, vp, &from_day, &to_day, clicks),
-            .scroll => try scrollPreview(ctx, site.id, page_path, vp, view.range.start_ms),
-            .attention => try attentionPreview(ctx, site.id, page_path, vp, view.range.start_ms),
+            .scroll => try scrollPreview(ctx, site.id, page_path, vp, view.range),
+            .attention => try attentionPreview(ctx, site.id, page_path, vp, view.range),
         }
         try render(w, "</div><div class=\"heat-body\"><strong class=\"mono t-14\">{path}</strong><p class=\"hint\">", .{ .path = page_path });
         switch (kind) {
@@ -293,8 +301,8 @@ fn topElements(ctx: *Ctx, site_id: i64, path: []const u8, viewport: []const u8, 
     if (!any) try w.writeAll("<p class=\"hint\">No clicks on this screen size.</p>");
 }
 
-fn scrollPreview(ctx: *Ctx, site_id: i64, path: []const u8, viewport: []const u8, since: i64) !void {
-    const json = try aggregatesJson(ctx.arena, ctx.db, site_id, path, viewport, @divFloor(ctx.now() - since, data.day_ms) + 1, ctx.now());
+fn scrollPreview(ctx: *Ctx, site_id: i64, path: []const u8, viewport: []const u8, range: data.Range) !void {
+    const json = try aggregatesJson(ctx.arena, ctx.db, site_id, path, viewport, range.start_ms, range.end_ms);
     const parsed = try std.json.parseFromSliceLeaky(std.json.Value, ctx.arena, json, .{});
     const steps = parsed.object.get("scroll").?.array.items;
     const w = ctx.w();
@@ -310,8 +318,8 @@ fn scrollPreview(ctx: *Ctx, site_id: i64, path: []const u8, viewport: []const u8
     try w.writeAll("</div>");
 }
 
-fn attentionPreview(ctx: *Ctx, site_id: i64, path: []const u8, viewport: []const u8, since: i64) !void {
-    const json = try aggregatesJson(ctx.arena, ctx.db, site_id, path, viewport, @divFloor(ctx.now() - since, data.day_ms) + 1, ctx.now());
+fn attentionPreview(ctx: *Ctx, site_id: i64, path: []const u8, viewport: []const u8, range: data.Range) !void {
+    const json = try aggregatesJson(ctx.arena, ctx.db, site_id, path, viewport, range.start_ms, range.end_ms);
     const parsed = try std.json.parseFromSliceLeaky(std.json.Value, ctx.arena, json, .{});
     const bands = parsed.object.get("attention").?.array.items;
     var peak: f64 = 1;
@@ -351,4 +359,32 @@ pub fn open(ctx: *Ctx, site: data.Site) !void {
     var buffer: [300]u8 = undefined;
     const token = try domain.signToken(&buffer, ctx.shared.master_key, "overlay", site.public_id, ctx.now() + 2 * data.hour_ms);
     return ctx.redirectFmt("{s}{s}#analytico-heatmap={s}", .{ site.origin, path, token });
+}
+
+test "scroll and attention count the same views as the page list, in the given window" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var db = try db_mod.Db.open(std.testing.allocator, ":memory:", true);
+    defer db.close();
+    try @import("../schema.zig").initialize(&db);
+    try db.exec("INSERT INTO sites(id,public_id,slug,tracking_mode,internal_secret,created_at_ms) VALUES(1,'550e8400-e29b-41d4-a716-446655440000','one','full',zeroblob(32),0)");
+    const day = try data.parseDate("2026-10-08");
+    // A person, a bot, a teammate, and a person the day before.
+    const Visit = struct { id: []const u8, at: i64, internal: i64, class: []const u8, scroll: i64 };
+    for ([_]Visit{
+        .{ .id = "person", .at = day + data.hour_ms, .internal = 0, .class = "human_like", .scroll = 40 },
+        .{ .id = "bot", .at = day + data.hour_ms, .internal = 0, .class = "known_bot", .scroll = 100 },
+        .{ .id = "team", .at = day + data.hour_ms, .internal = 1, .class = "internal", .scroll = 100 },
+        .{ .id = "earlier", .at = day - data.hour_ms, .internal = 0, .class = "human_like", .scroll = 100 },
+    }) |visit| {
+        const date = data.dateText(visit.at);
+        try db.run(arena, "INSERT INTO page_views(site_id,event_id,page_id,occurred_at_ms,received_at_ms,received_date,visitor_day_id,tracking_mode,path,viewport_class,tracker_version,consent_mode,internal,browser,operating_system,device,traffic_class,max_scroll) VALUES(1,?1,?1,?2,?2,?3,?1,'full','/','desktop','1','analytics',?4,'chrome','linux','desktop',?5,?6)", .{ visit.id, visit.at, &date, visit.internal, visit.class, visit.scroll });
+        try db.run(arena, "INSERT INTO page_summaries(site_id,event_id,page_id,occurred_at_ms,received_at_ms,tracking_mode,visible_ms,active_ms,interaction_count,max_scroll,sections_json,selection_count,copy_count,outbound_clicks,downloads,form_attempts,tracker_version,consent_mode,internal,attention_json) VALUES(1,?1||'-s',?1,?2,?2,'full',1000,1000,0,?3,'[]',0,0,0,0,0,'1','analytics',?4,json_array(?5,0,0,0,0,0,0,0,0,0))", .{ visit.id, visit.at, visit.scroll, visit.internal, visit.scroll * 100 });
+    }
+    const json = try aggregatesJson(arena, &db, 1, "/", "desktop", day, day + data.day_ms);
+    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena, json, .{});
+    try std.testing.expectEqual(@as(i64, 1), parsed.object.get("views").?.integer);
+    try std.testing.expectEqual(@as(f64, 40), jsonNumber(parsed.object.get("average_scroll").?));
+    try std.testing.expectEqual(@as(f64, 4000), jsonNumber(parsed.object.get("attention").?.array.items[0]));
 }

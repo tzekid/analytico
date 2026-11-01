@@ -91,9 +91,11 @@ workspace.
 - Daily rollups exist because measurement required them: at ten million page
   views a month, raw scans made a 30-day overview take minutes. A closed UTC
   day never changes (acceptance uses receipt time), so the background job
-  summarises it once per dimension, plus each remembered visitor's active
-  weeks for cohorts. The current day is summarised up to a cut 30 seconds
-  behind the clock every five minutes. Reports read rollups up to the cut
+  summarises it once per dimension, 30 minutes after it ends so late commits
+  and page summaries are in, plus each remembered visitor's active weeks for
+  cohorts. The current day is summarised up to a cut 30 seconds behind the
+  clock every five minutes, once the day before has closed; until then that
+  day's last partial summary is the cut. Reports read rollups up to the cut
   and raw rows after it; distinct visitors and sessions after the cut skip
   anyone the partial summary already counted under the same key (an indexed
   lookup), so totals stay exact. Views with more than one filter read raw

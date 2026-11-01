@@ -601,6 +601,9 @@ pub const View = struct {
     range: Range,
     filters: []Filter,
     any: bool,
+    /// The last filter holds as well, even when the others are any-of: a
+    /// page's sheet inside a view of several sources.
+    pinned: bool = false,
     compare: bool,
     metric: Metric,
     params: html.Params,
@@ -716,12 +719,13 @@ pub const Sql = struct {
         try self.int(start);
         try self.add(" AND pv.received_at_ms<");
         try self.int(end);
-        try self.filters(view.filters, view.any);
+        try self.filters(view);
     }
 
     /// count(DISTINCT pv.<column>) over raw rows from `split`. When `split`
-    /// is today's cut, people already counted in that day's partial rollup
-    /// under the same key and filters are left out, so the sum stays exact.
+    /// is a partial summary's cut, people already counted in that day's
+    /// summary under the same key and filters are left out, so the sum stays
+    /// exact.
     pub fn distinctAfter(self: *Sql, view: View, column: []const u8, key: []const u8, start: i64, split: i64) !void {
         if (split == start or @mod(split, day_ms) == 0) {
             try self.add("count(DISTINCT ");
@@ -731,9 +735,13 @@ pub const Sql = struct {
             try self.add(")");
             return;
         }
+        // Rows of the days after the cut's (today, while yesterday has not
+        // closed) were never in its summary: visits are counted per day.
+        try self.add("count(DISTINCT CASE WHEN pv.received_at_ms>=");
+        try self.int(split - @mod(split, day_ms) + day_ms);
         // The index keeps this a lookup of the person's few rows; left to
         // itself the planner scans every row of the day before the cut.
-        try self.add("count(DISTINCT CASE WHEN NOT EXISTS(SELECT 1 FROM page_views x INDEXED BY ");
+        try self.add(" OR NOT EXISTS(SELECT 1 FROM page_views x INDEXED BY ");
         try self.add(if (std.mem.eql(u8, column, "session_id")) "page_views_session" else "page_views_visitor_day");
         try self.add(" WHERE x.site_id=pv.site_id AND x.");
         try self.add(column);
@@ -770,16 +778,28 @@ pub const Sql = struct {
         return std.mem.replaceOwned(u8, arena, expression, "pv.", "x.");
     }
 
-    pub fn filters(self: *Sql, list: []const Filter, any: bool) !void {
-        if (list.len == 0) return;
-        try self.add(" AND (");
-        for (list, 0..) |filter, index| {
-            if (index != 0) try self.add(if (any) " OR " else " AND ");
-            try self.add(filter.dim.column());
-            try self.add(if (filter.negate) "<>" else "=");
-            try self.str(filter.value);
+    /// The view's filters over page views aliased `pv`.
+    pub fn filters(self: *Sql, view: View) !void {
+        const pinned = view.pinned and view.filters.len > 1;
+        const group = view.filters[0 .. view.filters.len - @intFromBool(pinned)];
+        if (group.len != 0) {
+            try self.add(" AND (");
+            for (group, 0..) |filter, index| {
+                if (index != 0) try self.add(if (view.any) " OR " else " AND ");
+                try self.condition(filter);
+            }
+            try self.add(")");
         }
-        try self.add(")");
+        if (pinned) {
+            try self.add(" AND ");
+            try self.condition(view.filters[view.filters.len - 1]);
+        }
+    }
+
+    fn condition(self: *Sql, filter: Filter) !void {
+        try self.add(filter.dim.column());
+        try self.add(if (filter.negate) "<>" else "=");
+        try self.str(filter.value);
     }
 
     /// Events of the site in [start, end): server events always count; browser
@@ -795,7 +815,7 @@ pub const Sql = struct {
             try self.add(" AND (e.source='server' OR e.traffic_class IN ('human_like','unknown'))");
         } else {
             try self.add(" AND EXISTS(SELECT 1 FROM page_views pv WHERE pv.site_id=e.site_id AND pv.internal=0 AND pv.traffic_class IN ('human_like','unknown') AND (pv.page_id=e.page_id OR (e.source='server' AND (pv.session_id=e.session_id OR (e.order_id IS NOT NULL AND pv.page_id IN (SELECT b.page_id FROM events b WHERE b.site_id=e.site_id AND b.order_id=e.order_id AND b.source='browser' AND b.internal=0 AND b.traffic_class IN ('human_like','unknown') AND b.name IN ('purchase','payment_confirmed'))))))");
-            try self.filters(view.filters, view.any);
+            try self.filters(view);
             try self.add(")");
         }
     }
@@ -961,9 +981,11 @@ pub fn top(arena: std.mem.Allocator, db: *db_mod.Db, view: View, dim: Dim, limit
         .device => "device",
         else => null,
     };
-    // Rollups hold one dimension at a time, so breakdowns use them unfiltered.
-    const split = if (view.filters.len == 0) try rollupSplit(arena, db, view, view.range.start_ms, view.range.end_ms) else view.range.start_ms;
-    const prev_split = if (view.filters.len == 0) try rollupSplit(arena, db, view, view.range.prev_start_ms, view.range.prev_end_ms) else view.range.prev_start_ms;
+    // Rollups hold one dimension at a time, so breakdowns use them unfiltered,
+    // and only for a dimension that is summarised (release is not).
+    const rolled = view.filters.len == 0 and isRolledUp(@tagName(dim));
+    const split = if (rolled) try rollupSplit(arena, db, view, view.range.start_ms, view.range.end_ms) else view.range.start_ms;
+    const prev_split = if (rolled) try rollupSplit(arena, db, view, view.range.prev_start_ms, view.range.prev_end_ms) else view.range.prev_start_ms;
     var sql = Sql.init(arena);
     try sql.add("WITH cur AS (SELECT k,sum(n) n,sum(v) v FROM (SELECT ");
     try sql.add(dim.column());
@@ -1026,7 +1048,7 @@ fn callKey(arena: std.mem.Allocator, view: View, call: Call) ![]const u8 {
     var out: std.Io.Writer.Allocating = .init(arena);
     const w = &out.writer;
     const r = view.range;
-    try w.print("{d}|{d}|{d}|{d}|{d}|{d}|{d}|{}", .{ view.site.id, r.start_ms, r.end_ms, r.prev_start_ms, r.prev_end_ms, r.bucket_ms, r.buckets, view.any });
+    try w.print("{d}|{d}|{d}|{d}|{d}|{d}|{d}|{}|{}", .{ view.site.id, r.start_ms, r.end_ms, r.prev_start_ms, r.prev_end_ms, r.bucket_ms, r.buckets, view.any, view.pinned });
     for (view.filters) |filter| try w.print("|{s}{s}={s}", .{ @tagName(filter.dim), if (filter.negate) "!" else "", filter.value });
     switch (call) {
         .totals => |c| try w.print("|totals|{d}|{d}", .{ c.start, c.end }),
@@ -1125,13 +1147,14 @@ fn isRolledUp(name: []const u8) bool {
 }
 
 /// The moment rollups cover up to: the end of the last closed day, or the
-/// cut of today's partial summary; 0 before the first rollup.
+/// cut of the latest partial summary (today's, or yesterday's until it
+/// closes); 0 before the first rollup.
 pub fn rolledUntil(arena: std.mem.Allocator, db: *db_mod.Db, site_id: i64) !i64 {
     return db.scalar(arena, i64, "SELECT coalesce(max(until_ms),0) FROM rollup_days WHERE site_id=?", .{site_id});
 }
 
 /// Rollups cover [start, split); raw rows cover [split, end). The split is
-/// a day boundary, or today's cut when the range runs past it.
+/// a day boundary, or the latest partial cut when the range runs past it.
 pub fn rollupSplit(arena: std.mem.Allocator, db: *db_mod.Db, view: View, start: i64, end: i64) !i64 {
     if (rollupScope(view) == null or @mod(start, day_ms) != 0) return start;
     const until = try rolledUntil(arena, db, view.site.id);
@@ -1151,7 +1174,7 @@ pub fn rollupWhere(sql: *Sql, site_id: i64, scope: RollupScope, start: i64, end:
     }
     try sql.add(" AND day>=");
     try sql.str(try sql.arena.dupe(u8, &dateText(start)));
-    // A split inside today includes today's partial summary.
+    // A split inside a day includes that day's partial summary.
     try sql.add(" AND day<=");
     try sql.str(try sql.arena.dupe(u8, &dateText(end - 1)));
 }
@@ -1447,4 +1470,27 @@ test "ranges say what they show" {
     try std.testing.expectEqual(Correction.unreadable, broken.correction);
     try std.testing.expectEqual(RangeKind.@"7d", broken.kind);
     try std.testing.expectEqualStrings("Those dates couldn’t be read, so this shows the last 7 days.", try say(arena, broken, .correction));
+}
+
+test "a pinned filter holds on top of any-of filters" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var db = try db_mod.Db.open(std.testing.allocator, ":memory:", true);
+    defer db.close();
+    try @import("../schema.zig").initialize(&db);
+    try db.exec("INSERT INTO sites(id,public_id,slug,tracking_mode,internal_secret,created_at_ms) VALUES(1,'550e8400-e29b-41d4-a716-446655440000','one','lite',zeroblob(32),0)");
+    const now = try parseDate("2026-10-08") + 12 * hour_ms;
+    for ([_][2][]const u8{ .{ "google", "/a" }, .{ "bing", "/a" }, .{ "google", "/b" }, .{ "direct", "/a" } }, 0..) |row, index| {
+        const id = try std.fmt.allocPrint(arena, "{d}", .{index});
+        try db.run(arena, "INSERT INTO page_views(site_id,event_id,page_id,occurred_at_ms,received_at_ms,received_date,visitor_day_id,tracking_mode,path,referrer_host,tracker_version,consent_mode,internal,browser,operating_system,device,traffic_class) VALUES(1,?1,?1,?2,?2,'2026-10-08',?1,'lite',?3,?4,'1','none',0,'chrome','linux','desktop','human_like')", .{ id, now - @as(i64, @intCast(index)), row[1], row[0] });
+    }
+    const params = try html.Params.parse(arena, "");
+    var filters = [_]Filter{ .{ .dim = .source, .value = "google" }, .{ .dim = .source, .value = "bing" }, .{ .dim = .page, .value = "/a" } };
+    var view: View = .{ .site = (try siteBySlug(arena, &db, "one")).?, .range = Range.parse(params, now), .filters = &filters, .any = true, .compare = false, .metric = .views, .params = params };
+    // Google or Bing, on /a.
+    view.pinned = true;
+    try std.testing.expectEqual(@as(i64, 2), (try totals(arena, &db, view, view.range.start_ms, view.range.end_ms)).views);
+    view.pinned = false;
+    try std.testing.expectEqual(@as(i64, 4), (try totals(arena, &db, view, view.range.start_ms, view.range.end_ms)).views);
 }
