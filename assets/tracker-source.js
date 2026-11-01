@@ -103,20 +103,10 @@
   // The server limits UTF-8 bytes, so this cuts whole characters until the
   // text fits. Text that is not valid UTF-8 (a lone surrogate) is dropped.
   function clean(value, limit) {
-    if (typeof value !== "string") return "";
-    try {
-      utf8(value);
-      value = value.slice(0, limit).replace(/[\ud800-\udbff]$/, "");
-      while (utf8(value) > limit) value = value.slice(0, /[\udc00-\udfff]$/.test(value) ? -2 : -1);
-    } catch (_) {
-      return "";
-    }
+    if (typeof value !== "string" || byteLength(value) === Infinity) return "";
+    value = value.slice(0, limit).replace(/[\ud800-\udbff]$/, "");
+    while (byteLength(value) > limit) value = value.slice(0, /[\udc00-\udfff]$/.test(value) ? -2 : -1);
     return /[\u0000-\u001f\u007f]/.test(value) ? "" : value;
-  }
-
-  // UTF-8 length; throws on a lone surrogate.
-  function utf8(text) {
-    return encodeURIComponent(text).replace(/%../g, "-").length;
   }
 
   function campaign() {
@@ -269,11 +259,12 @@
     return record;
   }
 
+  // UTF-8 length; Infinity for text with a lone surrogate (not valid UTF-8).
   function byteLength(text) {
     try {
-      return new TextEncoder().encode(text).length;
+      return encodeURIComponent(text).replace(/%../g, "-").length;
     } catch (_) {
-      return text.length * 3;
+      return Infinity;
     }
   }
 
