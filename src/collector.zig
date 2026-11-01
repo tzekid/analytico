@@ -254,7 +254,10 @@ pub fn ingest(
     source: Source,
     client: Client,
 ) !Result {
-    if (!site.enabled) return error.SiteDisabled;
+    // A paused website collects nothing, but erasure requests still go through.
+    if (!site.enabled) for (envelope.records) |record| {
+        if (!std.mem.eql(u8, record.type, "forget")) return error.SiteDisabled;
+    };
     const received_at_ms = domain.nowMs();
     if (envelope.sent_at_ms > received_at_ms + 5 * 60 * 1000 or
         envelope.sent_at_ms < received_at_ms - 90 * 24 * 60 * 60 * 1000) return error.InvalidSentAt;
@@ -292,12 +295,21 @@ pub fn ingest(
             if (try enforceConsent(&record, result.decision, client.gpc)) result.dropped = true;
             if (record.visitor_id) |visitor_id| {
                 const granting = std.mem.eql(u8, record.type, "consent") and record.state != null and (std.mem.eql(u8, record.state.?, "granted") or std.mem.eql(u8, record.state.?, "not_required"));
-                if (!granting and !std.mem.eql(u8, record.type, "forget") and try withdrawnVisitor(allocator, store, site.id, visitor_id)) {
-                    strip(&record, client.gpc);
-                    record.consent_mode = if (client.gpc) "gpc" else "denied";
-                    result.dropped = true;
-                    result.withdrawn = true;
-                }
+                if (!granting and !std.mem.eql(u8, record.type, "forget")) switch (try refusal(allocator, store, site.id, visitor_id)) {
+                    .none => {},
+                    .withdrawn => {
+                        strip(&record, client.gpc);
+                        record.consent_mode = if (client.gpc) "gpc" else "denied";
+                        result.dropped = true;
+                        result.withdrawn = true;
+                    },
+                    // Erased, not refused: the browser starts again under the
+                    // site's policy, with a new identity if it gets one.
+                    .forgotten => {
+                        strip(&record, client.gpc);
+                        result.dropped = true;
+                    },
+                };
             }
             // A visit continued from another of the site's domains must carry
             // a valid link for the identity it claims.
@@ -309,6 +321,7 @@ pub fn ingest(
             }
         }
         try validateRecord(allocator, record, site.mode, source, received_at_ms);
+        if (source == .server) record.tracking_mode = domain.modeName(site.mode);
         // Email addresses in a URL (an unsubscribe link, a campaign tag) are
         // never stored: such path segments are replaced, such UTM values dropped.
         if (record.path) |path| record.path = try minimalPath(allocator, path);
@@ -320,12 +333,12 @@ pub fn ingest(
         // A trusted application cannot bring a withdrawn visitor back either:
         // its record is kept without the identity, and identify links nothing.
         if (site.mode == .full and source == .server) if (record.visitor_id) |visitor_id| {
-            if (!std.mem.eql(u8, record.type, "forget") and try withdrawnVisitor(allocator, store, site.id, visitor_id)) {
+            if (!std.mem.eql(u8, record.type, "forget") and try refusal(allocator, store, site.id, visitor_id) != .none) {
                 record.visitor_id = null;
                 record.session_id = null;
             }
         };
-        const receipt = try receiptState(allocator, store, site.id, record.event_id, &digest);
+        const receipt = try receiptState(allocator, store, site.id, record.event_id, &digest.keyed, &digest.plain);
         switch (receipt) {
             .duplicate => {
                 result.duplicates += 1;
@@ -375,7 +388,7 @@ pub fn ingest(
                 result.identity = .{ .visitor_id = visitor_id, .session_id = session_id, .consent_mode = record.consent_mode };
             }
         };
-        try insertReceipt(allocator, store, site.id, record, &digest, received_at_ms);
+        try insertReceipt(allocator, store, site.id, record, &digest.keyed, received_at_ms);
         result.accepted += 1;
     }
     try incrementCounter(allocator, store, "accepted_records", @intCast(result.accepted));
@@ -384,9 +397,15 @@ pub fn ingest(
     return result;
 }
 
-/// Withdrew consent, or was forgotten: either way no record keeps the ID.
-fn withdrawnVisitor(allocator: std.mem.Allocator, store: *store_mod.Store, site_id: i64, visitor_id: []const u8) !bool {
-    return try store.database.scalar(allocator, i64, "SELECT EXISTS(SELECT 1 FROM visitors WHERE site_id=?1 AND visitor_id=?2 AND consent_state IN ('denied','gpc')) OR EXISTS(SELECT 1 FROM forgotten_visitors WHERE site_id=?1 AND visitor_id=?2)", .{ site_id, visitor_id }) != 0;
+/// Why no record may keep a visitor ID: consent withdrawn (the browser keeps
+/// that refusal), or the visitor was forgotten (the ID alone is refused).
+fn refusal(allocator: std.mem.Allocator, store: *store_mod.Store, site_id: i64, visitor_id: []const u8) !enum { none, withdrawn, forgotten } {
+    const state = try store.database.scalar(allocator, i64, "SELECT CASE WHEN EXISTS(SELECT 1 FROM visitors WHERE site_id=?1 AND visitor_id=?2 AND consent_state IN ('denied','gpc')) THEN 1 WHEN EXISTS(SELECT 1 FROM forgotten_visitors WHERE site_id=?1 AND visitor_id=?2) THEN 2 ELSE 0 END", .{ site_id, visitor_id });
+    return switch (state) {
+        1 => .withdrawn,
+        2 => .forgotten,
+        else => .none,
+    };
 }
 
 const Context = struct {
@@ -456,13 +475,17 @@ fn receiptState(
     site_id: i64,
     event_id: []const u8,
     digest: []const u8,
+    legacy: []const u8,
 ) !ReceiptState {
     var statement = try store.database.prepare(allocator, "SELECT payload_hash FROM record_receipts WHERE site_id=? AND event_id=?");
     defer statement.deinit();
     try statement.bindInt(1, site_id);
     try statement.bindText(2, event_id);
     if (try statement.step() == .done) return .new;
-    return if (std.mem.eql(u8, statement.columnText(0), digest)) .duplicate else .conflict;
+    // Receipts from before schema 13 hold the plain hash; they expire after
+    // 91 days, and until then a retried record still counts as a duplicate.
+    const stored = statement.columnText(0);
+    return if (std.mem.eql(u8, stored, digest) or std.mem.eql(u8, stored, legacy)) .duplicate else .conflict;
 }
 
 fn insertReceipt(
@@ -893,7 +916,7 @@ pub fn forgetUser(allocator: std.mem.Allocator, store: *store_mod.Store, site_id
 /// form fields) carry no identifier and stay.
 pub fn forgetVisitor(allocator: std.mem.Allocator, store: *store_mod.Store, site_id: i64, visitor_id: []const u8) !void {
     try noteExportRefresh(allocator, store, site_id, "SELECT received_at_ms FROM page_views WHERE site_id=?1 AND visitor_id=?2 UNION ALL SELECT received_at_ms FROM events WHERE site_id=?1 AND visitor_id=?2", visitor_id);
-    // The ID stays refused (see withdrawnVisitor): a tab or another of the
+    // The ID stays refused (see refusal): a tab or another of the
     // site's domains still holding it cannot start the visitor again. Only
     // IDs that were remembered, so made-up ones don't fill the table.
     try store.database.run(allocator, "INSERT INTO forgotten_visitors(site_id,visitor_id,forgotten_at_ms) SELECT site_id,visitor_id,? FROM visitors WHERE site_id=? AND visitor_id=? ON CONFLICT DO NOTHING", .{ domain.nowMs(), site_id, visitor_id });
@@ -957,7 +980,9 @@ fn validateRecord(
 ) !void {
     try domain.validateUuid(record.event_id);
     try domain.validateName(record.type);
-    if (!std.mem.eql(u8, record.tracking_mode, domain.modeName(mode))) return error.TrackingModeMismatch;
+    // A snippet left from before a mode change is caught here; the backend's
+    // records are stored under the site's current mode whatever they name.
+    if (source == .browser and !std.mem.eql(u8, record.tracking_mode, domain.modeName(mode))) return error.TrackingModeMismatch;
     try domain.validateText(record.consent_mode, 32, false);
     try domain.validateText(record.tracker_version, 32, false);
     try domain.validateText(record.release_id, 64, true);
@@ -1159,7 +1184,8 @@ fn authoritative(name: []const u8) bool {
 
 /// Keyed with the instance key: a receipt names the record's raw user ID
 /// among its fields, so a plain hash of it could be tested against guesses.
-fn recordHash(allocator: std.mem.Allocator, master_key: [32]u8, record: Record) ![64]u8 {
+/// The plain hash is only compared with receipts stored before schema 13.
+fn recordHash(allocator: std.mem.Allocator, master_key: [32]u8, record: Record) !struct { keyed: [64]u8, plain: [64]u8 } {
     var writer: std.Io.Writer.Allocating = .init(allocator);
     defer writer.deinit();
     try std.json.Stringify.value(record, .{}, &writer.writer);
@@ -1168,7 +1194,7 @@ fn recordHash(allocator: std.mem.Allocator, master_key: [32]u8, record: Record) 
     hmac.update("analytico/receipt/v1\x00");
     hmac.update(writer.writer.buffered());
     hmac.final(&digest);
-    return std.fmt.bytesToHex(digest, .lower);
+    return .{ .keyed = std.fmt.bytesToHex(digest, .lower), .plain = domain.payloadHash(writer.writer.buffered()) };
 }
 
 fn canonicalProperties(allocator: std.mem.Allocator, optional: ?std.json.Value) ![]const u8 {

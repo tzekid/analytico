@@ -119,10 +119,14 @@ pub fn load(arena: std.mem.Allocator, db: *db_mod.Db, master: [32]u8, site_id: i
     };
 }
 
-pub fn save(arena: std.mem.Allocator, io: std.Io, db: *db_mod.Db, master: [32]u8, site_id: i64, kind: Kind, config: Config, state: []const u8, now_ms: i64) !void {
+fn sealConfig(arena: std.mem.Allocator, io: std.Io, master: [32]u8, config: Config) ![]const u8 {
     var json: std.Io.Writer.Allocating = .init(arena);
     try std.json.Stringify.value(config, .{}, &json.writer);
-    const sealed = try secret.seal(arena, io, master, json.written());
+    return secret.seal(arena, io, master, json.written());
+}
+
+pub fn save(arena: std.mem.Allocator, io: std.Io, db: *db_mod.Db, master: [32]u8, site_id: i64, kind: Kind, config: Config, state: []const u8, now_ms: i64) !void {
+    const sealed = try sealConfig(arena, io, master, config);
     try db.run(arena, "INSERT INTO integrations(site_id,kind,config,state,created_at_ms) VALUES(?,?,?,?,?) ON CONFLICT(site_id,kind) DO UPDATE SET config=excluded.config,state=excluded.state", .{ site_id, @tagName(kind), sealed, state, now_ms });
 }
 
@@ -154,11 +158,18 @@ fn jsonText(value: ?std.json.Value) []const u8 {
     return if (inner == .string) inner.string else "";
 }
 
+/// A provider's count given as text, within the same bounds as `whole`.
+fn wholeText(text: []const u8) i64 {
+    const value = std.fmt.parseInt(i64, text, 10) catch return 0;
+    return if (value >= 0 and value <= 1_000_000_000_000) value else 0;
+}
+
 /// A provider's count or amount as a whole number: anything not finite or
 /// outside 0..10^12 (after scaling) is a malformed answer and counts as 0.
 fn whole(value: ?std.json.Value, scale: f64) i64 {
     const scaled = number(value) * scale;
-    return if (std.math.isFinite(scaled) and scaled >= 0 and scaled <= 1e12) @intFromFloat(scaled) else 0;
+    // Rounded: "1.15" × 100 is 114.999… in binary, and means 115.
+    return if (std.math.isFinite(scaled) and scaled >= 0 and scaled <= 1e12) @intFromFloat(@round(scaled)) else 0;
 }
 
 fn number(value: ?std.json.Value) f64 {
@@ -766,13 +777,19 @@ fn importGa4(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, site: da
             defer shared.unlockWrite();
             try write.exec("BEGIN IMMEDIATE");
             errdefer write.exec("ROLLBACK") catch {};
+            // Disconnected or changed while this month was fetched: stop, and
+            // never bring the old settings back.
+            const current = try load(arena, write, shared.master_key, site.id, .ga4) orelse return error.IntegrationIncomplete;
+            if (!std.mem.eql(u8, current.config.property, config.property)) return error.IntegrationIncomplete;
             for (batch.items) |item| {
                 // Country codes stay uppercase; paths keep their case.
                 const key = if (std.mem.eql(u8, item[1], "country")) try std.ascii.allocUpperString(arena, item[2]) else item[2];
-                try write.run(arena, "INSERT INTO imported_daily(site_id,day,dim,key,views,visitors) VALUES(?,?,?,?,?,?) ON CONFLICT(site_id,day,dim,key) DO UPDATE SET views=excluded.views,visitors=excluded.visitors", .{ site.id, item[0], item[1], key, std.fmt.parseInt(i64, item[3], 10) catch 0, std.fmt.parseInt(i64, item[4], 10) catch 0 });
+                try write.run(arena, "INSERT INTO imported_daily(site_id,day,dim,key,views,visitors) VALUES(?,?,?,?,?,?) ON CONFLICT(site_id,day,dim,key) DO UPDATE SET views=excluded.views,visitors=excluded.visitors", .{ site.id, item[0], item[1], key, wholeText(item[3]), wholeText(item[4]) });
             }
+            var progressed = current.config;
+            progressed.cursor = next_month;
+            try write.run(arena, "UPDATE integrations SET config=? WHERE site_id=? AND kind='ga4'", .{ try sealConfig(arena, shared.io, shared.master_key, progressed), site.id });
             config.cursor = next_month;
-            try save(arena, shared.io, write, shared.master_key, site.id, .ga4, config, "connected", now);
             try write.exec("COMMIT");
         }
         rows_stored += batch.items.len;
@@ -798,7 +815,8 @@ fn pendingConversions(arena: std.mem.Allocator, db: *db_mod.Db, site: data.Site,
     // Only for visitors whose consent stands ("from consented visitors").
     try sql.add(" AND ((o.session_id IS NOT NULL AND pv.session_id=o.session_id) OR pv.page_id=o.page_id) AND NOT EXISTS(SELECT 1 FROM visitors v WHERE v.site_id=pv.site_id AND v.visitor_id=pv.visitor_id AND v.consent_state IN ('denied','gpc')) ORDER BY pv.occurred_at_ms LIMIT 1) cid FROM o WHERE cid IS NOT NULL AND NOT EXISTS(SELECT 1 FROM conversion_uploads u WHERE u.site_id=");
     try sql.int(site.id);
-    try sql.add(" AND u.event_id=o.event_id AND u.destination=");
+    // Uploads that failed go again on the next sync; sent ones never twice.
+    try sql.add(" AND u.event_id=o.event_id AND u.state='sent' AND u.destination=");
     try sql.str(destination);
     try sql.add(") LIMIT 200");
     var statement = try sql.prepare(db);
@@ -1061,27 +1079,27 @@ pub fn refreshExports(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db)
 
 /// Retention covers the export: a day goes once retention starts deleting
 /// its records.
-pub fn pruneExports(arena: std.mem.Allocator, shared: *Shared, cutoff_ms: i64) !void {
-    const root = try std.fs.path.join(arena, &.{ shared.data, "exports" });
-    var exports = std.Io.Dir.cwd().openDir(shared.io, root, .{ .iterate = true }) catch |err| switch (err) {
+pub fn pruneExports(arena: std.mem.Allocator, io: std.Io, data_dir: []const u8, cutoff_ms: i64) !void {
+    const root = try std.fs.path.join(arena, &.{ data_dir, "exports" });
+    var exports = std.Io.Dir.cwd().openDir(io, root, .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,
     };
-    defer exports.close(shared.io);
+    defer exports.close(io);
     var old: std.ArrayList([]const u8) = .empty;
     var sites = exports.iterate();
-    while (try sites.next(shared.io)) |site| {
+    while (try sites.next(io)) |site| {
         if (site.kind != .directory) continue;
-        var site_dir = try exports.openDir(shared.io, site.name, .{ .iterate = true });
-        defer site_dir.close(shared.io);
+        var site_dir = try exports.openDir(io, site.name, .{ .iterate = true });
+        defer site_dir.close(io);
         var days = site_dir.iterate();
-        while (try days.next(shared.io)) |day| {
+        while (try days.next(io)) |day| {
             if (day.kind != .directory) continue;
             const day_start = data.parseDate(day.name) catch continue;
             if (day_start < cutoff_ms) try old.append(arena, try std.fs.path.join(arena, &.{ site.name, day.name }));
         }
     }
-    for (old.items) |path| try exports.deleteTree(shared.io, path);
+    for (old.items) |path| try exports.deleteTree(io, path);
     if (old.items.len != 0) std.log.info("exports_pruned days={d}", .{old.items.len});
 }
 

@@ -173,6 +173,9 @@ pub fn renderReport(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, s
     view.range.start_ms = today - length;
     view.range.prev_end_ms = view.range.start_ms;
     view.range.prev_start_ms = view.range.start_ms - length;
+    // "Last 24 hours" or "Today" would misname a whole past day: it is shown
+    // as its date.
+    if (view.range.bucket_ms == data.hour_ms) view.range.kind = .custom;
     const base = try origin(arena, db);
     const current = try data.totals(arena, db, view, view.range.start_ms, view.range.end_ms);
     const previous = try data.totals(arena, db, view, view.range.prev_start_ms, view.range.prev_end_ms);
@@ -390,7 +393,7 @@ fn nightly(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, at: i64) !
         if (days >= 30) {
             const removed = try settings.prune(arena, shared, at - days * data.day_ms);
             std.log.info("retention_pruned rows={d}", .{removed});
-            integrations.pruneExports(arena, shared, at - days * data.day_ms) catch |err| std.log.warn("export_prune_failed code={s}", .{@errorName(err)});
+            integrations.pruneExports(arena, shared.io, shared.data, at - days * data.day_ms) catch |err| std.log.warn("export_prune_failed code={s}", .{@errorName(err)});
             if (removed != 0) {
                 const write = shared.lockWrite();
                 defer shared.unlockWrite();

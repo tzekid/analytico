@@ -7,7 +7,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=%h/.local/share/analytico-sqlite
-ExecStartPre=%h/.local/opt/analytico/current/bin/analytico doctor --data %h/.local/share/analytico-sqlite
+ExecStartPre=%h/.local/opt/analytico/current/bin/analytico doctor --quick --data %h/.local/share/analytico-sqlite
 ExecStart=%h/.local/opt/analytico/current/bin/analytico serve --data %h/.local/share/analytico-sqlite --listen 127.0.0.1:4318
 Restart=on-failure
 RestartSec=2s

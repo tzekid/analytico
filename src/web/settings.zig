@@ -322,6 +322,8 @@ pub fn listBackups(arena: std.mem.Allocator, io: std.Io, data_dir: []const u8) !
     var iterator = dir.iterate();
     while (try iterator.next(io)) |entry| {
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".db")) continue;
+        // Without its key the copy was cut off before it finished.
+        _ = dir.statFile(io, try std.fmt.allocPrint(arena, "{s}.key", .{entry.name}), .{}) catch continue;
         const stat = dir.statFile(io, entry.name, .{}) catch continue;
         try out.append(arena, .{ .name = try arena.dupe(u8, entry.name), .size = stat.size });
     }
@@ -376,6 +378,7 @@ fn backupsSection(ctx: *Ctx) !void {
     try render(w,
         \\</section><dialog class="dialog dialog-wide" id="restore-dialog"><div class="dialog-head"><div><h2>Restore a backup</h2><p>Restoring creates a fresh data directory, so your current data stays untouched until you switch.</p></div><button class="btn btn-quiet btn-icon close" type="button" data-close aria-label="Close">×</button></div>
         \\<div class="dialog-body"><ol class="stack steps-list"><li>Restore into a new directory (works while Analytico runs):<div class="code mt-8"><span data-restore-command>analytico restore {directory}/<b data-restore-name>backup.db</b> {data}-restored</span></div></li>
+        \\<li>If you use locations, copy <code>geo.bin</code> from <code>{data}</code> into the new directory — backups leave it out.</li>
         \\<li>Stop the service, point it at the new directory (or swap the directories), and start it again. Collection pauses for a few seconds.</li></ol>
         \\<p class="hint">The backup’s <code>.key</code> companion is copied automatically — it holds the visitor pseudonym key.</p></div><div class="dialog-foot"><button class="btn" type="button" data-close>Done</button></div></dialog>
     , .{ .directory = try backupDirectory(arena, ctx.shared.data), .data = ctx.shared.data });

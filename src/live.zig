@@ -11,6 +11,9 @@ const server = @import("server.zig");
 const data = @import("web/data.zig");
 
 pub const max_streams = 64;
+/// Streams one session or key may hold; its oldest gives way to a new one, so
+/// a person's tabs (or one looping client) never take every slot.
+const per_credential = 8;
 const interval_ms = 2_000;
 const ping_every = 10;
 
@@ -26,6 +29,16 @@ pub const Hub = struct {
     pub fn add(self: *Hub, io: std.Io, stream: std.Io.net.Stream, subscription: Subscription) bool {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
+        var held: usize = 0;
+        var oldest: ?*?Stream = null;
+        for (&self.streams) |*slot| if (slot.*) |entry| if (std.mem.eql(u8, &entry.subscription.credential.hash, &subscription.credential.hash)) {
+            held += 1;
+            if (oldest == null) oldest = slot;
+        };
+        if (held >= per_credential) {
+            oldest.?.*.?.stream.close(io);
+            oldest.?.* = null;
+        }
         for (&self.streams) |*slot| if (slot.* == null) {
             const head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-store, no-transform\r\nx-accel-buffering: no\r\nconnection: close\r\n\r\nretry: 5000\n\n";
             if (!send(stream, head)) return false;
@@ -35,6 +48,15 @@ pub const Hub = struct {
         return false;
     }
 };
+
+/// Whether the client went away: clients send nothing after the request, so
+/// a readable end of stream (or a reset) means the tab is gone.
+fn closed(stream: std.Io.net.Stream) bool {
+    var byte: [1]u8 = undefined;
+    const rc = linux.recvfrom(stream.socket.handle, &byte, 1, linux.MSG.PEEK | linux.MSG.DONTWAIT, null, null);
+    const err = linux.errno(rc);
+    return (err == .SUCCESS and rc == 0) or (err != .SUCCESS and err != .AGAIN and err != .INTR);
+}
 
 /// Non-blocking write of the whole message; a client that cannot take it is dropped.
 fn send(stream: std.Io.net.Stream, bytes: []const u8) bool {
@@ -73,7 +95,7 @@ fn broadcast(arena: std.mem.Allocator, shared: *server.Shared, db: *db_mod.Db, p
     const now = @import("domain.zig").nowMs();
     for (&hub.streams) |*slot| {
         const entry: *Stream = if (slot.*) |*value| value else continue;
-        if (!try allowed(arena, db, entry.subscription, now)) {
+        if (closed(entry.stream) or !try allowed(arena, db, entry.subscription, now)) {
             entry.stream.close(shared.io);
             slot.* = null;
             continue;

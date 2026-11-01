@@ -39,7 +39,7 @@ function pages(origin, other) {
 
 // Stand-ins for Google (OpenID, Search Console, GA4, Ads), Meta, Slack and a
 // webhook receiver. They record what Analytico sends.
-const received = { slack: [], hook: [], ads: [], meta: [], tokenGrants: [] };
+const received = { slack: [], hook: [], ads: [], meta: [], tokenGrants: [], adsRefused: 0 };
 const codes = new Map();
 function fake({ incoming, outgoing, url, base, body, json }) {
   if (url.pathname === "/.well-known/openid-configuration") return json({ issuer: base, authorization_endpoint: `${base}/authorize`, token_endpoint: `${base}/token`, jwks_uri: `${base}/jwks` });
@@ -87,6 +87,8 @@ function fake({ incoming, outgoing, url, base, body, json }) {
     return json([{ results: [{ segments: { date: day }, campaign: { name: "spring" }, metrics: { costMicros: "12500000" }, customer: { currencyCode: "EUR" } }] }]);
   }
   if (url.pathname.endsWith(":uploadClickConversions")) {
+    // The first upload is refused (a quota, an expired token): it goes again.
+    if (received.adsRefused++ === 0) return json({ error: { status: "RESOURCE_EXHAUSTED" } }, 429);
     received.ads.push(JSON.parse(body));
     return json({ results: [] });
   }
@@ -570,7 +572,10 @@ await journey("v3", async (t) => {
   await withdrawing.evaluate(() => analytico.consent("denied"));
   await t.until(() => row("SELECT count(*) n FROM page_views WHERE click_id LIKE '%withdrawn'").n === 0, "click ID gone with consent");
   await connect("google_ads");
-  assert.match(await configure("google_ads", { customer_id: "123-456-7890", developer_token: "dev-token", conversion_action: "customers/1234567890/conversionActions/1" }, "Sync now"), /1 cost rows in, 1 conversion out/);
+  const adsSettings = { customer_id: "123-456-7890", developer_token: "dev-token", conversion_action: "customers/1234567890/conversionActions/1" };
+  assert.match(await configure("google_ads", adsSettings, "Sync now"), /rejected/);
+  await page.goto(`${originA}/settings/integrations?site=shop`);
+  assert.match(await configure("google_ads", adsSettings, "Sync now"), /1 cost rows in, 1 conversion out/);
   assert.equal(row("SELECT amount_minor a FROM campaign_spend WHERE source='google'").a, 1250);
   assert.deepEqual(received.ads[0].conversions.map((entry) => [entry.gclid, entry.orderId, entry.conversionValue]), [["EAIaIQ-ads", "G-1", 19.99]]);
 
@@ -824,11 +829,13 @@ await journey("v3", async (t) => {
   await consentPage.evaluate(() => analytico.forget());
   await t.until(() => !row("SELECT visitor_id FROM visitors WHERE visitor_id=?", newVisitor), "new visitor forgotten");
   await consentContext.close();
-  // A tab or domain that still holds the forgotten ID cannot start them again.
+  // A tab or domain that still holds the forgotten ID cannot start them again;
+  // being erased is not a refusal, so it starts over under the site's policy.
   const staleAt = Date.now();
   const staleRecord = { ...privacyBase, occurred_at_ms: staleAt, consent_mode: "granted", event_id: randomUUID(), type: "page_view", page_id: randomUUID(), path: "/home", visitor_id: newVisitor, session_id: randomUUID() };
   const stale = await fetch(`${originA}/e`, { method: "POST", headers: { origin: originA, "content-type": "text/plain", "user-agent": "Chrome/140" }, body: JSON.stringify({ v: 2, site: publicId, sent_at_ms: staleAt, records: [staleRecord] }) });
-  assert.equal((await stale.json()).drop_state, "denied");
+  const staleDecision = await stale.json();
+  assert.deepEqual([staleDecision.drop, staleDecision.drop_state], [true, undefined]);
   assert.deepEqual([row("SELECT count(*) n FROM page_views WHERE visitor_id=?", newVisitor).n, row("SELECT count(*) n FROM visitors WHERE visitor_id=?", newVisitor).n], [0, 0]);
   // Signed server records cannot attach a withdrawn or forgotten visitor
   // either: the event is kept without the identity, identify links nothing.

@@ -472,7 +472,9 @@ pub fn replayEvents(ctx: *Ctx, site: data.Site, session_id: []const u8) !void {
         @import("../domain.zig").validateUuid(session_id) catch break :domain_validate;
         const count = try replay.writeChunks(ctx.arena, ctx.db, site.id, session_id, ctx.w());
         if (count == 0) return ctx.text(.not_found, "not recorded\n");
-        try ctx.header("cache-control", "private, max-age=300");
+        // Revalidated every time: after sign-out, a change of access or the
+        // person's deletion, a cached copy must not play on.
+        ctx.revalidate = true;
         return ctx.finish("application/octet-stream");
     }
     return ctx.text(.not_found, "not recorded\n");

@@ -91,6 +91,7 @@ pub fn tool(arena: std.mem.Allocator, db: *db_mod.Db, site: data.Site, name: []c
         error.MissingParameter => "A required parameter is missing; see the tool's input schema.",
         error.SessionModeRequired => "This report needs a website in Session or Full mode.",
         error.UnsupportedFilter => "This report doesn't take that filter; see its description for the ones it does.",
+        error.InvalidParameter, error.InvalidName, error.InvalidPath, error.InvalidUuid, error.InvalidText => "An argument is not valid; see the tool's input schema for its allowed values.",
         else => return err,
     } };
     const view = try catalog.view(arena, site, params, now_ms);

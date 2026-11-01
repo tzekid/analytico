@@ -6,6 +6,7 @@
 // CLI and the read API; backup, restore and doctor.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Script } from "node:vm";
 import { DatabaseSync } from "node:sqlite";
@@ -197,7 +198,14 @@ await journey("cli", async (t) => {
   migrated.exec("INSERT INTO vitals_daily(site_id,day,metric,path,value,samples) VALUES(1,'2000-01-01','lcp','/old',100,1)");
   migrated.exec("INSERT INTO cache(site_id,name,day,value) VALUES(1,'retention','2000-01-01','{}')");
   migrated.close();
+  // The service's quick pre-start check answers like the full one.
+  assert.match(execFileSync(t.app, ["doctor", "--quick", "--data", restored], { encoding: "utf8" }), /^ok schema=13 /);
+  // Prune takes the daily export's files of those days too.
+  mkdirSync(join(restored, "exports", "example", "2019-12-31"), { recursive: true });
+  writeFileSync(join(restored, "exports", "example", "2019-12-31", "events.csv.gz"), "");
+  mkdirSync(join(restored, "exports", "example", "2020-01-01"), { recursive: true });
   execFileSync(t.app, ["prune", restored, "--before", "2020-01-01", "--backup", join(t.temporary, "before-prune.db")]);
+  assert.deepEqual(readdirSync(join(restored, "exports", "example")), ["2020-01-01"]);
   const pruned = new DatabaseSync(join(restored, "analytico.db"));
   assert.equal(pruned.prepare("SELECT count(*) n FROM vitals_daily WHERE day<'2020-01-01'").get().n, 0);
   assert.equal(pruned.prepare("SELECT count(*) n FROM cache").get().n, 0);

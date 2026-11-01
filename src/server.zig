@@ -339,14 +339,16 @@ fn serveConnection(shared: *Shared, read_db: *db_mod.Db, stream: std.Io.net.Stre
     const headers = try copyHeaders(arena, &request);
     const path = target[0 .. std.mem.findScalar(u8, target, '?') orelse target.len];
 
-    if (method == .GET and std.mem.eql(u8, path, "/healthz")) {
+    // HEAD answers like GET (without the body) for probes and snippet checks.
+    const get = method == .GET or method == .HEAD;
+    if (get and std.mem.eql(u8, path, "/healthz")) {
         return respond(&request, .ok, "text/plain; charset=utf-8", "no-store", "ok\n", null);
     }
-    if (method == .GET and std.mem.eql(u8, path, "/readyz")) {
+    if (get and std.mem.eql(u8, path, "/readyz")) {
         ready(arena, read_db) catch return respond(&request, .service_unavailable, "text/plain; charset=utf-8", "no-store", "not ready\n", null);
         return respond(&request, .ok, "text/plain; charset=utf-8", "no-store", "ready\n", null);
     }
-    if (method == .GET) {
+    if (get) {
         if (trackers.parseScript(path)) |variant| {
             return respond(&request, .ok, "text/javascript; charset=utf-8", "public, max-age=31536000, immutable", trackers.bytes(variant), null);
         }

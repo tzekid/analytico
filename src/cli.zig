@@ -32,7 +32,7 @@ pub fn run(
         return;
     }
     const data = option(args, "--data") orelse "data";
-    if (std.mem.eql(u8, args[1], "doctor")) return ops.doctor(allocator, io, output, data);
+    if (std.mem.eql(u8, args[1], "doctor")) return ops.doctor(allocator, io, output, data, flag(args, "--quick"));
     if (std.mem.eql(u8, args[1], "backup") and args.len == 4) return ops.backup(allocator, io, output, args[2], args[3]);
     if (std.mem.eql(u8, args[1], "restore") and args.len == 4) {
         return ops.restore(allocator, io, output, args[2], args[3]);
@@ -507,7 +507,7 @@ pub fn writeUsage(output: *std.Io.Writer) !void {
         \\  analytico migrate --data <dir> --backup <new-backup.db>
         \\  analytico email set --host smtp.example.com --from "Analytico <a@b.c>" [--username u] [--security tls|starttls|none] [--port n] --data <dir> < password-file
         \\  analytico stats --data <dir>
-        \\  analytico doctor --data <dir>
+        \\  analytico doctor [--quick] --data <dir>
         \\  analytico backup <data-dir> <new-backup.db>
         \\  analytico restore <backup.db> <new-data-dir>
         \\  analytico prune <data-dir> --before YYYY-MM-DD --backup <new-backup.db>

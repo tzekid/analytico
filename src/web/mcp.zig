@@ -546,6 +546,8 @@ fn mcp(ctx: *Ctx) !void {
     const result = runTool(ctx, grant, name_value.string, arguments) catch |err| switch (err) {
         error.UnknownTool => return rpcError(ctx, id, -32602, "Unknown tool"),
         error.UnknownSite => return toolResult(ctx, id.?, "Unknown or unauthorised site. Call list_sites for the slugs this connection may read.", true),
+        // The model can correct an argument; a transport error it cannot read.
+        error.InvalidParameter, error.MissingParameter, error.InvalidName, error.InvalidPath, error.InvalidUuid, error.InvalidText, error.InvalidEncoding => return toolResult(ctx, id.?, "An argument is not valid; see the tool's input schema for its allowed values.", true),
         else => return err,
     };
     {

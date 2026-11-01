@@ -324,7 +324,8 @@ pub fn accessToken(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, us
         // The grant is gone (expired, revoked or reused): sign in again.
         const write = shared.lockWrite();
         defer shared.unlockWrite();
-        try write.run(arena, "UPDATE chatgpt_accounts SET tokens='',updated_at_ms=? WHERE user_id=?", .{ now, user_id });
+        // A sign-out meanwhile stays a sign-out (NULL), not an ended plan ('').
+        try write.run(arena, "UPDATE chatgpt_accounts SET tokens='',updated_at_ms=? WHERE user_id=? AND tokens IS NOT NULL", .{ now, user_id });
         return error.AiSignInAgain;
     }
     const object = body orelse return error.AiUnreachable;
@@ -339,7 +340,9 @@ pub fn accessToken(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, us
     const models = listModels(arena, read[2], fresh.access) catch latest.models;
     const write = shared.lockWrite();
     defer shared.unlockWrite();
-    try write.run(arena, "UPDATE chatgpt_accounts SET tokens=?,models=?,updated_at_ms=? WHERE user_id=?", .{ try seal(arena, shared.io, shared.master_key, fresh), models, now, user_id });
+    // Signed out while this refresh ran: the new grant is not kept.
+    try write.run(arena, "UPDATE chatgpt_accounts SET tokens=?,models=?,updated_at_ms=? WHERE user_id=? AND tokens IS NOT NULL", .{ try seal(arena, shared.io, shared.master_key, fresh), models, now, user_id });
+    if (write.changes() == 0) return error.AiSignInAgain;
     return fresh.access;
 }
 

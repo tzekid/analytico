@@ -27,6 +27,8 @@ await journey("http", async (t) => {
     assert.equal(response.status, 200);
     assert.equal(await response.text(), "ready\n");
   };
+  // Probes and snippet checkers that send HEAD get the GET answer's status.
+  for (const path of ["/healthz", "/readyz"]) assert.equal((await fetch(`http://127.0.0.1:${t.port}${path}`, { method: "HEAD" })).status, 200, path);
   try {
     const head = "POST /e HTTP/1.1\r\nHost: localhost\r\nContent-Length: 100\r\nContent-Type: text/plain\r\n";
     async function connect() {

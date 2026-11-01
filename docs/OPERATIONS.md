@@ -24,7 +24,7 @@ systemctl --user enable --now analytico.service
 systemctl --user status analytico.service
 ```
 
-The unit runs `doctor` before every start, listens on `127.0.0.1:4318`, and
+The unit runs `doctor --quick` (SQLite's quick check) before every start, listens on `127.0.0.1:4318`, and
 restarts only after failure. Caddy exposes immutable `/t/*` assets, browser
 `/e`, replay chunks `/r`, the heatmap overlay's `/h` and the workspace,
 supplies the real client address, and hides `/i`, health and readiness. Trusted applications send signed `/i` requests over
@@ -270,7 +270,7 @@ Create a site and emit its exact immutable snippet:
 
 ```sh
 analytico site add plosca https://plosca.ru \
-  --data ~/.local/share/analytico-sqlite        # Full; or --mode session|lite
+  --data ~/.local/share/analytico-sqlite        # Lite by default; or --mode session|full
 analytico site snippet plosca https://analytico.example \
   --rum --data ~/.local/share/analytico-sqlite
 ```
@@ -292,7 +292,11 @@ analytico doctor --data ~/.local/share/analytico-restored
 
 The workspace also creates verified backups (Settings → Backups, plus an
 automatic daily copy that keeps the last fourteen) under `backups/` in the
-data directory. Restoring always uses the CLI into a new directory.
+data directory. Restoring always uses the CLI into a new directory. Backups
+leave out `geo.bin`: copy it from the old data directory, or import it again,
+before serving the restored one; without it every visitor's country is
+unknown and the default regional policy asks everyone, so visitors remembered
+without being asked lose their identity.
 
 Backup uses SQLite's online backup API and verifies the result. It creates the
 database plus a `.key` companion (both required) and a `.replays` companion

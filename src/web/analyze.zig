@@ -581,7 +581,8 @@ fn parseMoney(text: []const u8, digits: u8) !i64 {
         } else whole = whole * 10 + (byte - '0');
     }
     while (decimals < digits) : (decimals += 1) cents *= 10;
-    return whole * std.math.pow(i64, 10, digits) + cents;
+    const scaled = std.math.mul(i64, whole, std.math.pow(i64, 10, digits)) catch return error.InvalidAmount;
+    return std.math.add(i64, scaled, cents) catch error.InvalidAmount;
 }
 
 /// The amount as `parseMoney` reads it back.
@@ -930,4 +931,5 @@ test "money parsing" {
     try std.testing.expectError(error.InvalidAmount, parseMoney("1.234", 2));
     try std.testing.expectEqual(@as(i64, 1200), try parseMoney("1,200", 0));
     try std.testing.expectEqual(@as(i64, 1250), try parseMoney("1.25", 3));
+    try std.testing.expectError(error.InvalidAmount, parseMoney("9999999999999999", 3));
 }

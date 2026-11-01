@@ -29,16 +29,19 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, output: *std.Io.Writer, di
     try output.print("initialized data={s} schema={d}\n", .{ directory, schema.current_version });
 }
 
-pub fn doctor(allocator: std.mem.Allocator, io: std.Io, output: *std.Io.Writer, directory: []const u8) !void {
+/// `quick` (the service's pre-start) runs SQLite's quick check, which skips
+/// the index and foreign-key cross-checks that make a full check slow on a
+/// large database; plain `doctor` checks everything.
+pub fn doctor(allocator: std.mem.Allocator, io: std.Io, output: *std.Io.Writer, directory: []const u8, quick: bool) !void {
     const paths = try store_mod.Paths.init(allocator, directory);
     defer paths.deinit(allocator);
     _ = try store_mod.readKey(io, paths.key);
     var store = try store_mod.Store.open(allocator, io, directory, false);
     defer store.close();
-    try db_mod.integrity(&store.database, allocator);
+    if (quick) try db_mod.quickCheck(&store.database, allocator) else try db_mod.integrity(&store.database, allocator);
     var replays = try replay.open(allocator, paths.replays, false);
     defer replays.close();
-    try db_mod.integrity(&replays, allocator);
+    if (quick) try db_mod.quickCheck(&replays, allocator) else try db_mod.integrity(&replays, allocator);
     var counts = try store.database.prepare(allocator, "SELECT (SELECT count(*) FROM sites),(SELECT count(*) FROM page_views)," ++
         "(SELECT count(*) FROM page_summaries),(SELECT count(*) FROM events)");
     defer counts.deinit();
@@ -89,20 +92,23 @@ pub fn copyVerified(
     defer target.close();
     try db_mod.backup(source, &target);
     try db_mod.integrity(&target, allocator);
-    try std.Io.Dir.copyFile(.cwd(), paths.key, .cwd(), key_destination, io, .{ .replace = false });
-    const key_file = try std.Io.Dir.cwd().openFile(io, key_destination, .{});
-    defer key_file.close(io);
-    try key_file.sync(io);
     // Before `migrate` creates it, an older data directory has no replays.
     if (std.Io.Dir.cwd().statFile(io, paths.replays, .{})) |_| {
         var replays = try db_mod.Db.open(allocator, paths.replays, false);
         defer replays.close();
         try createEmptyFile(io, replay_destination);
+        errdefer std.Io.Dir.cwd().deleteFile(io, replay_destination) catch {};
         var replay_target = try db_mod.Db.open(allocator, replay_destination, true);
         defer replay_target.close();
         try db_mod.backup(&replays, &replay_target);
         try db_mod.integrity(&replay_target, allocator);
     } else |err| if (err != error.FileNotFound) return err;
+    // The key comes last: a backup with its key is complete, and one cut off
+    // (the process stopped mid-copy) is never offered for restoring.
+    try std.Io.Dir.copyFile(.cwd(), paths.key, .cwd(), key_destination, io, .{ .replace = false });
+    const key_file = try std.Io.Dir.cwd().openFile(io, key_destination, .{});
+    defer key_file.close(io);
+    try key_file.sync(io);
     return key_destination;
 }
 
@@ -180,6 +186,9 @@ pub fn restore(
         try db_mod.integrity(&replay_target, allocator);
     } else |err| if (err != error.FileNotFound) return err;
     try output.print("restore verified data={s}\n", .{directory});
+    // Backups leave out the location database, which is re-importable; without
+    // it every visitor's country is unknown and the regional policy asks all.
+    try output.print("copy geo.bin from the old data directory (or run analytico geo import) before serving\n", .{});
 }
 
 pub fn prune(
@@ -201,6 +210,8 @@ pub fn prune(
     const removed = try store_mod.pruneBefore(allocator, store_mod.Unlocked{ .database = &store.database }, cutoff);
     try @import("web/audit.zig").recordAs(allocator, &store.database, "cli", null, "retention.pruned", try std.fmt.allocPrint(allocator, "Removed {d} records received before {s}", .{ removed, before }), @import("domain.zig").nowMs());
     try store.checkpoint();
+    // The daily export's files of those days go too, as with nightly retention.
+    try @import("web/integrations.zig").pruneExports(allocator, io, directory, cutoff);
     try output.print("prune complete before={s} removed={d} backup={s}\n", .{ before, removed, backup_path });
 }
 

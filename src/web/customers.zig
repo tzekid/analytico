@@ -174,7 +174,7 @@ fn revenueChart(ctx: *Ctx, view: data.View) !void {
     for (confirmed, browser) |a, b| peak = @max(peak, a +| b);
     var best: usize = 0;
     for (confirmed, browser, 0..) |a, b, index| {
-        if (a + b > confirmed[best] + browser[best]) best = index;
+        if (a +| b > confirmed[best] +| browser[best]) best = index;
     }
     var label_buffer: [32]u8 = undefined;
     // Bars are what orders were worth when placed; the Revenue tile above is
@@ -200,7 +200,7 @@ fn revenueChart(ctx: *Ctx, view: data.View) !void {
         try render(w, "<div class=\"barchart-col{!best}\" data-tip=\"{day} · {amount}\"><div class=\"barchart-stack\"><span class=\"bar-browser\" style=\"height:{browser:.1}%\"></span><span class=\"bar-confirmed\" style=\"height:{confirmed:.1}%\"></span></div><small>{label}</small></div>", .{
             .best = if (index == best) " best" else "",
             .day = range.bucketLong(&long, index),
-            .amount = html.money(a + b, view.site.currency),
+            .amount = html.money(a +| b, view.site.currency),
             .browser = @as(f64, @floatFromInt(b)) / @as(f64, @floatFromInt(peak)) * 100,
             .confirmed = @as(f64, @floatFromInt(a)) / @as(f64, @floatFromInt(peak)) * 100,
             .label = label,

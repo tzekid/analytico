@@ -198,6 +198,9 @@ await journey("workspace", async (t) => {
   assert.match(pages.result.content[0].text, /^Pages for .*\npath \| page_type/);
   const emptyFunnel = await mcp({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "funnel", arguments: { site: "shop", name: "Pricing to checkout", range: "7d", filters: ["country:ZZ"] } } });
   assert.match(emptyFunnel.result.content[0].text, /1 \| path \| \/pricing \| 0 \|/);
+  // A bad argument is a tool error the model can read and correct.
+  const badArgument = await mcp({ jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "breakdown", arguments: { site: "shop", dimension: "pages" } } });
+  assert.match(badArgument.result.content[0].text, /not valid/, JSON.stringify(badArgument));
   await page.goto(`${origin}/shop/funnels/1?f=country:ZZ`);
   await page.getByText("0.0% end to end", { exact: true }).waitFor();
   assert.equal((await fetch(`${origin}/mcp`, { method: "POST", body: "{}" })).status, 401);
@@ -520,7 +523,10 @@ await journey("access", async (t) => {
   assert.equal((await audited(() => post(context, "/settings/ai/sharing", { site: "shop", paths: "1" }))).action, "ai.sharing");
   assert.equal((await audited(() => post(context, "/settings/ai/remove-key", { site: "shop" }))).action, "ai.key_removed");
   assert.equal((await audited(() => post(context, "/settings/signin/primary", { method: "passkey" }))).action, "signin.primary");
-  assert.equal((await audited(() => post(context, "/shop/shares", { label: "Board", expires: "30" }))).action, "share.created");
+  // The flash that carries a new share link is kept from page scripts.
+  let shared;
+  assert.equal((await audited(async () => { shared = await post(context, "/shop/shares", { label: "Board", expires: "30" }); })).action, "share.created");
+  assert.match(shared.headers()["set-cookie"] || "", /an_flash=[^;]+;[^\n]*HttpOnly/);
   const shareId = read("SELECT id FROM share_links")[0].id;
   assert.equal((await audited(() => post(context, `/shop/shares/${shareId}/revoke`))).action, "share.revoked");
   assert.equal((await audited(async () => assert.equal((await context.request.get(`${origin}/shop/export.csv?view=/shop/pages`)).status(), 200))).action, "report.exported");
@@ -577,6 +583,16 @@ await journey("access", async (t) => {
   assert.deepEqual((await liteExport.json()).events.map((event) => event.name), ["registration_confirmed"]);
   assert.equal((await post(context, "/settings/consent/forget", { site: "shop", person: "lite-user-7" })).status(), 303);
   assert.equal(read("SELECT count(*) n FROM events WHERE name='registration_confirmed'")[0].n, 0);
+  // The backend keeps working across a mode change, and its erasure
+  // requests reach a paused website.
+  await signed({ type: "event", name: "plan_renewed", tracking_mode: "lite" });
+  assert.equal(read("SELECT tracking_mode FROM events WHERE name='plan_renewed'")[0].tracking_mode, "full");
+  const paused = randomUUID();
+  await browserVisit(paused);
+  await post(context, "/settings/sites/update", { site: "shop", name: "", mode: "full" });
+  await signed({ type: "forget", visitor_id: paused });
+  assert.equal(read("SELECT count(*) n FROM page_views WHERE visitor_id=?", paused)[0].n, 0);
+  await post(context, "/settings/sites/update", { site: "shop", name: "", mode: "full", enabled: "1" });
 
   // The CLI's deletions are logged too, once the server has stopped.
   await admin.close();

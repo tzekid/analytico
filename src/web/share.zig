@@ -92,8 +92,12 @@ fn sharePage(ctx: *Ctx, token: []const u8) !void {
                     auth.recordFailure(ctx);
                     return passwordPage(ctx, link, "That password isn’t right.");
                 }
-                try ctx.header("set-cookie", try std.fmt.allocPrint(arena, "{s}={s}; Path=/share/; Max-Age=86400; HttpOnly; SameSite=Lax{s}", .{ cookie_name, &expected, if (ctx.secureOrigin()) "; Secure" else "" }));
-                return ctx.redirectFmt("/share/{s}", .{token});
+                // Embedded on another website, the unlock lives in that site's
+                // partition (a Lax cookie is never kept in a cross-site frame).
+                const embedded = ctx.param("embed") != null;
+                const attributes: []const u8 = if (embedded and ctx.secureOrigin()) "; SameSite=None; Secure; Partitioned" else if (ctx.secureOrigin()) "; SameSite=Lax; Secure" else "; SameSite=Lax";
+                try ctx.header("set-cookie", try std.fmt.allocPrint(arena, "{s}={s}; Path=/share/; Max-Age=86400; HttpOnly{s}", .{ cookie_name, &expected, attributes }));
+                return ctx.redirectFmt("/share/{s}{s}{s}{f}", .{ token, if (embedded) "?embed=1" else "", if (ctx.param("range") != null) (if (embedded) "&range=" else "?range=") else "", html.url(ctx.param("range") orelse "") });
             }
             return passwordPage(ctx, link, "");
         }
@@ -521,7 +525,7 @@ fn api(ctx: *Ctx, parts: []const []const u8) !void {
         error.MissingParameter => "missing_parameter",
         error.SessionModeRequired => "session_mode_required",
         error.UnsupportedFilter => "unsupported_filter",
-        error.InvalidParameter, error.InvalidName, error.InvalidPath, error.InvalidUuid => "invalid_parameter",
+        error.InvalidParameter, error.InvalidName, error.InvalidPath, error.InvalidUuid, error.InvalidText => "invalid_parameter",
         else => return err,
     });
     if (is(ctx.param("format") orelse "json", "csv")) {

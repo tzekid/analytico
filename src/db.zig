@@ -329,6 +329,12 @@ pub fn backup(source: *Db, destination: *Db) !void {
     if (rc != c.SQLITE_DONE or finish_rc != c.SQLITE_OK) return error.SqliteBackupFailed;
 }
 
+pub fn quickCheck(database: *Db, allocator: std.mem.Allocator) !void {
+    var statement = try database.prepare(allocator, "PRAGMA quick_check");
+    defer statement.deinit();
+    if (try statement.step() != .row or !std.mem.eql(u8, statement.columnText(0), "ok")) return error.IntegrityCheckFailed;
+}
+
 pub fn integrity(database: *Db, allocator: std.mem.Allocator) !void {
     var statement = try database.prepare(allocator, "PRAGMA integrity_check");
     defer statement.deinit();

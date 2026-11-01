@@ -245,14 +245,15 @@ pub const Ctx = struct {
     pub fn flash(self: *Ctx, message: []const u8, action_label: []const u8, action_href: []const u8) !void {
         var buffer: std.Io.Writer.Allocating = .init(self.arena);
         try buffer.writer.print("{f}|{f}|{f}", .{ html_mod.url(message), html_mod.url(action_label), html_mod.url(action_href) });
-        try self.header("set-cookie", try std.fmt.allocPrint(self.arena, "an_flash={s}; Path=/; Max-Age=60; SameSite=Lax", .{buffer.writer.buffered()}));
+        // It can carry a new share link: no script reads it, and only https sends it.
+        try self.header("set-cookie", try std.fmt.allocPrint(self.arena, "an_flash={s}; Path=/; Max-Age=60; HttpOnly; SameSite=Lax{s}", .{ buffer.writer.buffered(), if (self.secureOrigin()) "; Secure" else "" }));
     }
 
     pub const Flash = struct { message: []const u8, action_label: []const u8, action_href: []const u8 };
 
     pub fn takeFlash(self: *Ctx) !?Flash {
         const raw = self.cookie("an_flash") orelse return null;
-        try self.header("set-cookie", "an_flash=; Path=/; Max-Age=0; SameSite=Lax");
+        try self.header("set-cookie", if (self.secureOrigin()) "an_flash=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax; Secure" else "an_flash=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax");
         var parts = std.mem.splitScalar(u8, raw, '|');
         const message = html_mod.decodeComponent(self.arena, parts.next() orelse return null) catch return null;
         const label = html_mod.decodeComponent(self.arena, parts.next() orelse "") catch "";
