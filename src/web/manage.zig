@@ -657,12 +657,12 @@ pub fn dashboards(ctx: *Ctx, site: data.Site, id: ?i64) !void {
         try icon(&extra.writer, "pencil");
         try extra.writer.writeAll("<span class=\"btn-label\">Edit</span></a>");
     }
-    if (ctx.can(.admin)) try extra.writer.writeAll("<button class=\"btn\" type=\"button\" data-dialog=\"share-dialog\">Share publicly…</button>");
+    if (ctx.can(.admin)) try extra.writer.writeAll("<button class=\"btn\" type=\"button\" data-dialog=\"share-dialog\" commandfor=\"share-dialog\" command=\"show-modal\">Share publicly…</button>");
     try layout.head(ctx, .{ .title = current.name, .subtitle = if (editing) "Editing — drag to rearrange · changes save automatically" else try std.fmt.allocPrint(arena, "{f}", .{view.range}), .view = if (editing) null else view, .path = path, .extra = extra.written() });
     if (all.len > 1 or editing) {
         try w.writeAll("<nav class=\"tabs\">");
         for (all) |item| try render(w, "<a href=\"{href}\"{!current}>{name}</a>", .{ .href = try view.href(arena, try std.fmt.allocPrint(arena, "/{s}/dashboards/{d}", .{ site.slug, item.id }), &.{}), .current = if (item.id == current.id) " aria-current=\"page\"" else "", .name = item.name });
-        if (editing) try w.writeAll("<a href=\"#\" data-dialog=\"dashboard-dialog\">+ New dashboard</a>");
+        if (editing) try render(w, "<a href=\"{href}\" data-dialog=\"dashboard-dialog\">+ New dashboard</a>", .{ .href = try view.href(arena, path, &.{ .{ "edit", "1" }, .{ "dialog", "dashboard-dialog" } }) });
         try w.writeAll("</nav>");
     }
     const base = try std.fmt.allocPrint(arena, "/{s}", .{site.slug});
@@ -701,7 +701,7 @@ pub fn dashboards(ctx: *Ctx, site: data.Site, id: ?i64) !void {
         }
         try render(w, "</form></div></div><form class=\"mt-16\" method=\"post\" action=\"{path}/delete\" data-undo=\"Dashboard deleted\"><button class=\"btn btn-quiet\">", .{ .path = path });
         try icon(w, "trash");
-        try render(w, "Delete dashboard</button></form><dialog class=\"dialog\" id=\"dashboard-dialog\"><form method=\"post\" action=\"/{slug}/dashboards\"><div class=\"dialog-head\"><div><h2>New dashboard</h2><p>Starts with the essentials; edit it right after.</p></div></div><div class=\"dialog-body\"><label class=\"field\">Name<input class=\"input\" name=\"name\" required maxlength=\"60\"></label></div><div class=\"dialog-foot\"><button class=\"btn\" type=\"button\" data-close>Cancel</button><button class=\"btn btn-primary\">Create</button></div></form></dialog>", .{ .slug = site.slug });
+        try render(w, "Delete dashboard</button></form><dialog class=\"dialog\" id=\"dashboard-dialog\"{!open}><form method=\"post\" action=\"/{slug}/dashboards\"><div class=\"dialog-head\"><div><h2>New dashboard</h2><p>Starts with the essentials; edit it right after.</p></div></div><div class=\"dialog-body\"><label class=\"field\">Name<input class=\"input\" name=\"name\" required maxlength=\"60\"></label></div><div class=\"dialog-foot\"><button class=\"btn\" type=\"button\" data-close>Cancel</button><button class=\"btn btn-primary\">Create</button></div></form></dialog>", .{ .open = layout.requested(ctx, "dashboard-dialog"), .slug = site.slug });
     } else try w.writeAll("</div>");
     if (ctx.can(.admin)) try @import("share.zig").dialog(ctx, site, current.id, current.name);
     return layout.end(ctx);

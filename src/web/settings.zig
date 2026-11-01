@@ -369,7 +369,7 @@ fn backupsSection(ctx: *Ctx) !void {
     });
     const files = try listBackups(arena, ctx.shared.io, ctx.shared.data);
     for (files[0..@min(files.len, 30)]) |file| try render(w,
-        \\<tr><td class="strong mono t-13">{name}</td><td class="r secondary hide-m">{megabytes:.1} MB</td><td><span class="pill pill-good">✓ Verified</span></td><td class="r"><button class="link" type="button" data-dialog="restore-dialog" data-restore="{name}">Restore…</button></td></tr>
+        \\<tr><td class="strong mono t-13">{name}</td><td class="r secondary hide-m">{megabytes:.1} MB</td><td><span class="pill pill-good">✓ Verified</span></td><td class="r"><button class="link" type="button" data-dialog="restore-dialog" commandfor="restore-dialog" command="show-modal" data-restore="{name}">Restore…</button></td></tr>
     , .{ .name = file.name, .megabytes = @as(f64, @floatFromInt(file.size)) / 1_048_576.0 });
     try w.writeAll("</tbody></table></div>");
     if (files.len == 0) try ui.empty(w, "No backups yet", "Back up now, or keep automatic daily backups on. Each copy is integrity-checked before it’s listed.", "");
@@ -644,7 +644,7 @@ fn keyDialog(ctx: *Ctx, provider: ai.Provider, config: ?ai.Config, slug: []const
     const active = config != null and config.?.provider == provider;
     const model = posted(ctx, "model") orelse if (active) config.?.model else if (provider == .anthropic) "claude-sonnet-5-5" else "";
     try render(w,
-        \\<dialog class="dialog" id="key-dialog" data-open data-close-href="/settings/ai?site={slug}"><form method="post" action="/settings/ai/key" data-busy="Checking the key…"><input type="hidden" name="site" value="{slug}"><input type="hidden" name="provider" value="{provider}"><div class="dialog-head"><div><h2>{title}</h2><p>Stored encrypted on this server. You’re billed by the provider directly.</p></div><a class="btn btn-quiet btn-icon close" href="/settings/ai?site={slug}" data-close aria-label="Close">×</a></div><div class="dialog-body"><nav class="seg seg-fill">
+        \\<dialog class="dialog" id="key-dialog" data-open open data-close-href="/settings/ai?site={slug}"><form method="post" action="/settings/ai/key" data-busy="Checking the key…"><input type="hidden" name="site" value="{slug}"><input type="hidden" name="provider" value="{provider}"><div class="dialog-head"><div><h2>{title}</h2><p>Stored encrypted on this server. You’re billed by the provider directly.</p></div><a class="btn btn-quiet btn-icon close" href="/settings/ai?site={slug}" data-close aria-label="Close">×</a></div><div class="dialog-body"><nav class="seg seg-fill">
     , .{ .slug = slug, .provider = provider, .title = if (provider == .compatible) "Add an endpoint" else "Add an API key" });
     for ([_]struct { ai.Provider, []const u8 }{ .{ .anthropic, "Anthropic" }, .{ .openai, "OpenAI" }, .{ .compatible, "Local OpenAI-compatible" } }) |option| try render(w,
         \\<a href="/settings/ai?site={slug}&amp;key={provider}"{!current}>{label}</a>

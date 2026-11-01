@@ -99,7 +99,7 @@ pub fn section(ctx: *Ctx) !void {
     const has_password = try signin.methodCount(arena, db, user.id, .password) != 0;
     if (has_password or try signin.enabled(arena, db, .password)) {
         try row(w, .password, "Password", if (has_password) "Set · used with your email" else "Not set — your other methods are enough");
-        try render(w, "<button class=\"btn\" type=\"button\" data-dialog=\"password-dialog\">{label}</button>", .{ .label = if (has_password) "Change" else "Set a password" });
+        try render(w, "<button class=\"btn\" type=\"button\" data-dialog=\"password-dialog\" commandfor=\"password-dialog\" command=\"show-modal\">{label}</button>", .{ .label = if (has_password) "Change" else "Set a password" });
         if (has_password and try signin.userMethodCount(arena, db, user.id, .password) != 0) try w.writeAll("<form method=\"post\" action=\"/settings/signin/remove-password\" data-confirm=\"Remove your password? You’ll sign in with your other methods.\"><button class=\"btn btn-quiet\">Remove</button></form>");
         try w.writeAll("</div></div>");
     }
@@ -162,7 +162,7 @@ fn providerDialog(ctx: *Ctx, provider: oidc.Provider, origin: ?[]const u8) !void
     const w = ctx.w();
     const existing = try oidc.load(arena, ctx.db, ctx.shared.master_key, provider);
     const redirect = try std.fmt.allocPrint(arena, "{s}/auth/{s}/callback", .{ origin orelse "https://your-analytics.example", @tagName(provider) });
-    try render(w, "<dialog class=\"dialog dialog-wide\" id=\"provider-dialog\" data-open data-close-href=\"/settings/signin\"><form method=\"post\" action=\"/settings/signin/provider\" data-native><input type=\"hidden\" name=\"provider\" value=\"{name}\"><div class=\"dialog-head\">", .{ .name = provider });
+    try render(w, "<dialog class=\"dialog dialog-wide\" id=\"provider-dialog\" data-open open data-close-href=\"/settings/signin\"><form method=\"post\" action=\"/settings/signin/provider\" data-native><input type=\"hidden\" name=\"provider\" value=\"{name}\"><div class=\"dialog-head\">", .{ .name = provider });
     try signin.mark(w, if (provider == .google) .google else .chatgpt);
     try render(w,
         \\<div><h2>Set up {label} sign-in</h2><p>{intro}</p></div><a class="btn btn-quiet btn-icon close" href="/settings/signin" data-close aria-label="Close">×</a></div><div class="dialog-body"><div class="steps steps-20">

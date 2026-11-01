@@ -541,7 +541,17 @@ pub const Filter = struct {
 
 pub fn parseFilters(arena: std.mem.Allocator, params: html.Params) ![]Filter {
     var out: std.ArrayList(Filter) = .empty;
-    for (try params.all(arena, "f")) |raw| {
+    var raws: std.ArrayList([]const u8) = .empty;
+    try raws.appendSlice(arena, try params.all(arena, "f"));
+    // The filter form sent without the script: each condition's dimension,
+    // comparison and value, row by row (`f` stays empty).
+    const dims = try params.all(arena, "fd");
+    const ops = try params.all(arena, "fo");
+    for (try params.all(arena, "fv"), 0..) |value, index| {
+        if (index >= dims.len or index >= ops.len) break;
+        try raws.append(arena, try std.fmt.allocPrint(arena, "{s}{s}:{s}", .{ dims[index], ops[index], std.mem.trim(u8, value, " ") }));
+    }
+    for (raws.items) |raw| {
         const split = std.mem.findScalar(u8, raw, ':') orelse continue;
         const negate = split > 0 and raw[split - 1] == '!';
         const dim = std.meta.stringToEnum(Dim, raw[0 .. split - @intFromBool(negate)]) orelse continue;

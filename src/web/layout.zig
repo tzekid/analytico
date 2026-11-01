@@ -86,11 +86,12 @@ pub fn begin(ctx: *Ctx, shell: Shell) !void {
     if (shell.site) |site| {
         try render(w, "<a class=\"nav\" href=\"/{slug}/health\"{!current}>", .{ .slug = site.slug, .current = current(shell.nav == .health) });
         try icon(w, "quality");
-        try render(w, "<span>Data health</span><i class=\"dot {state}\"></i></a>", .{ .state = switch (shell.health) {
-            .ok => "",
-            .warn => "warn",
-            .bad => "bad",
-        } });
+        const state: struct { []const u8, []const u8 } = switch (shell.health) {
+            .ok => .{ "", "collecting normally" },
+            .warn => .{ "warn", "needs attention" },
+            .bad => .{ "bad", "failing" },
+        };
+        try render(w, "<span>Data health</span><i class=\"dot {class}\" role=\"img\" aria-label=\"{label}\" title=\"Data health: {label}\"></i></a>", .{ .class = state[0], .label = state[1] });
     }
     try render(w, "<a class=\"nav\" href=\"/settings{query}\"{!current}>", .{ .query = if (shell.site) |site| try std.fmt.allocPrint(ctx.arena, "?site={s}", .{site.slug}) else "", .current = current(shell.nav == .settings) });
     try icon(w, "settings");
@@ -405,7 +406,7 @@ fn filterPopover(ctx: *Ctx, view: data.View, path: []const u8) !void {
         \\<datalist id="filter-values"></datalist><div class="pop-section row-between">
     );
     if (view.filters.len != 0) {
-        try w.writeAll("<button class=\"btn btn-quiet\" type=\"button\" data-dialog=\"segment-dialog\">");
+        try w.writeAll("<button class=\"btn btn-quiet\" type=\"button\" data-dialog=\"segment-dialog\" commandfor=\"segment-dialog\" command=\"show-modal\">");
         try icon(w, "bookmark");
         try w.writeAll("Save as segment</button>");
     } else {
@@ -424,11 +425,13 @@ fn segmentLinks(ctx: *Ctx, view: data.View, path: []const u8) !void {
 }
 
 pub fn conditionRow(w: *std.Io.Writer, filter: data.Filter) !void {
-    try w.writeAll("<div class=\"cond\" data-condition><select class=\"input\" data-dim aria-label=\"Dimension\">");
+    // Named for a plain submit (data.parseFilters combines them); the script
+    // sends the hidden `f` instead.
+    try w.writeAll("<div class=\"cond\" data-condition><select class=\"input\" name=\"fd\" data-dim aria-label=\"Dimension\">");
     for (std.enums.values(data.Dim)) |dim| try render(w, "<option value=\"{value}\"{!selected}>{label}</option>", .{ .value = dim, .selected = if (dim == filter.dim) " selected" else "", .label = dim.label() });
     try render(w,
-        \\</select><div class="row nowrap"><select class="input input-op" data-op aria-label="Comparison"><option value=""{!is}>is</option><option value="!"{!not}>is not</option></select>
-        \\<input class="input" data-value list="filter-values" value="{value}" placeholder="Value" autocomplete="off"></div>
+        \\</select><div class="row nowrap"><select class="input input-op" name="fo" data-op aria-label="Comparison"><option value=""{!is}>is</option><option value="!"{!not}>is not</option></select>
+        \\<input class="input" name="fv" data-value list="filter-values" value="{value}" placeholder="Value" autocomplete="off"></div>
         \\<button type="button" class="btn btn-quiet btn-icon" data-remove-condition aria-label="Remove condition">
     , .{ .is = if (!filter.negate) " selected" else "", .not = if (filter.negate) " selected" else "", .value = filter.value });
     try icon(w, "x");
@@ -446,21 +449,21 @@ fn actionsMenu(ctx: *Ctx, view: data.View, path: []const u8) !void {
     try icon(w, "download");
     try w.writeAll("Download CSV</a><button class=\"menu-item\" type=\"button\" data-print>");
     try icon(w, "print");
-    try w.writeAll("Download PDF</button><div class=\"menu-sep\"></div><button class=\"menu-item\" type=\"button\" data-dialog=\"schedule-dialog\">");
+    try w.writeAll("Download PDF</button><div class=\"menu-sep\"></div><button class=\"menu-item\" type=\"button\" data-dialog=\"schedule-dialog\" commandfor=\"schedule-dialog\" command=\"show-modal\">");
     try icon(w, "mail");
-    try w.writeAll("Schedule email…</button><button class=\"menu-item\" type=\"button\" data-dialog=\"alert-dialog\">");
+    try w.writeAll("Schedule email…</button><button class=\"menu-item\" type=\"button\" data-dialog=\"alert-dialog\" commandfor=\"alert-dialog\" command=\"show-modal\">");
     try icon(w, "bell-plus");
-    try w.writeAll("Create alert…</button><button class=\"menu-item\" type=\"button\" data-dialog=\"note-dialog\">");
+    try w.writeAll("Create alert…</button><button class=\"menu-item\" type=\"button\" data-dialog=\"note-dialog\" commandfor=\"note-dialog\" command=\"show-modal\">");
     try icon(w, "pin");
     try w.writeAll("Add a note…</button>");
     const on_overview = std.mem.eql(u8, path, try std.fmt.allocPrint(ctx.arena, "/{s}", .{site.slug}));
     if (ctx.can(.admin) and on_overview) {
-        try w.writeAll("<div class=\"menu-sep\"></div><button class=\"menu-item\" type=\"button\" data-dialog=\"share-dialog\">");
+        try w.writeAll("<div class=\"menu-sep\"></div><button class=\"menu-item\" type=\"button\" data-dialog=\"share-dialog\" commandfor=\"share-dialog\" command=\"show-modal\">");
         try icon(w, "share");
         try w.writeAll("Share publicly…</button>");
     }
     if (view.filters.len != 0) {
-        try w.writeAll("<button class=\"menu-item\" type=\"button\" data-dialog=\"segment-dialog\">");
+        try w.writeAll("<button class=\"menu-item\" type=\"button\" data-dialog=\"segment-dialog\" commandfor=\"segment-dialog\" command=\"show-modal\">");
         try icon(w, "bookmark");
         try w.writeAll("Save as segment…</button>");
     }
@@ -487,6 +490,12 @@ pub fn viewSummary(arena: std.mem.Allocator, view: data.View) ![]const u8 {
     return out.written();
 }
 
+/// ` open` on the dialog a link asks for (`?dialog=id`), so that it shows
+/// without the script too; the script opens it as a modal.
+pub fn requested(ctx: *Ctx, id: []const u8) []const u8 {
+    return if (std.mem.eql(u8, ctx.param("dialog") orelse "", id)) " open" else "";
+}
+
 fn dialogHead(w: *std.Io.Writer, title: []const u8, subtitle: []const u8) !void {
     try render(w, "<div class=\"dialog-head\"><div><h2>{title}</h2><p>{subtitle}</p></div><button class=\"btn btn-quiet btn-icon close\" type=\"button\" data-close aria-label=\"Close\">", .{ .title = title, .subtitle = subtitle });
     try icon(w, "x");
@@ -499,7 +508,7 @@ fn viewDialogs(ctx: *Ctx, view: data.View, path: []const u8) !void {
     const summary = try viewSummary(ctx.arena, view);
     const view_query = try view.href(ctx.arena, path, &.{});
     // Schedule this view.
-    try render(w, "<dialog class=\"dialog\" id=\"schedule-dialog\"><form method=\"post\" action=\"/{slug}/schedules\">", .{ .slug = site.slug });
+    try render(w, "<dialog class=\"dialog\" id=\"schedule-dialog\"{!open}><form method=\"post\" action=\"/{slug}/schedules\">", .{ .open = requested(ctx, "schedule-dialog"), .slug = site.slug });
     try dialogHead(w, "Schedule this view", "A summary of exactly this view, delivered by email.");
     try render(w,
         \\<div class="dialog-body"><span class="chip self-start">{summary}</span><input type="hidden" name="view" value="{view}">
@@ -512,8 +521,8 @@ fn viewDialogs(ctx: *Ctx, view: data.View, path: []const u8) !void {
     try render(w,
         \\</select></label></div><label class="field">Send to<input class="input" name="recipients" value="{email}" required placeholder="name@example.com, team@example.com"><small>Separate addresses with commas.</small></label></div>
         \\<div class="dialog-foot"><button class="btn" type="button" data-close>Cancel</button><button class="btn btn-primary">Schedule</button></div></form></dialog>
-        \\<dialog class="dialog" id="alert-dialog"><form method="post" action="/{slug}/alerts" data-alert-form data-preview="/{slug}/alert-preview.json">
-    , .{ .email = if (ctx.user) |user| user.email else "", .slug = site.slug });
+        \\<dialog class="dialog" id="alert-dialog"{!open}><form method="post" action="/{slug}/alerts" data-alert-form data-preview="/{slug}/alert-preview.json">
+    , .{ .email = if (ctx.user) |user| user.email else "", .open = requested(ctx, "alert-dialog"), .slug = site.slug });
     // Create alert.
     try dialogHead(w, "Create alert", "Get notified when this view changes unexpectedly.");
     const event = view.params.get("event");
@@ -528,13 +537,14 @@ fn viewDialogs(ctx: *Ctx, view: data.View, path: []const u8) !void {
         \\<input class="input" name="name" value="{name}" aria-label="Alert name" required maxlength="80">
         \\<div><div class="field mb-8">Send to</div><div class="row gap-24"><label class="check"><input type="checkbox" checked disabled>In-app inbox</label><label class="check"><input type="checkbox" name="email" value="1" checked>Email the team</label></div></div></div>
         \\<div class="dialog-foot"><button class="btn" type="button" data-close>Cancel</button><button class="btn btn-primary">Create alert</button></div></form></dialog>
-        \\<dialog class="dialog" id="note-dialog"><form method="post" action="/{slug}/annotations">
+        \\<dialog class="dialog" id="note-dialog"{!note_open}><form method="post" action="/{slug}/annotations">
     , .{
         .summary = if (event) |name| try std.fmt.allocPrint(ctx.arena, "{s} · Event {s}", .{ summary, name }) else summary,
         .filters = alert_filters,
         .event = if (event != null) " selected" else "",
         .events = if (event != null) "This event" else "Events",
         .name = try alertName(ctx.arena, view, event),
+        .note_open = requested(ctx, "note-dialog"),
         .slug = site.slug,
     });
     // Note (annotation).

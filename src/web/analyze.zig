@@ -32,7 +32,7 @@ pub fn sitePath(arena: std.mem.Allocator, site: data.Site, suffix: []const u8) !
 
 fn sheetOpen(w: *std.Io.Writer, overline: []const u8, title: []const u8, close_href: []const u8) !void {
     try render(w,
-        \\<dialog class="sheet" data-sheet data-detents data-close-href="{close}" autofocus><div class="sheet-head"><div class="min-0"><div class="overline">{overline}</div><h2>{title}</h2></div><a class="sheet-close" href="{close}" data-close aria-label="Close">
+        \\<dialog class="sheet" data-sheet data-detents data-close-href="{close}" autofocus open><div class="sheet-head"><div class="min-0"><div class="overline">{overline}</div><h2>{title}</h2></div><a class="sheet-close" href="{close}" data-close aria-label="Close">
     , .{ .close = close_href, .overline = overline, .title = title });
     try icon(w, "x");
     try w.writeAll("</a></div>");
@@ -524,7 +524,7 @@ fn campaigns(ctx: *Ctx, view: data.View, path: []const u8) !void {
         .{ "Cost per conversion", if (conversions > 0 and spend > 0) try std.fmt.allocPrint(arena, "{f}", .{html.money(@divTrunc(spend, conversions), currency)}) else null },
     };
     for (figures) |figure| try ui.stat(w, figure[0], figure[1] orelse "—", "");
-    try w.writeAll("</div><section class=\"card card-flush\"><div class=\"card-head campaigns-head\"><h2>Campaigns</h2><button class=\"btn\" type=\"button\" data-dialog=\"import-dialog\">");
+    try w.writeAll("</div><section class=\"card card-flush\"><div class=\"card-head campaigns-head\"><h2>Campaigns</h2><button class=\"btn\" type=\"button\" data-dialog=\"import-dialog\" commandfor=\"import-dialog\" command=\"show-modal\">");
     try icon(w, "upload");
     try w.writeAll("Import spend (CSV)</button></div><div class=\"table-wrap\"><table class=\"table\"><thead><tr><th>Campaign</th><th class=\"r\">Visitors</th><th class=\"r\">Conversions</th><th class=\"r\">Revenue</th><th class=\"r\">Spend</th><th class=\"r\">ROAS</th></tr></thead><tbody>");
     for (rows.items) |row| {
@@ -582,6 +582,13 @@ fn parseMoney(text: []const u8) !i64 {
     return whole * 100 + cents;
 }
 
+/// An ISO 4217 code as the collector takes it: three letters A–Z.
+fn isCurrency(code: []const u8) bool {
+    if (code.len != 3) return false;
+    for (code) |byte| if (!std.ascii.isUpper(byte)) return false;
+    return true;
+}
+
 pub fn setSpend(ctx: *Ctx, site: data.Site) !void {
     const campaign = try ctx.field("campaign");
     const amount = parseMoney(try ctx.field("amount")) catch return overview.failBack(ctx, site, "Spend must be a number like 1200 or 1200.50.");
@@ -591,7 +598,7 @@ pub fn setSpend(ctx: *Ctx, site: data.Site) !void {
     _ = data.parseDate(from) catch return overview.failBack(ctx, site, "Invalid period.");
     _ = data.parseDate(to) catch return overview.failBack(ctx, site, "Invalid period.");
     domain.validateText(campaign, 128, false) catch return overview.failBack(ctx, site, "Invalid campaign.");
-    if (currency.len != 3) return overview.failBack(ctx, site, "Invalid currency.");
+    if (!isCurrency(currency)) return overview.failBack(ctx, site, "Invalid currency.");
     const db = ctx.shared.lockWrite();
     defer ctx.shared.unlockWrite();
     // The edited number is the period's total: replace that period's rows.
@@ -627,13 +634,13 @@ pub fn importSpend(ctx: *Ctx, site: data.Site) !void {
             if (count >= fields.len) break;
             fields[count] = std.mem.trim(u8, part, " \t\"");
         }
-        const bad = count != 6 or (data.parseDate(fields[0]) catch null) == null or fields[2].len == 0 or fields[5].len != 3;
+        const upper = if (count == 6) try std.ascii.allocUpperString(ctx.arena, fields[5]) else "";
+        const bad = count != 6 or (data.parseDate(fields[0]) catch null) == null or fields[2].len == 0 or !isCurrency(upper);
         const amount = if (bad) -1 else std.fmt.parseInt(i64, fields[4], 10) catch -1;
         if (bad or amount < 0) {
             db.exec("ROLLBACK") catch {};
             return overview.failBack(ctx, site, try std.fmt.allocPrint(ctx.arena, "Line {d} doesn’t match date,source,campaign,content,amount_minor,currency.", .{line_number}));
         }
-        const upper = try std.ascii.allocUpperString(ctx.arena, fields[5]);
         try db.run(ctx.arena, "INSERT INTO campaign_spend(site_id,spend_date,source,campaign,content,amount_minor,currency,created_at_ms) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(site_id,spend_date,source,campaign,content,currency) DO UPDATE SET amount_minor=CASE WHEN created_at_ms=excluded.created_at_ms THEN amount_minor+excluded.amount_minor ELSE excluded.amount_minor END,created_at_ms=excluded.created_at_ms", .{ site.id, fields[0], fields[1], fields[2], fields[3], amount, upper, stamp });
         imported += 1;
     }
@@ -839,7 +846,7 @@ fn goalDialog(ctx: *Ctx, site: data.Site, preset: []const u8) !void {
         try suggested.append(ctx.arena, if (byte == '_' or byte == '-') ' ' else byte);
     };
     if (suggested.items.len != 0) suggested.items[0] = std.ascii.toUpper(suggested.items[0]);
-    try render(w, "<dialog class=\"dialog\" id=\"goal-dialog\" data-open data-close-href=\"/{slug}/events?tab=goals\"><form method=\"post\" action=\"/{slug}/goals\"><div class=\"dialog-head\"><div><h2>Track as goal</h2><p>Count this as a conversion everywhere: overview, funnels and campaigns.</p></div><button class=\"btn btn-quiet btn-icon close\" type=\"button\" data-close aria-label=\"Close\">", .{ .slug = site.slug });
+    try render(w, "<dialog class=\"dialog\" id=\"goal-dialog\" data-open open data-close-href=\"/{slug}/events?tab=goals\"><form method=\"post\" action=\"/{slug}/goals\"><div class=\"dialog-head\"><div><h2>Track as goal</h2><p>Count this as a conversion everywhere: overview, funnels and campaigns.</p></div><button class=\"btn btn-quiet btn-icon close\" type=\"button\" data-close aria-label=\"Close\">", .{ .slug = site.slug });
     try icon(w, "x");
     try render(w,
         \\</button></div><div class="dialog-body"><label class="field">Goal name<input class="input" name="label" value="{name}" required maxlength="64" placeholder="Newsletter signup"></label>

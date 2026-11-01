@@ -61,7 +61,7 @@ pub fn teamSection(ctx: *Ctx, notice: []const u8) !void {
         }
         if (!role.atLeast(.admin) and !me) {
             try render(w,
-                \\ <button class="link" type="button" data-dialog="sites-{id}">Change</button><dialog class="dialog" id="sites-{id}"><form method="post" action="/settings/team/sites/{id}"><div class="dialog-head"><div><h2>Websites for {email}</h2><p>They see only these, everywhere: reports, replays, the API and AI connectors.</p></div></div><div class="dialog-body"><label class="check"><input type="checkbox" name="all" value="1"{!all}>All websites, including ones added later</label>
+                \\ <button class="link" type="button" data-dialog="sites-{id}" commandfor="sites-{id}" command="show-modal">Change</button><dialog class="dialog" id="sites-{id}"><form method="post" action="/settings/team/sites/{id}"><div class="dialog-head"><div><h2>Websites for {email}</h2><p>They see only these, everywhere: reports, replays, the API and AI connectors.</p></div></div><div class="dialog-body"><label class="check"><input type="checkbox" name="all" value="1"{!all}>All websites, including ones added later</label>
             , .{ .id = person.id, .email = person.email, .all = if (person.all_sites) " checked" else "" });
             for (sites) |site| {
                 const has = try ctx.db.scalar(arena, i64, "SELECT count(*) FROM user_sites WHERE user_id=? AND site_id=?", .{ person.id, site.id }) != 0;

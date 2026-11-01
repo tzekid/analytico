@@ -105,7 +105,7 @@ pub fn consentSection(ctx: *Ctx, maybe_site: ?data.Site) !void {
         \\</div></section><section class="card"><h2 class="card-title">Privacy requests</h2><p class="hint">{deletions} deletion{plural} in the last 30 days</p>
         \\<form method="post" action="/settings/consent/forget" class="row nowrap mt-12" data-confirm="Delete everything stored about this person? This cannot be undone."><input type="hidden" name="site" value="{slug}">
         \\<input class="input mono" name="person" required placeholder="Your user ID, or a visitor ID" aria-label="User ID or visitor ID"><button class="btn btn-danger">Delete…</button></form>
-        \\<form method="get" action="/settings/consent/export" class="row nowrap mt-8"><input type="hidden" name="site" value="{slug}"><input class="input mono" name="person" required placeholder="Your user ID, or a visitor ID" aria-label="User ID or visitor ID to export"><button class="btn">Export (JSON)</button></form>
+        \\<form method="get" action="/settings/consent/export" class="row nowrap mt-8" data-native><input type="hidden" name="site" value="{slug}"><input class="input mono" name="person" required placeholder="Your user ID, or a visitor ID" aria-label="User ID or visitor ID to export"><button class="btn">Export (JSON)</button></form>
         \\<p class="hint mt-12">A “Forget me” link on your privacy page: <code>&lt;button onclick="analytico.forget()"&gt;Forget me&lt;/button&gt;</code> — erases the visitor’s data and stops tracking them. From your backend, send a <code>forget</code> record with their user ID to <code>/i</code>.</p></section></div></div>
     , .{ .deletions = deletions, .plural = if (deletions == 1) "" else "s", .slug = site.slug });
 }

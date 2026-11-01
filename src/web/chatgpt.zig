@@ -576,7 +576,7 @@ pub fn card(ctx: *Ctx) !void {
     if (ctx.can(.admin)) try render(w, "<label class=\"row nowrap\"><input type=\"checkbox\" name=\"background\" value=\"1\" data-autosubmit{!checked}><span>Use my plan for alerts and scheduled emails when there’s no API key</span></label>", .{ .checked = if (value.background) " checked" else "" });
     try w.writeAll("</form></section>");
     if (!value.welcomed) {
-        try w.writeAll("<dialog class=\"dialog\" data-open><form method=\"post\" action=\"/settings/ai/chatgpt/welcomed\"><div class=\"dialog-head\"><div><span class=\"mark mark-chatgpt mb-10\">");
+        try w.writeAll("<dialog class=\"dialog\" data-open open><form method=\"post\" action=\"/settings/ai/chatgpt/welcomed\"><div class=\"dialog-head\"><div><span class=\"mark mark-chatgpt mb-10\">");
         try icon(w, "chatgpt");
         try w.writeAll(
             \\</span><h2>You’re using your ChatGPT plan</h2><p>Ask and Why? in Analytico now run on your ChatGPT plan and count toward its usage limits. Only aggregated numbers are sent, as set under “What the AI can see”.</p></div></div><div class="dialog-foot"><button class="btn btn-primary">Got it</button></div></form></dialog>

@@ -223,7 +223,7 @@ fn optionsDialog(ctx: *Ctx, flow: Flow, main: Method, methods: []const Method) !
     }
     const setup_providers = flow == .setup;
     if (others == 0 and !setup_providers) return;
-    try w.writeAll("<button class=\"btn btn-block auth-other\" type=\"button\" data-dialog=\"other-ways\">Other ways to sign in</button>");
+    try w.writeAll("<button class=\"btn btn-block auth-other\" type=\"button\" data-dialog=\"other-ways\" commandfor=\"other-ways\" command=\"show-modal\">Other ways to sign in</button>");
     try w.writeAll("<dialog class=\"dialog dialog-narrow\" id=\"other-ways\"><div class=\"dialog-head\"><div><h2>Other ways to sign in</h2></div><button class=\"btn btn-quiet btn-icon close\" type=\"button\" data-close aria-label=\"Close\">");
     try icon(w, "x");
     try w.writeAll("</button></div><div class=\"dialog-body gap-8\">");

@@ -413,6 +413,10 @@ dialog { color: var(--ink); }
 dialog::backdrop { background: var(--scrim); }
 .dialog { width: min(540px, calc(100vw - 32px)); padding: 0; border: 0; border-radius: 16px; background: var(--surface); box-shadow: 0 24px 64px -12px #28242166; }
 .dialog-wide { width: min(640px, calc(100vw - 32px)); }
+/* A dialog a page asks for is open in its HTML. Without app.js, which makes
+   it a modal, it shows where the modal would, over the page. */
+dialog.dialog:not(:modal) { position: fixed; inset: 0; z-index: 30; max-height: calc(100% - 32px); overflow-y: auto; }
+dialog.sheet:not(:modal) { z-index: 30; }
 .dialog-head { display: flex; align-items: flex-start; gap: 12px; padding: 24px 28px 0; }
 .dialog-head h2 { font-size: 17px; line-height: 24px; font-weight: 600; }
 .dialog-head p { margin-top: 4px; font-size: 13px; color: var(--ink-2); }

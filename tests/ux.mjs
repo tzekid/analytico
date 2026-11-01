@@ -3,7 +3,8 @@
 // revalidation, live updates over server-sent events, the lazy insights
 // card, hover/touch/range prefetching, instant back/forward with scroll
 // restore, in-place page morphing, remembered views, undoable deletes,
-// keyboard shortcuts and chart drill-down.
+// keyboard shortcuts and chart drill-down; late pages dropped, upgrades
+// loaded whole, and the same pages working as plain HTML without the script.
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
@@ -177,6 +178,36 @@ await journey("ux", async (t) => {
   await t.until(async () => Math.abs((await page.evaluate(() => scrollY)) - scrolled) < 5, "scroll restored");
   await page.setViewportSize({ width: 1280, height: 900 });
 
+  // A slow page clicked before another doesn't land over it later, or add a step.
+  await page.goto(`${base}/ux`);
+  const slow = (url) => url.pathname === "/ux/acquisition";
+  await page.route(slow, async (route) => { await delay(1500); await route.continue(); });
+  const steps = await page.evaluate(() => history.length);
+  await page.locator("a.nav", { hasText: "Acquisition" }).click();
+  await page.locator("a.nav", { hasText: "Audience" }).click();
+  await page.locator("h1", { hasText: "Audience" }).waitFor();
+  await delay(2000);
+  await page.unroute(slow);
+  assert.equal(await page.locator("h1", { hasText: "Acquisition" }).count(), 0);
+  assert.match(page.url(), /\/ux\/audience/);
+  assert.equal(await page.evaluate(() => history.length), steps + 1);
+
+  // After an upgrade, a page that names other assets loads whole instead of
+  // being patched into this one.
+  await page.evaluate(() => { window.sameDocument = true; });
+  const upgraded = (url) => url.pathname === "/ux/events";
+  await page.route(upgraded, async (route) => {
+    if (!route.request().headers()["x-requested-with"]) return route.continue();
+    const response = await route.fetch();
+    await route.fulfill({ response, body: (await response.text()).replace(/\/_\/app\.\w+\.css/, "/_/app.0000000000.css") });
+  });
+  const reloaded = page.waitForEvent("load");
+  await page.locator("a.nav", { hasText: "Events" }).click();
+  await reloaded;
+  await page.unroute(upgraded);
+  await page.locator("h1", { hasText: "Events" }).waitFor();
+  assert.equal(await page.evaluate(() => window.sameDocument), undefined);
+
   // Each website opens the way it was last viewed (30 days here), also on a
   // full load; going back to the default forgets it.
   await page.goto(`${base}/settings/sites?site=ux`);
@@ -185,11 +216,34 @@ await journey("ux", async (t) => {
   await page.goto(`${base}/ux/audience`);
   await page.waitForURL(/range=30d/);
   assert.equal(await page.locator(".seg[aria-label='Date range'] a[aria-current]").textContent(), "30d");
+  // Live has no period of its own; the next report still opens with it.
+  await page.locator("a.nav", { hasText: "Live" }).click();
+  await page.waitForURL(`${base}/ux/live`);
+  await page.locator("a.nav", { hasText: "Pages" }).click();
+  await page.waitForURL(/\/ux\/pages\?.*range=30d/);
+  assert.equal(await page.locator(".seg[aria-label='Date range'] a[aria-current]").textContent(), "30d");
   await page.locator(".seg[aria-label='Date range'] a", { hasText: "7d" }).click();
   await t.until(async () => (await page.locator(".seg[aria-label='Date range'] a[aria-current]").textContent()) === "7d", "back to 7 days");
   await page.goto(`${base}/ux/audience`);
   assert.equal(await page.locator(".seg[aria-label='Date range'] a[aria-current]").textContent(), "7d");
   assert.doesNotMatch(page.url(), /range=/);
+
+  // "Connect with Google" starts a flow: hovering it fetches nothing.
+  await page.goto(`${base}/settings/integrations?site=ux`);
+  await page.getByRole("link", { name: "Connect with Google" }).first().hover();
+  await delay(300);
+  assert.equal(requested("/integrations/google/start"), false);
+
+  // The privacy export is the browser's own request, not a page the script
+  // fetches (which sent it, and its audit entry, twice).
+  await page.goto(`${base}/settings/consent?site=ux`);
+  await page.evaluate(() => { window.sameDocument = true; });
+  await page.getByLabel("User ID or visitor ID to export").fill("nobody");
+  const exported = page.waitForEvent("load");
+  await page.getByRole("button", { name: "Export (JSON)" }).click();
+  await exported;
+  await page.locator("h1", { hasText: "Person not found" }).waitFor();
+  assert.equal(await page.evaluate(() => window.sameDocument), undefined);
 
   // Touch: the press itself starts the fetch.
   const touchContext = await t.context({ hasTouch: true, viewport: { width: 390, height: 844 }, storageState: await context.storageState() });
@@ -328,6 +382,47 @@ await journey("ux", async (t) => {
   }
   await touchContext.close();
 
+  // Without the script every page still works: sheets and dialogs a link
+  // asks for show, buttons open their dialogs, and the filter form applies
+  // what it shows (pressed again unchanged, it keeps the filter).
+  // (Reduced motion: Playwright sees a popover still in its opening transition
+  // as moving when the page runs no script.)
+  const plain = await t.context({ javaScriptEnabled: false, reducedMotion: "reduce", storageState: await context.storageState() });
+  const html = await plain.newPage();
+  await html.goto(`${base}/spike/pages?range=30d&page=%2F`);
+  await html.locator("dialog.sheet[open] h2", { hasText: "/" }).waitFor();
+  await html.goto(`${base}/ux?dialog=alert-dialog`);
+  await html.locator("#alert-dialog").getByRole("button", { name: "Create alert" }).waitFor();
+  await html.goto(`${base}/ux`);
+  await html.getByRole("button", { name: "More actions" }).click();
+  await html.getByRole("button", { name: "Schedule email…" }).click();
+  await html.locator("#schedule-dialog:modal").waitFor();
+  await html.goto(`${base}/spike?range=30d`);
+  const plainFilter = html.locator("#filter-pop");
+  await html.getByRole("button", { name: "Filter", exact: true }).click();
+  await plainFilter.locator("select[name=fd]").selectOption("country");
+  await plainFilter.locator("input[name=fv]").fill("DE");
+  await plainFilter.getByRole("button", { name: "Apply" }).click();
+  await html.locator(".chips .chip", { hasText: "Country is DE" }).waitFor();
+  await html.getByRole("button", { name: "Filter", exact: true }).click();
+  const applied = html.waitForEvent("load");
+  await plainFilter.getByRole("button", { name: "Apply" }).click();
+  await applied;
+  await html.locator(".chips .chip", { hasText: "Country is DE" }).waitFor();
+  await plain.close();
+  // With it, the asked-for dialog is a modal, and filters are one `f` each.
+  await page.goto(`${base}/ux?dialog=alert-dialog`);
+  await page.locator("#alert-dialog:modal").waitFor();
+  assert.equal(new URL(page.url()).searchParams.has("dialog"), false);
+  await page.keyboard.press("Escape");
+  await page.goto(`${base}/spike?range=30d`);
+  await page.getByRole("button", { name: "Filter", exact: true }).click();
+  await page.locator("#filter-pop [data-dim]").selectOption("country");
+  await page.locator("#filter-pop [data-value]").fill("DE");
+  await page.locator("#filter-pop").getByRole("button", { name: "Apply" }).click();
+  await page.waitForURL(/f=country%3ADE/);
+  assert.doesNotMatch(page.url(), /f[dov]=/);
+
   // The daily check drafted a note for the spike; kept, it joins the chart.
   await t.until(() => row("SELECT count(*) n FROM annotations WHERE draft=1").n === 1, "anomaly drafted", 20000);
   await page.goto(`${base}/spike?range=30d`);
@@ -360,6 +455,16 @@ await journey("ux", async (t) => {
   await page.keyboard.press("?");
   await page.locator("#shortcuts", { hasText: "Keyboard shortcuts" }).waitFor();
   await page.keyboard.press("Escape");
+  // j selects a row and Enter opens it, unless a focused button takes Enter.
+  await page.keyboard.press("j");
+  await page.getByRole("button", { name: "Choose dates" }).focus();
+  await page.keyboard.press("Enter");
+  await page.locator("#range-pop:popover-open").waitFor();
+  assert.doesNotMatch(page.url(), /[?&]page=/);
+  await page.keyboard.press("Escape");
+  await page.evaluate(() => document.activeElement.blur());
+  await page.keyboard.press("Enter");
+  await page.waitForURL(/[?&]page=/);
 
   // Clicking a day on the trend chart opens that day.
   await page.goto(`${base}/ux`);
@@ -423,9 +528,21 @@ await journey("ux", async (t) => {
   await page.goto(`${base}/fresh/pages`);
   assert.equal(await page.locator("[data-stage=waiting] h2").textContent(), "Waiting for your first visit");
   assert.equal(await page.locator(".seg").count(), 0);
+  // The sidebar's health dot says what it means.
+  await page.getByRole("link", { name: /^Data health\s*needs attention$/ }).waitFor();
+  assert.equal(await page.locator(".sidebar a[href='/fresh/health'] .dot").getAttribute("title"), "Data health: needs attention");
+
+  // Spend takes an ISO currency code only; markup in one is refused, and
+  // the import takes a lowercase code as the uppercase one.
+  const spend = (form, to = "spend") => page.request.post(`${base}/ux/${to}`, { form, headers: { origin: base } });
+  await spend({ campaign: "launch", amount: "12", from: day(1), to: day(1), currency: "<s>" });
+  await spend({ csv: `${day(1)},meta,launch,,1200,e<r` }, "spend-import");
+  assert.equal(row("SELECT count(*) n FROM campaign_spend").n, 0);
+  await spend({ csv: `${day(1)},meta,launch,,1200,eur` }, "spend-import");
+  assert.equal(row("SELECT currency FROM campaign_spend").currency, "EUR");
 
   // The heatmap overlay's data can be computed ahead of opening the page.
   assert.equal((await page.request.get(`${base}/ux/heatmaps/warm?path=%2F`)).status(), 204);
 
-  return "group commit, engagement on page views, Server-Timing, API revalidation, live updates, the Live page, phone sheets and More, lazy card, hover/touch/range prefetch, instant back with scroll, morphing, remembered views, undo, keyboard, chart drill-down to an hourly day, dated comparisons, corrected ranges, empty and waiting states, heatmap warm, anomaly note kept";
+  return "group commit, engagement on page views, Server-Timing, API revalidation, live updates, the Live page, phone sheets and More, lazy card, hover/touch/range prefetch, instant back with scroll, morphing, remembered views, undo, keyboard, chart drill-down to an hourly day, dated comparisons, corrected ranges, empty and waiting states, heatmap warm, anomaly note kept, late pages dropped, upgrades loaded whole, plain HTML dialogs and filters, ISO spend currencies";
 });

@@ -240,7 +240,7 @@ pub const Money = struct {
         for (symbols) |entry| if (std.mem.eql(u8, entry[0], self.currency)) {
             symbol = entry[1];
         };
-        if (symbol) |value| try w.writeAll(value) else if (self.currency.len != 0) try w.print("{s} ", .{self.currency});
+        if (symbol) |value| try w.writeAll(value) else if (self.currency.len != 0) try w.print("{f} ", .{esc(self.currency)});
         const whole = @divTrunc(self.minor, 100);
         const cents = @abs(@rem(self.minor, 100));
         try int(whole).format(w);

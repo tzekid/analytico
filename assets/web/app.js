@@ -33,7 +33,9 @@
   const AHEAD_MS = 15000;
   const SEEN_MS = 5 * 60000;
   const sameOrigin = (url) => url.origin === location.origin;
-  const navigable = (url) => sameOrigin(url) && !url.pathname.startsWith("/_/") && !/\.(csv|json)$/.test(url.pathname) && !url.pathname.startsWith("/oauth/") && !url.pathname.startsWith("/auth/") && !url.pathname.endsWith("/heatmaps/open") && !url.pathname.endsWith("/stream");
+  // Not fetched ahead or into the page: assets, files, streams, and sign-in
+  // and connection flows, whose GETs start something and leave for another site.
+  const navigable = (url) => sameOrigin(url) && !url.pathname.startsWith("/_/") && !/\.(csv|json)$/.test(url.pathname) && !/^\/(oauth|auth|integrations)\//.test(url.pathname) && !/\/(start|stream)$/.test(url.pathname) && !url.pathname.endsWith("/heatmaps/open");
   const reducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
 
   function fetchPage(href) {
@@ -88,8 +90,10 @@
   function remembered(url) {
     const slug = url.pathname.split("/")[1];
     if (!slug || viewKeys.some((key) => url.searchParams.has(key))) return url;
-    // Within a website, links already carry the view.
-    if ($("main[data-site]")?.dataset.site === slug && location.pathname.split("/")[1] === slug) return url;
+    // Within a website, links on a page with a view already carry it (Live,
+    // Data health and the like have none).
+    const main = $("main[data-site]");
+    if (main?.dataset.site === slug && main.dataset.view !== undefined && location.pathname.split("/")[1] === slug) return url;
     const saved = cookie(`an_view_${slug}`);
     if (!saved) return url;
     const next = new URL(url);
@@ -169,7 +173,12 @@
       if (paths) tweenPaths(to, paths);
       return;
     }
-    if (from.tagName === "DIALOG" && from.open && !to.hasAttribute("open")) from.close();
+    if (from.tagName === "DIALOG") {
+      // A patch closes a dialog; init() then opens the ones the new page asks
+      // for, which its HTML has open so that they show without this script.
+      if (from.open) from.close();
+      to.removeAttribute("open");
+    }
     syncAttributes(from, to);
     if (from instanceof HTMLInputElement || from instanceof HTMLSelectElement || from instanceof HTMLTextAreaElement) syncValue(from, to);
     if (from.tagName !== "TEXTAREA") morphChildren(from, to);
@@ -240,8 +249,22 @@
     });
   }
 
+  // The stylesheet and script this page runs on. A page naming others comes
+  // from an upgraded server; its markup needs them, so it loads whole.
+  const assetsOf = (doc) => `${doc.querySelector("link[rel=stylesheet]")?.getAttribute("href")} ${doc.querySelector("script[src]")?.getAttribute("src")}`;
+  const ownAssets = `${$("link[rel=stylesheet]")?.getAttribute("href")} ${document.currentScript?.getAttribute("src")}`;
+
   function swap(html, url, mode, keepScroll, scrollTo = null) {
     const next = new DOMParser().parseFromString(html, "text/html");
+    if (assetsOf(next) !== ownAssets) {
+      // Nothing still loading may patch the page meanwhile. A form's answer
+      // that stays on its page reloads that page.
+      navigation++;
+      if (mode === "none") location.reload();
+      else if (mode === "replace") location.replace(url);
+      else location.assign(url);
+      return;
+    }
     const openSheet = $("dialog[data-sheet][open]");
     const nextSheet = next.querySelector("dialog[data-sheet]");
     if (openSheet && nextSheet && new URL(url, location.href).pathname === location.pathname) {
@@ -282,7 +305,14 @@
     morphChildren(from, to);
   }
 
+  // Only the latest navigation shows: a page that arrives after another
+  // click, Back or form has moved on is dropped, not swapped in.
+  let navigation = 0;
+
   async function navigate(href, { mode = "push", keepScroll = false, scrollTo = null } = {}) {
+    const id = ++navigation;
+    loading(false);
+    document.documentElement.classList.remove("refreshing");
     let url = new URL(href, location.href);
     if (!navigable(url)) { location.href = url.href; return; }
     url = remembered(url);
@@ -304,23 +334,24 @@
       try {
         const page = await fetchPage(key);
         keep(key, page);
-        if (page.type.startsWith("text/html") && new URL(page.url).href === location.href) swap(page.html, page.url, "none", true);
+        if (id === navigation && page.type.startsWith("text/html") && new URL(page.url).href === location.href) swap(page.html, page.url, "none", true);
       } catch { /* The shown copy stays. */ }
-      document.documentElement.classList.remove("refreshing");
+      if (id === navigation) document.documentElement.classList.remove("refreshing");
       return;
     }
     loading(true);
     try {
       const response = await prefetch(key);
       ahead.delete(key);
-      if (!response.type.startsWith("text/html")) { location.href = key; return; }
       keep(response.url, response);
+      if (id !== navigation) return;
+      if (!response.type.startsWith("text/html")) { location.href = key; return; }
       const samePage = new URL(response.url).pathname === location.pathname;
       swap(response.html, response.url, mode, keepScroll || samePage, scrollTo);
     } catch {
-      location.href = key;
+      if (id === navigation) location.href = key;
     } finally {
-      loading(false);
+      if (id === navigation) loading(false);
     }
   }
 
@@ -346,15 +377,18 @@
     const optimistic = form.querySelector("[data-autosubmit]") !== null;
     if (!optimistic) buttons.forEach((button) => { button.disabled = true; });
     if (busy && submitter) submitter.textContent = busy;
+    const id = ++navigation;
     try {
       const response = await fetch(action.href, { method: "POST", body: new URLSearchParams(body), headers: { "x-requested-with": "fetch" } });
       const type = response.headers.get("content-type") || "";
-      if (!type.startsWith("text/html")) { location.reload(); return; }
-      const html = await response.text();
+      const html = type.startsWith("text/html") ? await response.text() : null;
+      // Sent; if the page moved on meanwhile, its answer isn't shown.
+      if (id !== navigation) return;
+      if (html === null) { location.reload(); return; }
       const finalUrl = new URL(response.url);
       swap(html, finalUrl.href, response.redirected ? (finalUrl.pathname === location.pathname ? "replace" : "push") : "none", finalUrl.pathname === location.pathname);
     } catch {
-      form.submit();
+      if (id === navigation) form.submit();
     }
   }
 
@@ -599,6 +633,14 @@
     const away = phone() ? "translateY(calc(100% + 40px))" : dialog.matches(".sheet") ? "translateX(16px)" : "translateY(6px) scale(.99)";
     const frames = [{ transform: getComputedStyle(dialog).transform }, { transform: away, ...(phone() ? {} : { opacity: 0 }) }];
     return dialog.animate(frames, { duration: closeMs(), easing: phone() ? bezier(curve) : "ease-in", fill: "forwards" }).finished.catch(() => {});
+  }
+
+  // A dialog a page asks for (?dialog=) is open in its HTML, so that it shows
+  // without this script; here it becomes the modal it is meant to be.
+  function showModal(dialog) {
+    if (dialog.matches(":modal")) return;
+    dialog.close();
+    dialog.showModal();
   }
 
   let sheetFrom = null, returning = false;
@@ -1356,6 +1398,9 @@
 
   function encodeConditions(form) {
     $$("[data-condition]", form).forEach((row) => {
+      // The row's own fields are named for a plain submit without this
+      // script; here one encoded `f` stands for them.
+      $$("[data-dim], [data-op], [data-value]", row).forEach((field) => field.removeAttribute("name"));
       const value = $("[data-value]", row).value.trim();
       const hidden = $("[data-encoded]", row);
       hidden.disabled = !value;
@@ -1615,9 +1660,10 @@
       rows[selected].scrollIntoView({ block: "nearest" });
       return;
     }
+    // Enter opens the selected row, unless a focused button or link takes it.
     if (key === "Enter" && selected >= 0) {
       const row = selectable()[selected];
-      if (row) { event.preventDefault(); navigate(row.dataset.href || row.href); }
+      if (row && (event.target === document.body || event.target === row)) { event.preventDefault(); navigate(row.dataset.href || row.href); }
       return;
     }
     if (key === "/") {
@@ -1716,7 +1762,9 @@
     $$("[data-range-form]").forEach(setupRangeForm);
     openDatesFromHash();
     $$("dialog[data-sheet], dialog[data-open]").forEach((dialog) => {
-      if (dialog.open) return;
+      // Open as the page has it, which is how it shows without this script;
+      // it opens again as below.
+      dialog.close();
       // Focus the dialog itself, not its first link (which drew a focus ring).
       dialog.autofocus = true;
       dialog.tabIndex = -1;
@@ -1737,7 +1785,7 @@
     const requested = params.get("dialog");
     if (requested && document.getElementById(requested)) {
       const dialog = document.getElementById(requested);
-      dialog.showModal();
+      showModal(dialog);
       if (dialog.matches("#alert-dialog")) alertPreview(dialog);
       params.delete("dialog");
       history.replaceState({}, "", location.pathname + (params.toString() ? `?${params}` : ""));
@@ -1768,7 +1816,7 @@
       if (opener.dataset.restore) $$("[data-restore-name]", dialog).forEach((node) => { node.textContent = opener.dataset.restore; });
       if (opener.dataset.noteDay) { const day = $("input[name=day]", dialog); if (day) day.value = opener.dataset.noteDay; }
       if (opener.dataset.connect) setupConnect(dialog, opener.dataset.connect);
-      dialog.showModal();
+      showModal(dialog);
       // The dialog itself takes focus, not its close button (which Safari
       // rings), unless something in it asks for focus.
       if (!dialog.querySelector("[autofocus]")) { dialog.tabIndex = -1; dialog.focus({ preventScroll: true }); }
@@ -1804,7 +1852,7 @@
     ["[data-chatgpt-start]", () => {
       const dialog = $("#chatgpt-dialog");
       if (!dialog) return;
-      dialog.showModal();
+      showModal(dialog);
       const id = setInterval(() => {
         if (!dialog.open) return clearInterval(id);
         getJson(dialog.dataset.chatgptStatus).then((status) => {
