@@ -49,6 +49,8 @@
   var replay = null;
   var replayRequested = false;
   var identityGeneration = 0;
+  // Callbacks waiting for this page's view to be stored (see setConsent).
+  var viewInFlight = null;
   var bannerHost = null;
   var clickCells, clickCount, recentClicks, attention, forms, lastAttention;
   var arrivedClickId = null;
@@ -349,7 +351,12 @@
     }
     var expectedClaim = linkArrival;
     var generation = identityGeneration;
-    send([record], function (response) { decision(response, expectedClaim, generation); });
+    var waiting = viewInFlight = [];
+    send([record], function (response) {
+      if (viewInFlight === waiting) viewInFlight = null;
+      waiting.forEach(function (then) { then(); });
+      decision(response, expectedClaim, generation);
+    });
     return;
     /* @full-end */
     send([record]);
@@ -709,10 +716,19 @@
     /* @full-begin */
     if (visitorId) {
       var cells = Object.keys(clickCells).map(function (key) { return clickCells[key]; });
+      cells.sort(function (a, b) { return b.n - a.n; });
       if (cells.length) record.clicks = cells;
       if (attention.some(function (value) { return value > 0; })) record.attention = attention.map(Math.round);
       var fields = formSummary();
       if (fields.length) record.form_fields = fields;
+      // A record past a batch's size is never sent (see send): the detail
+      // gives way instead, the last form fields and least-clicked cells first.
+      ["form_fields", "clicks"].forEach(function (key) {
+        while (record[key] && byteLength(JSON.stringify(record)) > 7600) {
+          record[key].pop();
+          if (!record[key].length) delete record[key];
+        }
+      });
     }
     if (replay) replay.flush(true);
     /* @full-end */
@@ -1051,9 +1067,20 @@
     restore();
   }
 
-  function sendConsent() {
+  function sendConsent(again) {
     var generation = identityGeneration;
-    send([Object.assign(base(uuid(), "consent"), { state: consent === "granted" ? "granted" : "not_required" })], function (response) { decision(response, null, generation); });
+    var granted = consent === "granted";
+    send([Object.assign(base(uuid(), "consent"), { state: granted ? "granted" : "not_required" })], function (response) {
+      // The ID it named was refused (withdrawn or erased in another tab or on
+      // another of the site's domains): granting again starts a new identity.
+      if (granted && !again && response && response.drop && !response.drop_state && generation === identityGeneration) {
+        clearIdentity("pending");
+        establish("granted");
+        sendConsent(true);
+        return;
+      }
+      decision(response, null, generation);
+    });
   }
 
   function setConsent(value) {
@@ -1072,7 +1099,11 @@
       hideBanner();
       if (consent === "denied") return;
       clearIdentity("denied");
-      send([Object.assign(base(uuid(), "consent"), { state: "denied" })]);
+      var refusal = Object.assign(base(uuid(), "consent"), { state: "denied" });
+      send([refusal]);
+      // The refusal finds the visitor through this page's view: one still on
+      // its way could be stored after it, so it is said again once it is.
+      if (viewInFlight) viewInFlight.push(function () { send([Object.assign({}, refusal, { event_id: uuid() })]); });
     }
   }
 
@@ -1083,6 +1114,7 @@
     // Consent, GPC or forgetting may have cancelled this request while it was
     // in flight. A stale continuation response cannot change the newer state.
     if (expectedClaim && linkArrival !== expectedClaim) return;
+    var held = visitorId;
     // A cross-domain identity remains in memory until the server authenticates
     // its signed claim. Failed or lost validation never writes browser state.
     var rejectedLink = false;
@@ -1091,6 +1123,13 @@
       linkArrival = null;
       if (response.continued && !gpc && consent !== "denied") establish(claim.consent, { visitor: claim.visitor, session: claim.session });
       else rejectedLink = true;
+    }
+    // Another tab has moved on since (withdrew, then granted again with a new
+    // ID): its stored choice is newer than this answer about the old ID.
+    var stored = storedVisitor();
+    if ((response.drop_state === "denied" || response.drop) && held && stored && stored !== held) {
+      resume();
+      return;
     }
     // The visitor withdrew (in another tab, or on another of the site's
     // domains): keep the refusal stored, so no later answer starts again.
@@ -1102,7 +1141,15 @@
       if (visitorId || consent !== "gpc") clearIdentity("gpc");
       return;
     }
-    if (response.drop && !rejectedLink) clearIdentity("pending");
+    if (response.drop && !rejectedLink) {
+      // A refusal stored on this domain (forget() or a withdrawal in another
+      // tab) outlives the identity: it never becomes a fresh start.
+      if (load("consent") === "denied") {
+        clearIdentity("denied");
+        return;
+      }
+      clearIdentity("pending");
+    }
     linkToken = response.link || null;
     excluded = Array.isArray(response.exclude) ? response.exclude : [];
     linkDomains = Array.isArray(response.domains) ? response.domains : [];

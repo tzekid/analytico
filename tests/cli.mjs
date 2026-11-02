@@ -193,19 +193,21 @@ await journey("cli", async (t) => {
   assert.throws(() => execFileSync(t.app, ["doctor", "--data", restored], { stdio: ["ignore", "pipe", "pipe"] }), /MigrationRequired/);
   execFileSync(t.app, ["migrate", "--data", restored, "--backup", join(t.temporary, "before-migrate.db")]);
   const migrated = new DatabaseSync(join(restored, "analytico.db"));
-  assert.equal(migrated.prepare("PRAGMA user_version").get().user_version, 13);
+  assert.equal(migrated.prepare("PRAGMA user_version").get().user_version, 14);
   assert.equal(migrated.prepare("SELECT count(*) n FROM forgotten_visitors").get().n, 0);
   migrated.exec("INSERT INTO vitals_daily(site_id,day,metric,path,value,samples) VALUES(1,'2000-01-01','lcp','/old',100,1)");
   migrated.exec("INSERT INTO cache(site_id,name,day,value) VALUES(1,'retention','2000-01-01','{}')");
   migrated.close();
   // The service's quick pre-start check answers like the full one.
-  assert.match(execFileSync(t.app, ["doctor", "--quick", "--data", restored], { encoding: "utf8" }), /^ok schema=13 /);
+  assert.match(execFileSync(t.app, ["doctor", "--quick", "--data", restored], { encoding: "utf8" }), /^ok schema=14 /);
   // Prune takes the daily export's files of those days too.
   mkdirSync(join(restored, "exports", "example", "2019-12-31"), { recursive: true });
   writeFileSync(join(restored, "exports", "example", "2019-12-31", "events.csv.gz"), "");
   mkdirSync(join(restored, "exports", "example", "2020-01-01"), { recursive: true });
   execFileSync(t.app, ["prune", restored, "--before", "2020-01-01", "--backup", join(t.temporary, "before-prune.db")]);
   assert.deepEqual(readdirSync(join(restored, "exports", "example")), ["2020-01-01"]);
+  // Vacuum builds its copy on disk, after its own verified backup.
+  assert.match(execFileSync(t.app, ["vacuum", restored, "--backup", join(t.temporary, "before-vacuum.db")], { encoding: "utf8" }), /vacuum complete/);
   const pruned = new DatabaseSync(join(restored, "analytico.db"));
   assert.equal(pruned.prepare("SELECT count(*) n FROM vitals_daily WHERE day<'2020-01-01'").get().n, 0);
   assert.equal(pruned.prepare("SELECT count(*) n FROM cache").get().n, 0);

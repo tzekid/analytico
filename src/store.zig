@@ -228,12 +228,16 @@ pub const Store = struct {
     }
 };
 
+/// How long the tracker keeps a visitor ID (`storedVisitor`).
+const visitor_id_lifetime_ms: i64 = 395 * 86_400_000;
+
 /// Retention: removes detailed records received before the cutoff, plus the
 /// aggregates and remembered visitors that only describe that time. Callers
 /// back up first. It runs as many short transactions so collection keeps
 /// going: `writer` (the server's shared state, or `Unlocked` from the CLI)
 /// holds the write lock for one at a time.
 pub fn pruneBefore(allocator: std.mem.Allocator, writer: anytype, cutoff_ms: i64) !usize {
+    const now_ms = domain.nowMs();
     var removed: usize = 0;
     var sites: std.ArrayList(i64) = .empty;
     defer sites.deinit(allocator);
@@ -257,6 +261,9 @@ pub fn pruneBefore(allocator: std.mem.Allocator, writer: anytype, cutoff_ms: i64
             try database.exec("BEGIN IMMEDIATE");
             errdefer database.exec("ROLLBACK") catch {};
             const oldest = "(SELECT visitor_id FROM visitors WHERE site_id=?1 AND last_seen_ms<?2 ORDER BY last_seen_ms,visitor_id LIMIT ?3)";
+            // A withdrawal outlives the visitor's data: their ID stays
+            // refused while a browser may still hold it (see below).
+            try database.run(allocator, "INSERT INTO forgotten_visitors(site_id,visitor_id,forgotten_at_ms,refused) SELECT site_id,visitor_id,?4,1 FROM visitors WHERE site_id=?1 AND visitor_id IN " ++ oldest ++ " AND consent_state IN ('denied','gpc') ON CONFLICT DO UPDATE SET refused=1", .{ site_id, cutoff_ms, prune_batch, now_ms });
             try database.run(allocator, "DELETE FROM visitor_links WHERE site_id=?1 AND visitor_id IN " ++ oldest, .{ site_id, cutoff_ms, prune_batch });
             removed += database.changes();
             try database.run(allocator, "DELETE FROM visitors WHERE site_id=?1 AND visitor_id IN " ++ oldest, .{ site_id, cutoff_ms, prune_batch });
@@ -268,19 +275,21 @@ pub fn pruneBefore(allocator: std.mem.Allocator, writer: anytype, cutoff_ms: i64
     }
     // What is left only describes that time: receipts and daily aggregates.
     inline for (.{
-        "DELETE FROM record_receipts WHERE (site_id,event_id) IN (SELECT site_id,event_id FROM record_receipts WHERE received_at_ms<?1 LIMIT ?2)",
-        "DELETE FROM click_cells WHERE (site_id,path,day,viewport_class,element,x,y) IN (SELECT site_id,path,day,viewport_class,element,x,y FROM click_cells WHERE day<strftime('%Y-%m-%d',?1/1000,'unixepoch') LIMIT ?2)",
-        "DELETE FROM form_fields WHERE (site_id,path,day,form,field) IN (SELECT site_id,path,day,form,field FROM form_fields WHERE day<strftime('%Y-%m-%d',?1/1000,'unixepoch') LIMIT ?2)",
-        "DELETE FROM visitor_weeks WHERE (site_id,week,visitor_id) IN (SELECT site_id,week,visitor_id FROM visitor_weeks WHERE week<(?1/86400000+3)/7 LIMIT ?2)",
-        "DELETE FROM rollups WHERE (site_id,dim,day,key) IN (SELECT site_id,dim,day,key FROM rollups WHERE day<strftime('%Y-%m-%d',?1/1000,'unixepoch') LIMIT ?2)",
-        "DELETE FROM rollup_days WHERE (site_id,day) IN (SELECT site_id,day FROM rollup_days WHERE day<strftime('%Y-%m-%d',?1/1000,'unixepoch') LIMIT ?2)",
-        "DELETE FROM vitals_daily WHERE (site_id,metric,day,path,value) IN (SELECT site_id,metric,day,path,value FROM vitals_daily WHERE day<strftime('%Y-%m-%d',?1/1000,'unixepoch') LIMIT ?2)",
-        "DELETE FROM forgotten_visitors WHERE (site_id,visitor_id) IN (SELECT site_id,visitor_id FROM forgotten_visitors WHERE forgotten_at_ms<?1 LIMIT ?2)",
-    }) |sql| {
+        .{ "DELETE FROM record_receipts WHERE (site_id,event_id) IN (SELECT site_id,event_id FROM record_receipts WHERE received_at_ms<?1 LIMIT ?2)", cutoff_ms },
+        .{ "DELETE FROM click_cells WHERE (site_id,path,day,viewport_class,element,x,y) IN (SELECT site_id,path,day,viewport_class,element,x,y FROM click_cells WHERE day<strftime('%Y-%m-%d',?1/1000,'unixepoch') LIMIT ?2)", cutoff_ms },
+        .{ "DELETE FROM form_fields WHERE (site_id,path,day,form,field) IN (SELECT site_id,path,day,form,field FROM form_fields WHERE day<strftime('%Y-%m-%d',?1/1000,'unixepoch') LIMIT ?2)", cutoff_ms },
+        .{ "DELETE FROM visitor_weeks WHERE (site_id,week,visitor_id) IN (SELECT site_id,week,visitor_id FROM visitor_weeks WHERE week<(?1/86400000+3)/7 LIMIT ?2)", cutoff_ms },
+        .{ "DELETE FROM rollups WHERE (site_id,dim,day,key) IN (SELECT site_id,dim,day,key FROM rollups WHERE day<strftime('%Y-%m-%d',?1/1000,'unixepoch') LIMIT ?2)", cutoff_ms },
+        .{ "DELETE FROM rollup_days WHERE (site_id,day) IN (SELECT site_id,day FROM rollup_days WHERE day<strftime('%Y-%m-%d',?1/1000,'unixepoch') LIMIT ?2)", cutoff_ms },
+        .{ "DELETE FROM vitals_daily WHERE (site_id,metric,day,path,value) IN (SELECT site_id,metric,day,path,value FROM vitals_daily WHERE day<strftime('%Y-%m-%d',?1/1000,'unixepoch') LIMIT ?2)", cutoff_ms },
+        // Refused IDs follow the browser's 13 months, not the data: one
+        // cannot be held anywhere longer than that after it was refused.
+        .{ "DELETE FROM forgotten_visitors WHERE (site_id,visitor_id) IN (SELECT site_id,visitor_id FROM forgotten_visitors WHERE forgotten_at_ms<?1 LIMIT ?2)", now_ms - visitor_id_lifetime_ms },
+    }) |entry| {
         while (true) {
             const database = writer.lockWrite();
             defer writer.unlockWrite();
-            try database.run(allocator, sql, .{ cutoff_ms, prune_batch });
+            try database.run(allocator, entry[0], .{ entry[1], prune_batch });
             const changed = database.changes();
             removed += changed;
             if (changed < prune_batch) break;

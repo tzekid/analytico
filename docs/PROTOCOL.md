@@ -18,7 +18,10 @@ Bodies are strict UTF-8 JSON, at most 8 KiB, with no unknown fields. A batch
 contains the protocol version (`v`: 2, or 1 for snippets deployed before
 v2), site public ID, client send time, and 1-16 closed records. Identifiers
 are canonical lowercase UUIDs. Strings, arrays, paths, properties,
-timestamps, and monetary values have fixed bounds. Full URLs and arbitrary
+timestamps, and monetary values have fixed bounds. Record times first move
+by the batch's clock offset (receipt time minus send time), so a device
+clock that is off neither reorders nor loses records; the moved times must
+lie between 90 days before receipt and five minutes after it. Full URLs and arbitrary
 query strings are rejected rather than normalized into storage.
 
 Version 1 allows the record types `page_view`, `page_summary` and `event`
@@ -42,10 +45,11 @@ with the fields they had in v1. Version 2 adds:
 - `identify` with `user_id`: links the visitor to the operator's user ID,
   which is stored only as a keyed hash;
 - `forget`: erases everything stored about `visitor_id`, or from `/i`,
-  everything linked to `user_id`.
+  everything linked to `user_id`, whatever the site's mode is now.
 
 Semantic event names are canonical identifiers. Flat event properties allow
-at most eight keys with string, integer, boolean, or null values. Money uses
+at most eight keys with string, integer, boolean, or null values; a string
+shaped like an email address is stored as `[email]`. Money uses
 integer `value_minor` plus three-letter currency.
 
 Each `(site,event_id)` is idempotent. Reusing an event ID with the same
@@ -94,7 +98,9 @@ visitors.
 When a remembered visitor withdraws consent, the server stores that decision
 and refuses further replay uploads for the visitor. A dropped identity with
 `drop_state: "denied"` keeps the tracker declined rather than starting Full
-mode again. Granting consent again starts a new identity.
+mode again. Granting consent again starts a new identity: a grant that
+names a withdrawn or forgotten ID is answered with `drop`, and the tracker
+sends it again under a new ID.
 
 ## Server batches
 

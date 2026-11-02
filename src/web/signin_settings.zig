@@ -138,16 +138,23 @@ pub fn section(ctx: *Ctx) !void {
         };
         try row(w, method, if (method == .passkey) "Passkeys" else method.label(), detail);
         if (main != null and main.? == method) try w.writeAll("<span class=\"pill pill-brand\">Shown first</span>");
-        if (method.provider() != null) try render(w, "<a class=\"btn\" href=\"/settings/signin?provider={name}\">{action}</a>", .{ .name = method, .action = if (is_configured) "Edit" else "Set up" });
-        if (is_configured) try render(w,
+        // Controls only for those who may use them (see post).
+        if (method.provider() != null and ctx.can(.owner)) try render(w, "<a class=\"btn\" href=\"/settings/signin?provider={name}\">{action}</a>", .{ .name = method, .action = if (is_configured) "Edit" else "Set up" });
+        if (is_configured and ctx.can(.admin)) try render(w,
             \\<form method="post" action="/settings/signin/toggle" class="switch" title="{title}"><input type="hidden" name="method" value="{name}"><input type="checkbox" name="enabled" value="1" aria-label="Allow {label}" data-autosubmit{!checked}></form>
         , .{ .title = if (is_enabled) "Turn off" else "Turn on", .name = method, .label = method.label(), .checked = if (is_enabled) " checked" else "" });
         try w.writeAll("</div></div>");
     }
-    try w.writeAll("</div><form class=\"card-foot on-canvas start flex-wrap\" method=\"post\" action=\"/settings/signin/primary\"><label class=\"row\"><strong class=\"t-13\">Shown first on the sign-in page</strong><select class=\"input input-l\" name=\"method\" data-autosubmit>");
+    try w.writeAll("</div>");
+    if (!ctx.can(.admin)) {
+        try w.writeAll("</section>");
+        return;
+    }
+    try w.writeAll("<form class=\"card-foot on-canvas start flex-wrap\" method=\"post\" action=\"/settings/signin/primary\"><label class=\"row\"><strong class=\"t-13\">Shown first on the sign-in page</strong><select class=\"input input-l\" name=\"method\" data-autosubmit>");
     for (try signin.enabledMethods(arena, db)) |method| try render(w, "<option value=\"{name}\"{!selected}>{label}</option>", .{ .name = method, .selected = if (main != null and main.? == method) " selected" else "", .label = method.label() });
     try w.writeAll("</select></label><span class=\"hint\">Everything else sits behind “Other ways to sign in”.</span></form></section>");
 
+    if (!ctx.can(.owner)) return;
     if (ctx.param("provider")) |name| if (std.meta.stringToEnum(oidc.Provider, name)) |provider| try providerDialog(ctx, provider, origin);
 }
 
@@ -197,10 +204,13 @@ pub fn post(ctx: *Ctx, action: []const u8) !void {
             return std.mem.eql(u8, a, b);
         }
     }.eq;
-    // Provider credentials and instance-wide sign-in policy belong to
-    // administrators. Everyone may still manage only their own methods.
+    // Instance-wide sign-in policy belongs to administrators; provider
+    // credentials to the owner, since a provider vouches for everyone's
+    // linked accounts (an admin's own issuer could sign in as the owner).
+    // Everyone may still manage only their own methods.
     const global = is(action, "provider") or is(action, "toggle") or is(action, "primary");
     if (global and !ctx.can(.admin)) return @import("app.zig").forbidden(ctx);
+    if (is(action, "provider") and !ctx.can(.owner)) return @import("app.zig").forbidden(ctx);
     if (is(action, "provider")) return saveProvider(ctx);
     // Argon2 takes a while; never hold the write lock for it.
     var new_hash: []const u8 = "";

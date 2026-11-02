@@ -29,6 +29,13 @@ await journey("http", async (t) => {
   };
   // Probes and snippet checkers that send HEAD get the GET answer's status.
   for (const path of ["/healthz", "/readyz"]) assert.equal((await fetch(`http://127.0.0.1:${t.port}${path}`, { method: "HEAD" })).status, 200, path);
+  // One client (an IPv6 /64 counts as one) can't fill the table of sign-ins
+  // being started for everyone else.
+  const instance = `http://127.0.0.1:${t.port}`;
+  const startSignIn = (ip) => fetch(`${instance}/auth/passkey/options`, { method: "POST", headers: { origin: instance, "content-type": "application/json", "x-forwarded-for": ip }, body: JSON.stringify({ purpose: "login" }) });
+  for (let attempt = 0; attempt < 30; attempt++) assert.equal((await startSignIn("2001:db8:1:2::7")).status, 200, `attempt ${attempt}`);
+  assert.equal((await startSignIn("2001:db8:1:2::99")).status, 429);
+  assert.equal((await startSignIn("198.51.100.8")).status, 200);
   try {
     const head = "POST /e HTTP/1.1\r\nHost: localhost\r\nContent-Length: 100\r\nContent-Type: text/plain\r\n";
     async function connect() {

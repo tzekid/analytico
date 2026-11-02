@@ -345,7 +345,9 @@ fn rangePopover(ctx: *Ctx, view: data.View, path: []const u8) !void {
     }
     try render(w, "<span class=\"range-custom\"{!current}>Custom range</span></nav>", .{ .current = if (view.range.kind == .custom and !matched) " aria-current=\"true\"" else "" });
     const first = try data.firstDay(arena, ctx.db, view.site.id) orelse today;
-    try render(w, "<form method=\"get\" action=\"{path}\" class=\"range-form form-grid\" data-range-form><input type=\"hidden\" name=\"range\" value=\"custom\">", .{ .path = path });
+    // `data-for`, as on the filter popover: the script keeps this form across
+    // patches only while the view it carries stays the same.
+    try render(w, "<form method=\"get\" action=\"{path}\" class=\"range-form form-grid\" data-range-form data-for=\"{view}\"><input type=\"hidden\" name=\"range\" value=\"custom\">", .{ .path = path, .view = try view.href(arena, path, &.{}) });
     try hiddenState(ctx, view, &.{ "range", "from", "to" });
     const first_date = data.civil(first);
     const today_date = data.civil(today);

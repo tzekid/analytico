@@ -44,7 +44,7 @@ pub fn load(arena: std.mem.Allocator, db: *db_mod.Db, master: [32]u8, provider: 
 pub fn validIssuer(issuer: []const u8) bool {
     if (issuer.len > 255 or std.mem.endsWith(u8, issuer, "/")) return false;
     if (std.mem.startsWith(u8, issuer, "https://")) return issuer.len > 8;
-    return std.mem.startsWith(u8, issuer, "http://localhost") or std.mem.startsWith(u8, issuer, "http://127.0.0.1");
+    return net.loopbackHttp(issuer);
 }
 
 pub const Discovery = struct { issuer: []const u8, authorization_endpoint: []const u8, token_endpoint: []const u8, jwks_uri: []const u8 = "", revocation_endpoint: []const u8 = "" };

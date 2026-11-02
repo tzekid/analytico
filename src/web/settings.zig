@@ -52,29 +52,6 @@ fn keyProvider(name: []const u8) ai.Provider {
     return if (provider == .chatgpt) .anthropic else provider;
 }
 
-fn localAiEndpoint(url: []const u8) bool {
-    const prefix = "http://";
-    if (!std.mem.startsWith(u8, url, prefix)) return false;
-    const end = std.mem.findAnyPos(u8, url, prefix.len, "/?#") orelse url.len;
-    const authority = url[prefix.len..end];
-    if (authority.len == 0 or std.mem.findScalar(u8, authority, '@') != null) return false;
-    const colon = std.mem.findScalar(u8, authority, ':');
-    const host = if (colon) |at| authority[0..at] else authority;
-    if (colon) |at| {
-        if (at + 1 == authority.len) return false;
-        _ = std.fmt.parseInt(u16, authority[at + 1 ..], 10) catch return false;
-    }
-    return std.mem.eql(u8, host, "127.0.0.1") or std.ascii.eqlIgnoreCase(host, "localhost");
-}
-
-test localAiEndpoint {
-    try std.testing.expect(localAiEndpoint("http://127.0.0.1:11434/v1"));
-    try std.testing.expect(localAiEndpoint("http://localhost:8080/v1"));
-    try std.testing.expect(!localAiEndpoint("http://localhost:80@remote.example/v1"));
-    try std.testing.expect(!localAiEndpoint("http://localhost.example/v1"));
-    try std.testing.expect(!localAiEndpoint("https://127.0.0.1/v1"));
-}
-
 fn is(value: []const u8, expected: []const u8) bool {
     return std.mem.eql(u8, value, expected);
 }
@@ -349,6 +326,24 @@ pub fn pruneBackups(arena: std.mem.Allocator, io: std.Io, data_dir: []const u8, 
         std.Io.Dir.cwd().deleteFile(io, try std.fmt.allocPrint(arena, "{s}.key", .{path})) catch {};
         std.Io.Dir.cwd().deleteFile(io, try std.fmt.allocPrint(arena, "{s}.replays", .{path})) catch {};
     }
+    // Copies cut off before their key was written (the process stopped
+    // midway) are never listed; once surely not still being written, they go.
+    var dir = std.Io.Dir.cwd().openDir(io, directory, .{ .iterate = true }) catch return;
+    defer dir.close(io);
+    var abandoned: std.ArrayList([]const u8) = .empty;
+    var iterator = dir.iterate();
+    const hour_ago = @import("../domain.zig").nowMs() - data.hour_ms;
+    while (try iterator.next(io)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".db")) continue;
+        if (dir.statFile(io, try std.fmt.allocPrint(arena, "{s}.key", .{entry.name}), .{})) |_| continue else |_| {}
+        const stat = dir.statFile(io, entry.name, .{}) catch continue;
+        if (stat.mtime.toMilliseconds() < hour_ago) try abandoned.append(arena, try arena.dupe(u8, entry.name));
+    }
+    // With their write-ahead logs: a copy cut off midway keeps most of its
+    // pages there.
+    for (abandoned.items) |name| inline for (.{ "", ".replays" }) |database| inline for (.{ "", "-wal", "-shm" }) |suffix| {
+        dir.deleteFile(io, try std.fmt.allocPrint(arena, "{s}" ++ database ++ suffix, .{name})) catch {};
+    };
 }
 
 fn backupsSection(ctx: *Ctx) !void {
@@ -728,7 +723,7 @@ fn aiPost(ctx: *Ctx, action: []const u8) !void {
     };
     if (provider != .compatible and key.len < 10) return retry.go(ctx, slug, provider, "Paste the API key from your provider’s console.");
     if (model.len == 0 or model.len > 100) return retry.go(ctx, slug, provider, "Choose a model.");
-    if (provider == .compatible and !localAiEndpoint(base_url)) return retry.go(ctx, slug, provider, "Use a local endpoint on 127.0.0.1 or localhost.");
+    if (provider == .compatible and !@import("../net.zig").loopbackHttp(base_url)) return retry.go(ctx, slug, provider, "Use a local endpoint on 127.0.0.1 or localhost.");
     const config: ai.Config = .{ .provider = provider, .model = model, .base_url = base_url, .key = key, .budget_cents = std.math.clamp(budget, 0, 100_000) * 100, .share_paths = true, .share_sources = true };
     ctx.extendDeadline(60);
     const reply = ai.call(arena, ctx.shared.io, config, "Reply with the single word OK.", "Connection check from Analytico.", 16) catch |err| return retry.go(ctx, slug, provider, ai.errorText(err));

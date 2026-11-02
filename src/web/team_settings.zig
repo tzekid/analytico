@@ -45,7 +45,9 @@ pub fn teamSection(ctx: *Ctx, notice: []const u8) !void {
             .you = if (me) "You · " else "",
             .status = if (!person.joined) "invited — hasn’t joined yet" else if (methods.items.len == 0) "joined" else try std.mem.join(arena, " + ", methods.items),
         });
-        if (role == .owner or me or !ctx.can(.admin)) {
+        // Only the owner changes an admin (see teamPost).
+        const managed = !me and role != .owner and ctx.can(.admin) and (role != .admin or ctx.can(.owner));
+        if (!managed) {
             try render(w, "<span class=\"pill pill-plain\">{role}</span>", .{ .role = role.label() });
         } else {
             try render(w, "<form method=\"post\" action=\"/settings/team/role/{id}\"><select class=\"input input-xs\" name=\"role\" data-autosubmit aria-label=\"Role of {email}\">", .{ .id = person.id, .email = person.email });
@@ -76,7 +78,7 @@ pub fn teamSection(ctx: *Ctx, notice: []const u8) !void {
             if (linkAllowed(ctx, role)) try render(w,
                 \\<form class="inline" method="post" action="/settings/team/invite"><input type="hidden" name="email" value="{email}"><button class="btn btn-quiet">{label}</button></form>
             , .{ .email = person.email, .label = if (person.joined) "Sign-in link" else "New invite link" });
-            if (!me and role != .owner) {
+            if (managed) {
                 try render(w,
                     \\<form class="inline" method="post" action="/settings/team/remove/{id}" data-confirm="Remove {email}? They are signed out everywhere."><button class="btn btn-quiet btn-icon" aria-label="Remove">
                 , .{ .id = person.id, .email = person.email });
@@ -173,6 +175,9 @@ pub fn teamPost(ctx: *Ctx, action: []const u8, target: []const u8, page: anytype
         if (try person.step() != .row) return fail(ctx, "team", "Unknown person.");
         const email = try arena.dupe(u8, person.columnText(0));
         if (std.mem.eql(u8, person.columnText(1), "owner")) return fail(ctx, "team", "The owner’s access can’t be changed.");
+        // Only the owner changes an admin's access: lowered first, an admin
+        // could otherwise be given a sign-in link by another (linkAllowed).
+        if (std.mem.eql(u8, person.columnText(1), "admin") and !ctx.can(.owner)) return fail(ctx, "team", "Only the owner can change an admin’s access.");
         const role: Role = if (std.mem.eql(u8, action, "role")) (std.meta.stringToEnum(Role, try ctx.field("role")) orelse return fail(ctx, "team", "Unknown role.")) else .viewer;
         if (role == .owner) return fail(ctx, "team", "There is one owner.");
         const db = ctx.shared.lockWrite();

@@ -84,10 +84,9 @@ pub const Shared = struct {
     ingest_leading: bool = false,
     live: live.Hub = .{},
     heat_cache: @import("web/heatmaps.zig").Cache = .{},
-    login_lock: std.Io.Mutex = .init,
-    login_failures: [64]LoginFailure = @splat(.{}),
-
-    pub const LoginFailure = struct { ip_hash: u64 = 0, count: u32 = 0, window_start_ms: i64 = 0 };
+    /// Failed sign-ins, and sign-in attempts started without an account.
+    login_failures: @import("web/auth.zig").Limiter = .{},
+    challenges_started: @import("web/auth.zig").Limiter = .{},
 
     pub fn lockWrite(self: *Shared) *db_mod.Db {
         self.write_lock.lockUncancelable(self.io);

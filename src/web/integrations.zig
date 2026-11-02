@@ -449,7 +449,7 @@ fn post(ctx: *Ctx, action: []const u8) !void {
     var config: Config = if (existing) |value| value.config else .{};
     const api = std.mem.trim(u8, try ctx.field("api"), " /");
     if (api.len != 0) {
-        if (!(std.mem.startsWith(u8, api, "https://") or std.mem.startsWith(u8, api, "http://127.0.0.1") or std.mem.startsWith(u8, api, "http://localhost"))) return back(ctx, site, "!API endpoints use https.");
+        if (!(std.mem.startsWith(u8, api, "https://") or net.loopbackHttp(api))) return back(ctx, site, "!API endpoints use https.");
         config.api = api;
     }
     switch (kind) {
@@ -516,7 +516,7 @@ fn channelAdd(ctx: *Ctx, site: data.Site) !void {
     const name = std.mem.trim(u8, try ctx.field("name"), " ");
     domain.validateText(name, 60, false) catch return back(ctx, site, "!Give the channel a name.");
     const url = std.mem.trim(u8, try ctx.field("url"), " ");
-    if (!(std.mem.startsWith(u8, url, "https://") or std.mem.startsWith(u8, url, "http://127.0.0.1") or std.mem.startsWith(u8, url, "http://localhost")) or url.len > 500) return back(ctx, site, "!Channel URLs use https.");
+    if (!(std.mem.startsWith(u8, url, "https://") or net.loopbackHttp(url)) or url.len > 500) return back(ctx, site, "!Channel URLs use https.");
     var key: [32]u8 = undefined;
     try ctx.shared.io.randomSecure(&key);
     const signing = std.fmt.bytesToHex(key, .lower);
@@ -614,20 +614,40 @@ fn deliver(arena: std.mem.Allocator, shared: *Shared, channel: Channel, slack_te
 
 /// Goal events since the last delivery go to webhooks, oldest first.
 pub fn deliverGoals(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, now_ms: i64) !void {
-    if (try db.scalar(arena, i64, "SELECT (SELECT count(*) FROM channels WHERE kind='webhook')+(SELECT count(*) FROM devices WHERE instr(','||kinds||',',',goal,')>0)", .{}) == 0) return;
-    const cursor = std.fmt.parseInt(i64, (try data.setting(arena, db, .@"webhooks.cursor")) orelse "0", 10) catch 0;
-    const since = if (cursor == 0) now_ms - 60_000 else cursor;
+    const stored = (try data.setting(arena, db, .@"webhooks.cursor")) orelse "";
+    if (try db.scalar(arena, i64, "SELECT (SELECT count(*) FROM channels WHERE kind='webhook')+(SELECT count(*) FROM devices WHERE instr(','||kinds||',',',goal,')>0)", .{}) == 0) {
+        // Nothing listens: forget the place, so goals reached meanwhile are
+        // never sent as new once something listens again.
+        if (stored.len != 0) {
+            const write = shared.lockWrite();
+            defer shared.unlockWrite();
+            try data.putSetting(arena, write, .@"webhooks.cursor", null);
+        }
+        return;
+    }
+    // The last goal sent: its receipt time and event ID. "~" sorts after
+    // every ID, so a time alone means all of that millisecond went out.
+    var parts = std.mem.splitScalar(u8, stored, ':');
+    const since = std.fmt.parseInt(i64, parts.first(), 10) catch now_ms - 60_000;
+    const since_id = parts.next() orelse "~";
+    // Counted as reports count goals: people, not crawlers or monitors, and
+    // an order the browser and the server both report once.
     var statement = try db.prepare(arena,
-        \\SELECT s.slug,e.name,e.value_minor,coalesce(e.currency,''),e.received_at_ms,g.name,s.id FROM events e JOIN goals g ON g.site_id=e.site_id AND g.kind='event' AND g.match_value=e.name
-        \\JOIN sites s ON s.id=e.site_id WHERE e.received_at_ms>? AND e.internal=0 ORDER BY e.received_at_ms LIMIT 200
+        \\SELECT s.slug,e.name,e.value_minor,coalesce(e.currency,''),e.received_at_ms,g.name,s.id,e.event_id FROM events e JOIN goals g ON g.site_id=e.site_id AND g.kind='event' AND g.match_value=e.name
+        \\JOIN sites s ON s.id=e.site_id WHERE e.received_at_ms>=?1 AND (e.received_at_ms>?1 OR e.event_id>?2) AND e.internal=0
+        \\ AND (e.source='server' OR e.traffic_class IN ('human_like','unknown'))
+        \\ AND (e.order_id IS NULL OR NOT EXISTS(SELECT 1 FROM events d WHERE d.site_id=e.site_id AND d.order_id=e.order_id AND d.name=e.name AND (d.received_at_ms<e.received_at_ms OR (d.received_at_ms=e.received_at_ms AND d.event_id<e.event_id))))
+        \\ORDER BY e.received_at_ms,e.event_id LIMIT 200
     );
     defer statement.deinit();
     try statement.bindInt(1, since);
-    var latest = since;
+    try statement.bindText(2, since_id);
+    var latest: []const u8 = "";
     const Item = struct { site: []const u8, event: []const u8, value: ?i64, currency: []const u8, at: i64, goal: []const u8, site_id: i64 };
     var items: std.ArrayList(Item) = .empty;
     while (try statement.step() == .row) {
         try items.append(arena, .{ .site = try arena.dupe(u8, statement.columnText(0)), .event = try arena.dupe(u8, statement.columnText(1)), .value = if (statement.columnType(2) == db_mod.sqlite.SQLITE_NULL) null else statement.columnInt(2), .currency = try arena.dupe(u8, statement.columnText(3)), .at = statement.columnInt(4), .goal = try arena.dupe(u8, statement.columnText(5)), .site_id = statement.columnInt(6) });
+        latest = try std.fmt.allocPrint(arena, "{d}:{s}", .{ statement.columnInt(4), statement.columnText(7) });
     }
     // A webhook that fails misses the rest of this run's goals, as it
     // would have anyway, so a dead endpoint costs one timeout per run
@@ -636,7 +656,6 @@ pub fn deliverGoals(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, n
     const working = try arena.alloc(bool, hooks.len);
     @memset(working, true);
     for (items.items) |item| {
-        latest = @max(latest, item.at);
         const notice: Notice = .{ .kind = "goal", .site = item.site, .text = try std.fmt.allocPrint(arena, "Goal reached: {s}", .{item.goal}), .event = item.event, .value_minor = item.value, .currency = item.currency, .at_ms = item.at };
         for (hooks, working) |channel, *up| {
             if (!up.* or std.mem.eql(u8, channel.kind, "slack")) continue;
@@ -646,7 +665,8 @@ pub fn deliverGoals(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, n
     try pushGoals(arena, shared, db, items.items);
     const write = shared.lockWrite();
     defer shared.unlockWrite();
-    try data.putSetting(arena, write, .@"webhooks.cursor", try std.fmt.allocPrint(arena, "{d}", .{if (items.items.len == 0) @max(since, now_ms - 60_000) else latest}));
+    const cursor = if (items.items.len != 0) latest else if (since < now_ms - 60_000) try std.fmt.allocPrint(arena, "{d}", .{now_ms - 60_000}) else stored;
+    if (cursor.len != 0) try data.putSetting(arena, write, .@"webhooks.cursor", cursor);
 }
 
 /// One notification per website per run, so a busy minute is one buzz:
@@ -788,6 +808,7 @@ fn importGa4(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, site: da
             }
             var progressed = current.config;
             progressed.cursor = next_month;
+            progressed.until = config.until;
             try write.run(arena, "UPDATE integrations SET config=? WHERE site_id=? AND kind='ga4'", .{ try sealConfig(arena, shared.io, shared.master_key, progressed), site.id });
             config.cursor = next_month;
             try write.exec("COMMIT");
@@ -799,15 +820,20 @@ fn importGa4(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, site: da
     return std.fmt.allocPrint(arena, "Google Analytics import: {d} month{s}, {d} rows.", .{ months, if (months == 1) "" else "s", rows_stored });
 }
 
+/// Conversions per upload request; a sync sends batches until none are left.
+const conversion_batch = 200;
+
 const Conversion = struct { event_id: []const u8, value: i64, currency: []const u8, at_ms: i64, order: []const u8, click: []const u8 };
 
-/// Orders in the last 30 days from visits with an ad click ID of `prefix`
+/// Recent orders from visits with an ad click ID of `prefix`
 /// that weren't uploaded to `destination` yet.
-fn pendingConversions(arena: std.mem.Allocator, db: *db_mod.Db, site: data.Site, prefix: []const u8, destination: []const u8) ![]Conversion {
+/// `days`: how far back the destination takes conversions (Meta refuses a
+/// whole request that holds one older than 7 days).
+fn pendingConversions(arena: std.mem.Allocator, db: *db_mod.Db, site: data.Site, prefix: []const u8, destination: []const u8, days: i64) ![]Conversion {
     const now = domain.nowMs();
     const view = try data.View.parse(arena, site, .{}, now);
     var sql = data.Sql.init(arena);
-    try customers.ordersCte(&sql, view, now - 30 * data.day_ms, now + 1);
+    try customers.ordersCte(&sql, view, now - days * data.day_ms, now + 1);
     try sql.add(" SELECT o.event_id,o.v,o.c,o.t,o.k,(SELECT pv.click_id FROM page_views pv WHERE pv.site_id=");
     try sql.int(site.id);
     try sql.add(" AND pv.click_id LIKE ");
@@ -818,7 +844,8 @@ fn pendingConversions(arena: std.mem.Allocator, db: *db_mod.Db, site: data.Site,
     // Uploads that failed go again on the next sync; sent ones never twice.
     try sql.add(" AND u.event_id=o.event_id AND u.state='sent' AND u.destination=");
     try sql.str(destination);
-    try sql.add(") LIMIT 200");
+    try sql.add(") ORDER BY o.t,o.event_id LIMIT ");
+    try sql.int(conversion_batch);
     var statement = try sql.prepare(db);
     defer statement.deinit();
     var out: std.ArrayList(Conversion) = .empty;
@@ -880,9 +907,10 @@ fn syncGoogleAds(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, site
     }
     // Conversions out.
     var sent: usize = 0;
-    if (config.conversion_action.len != 0) {
-        const conversions = try pendingConversions(arena, db, site, "gclid", "google_ads");
-        if (conversions.len != 0) {
+    if (config.conversion_action.len != 0) while (true) {
+        const conversions = try pendingConversions(arena, db, site, "gclid", "google_ads", 30);
+        if (conversions.len == 0) break;
+        {
             var body: std.Io.Writer.Allocating = .init(arena);
             try body.writer.writeAll("{\"conversions\":[");
             for (conversions, 0..) |conversion, index| {
@@ -902,9 +930,10 @@ fn syncGoogleAds(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, site
             const upload = try fetch(arena, .POST, try std.fmt.allocPrint(arena, "{s}/v17/customers/{s}:uploadClickConversions", .{ config.api, config.customer_id }), body.written(), "application/json", &headers);
             try recordUploads(arena, shared, site, conversions, "google_ads", upload.status == 200);
             if (upload.status != 200) return error.IntegrationRejected;
-            sent = conversions.len;
+            sent += conversions.len;
         }
-    }
+        if (conversions.len < conversion_batch) break;
+    };
     return std.fmt.allocPrint(arena, "Google Ads synced: {d} cost rows in, {d} conversion{s} out.", .{ days, sent, if (sent == 1) "" else "s" });
 }
 
@@ -936,9 +965,10 @@ fn syncMeta(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, site: dat
         try write.exec("COMMIT");
     }
     var sent: usize = 0;
-    if (config.pixel_id.len != 0) {
-        const conversions = try pendingConversions(arena, db, site, "fbclid", "meta");
-        if (conversions.len != 0) {
+    if (config.pixel_id.len != 0) while (true) {
+        const conversions = try pendingConversions(arena, db, site, "fbclid", "meta", 7);
+        if (conversions.len == 0) break;
+        {
             var body: std.Io.Writer.Allocating = .init(arena);
             try body.writer.writeAll("{\"data\":[");
             for (conversions, 0..) |conversion, index| {
@@ -957,9 +987,10 @@ fn syncMeta(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, site: dat
             const upload = try fetch(arena, .POST, url.written(), body.written(), "application/json", &.{});
             try recordUploads(arena, shared, site, conversions, "meta", upload.status == 200);
             if (upload.status != 200) return error.IntegrationRejected;
-            sent = conversions.len;
+            sent += conversions.len;
         }
-    }
+        if (conversions.len < conversion_batch) break;
+    };
     return std.fmt.allocPrint(arena, "Meta synced: {d} cost rows in, {d} conversion{s} out.", .{ days, sent, if (sent == 1) "" else "s" });
 }
 

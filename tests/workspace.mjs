@@ -492,6 +492,15 @@ await journey("access", async (t) => {
   assert.equal(read("SELECT count(*) n FROM user_invites i JOIN users u ON u.id=i.user_id WHERE u.role='owner'")[0].n, 0);
   const linked = await audited(async () => assert.match(await (await post(admin, "/settings/team/invite", { email: "viewer@example.test" })).text(), /\/invite\/[0-9a-f]{64}/));
   assert.deepEqual(linked, { action: "team.signin_link", detail: "Created a sign-in link for viewer@example.test", actor: "admin@example.test" });
+  // Only the owner changes an admin: lowered first, an admin could be given
+  // a sign-in link by another.
+  await invite("second-admin@example.test", "admin");
+  const secondAdmin = read("SELECT id FROM users WHERE email='second-admin@example.test'")[0].id;
+  await post(admin, `/settings/team/role/${secondAdmin}`, { role: "editor" });
+  assert.equal(read("SELECT role FROM users WHERE id=?", secondAdmin)[0].role, "admin");
+  await post(context, `/settings/team/remove/${secondAdmin}`);
+  // So are sign-in providers: one vouches for everyone's linked accounts.
+  assert.equal((await post(admin, "/settings/signin/provider", { provider: "google", client_id: "admin-client", client_secret: "admin-secret", issuer: origin })).status(), 403);
 
   // A member limited to one website doesn't see another one's name in settings.
   const settingsPage = await (await viewer.request.get(`${origin}/settings/signin?site=hidden`)).text();
@@ -592,6 +601,14 @@ await journey("access", async (t) => {
   await post(context, "/settings/sites/update", { site: "shop", name: "", mode: "full" });
   await signed({ type: "forget", visitor_id: paused });
   assert.equal(read("SELECT count(*) n FROM page_views WHERE visitor_id=?", paused)[0].n, 0);
+  await post(context, "/settings/sites/update", { site: "shop", name: "", mode: "full", enabled: "1" });
+  // And what Full mode collected after the website moves to another mode.
+  const [earlier, earlierUser] = [randomUUID(), randomUUID()];
+  await browserVisit(earlier);
+  await signed({ type: "identify", visitor_id: earlier, user_id: earlierUser });
+  await post(context, "/settings/sites/update", { site: "shop", name: "", mode: "session", enabled: "1" });
+  await signed({ type: "forget", user_id: earlierUser });
+  assert.equal(read("SELECT count(*) n FROM page_views WHERE visitor_id=?", earlier)[0].n, 0);
   await post(context, "/settings/sites/update", { site: "shop", name: "", mode: "full", enabled: "1" });
 
   // The CLI's deletions are logged too, once the server has stopped.

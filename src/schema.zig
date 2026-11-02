@@ -16,10 +16,20 @@ const std = @import("std");
 const db_mod = @import("db.zig");
 
 const baseline_version: i64 = 6;
-pub const current_version: i64 = 13;
+pub const current_version: i64 = 14;
 
 /// Migrations after the baseline: index 0 takes schema 6 to 7.
-const migrations = [_][]const u8{ chatgpt_sql, draft_notes_sql, scale_sql, apps_sql, push_sql, consent_state_sql, forgotten_sql };
+const migrations = [_][]const u8{ chatgpt_sql, draft_notes_sql, scale_sql, apps_sql, push_sql, consent_state_sql, forgotten_sql, forgotten_refused_sql };
+
+/// 14: a visitor who withdrew consent and was then forgotten stays refused:
+/// their other tabs and domains keep the refusal instead of starting over.
+const forgotten_refused_sql =
+    \\BEGIN IMMEDIATE;
+    \\ALTER TABLE forgotten_visitors ADD COLUMN refused INTEGER NOT NULL DEFAULT 0 CHECK(refused IN (0,1));
+    \\INSERT INTO schema_migrations VALUES(14,'forgotten-refused',unixepoch('subsec')*1000);
+    \\PRAGMA user_version=14;
+    \\COMMIT;
+;
 
 /// 13: a forgotten visitor's ID stays refused, so a tab or another of the
 /// site's domains that still holds it cannot start them again. Only the

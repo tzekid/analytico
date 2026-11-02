@@ -515,10 +515,15 @@ pub fn route(ctx: *Ctx, action: []const u8) !void {
         return ctx.done("Saved.", "/settings/ai", .{});
     }
     if (is(action, "sign-out")) {
-        const current = try account(arena, db, ctx.shared.master_key, user_id);
-        const auth_issuer = try issuer(arena, db);
-        try db.run(arena, "UPDATE chatgpt_accounts SET tokens=NULL,background=0,updated_at_ms=? WHERE user_id=?", .{ ctx.now(), user_id });
-        ctx.shared.unlockWrite();
+        // The revoke below is a network call: the write lock goes first,
+        // whether or not these succeed.
+        const current, const auth_issuer = blk: {
+            defer ctx.shared.unlockWrite();
+            const found = try account(arena, db, ctx.shared.master_key, user_id);
+            const found_issuer = try issuer(arena, db);
+            try db.run(arena, "UPDATE chatgpt_accounts SET tokens=NULL,background=0,updated_at_ms=? WHERE user_id=?", .{ ctx.now(), user_id });
+            break :blk .{ found, found_issuer };
+        };
         if (current) |value| if (value.tokens) |tokens| {
             ctx.extendDeadline(30);
             if (oidc.discover(arena, auth_issuer)) |discovery| revoke(arena, discovery, value.client_id, tokens.refresh) else |_| {}

@@ -357,7 +357,7 @@ pub fn pathsTab(ctx: *Ctx, view: data.View, path: []const u8) !void {
     const split = try pathsSplit(arena, ctx.db, view);
     var landing_sql = data.Sql.init(arena);
     try landing_sql.add("WITH f AS (SELECT pv.path,row_number() OVER(PARTITION BY pv.session_id ORDER BY pv.occurred_at_ms,pv.received_at_ms) rn,row_number() OVER(PARTITION BY pv.session_id ORDER BY pv.occurred_at_ms DESC,pv.received_at_ms DESC) rl FROM page_views pv WHERE ");
-    try landing_sql.pageViews(view, split, view.range.end_ms);
+    try visitPages(&landing_sql, view, split);
     try landing_sql.add(" AND pv.session_id IS NOT NULL), r AS (SELECT 'entry' kind,path,count(*) n FROM f WHERE rn=1 GROUP BY path UNION ALL SELECT 'exit',path,count(*) FROM f WHERE rl=1 GROUP BY path");
     for ([_][]const u8{ "entry", "exit" }) |dim| if (split > view.range.start_ms) {
         try landing_sql.add(" UNION ALL SELECT dim,key,sum(views)");
@@ -389,6 +389,19 @@ pub fn pathsTab(ctx: *Ctx, view: data.View, path: []const u8) !void {
     try w.writeAll("</div></section></div>");
 }
 
+/// Every page of the visits that match the filters, from `start`: a filter
+/// picks visits, as funnels do, never single pages out of them (a page
+/// filter would leave each visit that one page, entering and leaving there).
+fn visitPages(sql: *data.Sql, view: data.View, start: i64) !void {
+    var unfiltered = view;
+    unfiltered.filters = &.{};
+    try sql.pageViews(unfiltered, start, view.range.end_ms);
+    if (view.filters.len == 0) return;
+    try sql.add(" AND pv.session_id IN (SELECT pv.session_id FROM page_views pv WHERE ");
+    try sql.pageViews(view, start, view.range.end_ms);
+    try sql.add(" AND pv.session_id IS NOT NULL)");
+}
+
 /// Raw rows from here on; whole days before it come from the summaries.
 fn pathsSplit(arena: std.mem.Allocator, db: *db_mod.Db, view: data.View) !i64 {
     if (view.filters.len != 0) return view.range.start_ms;
@@ -404,7 +417,7 @@ pub fn nextSteps(arena: std.mem.Allocator, db: *db_mod.Db, view: data.View, from
     const split = try pathsSplit(arena, db, view);
     var sql = data.Sql.init(arena);
     try sql.add("WITH o AS (SELECT pv.path,lead(pv.path) OVER(PARTITION BY pv.session_id ORDER BY pv.occurred_at_ms,pv.received_at_ms) nxt FROM page_views pv WHERE ");
-    try sql.pageViews(view, split, view.range.end_ms);
+    try visitPages(&sql, view, split);
     try sql.add(" AND pv.session_id IS NOT NULL), r AS (SELECT coalesce(nxt,'') k,count(*) n FROM o WHERE path=");
     try sql.str(from);
     try sql.add(" GROUP BY 1");
@@ -437,7 +450,7 @@ pub fn previousSteps(arena: std.mem.Allocator, db: *db_mod.Db, view: data.View, 
     const split = try pathsSplit(arena, db, view);
     var sql = data.Sql.init(arena);
     try sql.add("WITH o AS (SELECT pv.path,lag(pv.path) OVER(PARTITION BY pv.session_id ORDER BY pv.occurred_at_ms,pv.received_at_ms) prv FROM page_views pv WHERE ");
-    try sql.pageViews(view, split, view.range.end_ms);
+    try visitPages(&sql, view, split);
     try sql.add(" AND pv.session_id IS NOT NULL), r AS (SELECT coalesce(prv,'') k,count(*) n FROM o WHERE path=");
     try sql.str(to);
     try sql.add(" GROUP BY 1");

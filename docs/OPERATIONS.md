@@ -60,6 +60,8 @@ analytico migrate --data ~/.local/share/analytico-sqlite \
 systemctl --user start analytico.service
 ```
 
+Schema 14 keeps a withdrawal on a forgotten visitor's ID, so their other
+tabs and domains stay refused; it is instant.
 Schema 13 remembers forgotten visitor IDs (the ID only) so a tab or another
 of the site's domains that still holds one cannot start that visitor again,
 and indexes receipts and daily aggregates by time so retention deletes in

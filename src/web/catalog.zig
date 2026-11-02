@@ -803,7 +803,7 @@ const economics_sql =
     \\), outcomes AS (
     \\ SELECT source,campaign,content,sum(name='registration_confirmed') registrations,sum(name='payment_confirmed') paid_registrations,
     \\ sum(name IN ('payment_refunded','refund_confirmed')) refunds,sum(name='attendance_confirmed') attendees,
-    \\ coalesce(sum(CASE WHEN name='payment_confirmed' THEN value_minor END),0)-coalesce(sum(CASE WHEN name IN ('payment_refunded','refund_confirmed') THEN value_minor END),0) revenue_minor,
+    \\ coalesce(sum(CASE WHEN name='payment_confirmed' THEN value_minor END),0)-coalesce(sum(CASE WHEN name IN ('payment_refunded','refund_confirmed') THEN abs(value_minor) END),0) revenue_minor,
     \\ max(currency) currency FROM ev GROUP BY 1,2,3
     \\), spend AS (
     \\ SELECT source,campaign,content,sum(amount_minor) spend_minor FROM campaign_spend WHERE site_id=?1 AND unixepoch(spend_date)*1000>=?2 AND unixepoch(spend_date)*1000<?3 GROUP BY 1,2,3

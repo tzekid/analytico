@@ -116,7 +116,8 @@ pub fn pages(ctx: *Ctx, site: data.Site) !void {
         try render(w, "<th class=\"r {class}\"><a href=\"{href}\">{label}{arrow}</a></th>", .{ .class = column[2], .href = try view.href(arena, path, &.{ .{ "sort", column[0] }, .{ "q", search } }), .label = column[1], .arrow = if (std.mem.eql(u8, sort, column[0])) " ↓" else "" });
     }
     try w.writeAll("<th class=\"r hide-m\">Change</th></tr></thead><tbody>");
-    const selected = ctx.param("page");
+    // A page path only: the sheet's "Open page" joins it to the site's origin.
+    const selected = if (ctx.param("page")) |value| (if (domain.validatePath(value)) |_| value else |_| null) else null;
     for (rows.items) |row| {
         const href = try view.href(arena, path, &.{ .{ "page", row.path }, .{ "sort", if (std.mem.eql(u8, sort, "views")) "" else sort }, .{ "q", search } });
         try render(w, "<tr data-href=\"{href}\"{!selected}><td class=\"strong\"><a href=\"{href}\">{path}</a></td><td class=\"r\">{views}</td><td class=\"r\">{visitors}</td><td class=\"r hide-m\">{time}</td><td class=\"r hide-m\">{scroll}%</td><td class=\"r hide-m\">", .{
@@ -485,7 +486,9 @@ fn campaigns(ctx: *Ctx, view: data.View, path: []const u8) !void {
     try sql.pageViews(view, view.range.start_ms, view.range.end_ms);
     try sql.add(" AND pv.utm_campaign>''), cs AS MATERIALIZED (SELECT session_id,max(c) c FROM cv WHERE session_id IS NOT NULL GROUP BY session_id), ev AS MATERIALIZED (SELECT coalesce(json_extract(e.properties_json,'$.campaign'),cs.c,cv.c) c,e.name,e.value_minor,e.currency,coalesce(e.order_id,e.event_id) o,e.source FROM events e LEFT JOIN cs ON cs.session_id=e.session_id LEFT JOIN cv ON cv.page_id=e.page_id WHERE ");
     try sql.events(view, view.range.start_ms, view.range.end_ms);
-    try sql.add("), sp AS (SELECT campaign c,sum(amount_minor) a,max(currency) cur FROM campaign_spend WHERE site_id=");
+    // Spend keeps its currency (an ad account may bill in another one);
+    // '' when a campaign's spend mixes several.
+    try sql.add("), sp AS (SELECT campaign c,sum(amount_minor) a,CASE WHEN min(currency)=max(currency) THEN min(currency) ELSE '' END cur FROM campaign_spend WHERE site_id=");
     try sql.int(site.id);
     try sql.add(" AND spend_date>=");
     try sql.str(&from);
@@ -493,14 +496,18 @@ fn campaigns(ctx: *Ctx, view: data.View, path: []const u8) !void {
     try sql.str(&to);
     try sql.add(" GROUP BY campaign), k AS (SELECT c FROM cv UNION SELECT c FROM sp), vis AS (SELECT c,count(DISTINCT visitor_day_id) n FROM cv GROUP BY c), conv AS (SELECT c,count(DISTINCT CASE WHEN name IN (SELECT match_value FROM goals WHERE kind='event' AND site_id=");
     try sql.int(site.id);
-    try sql.add(") THEN o END) n,max(currency) cur FROM ev GROUP BY c), orders AS (SELECT coalesce(json_extract(o.properties_json,'$.campaign'),cs.c,cv.c) c,sum(o.v) v FROM o LEFT JOIN cs ON cs.session_id=o.session_id LEFT JOIN cv ON cv.page_id=o.page_id WHERE o.source='server' GROUP BY 1), refunds AS (SELECT c,sum(abs(value_minor)) v FROM ev WHERE name IN " ++ customers.refund_names ++ " AND value_minor IS NOT NULL AND source='server' GROUP BY c) SELECT k.c,coalesce(vis.n,0),coalesce(conv.n,0),coalesce(orders.v,0)-coalesce(refunds.v,0),coalesce(sp.a,0),coalesce(sp.cur,conv.cur,'') FROM k LEFT JOIN vis ON vis.c=k.c LEFT JOIN conv ON conv.c=k.c LEFT JOIN orders ON orders.c=k.c LEFT JOIN refunds ON refunds.c=k.c LEFT JOIN sp ON sp.c=k.c ORDER BY 4 DESC,2 DESC LIMIT 100");
+    try sql.add(") THEN o END) n FROM ev GROUP BY c), orders AS (SELECT coalesce(json_extract(o.properties_json,'$.campaign'),cs.c,cv.c) c,sum(o.v) v FROM o LEFT JOIN cs ON cs.session_id=o.session_id LEFT JOIN cv ON cv.page_id=o.page_id WHERE o.source='server' GROUP BY 1), refunds AS (SELECT c,sum(abs(value_minor)) v FROM ev WHERE name IN " ++ customers.refund_names ++ " AND value_minor IS NOT NULL AND source='server' GROUP BY c) SELECT k.c,coalesce(vis.n,0),coalesce(conv.n,0),coalesce(orders.v,0)-coalesce(refunds.v,0),coalesce(sp.a,0),coalesce(sp.cur,'') FROM k LEFT JOIN vis ON vis.c=k.c LEFT JOIN conv ON conv.c=k.c LEFT JOIN orders ON orders.c=k.c LEFT JOIN refunds ON refunds.c=k.c LEFT JOIN sp ON sp.c=k.c ORDER BY 4 DESC,2 DESC LIMIT 100");
     var statement = try sql.prepare(ctx.db);
     defer statement.deinit();
     var rows: std.ArrayList(Campaign) = .empty;
     var spend: i64 = 0;
     var revenue: i64 = 0;
     var conversions: i64 = 0;
-    var currency: []const u8 = (try data.setting(arena, ctx.db, .currency)) orelse "EUR";
+    // Revenue is in the website's currency, as everywhere; spend in its own.
+    // Return on spend needs both in one currency.
+    const currency = site.currency;
+    var spend_currency: ?[]const u8 = null;
+    var mixed = false;
     while (try statement.step() == .row) {
         const row: Campaign = .{
             .name = try arena.dupe(u8, statement.columnText(0)),
@@ -510,32 +517,40 @@ fn campaigns(ctx: *Ctx, view: data.View, path: []const u8) !void {
             .spend = statement.columnInt(4),
             .currency = try arena.dupe(u8, statement.columnText(5)),
         };
-        if (row.currency.len == 3) currency = row.currency;
+        if (row.spend != 0) {
+            if (row.currency.len != 3 or (spend_currency != null and !std.mem.eql(u8, spend_currency.?, row.currency))) mixed = true;
+            spend_currency = row.currency;
+        }
         spend +|= row.spend;
         revenue +|= row.revenue;
         conversions +|= row.conversions;
         try rows.append(arena, row);
     }
     try w.writeAll("<div class=\"grid grid-4 mb-16\">");
+    const spent_in = spend_currency orelse currency;
+    const comparable = !mixed and std.mem.eql(u8, spent_in, currency);
     const figures = [_]struct { []const u8, ?[]const u8 }{
-        .{ "Spend", try std.fmt.allocPrint(arena, "{f}", .{html.money(spend, currency)}) },
+        .{ "Spend", if (mixed) "Several currencies" else try std.fmt.allocPrint(arena, "{f}", .{html.money(spend, spent_in)}) },
         .{ "Confirmed revenue", try std.fmt.allocPrint(arena, "{f}", .{html.money(revenue, currency)}) },
-        .{ "Return on ad spend", if (spend > 0) try std.fmt.allocPrint(arena, "{d:.1}×", .{@as(f64, @floatFromInt(revenue)) / @as(f64, @floatFromInt(spend))}) else null },
-        .{ "Cost per conversion", if (conversions > 0 and spend > 0) try std.fmt.allocPrint(arena, "{f}", .{html.money(@divTrunc(spend, conversions), currency)}) else null },
+        .{ "Return on ad spend", if (spend > 0 and comparable) try std.fmt.allocPrint(arena, "{d:.1}×", .{@as(f64, @floatFromInt(revenue)) / @as(f64, @floatFromInt(spend))}) else null },
+        .{ "Cost per conversion", if (conversions > 0 and spend > 0 and !mixed) try std.fmt.allocPrint(arena, "{f}", .{html.money(@divTrunc(spend, conversions), spent_in)}) else null },
     };
     for (figures) |figure| try ui.stat(w, figure[0], figure[1] orelse "—", "");
     try w.writeAll("</div><section class=\"card card-flush\"><div class=\"card-head campaigns-head\"><h2>Campaigns</h2><button class=\"btn\" type=\"button\" data-dialog=\"import-dialog\" commandfor=\"import-dialog\" command=\"show-modal\">");
     try icon(w, "upload");
     try w.writeAll("Import spend (CSV)</button></div><div class=\"table-wrap\"><table class=\"table\"><thead><tr><th>Campaign</th><th class=\"r\">Visitors</th><th class=\"r\">Conversions</th><th class=\"r\">Revenue</th><th class=\"r\">Spend</th><th class=\"r\">ROAS</th></tr></thead><tbody>");
     for (rows.items) |row| {
-        const row_currency = if (row.currency.len == 3) row.currency else currency;
+        // Spend with no single currency is edited (replaced) in the website's.
+        const several = row.spend != 0 and row.currency.len != 3;
+        const row_currency = if (row.spend != 0 and !several) row.currency else currency;
+        const spend_text = if (several) "Several currencies" else try std.fmt.allocPrint(arena, "{f}", .{html.money(row.spend, row_currency)});
         try render(w,
             \\<tr><td class="strong">{name}</td><td class="r">{visitors}</td><td class="r">{conversions}</td><td class="r">{revenue}</td><td class="r"><form method="post" action="/{slug}/spend" data-inline-edit><input type="hidden" name="campaign" value="{name}"><input type="hidden" name="from" value="{from}"><input type="hidden" name="to" value="{to}"><input type="hidden" name="currency" value="{currency}">
             \\<button type="button" class="edit-cell" data-edit>{spend}
-        , .{ .name = row.name, .visitors = html.int(row.visitors), .conversions = html.int(row.conversions), .revenue = html.money(row.revenue, row_currency), .slug = site.slug, .from = &from, .to = &to, .currency = row_currency, .spend = html.money(row.spend, row_currency) });
+        , .{ .name = row.name, .visitors = html.int(row.visitors), .conversions = html.int(row.conversions), .revenue = html.money(row.revenue, currency), .slug = site.slug, .from = &from, .to = &to, .currency = row_currency, .spend = spend_text });
         try icon(w, "pencil");
-        try render(w, "</button><input class=\"input inline-input\" name=\"amount\" inputmode=\"decimal\" value=\"{amount}\" hidden aria-label=\"Spend for {name}\"></form></td><td class=\"r\">", .{ .amount = try moneyText(arena, row.spend, row_currency), .name = row.name });
-        if (row.spend > 0) {
+        try render(w, "</button><input class=\"input inline-input\" name=\"amount\" inputmode=\"decimal\" value=\"{amount}\" hidden aria-label=\"Spend for {name}\"></form></td><td class=\"r\">", .{ .amount = if (several) "" else try moneyText(arena, row.spend, row_currency), .name = row.name });
+        if (row.spend > 0 and !several and std.mem.eql(u8, row_currency, currency)) {
             const roas = @as(f64, @floatFromInt(row.revenue)) / @as(f64, @floatFromInt(row.spend));
             try render(w, "<span class=\"{class}\">{roas:.1}×</span>", .{ .class = if (roas < 3) "warn" else "", .roas = roas });
         } else try w.writeAll("<span class=\"muted\">—</span>");

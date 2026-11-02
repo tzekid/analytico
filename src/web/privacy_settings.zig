@@ -243,8 +243,21 @@ pub fn recordingPost(ctx: *Ctx, action: []const u8) !void {
 /// Nightly replay retention, on the replay database's own schedule.
 pub fn pruneReplays(arena: std.mem.Allocator, shared: anytype, db: anytype, now_ms: i64) !void {
     const days = std.fmt.parseInt(i64, (try data.setting(arena, db, .@"replays.retention_days")) orelse "30", 10) catch 30;
+    // Replays are deleted after the analytics commit, in their own database;
+    // a crash in between left some. Visitors forgotten or withdrawn this
+    // week lose any that remain.
+    const Gone = struct { site_id: i64, visitor_id: []const u8 };
+    const gone = try db.all(arena, Gone, "SELECT site_id,visitor_id FROM forgotten_visitors WHERE forgotten_at_ms>=?1 UNION SELECT site_id,visitor_id FROM visitors WHERE consent_state IN ('denied','gpc') AND last_seen_ms>=?1 ORDER BY 1", .{now_ms - 7 * data.day_ms});
     const replays = shared.lockReplays();
     defer shared.unlockReplays();
+    var start: usize = 0;
+    while (start < gone.len) {
+        var end = start;
+        var ids: std.ArrayList([]const u8) = .empty;
+        while (end < gone.len and gone[end].site_id == gone[start].site_id) : (end += 1) try ids.append(arena, gone[end].visitor_id);
+        try replay.forgetVisitors(arena, replays, gone[start].site_id, ids.items);
+        start = end;
+    }
     const removed = try replay.prune(arena, replays, now_ms - days * data.day_ms);
     if (removed != 0) std.log.info("replays_pruned rows={d}", .{removed});
 }

@@ -556,8 +556,13 @@ const Challenge = struct { purpose: []const u8, challenge: []const u8, user_id: 
 
 /// Challenges can be requested without signing in; keep their number bounded.
 fn challengeRoom(ctx: *Ctx, db: *db_mod.Db) !bool {
+    // Per client first; the table's own cap is a backstop far above it.
+    if (ctx.user == null and !auth.startChallenge(ctx)) return false;
     try db.run(ctx.arena, "DELETE FROM auth_challenges WHERE expires_at_ms<?", .{ctx.now()});
-    return try db.scalar(ctx.arena, i64, "SELECT count(*) FROM auth_challenges", .{}) < 1000;
+    // Full, it gives up the attempts closest to expiring rather than refuse
+    // everyone: whoever holds many addresses can't lock the owner out.
+    try db.run(ctx.arena, "DELETE FROM auth_challenges WHERE id IN (SELECT id FROM auth_challenges ORDER BY expires_at_ms LIMIT max(0,(SELECT count(*) FROM auth_challenges)-19999))", .{});
+    return true;
 }
 
 /// Single use: every attempt consumes the challenge, successful or not.

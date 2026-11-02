@@ -376,6 +376,7 @@
     // Switches stay usable: the change already shows, the server confirms it.
     const optimistic = form.querySelector("[data-autosubmit]") !== null;
     if (!optimistic) buttons.forEach((button) => { button.disabled = true; });
+    const label = submitter?.textContent;
     if (busy && submitter) submitter.textContent = busy;
     const id = ++navigation;
     try {
@@ -398,7 +399,17 @@
       }
       swap(html, finalUrl.href, response.redirected ? (finalUrl.pathname === location.pathname ? "replace" : "push") : "none", finalUrl.pathname === location.pathname);
     } catch {
-      if (id === navigation) form.submit();
+      // Never sent again on its own: the server may have done it already (a
+      // schedule, a key). The form stays as it was, to check and try again.
+      if (id !== navigation) return;
+      buttons.forEach((button) => { button.disabled = false; });
+      if (busy && submitter) submitter.textContent = label;
+      const toast = document.createElement("div");
+      toast.className = "toast error";
+      toast.setAttribute("role", "alert");
+      toast.textContent = "Couldn’t reach the server. Check the page before trying again.";
+      $("#toasts")?.appendChild(toast);
+      setTimeout(() => fadeOut(toast), 6000);
     }
   }
 

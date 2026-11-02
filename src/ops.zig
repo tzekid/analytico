@@ -142,6 +142,8 @@ pub fn migrate(
     if (std.Io.Dir.cwd().statFile(io, paths.replays, .{})) |_| {} else |err| {
         if (err != error.FileNotFound) return err;
         try createEmptyFile(io, paths.replays);
+        // An empty file left behind would read as present on the next run.
+        errdefer std.Io.Dir.cwd().deleteFile(io, paths.replays) catch {};
         try replay.create(allocator, paths.replays);
     }
     try output.print("migrated from={d} to={d} backup={s}\n", .{ before, after, backup_path });
@@ -226,6 +228,9 @@ pub fn vacuum(
     var store = try store_mod.Store.open(allocator, io, directory, true);
     defer store.close();
     try store.checkpoint();
+    // VACUUM builds its copy as a temporary database: on disk, not in memory,
+    // or a database larger than free memory could never be vacuumed.
+    try store.database.exec("PRAGMA temp_store=FILE");
     try store.database.exec("VACUUM");
     try db_mod.integrity(&store.database, allocator);
     try output.print("vacuum complete backup={s}\n", .{backup_path});

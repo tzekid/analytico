@@ -396,6 +396,18 @@ await journey("v3", async (t) => {
   await page.locator("td", { hasText: "Garden guide" }).waitFor();
   await visit("/shop/acquisition?tab=campaigns", "Confirmed revenue");
   assert.match(await page.getByText("Confirmed revenue", { exact: true }).locator("..").textContent(), /€45/);
+  // Spend billed in another currency stays in it: revenue keeps the
+  // website's, and no return on spend mixes the two.
+  const otherSpend = t.db("analytico.db", {});
+  otherSpend.prepare("INSERT INTO campaign_spend(site_id,spend_date,source,campaign,content,amount_minor,currency,created_at_ms) VALUES(1,?,'','usd-only','',10000,'USD',?)").run(new Date().toISOString().slice(0, 10), Date.now());
+  await visit("/shop/acquisition?tab=campaigns", "Confirmed revenue");
+  const usdRow = page.locator("tbody tr", { hasText: "usd-only" });
+  assert.match(await usdRow.locator(".edit-cell").textContent(), /\$100/);
+  assert.equal((await usdRow.locator("td").last().textContent()).trim(), "—");
+  assert.match(await page.getByText("Confirmed revenue", { exact: true }).locator("..").textContent(), /€45/);
+  assert.match(await page.getByText("Return on ad spend", { exact: true }).locator("..").textContent(), /—/);
+  otherSpend.exec("DELETE FROM campaign_spend WHERE campaign='usd-only'");
+  otherSpend.close();
   await visit("/shop/retention", "Weekly cohorts");
   // Computed once a day, then served from the cache.
   assert.equal(row("SELECT day FROM cache WHERE site_id=1 AND name='retention'").day, new Date().toISOString().slice(0, 10));
@@ -548,6 +560,9 @@ await journey("v3", async (t) => {
 
   await connect("ga4");
   assert.match(await configure("ga4", { property: "318000000" }, "Import history"), /Google Analytics import: \d+ months/);
+  // Its progress is kept: importing again finds nothing left to do.
+  await page.goto(`${originA}/settings/integrations?site=shop`);
+  assert.match(await configure("ga4", { property: "318000000" }, "Import history"), /Google Analytics import: 0 months, 0 rows/);
   const imported = row("SELECT sum(views) v FROM imported_daily WHERE dim='total'").v;
   assert.ok(imported >= 120);
   await page.goto(`${originA}/shop?range=90d`);
@@ -586,6 +601,25 @@ await journey("v3", async (t) => {
   assert.deepEqual(Object.keys(metaEvent.user_data), ["fbc"]);
   assert.match(metaEvent.user_data.fbc, /^fb\.1\.\d+\.IwAR-meta$/);
   assert.deepEqual(metaEvent.custom_data, { value: 19.99, currency: "EUR" });
+  // A busy day's orders all go out, a batch at a time. (Confirmed by the
+  // server: not the "purchased" goal the webhooks below count.)
+  const bulk = t.db("analytico.db", {});
+  const bulkAt = Date.now();
+  const bulkDay = new Date(bulkAt).toISOString().slice(0, 10);
+  const bulkView = bulk.prepare(`INSERT INTO page_views(site_id,event_id,page_id,session_id,occurred_at_ms,received_at_ms,received_date,visitor_day_id,tracking_mode,path,tracker_version,consent_mode,internal,browser,operating_system,device,traffic_class,click_id)
+    VALUES(1,?,?,?,?,?,?,?,'full','/checkout','2','granted',0,'chrome','linux','desktop','human_like',?)`);
+  const bulkOrder = bulk.prepare(`INSERT INTO events(site_id,event_id,page_id,session_id,source,occurred_at_ms,received_at_ms,received_date,tracking_mode,name,tracker_version,consent_mode,internal,value_minor,currency,properties_json,order_id)
+    VALUES(1,?,?,?,'server',?,?,?,'full','payment_confirmed','backend','server',0,100,'EUR','{}',?)`);
+  for (let index = 0; index < 201; index++) {
+    const [bulkPage, bulkSession] = [randomUUID(), randomUUID()];
+    bulkView.run(randomUUID(), bulkPage, bulkSession, bulkAt, bulkAt, bulkDay, index.toString(16).padStart(16, "0"), `gclid:bulk-${index}`);
+    bulkOrder.run(randomUUID(), bulkPage, bulkSession, bulkAt, bulkAt, bulkDay, `BULK-${index}`);
+  }
+  bulk.close();
+  const uploadsBefore = received.ads.length;
+  await page.goto(`${originA}/settings/integrations?site=shop`);
+  assert.match(await configure("google_ads", adsSettings, "Sync now"), /201 conversions out/);
+  assert.deepEqual(received.ads.slice(uploadsBefore).map((upload) => upload.conversions.length), [200, 1]);
 
   // Slack and a signed webhook: a test message, then a goal as it happens.
   await page.goto(`${originA}/settings/integrations?site=shop`);
@@ -603,7 +637,9 @@ await journey("v3", async (t) => {
   await integration("channels").getByRole("textbox", { name: "URL" }).fill(`${fakeBase}/hook`);
   await integration("channels").getByRole("button", { name: "Add and send a test" }).click();
   const webhookSecret = /secret \(shown once\): ([0-9a-f]{64})/.exec(await page.locator(".toast").textContent())[1];
-  const goalVisitor = await (await newContext()).newPage();
+  // A person's browser (a headless one counts as a crawler, which reaches
+  // no goal), as the goal reports count them.
+  const goalVisitor = await (await newContext({ userAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36" })).newPage();
   await Promise.all([decision(goalVisitor), goalVisitor.goto(`${originB}/welcome`)]);
   await goalVisitor.evaluate(() => analytico.track("purchase", {}, { value_minor: 2500, currency: "EUR", order_id: "B-7" }));
   await goalVisitor.goto(`${originB}/checkout`);
@@ -649,6 +685,10 @@ await journey("v3", async (t) => {
 
   // Rollups: a closed day is summarised once by the background job and reads
   // exactly like its raw rows (25 views by 10 visitor-days from NL).
+  // Yesterday closes 30 minutes after midnight UTC, and today's summary waits
+  // for it: in that window the job rightly has nothing to do yet.
+  const sinceMidnight = Date.now() % 86400000;
+  if (sinceMidnight < 31 * 60000) await delay(31 * 60000 - sinceMidnight);
   const writer = t.db("analytico.db", {});
   const yesterdayAt = Date.now() - Date.now() % 86400000 - 86400000 + 3600000;
   const yesterday = new Date(yesterdayAt).toISOString().slice(0, 10);
@@ -681,6 +721,9 @@ await journey("v3", async (t) => {
   assert.equal(await rankValue("Exit pages", "/archive"), row(`${ordered} SELECT count(*) n FROM f WHERE nxt IS NULL AND path='/archive'`, weekFrom).n);
   assert.equal(await rankValue("Next from", "/archive/b"), 5);
   assert.equal(await rankValue("Next from", "/archive"), 5);
+  // A filter picks visits, never single pages out of them.
+  await page.goto(`${originA}/shop/sessions?tab=paths&range=7d&from=${encodeURIComponent("/archive/a")}&f=${encodeURIComponent("page:/archive/a")}`);
+  assert.equal(await rankValue("Next from", "/archive/b"), 5);
   await page.goto(`${originA}/shop/performance?range=7d&vital=inp`);
   const inp = rows(`SELECT ps.inp_ms v FROM page_views pv JOIN page_summaries ps ON ps.site_id=pv.site_id AND ps.page_id=pv.page_id WHERE pv.${human.replaceAll(" AND ", " AND pv.")} AND ps.inp_ms IS NOT NULL ORDER BY 1`, weekFrom).map((sample) => sample.v);
   // Summarised samples are rounded up to two significant figures: between the exact and the rounded p75.
@@ -691,6 +734,9 @@ await journey("v3", async (t) => {
   await page.goto(`${originA}/shop/pages?range=7d&page=${encodeURIComponent("/archive")}`);
   assert.equal((await page.locator(".metrics-sheet .metric", { hasText: "Views" }).locator(".metric-value").textContent()).trim(), String(row(`SELECT count(*) n FROM page_views WHERE ${human} AND path='/archive'`, weekFrom).n));
   assert.equal((await page.locator(".row", { hasText: "intro" }).locator(".reach-pct").textContent()).trim(), "100%");
+  // Only a page path opens the sheet: its "Open page" joins it to the site.
+  await page.goto(`${originA}/shop/pages?range=7d&page=${encodeURIComponent(".evil.example/login")}`);
+  assert.equal(await page.locator(".metrics-sheet").count(), 0);
   await page.goto(`${originA}/shop/errors?range=7d`);
   const visits = row(`SELECT count(DISTINCT received_date||char(31)||coalesce(session_id,page_id)) n FROM page_views WHERE ${human}`, weekFrom).n;
   assert.match(await page.locator(".card", { hasText: "Sessions with an error" }).textContent(), new RegExp(` of ${visits.toLocaleString("en-US")}`));
@@ -770,6 +816,14 @@ await journey("v3", async (t) => {
   assert.deepEqual(rows("SELECT search_term FROM page_views WHERE path LIKE '/privacy/%' ORDER BY path").map((item) => item.search_term), [null, null, null, "garden tools", null]);
   assert.deepEqual({ ...row("SELECT path,utm_source,utm_content FROM page_views WHERE path LIKE '/privacy/unsubscribe/%'") }, { path: "/privacy/unsubscribe/[email]", utm_source: "newsletter", utm_content: null });
   assert.deepEqual({ ...row("SELECT message,file FROM errors WHERE path='/privacy/error'") }, { message: "ReferenceError", file: "app.js" });
+  // Nor in an event property (a downloaded file's name). And a device clock
+  // ten minutes fast loses nothing: times move by the batch's own offset.
+  const fastClock = Date.now() + 600000;
+  const download = { ...privacyBase, occurred_at_ms: fastClock, event_id: randomUUID(), page_id: randomUUID(), type: "event", name: "file_download", path: "/privacy/files", properties: { file: "jane.doe%40example.com.pdf", kind: "pdf" } };
+  assert.equal((await fetch(`${originA}/e`, { method: "POST", headers: { origin: originA, "content-type": "text/plain", "user-agent": "Chrome/140" }, body: JSON.stringify({ v: 2, site: publicId, sent_at_ms: fastClock, records: [download] }) })).status, 200);
+  const stored = row("SELECT properties_json p,occurred_at_ms o FROM events WHERE event_id=?", download.event_id);
+  assert.deepEqual(JSON.parse(stored.p), { file: "[email]", kind: "pdf" });
+  assert.ok(Math.abs(stored.o - Date.now()) < 60000, `occurred ${stored.o - Date.now()} ms from now`);
   // A page the site never records keeps no heatmap or form detail, even from
   // a consented batch sent without the tracker.
   const excludedPage = randomUUID();
@@ -782,6 +836,11 @@ await journey("v3", async (t) => {
   assert.equal(excludedBatch.status, 200);
   assert.deepEqual({ ...row("SELECT attention_json a FROM page_summaries WHERE page_id=?", excludedPage) }, { a: null });
   assert.deepEqual([row("SELECT count(*) n FROM click_cells WHERE path='/checkout'").n, row("SELECT count(*) n FROM form_fields WHERE path='/checkout'").n], [0, 0]);
+  // Nor do the team's own visits: the heatmap's view count leaves them out.
+  const teamPage = randomUUID();
+  const teamRecords = excludedRecords.map((record) => ({ ...record, internal: true, event_id: randomUUID(), page_id: teamPage, ...(record.type === "page_view" ? { path: "/team-only" } : {}) }));
+  assert.equal((await fetch(`${originA}/e`, { method: "POST", headers: { origin: originA, "content-type": "text/plain", "user-agent": "Chrome/140" }, body: JSON.stringify({ v: 2, site: publicId, sent_at_ms: privacyNow, records: teamRecords }) })).status, 200);
+  assert.equal(row("SELECT count(*) n FROM click_cells WHERE path='/team-only'").n, 0);
 
   // Withdrawal ends replay authorization; a new grant gets a new identity.
   const consentContext = await newContext();
@@ -822,6 +881,58 @@ await journey("v3", async (t) => {
   await delay(500);
   assert.deepEqual([await storedOn(otherDomain, "visitor"), await storedOn(otherDomain, "consent")], [null, "denied"]);
   await otherDomain.close();
+  // A consent tool there granting while the page's view (with the old ID)
+  // is still on its way never brings that ID back: the tracker grants
+  // again under a new one.
+  const slowViews = async (target) => target.route("**/e", async (route) => {
+    if (route.request().postData()?.includes('"type":"page_view"')) await delay(1500);
+    await route.continue();
+  });
+  const storedId = async (target) => ((await storedOn(target, "visitor")) || "").split(".")[0];
+  const regranting = await consentContext.newPage();
+  await regranting.goto(`${originB}/welcome`);
+  await regranting.evaluate(([site, id]) => { localStorage.setItem(`analytico:${site}:visitor`, `${id}.${Date.now()}`); localStorage.setItem(`analytico:${site}:consent`, "auto"); }, [publicId, originalVisitor]);
+  await slowViews(regranting);
+  await regranting.goto(`${originB}/checkout`);
+  await regranting.evaluate(() => analytico.consent("granted"));
+  const regranted = await t.until(async () => { const id = await storedId(regranting); return id && id !== originalVisitor ? id : null; }, "granted again under a new identity");
+  assert.equal(await storedOn(regranting, "consent"), "granted");
+  await regranting.unroute("**/e");
+  await Promise.all([pageViewDecision(regranting), regranting.goto(`${originB}/welcome`)]);
+  await t.until(() => row("SELECT count(*) n FROM page_views WHERE visitor_id=?", regranted).n >= 1, "the new identity collects");
+  assert.equal(row("SELECT consent_state FROM visitors WHERE visitor_id=?", originalVisitor).consent_state, "denied");
+  await regranting.close();
+  // A refusal said while the page's view is still on its way finds the
+  // visitor once that view is stored.
+  const racingContext = await newContext();
+  const racing = await racingContext.newPage();
+  await Promise.all([decision(racing), racing.goto(`${originA}/home`)]);
+  await racing.getByRole("dialog", { name: "Analytics consent" }).getByRole("button", { name: "Allow", exact: true }).click();
+  const racer = await t.until(() => storedId(racing), "racing visitor granted");
+  await t.until(() => row("SELECT consent_state FROM visitors WHERE visitor_id=?", racer)?.consent_state === "granted", "racing visitor stored");
+  await slowViews(racing);
+  await racing.goto(`${originA}/home`);
+  await racing.evaluate(() => analytico.consent("denied"));
+  await t.until(() => row("SELECT consent_state FROM visitors WHERE visitor_id=?", racer)?.consent_state === "denied", "the refusal found the visitor after its view");
+  await racingContext.close();
+  // A tab left behind defers to a newer choice made in another: withdrawn
+  // and granted again there, the old ID's refusal doesn't undo the grant.
+  const tabsContext = await newContext();
+  const firstTab = await tabsContext.newPage();
+  await Promise.all([decision(firstTab), firstTab.goto(`${originA}/spa`)]);
+  await firstTab.getByRole("dialog", { name: "Analytics consent" }).getByRole("button", { name: "Allow", exact: true }).click();
+  const oldId = await t.until(() => storedId(firstTab), "first tab granted");
+  const secondTab = await tabsContext.newPage();
+  await Promise.all([decision(secondTab), secondTab.goto(`${originA}/spa`)]);
+  await firstTab.evaluate(() => analytico.consent("denied"));
+  await t.until(() => row("SELECT consent_state FROM visitors WHERE visitor_id=?", oldId)?.consent_state === "denied", "first tab withdrew");
+  await firstTab.evaluate(() => analytico.consent("granted"));
+  const newId = await t.until(async () => { const id = await storedId(firstTab); return id && id !== oldId ? id : null; }, "first tab granted again");
+  const [staleTab] = await Promise.all([pageViewDecision(secondTab), secondTab.locator("#next").click()]);
+  assert.equal((await staleTab.json()).drop_state, "denied");
+  await delay(300);
+  assert.deepEqual([await storedId(secondTab), await storedOn(secondTab, "consent")], [newId, "granted"]);
+  await tabsContext.close();
   await consentPage.evaluate(() => analytico.consent("granted"));
   const newVisitor = await t.until(() => consentPage.evaluate((site) => (localStorage.getItem(`analytico:${site}:visitor`) || "").split(".")[0], publicId), "consent granted again");
   assert.notEqual(newVisitor, originalVisitor);
@@ -851,6 +962,11 @@ await journey("v3", async (t) => {
   assert.equal(row("SELECT count(*) n FROM visitor_links WHERE visitor_id IN (?,?)", originalVisitor, newVisitor).n, 0);
   assert.deepEqual({ ...row("SELECT consent_state,user_hash FROM visitors WHERE visitor_id=?", originalVisitor) }, { consent_state: "denied", user_hash: null });
   assert.equal(row("SELECT count(*) n FROM visitors WHERE visitor_id=?", newVisitor).n, 0);
+  // Erasing someone who had withdrawn keeps the refusal for their other tabs.
+  const eraseWithdrawn = JSON.stringify({ v: 2, site: publicId, sent_at_ms: Date.now(), records: [{ ...serverRecord, occurred_at_ms: Date.now(), event_id: randomUUID(), type: "forget", visitor_id: originalVisitor }] });
+  assert.equal((await fetch(`http://127.0.0.1:${t.port}/i`, { method: "POST", headers: { "content-type": "application/json", ...t.sign("shop", eraseWithdrawn) }, body: eraseWithdrawn })).status, 204);
+  const afterErasure = await fetch(`${originA}/e`, { method: "POST", headers: { origin: originA, "content-type": "text/plain", "user-agent": "Chrome/140" }, body: JSON.stringify({ v: 2, site: publicId, sent_at_ms: Date.now(), records: [{ ...staleRecord, occurred_at_ms: Date.now(), event_id: randomUUID(), page_id: randomUUID(), visitor_id: originalVisitor }] }) });
+  assert.equal((await afterErasure.json()).drop_state, "denied");
 
   // Backups cover the replay database too.
   const backup = join(t.temporary, "backup.db");
@@ -869,6 +985,10 @@ await journey("v3", async (t) => {
   aged.exec("INSERT INTO event_items(site_id,event_id,position,item_id,name,quantity) VALUES(1,'aged-order',0,'kit','Kit',1),(1,'aged-order',1,'guide','Guide',1)");
   aged.prepare("INSERT INTO visitors(site_id,visitor_id,first_seen_ms,last_seen_ms,first_source,user_hash) VALUES(1,'aged-visitor',?,?,'direct','aged-user')").run(oldAt, oldAt);
   aged.prepare("INSERT INTO visitor_links(site_id,user_hash,visitor_id,linked_at_ms) VALUES(1,'aged-user','aged-visitor',?)").run(oldAt);
+  // A withdrawal outlives its visitor's data, and refused IDs stay as long
+  // as a browser may hold them (13 months), whatever the data's retention.
+  aged.prepare("INSERT INTO visitors(site_id,visitor_id,first_seen_ms,last_seen_ms,first_source,consent_state) VALUES(1,'aged-withdrawn',?,?,'direct','denied')").run(oldAt, oldAt);
+  aged.prepare("INSERT INTO forgotten_visitors(site_id,visitor_id,forgotten_at_ms) VALUES(1,'aged-forgotten',?),(1,'expired-forgotten',?)").run(oldAt, Date.now() - 400 * 86400000);
   aged.exec("COMMIT");
   aged.close();
   const kept = row("SELECT (SELECT count(*) FROM page_views WHERE received_at_ms>=?1)+(SELECT count(*) FROM events WHERE received_at_ms>=?1)+(SELECT count(*) FROM visitors WHERE last_seen_ms>=?1) n", cutoff).n;
@@ -878,6 +998,7 @@ await journey("v3", async (t) => {
   assert.ok(pruned >= 12000 + 1 + 2 + 2, `removed ${pruned}`);
   assert.deepEqual({ ...row("SELECT (SELECT count(*) FROM page_views WHERE received_at_ms<?1) views,(SELECT count(*) FROM events WHERE received_at_ms<?1) events,(SELECT count(*) FROM event_items WHERE event_id='aged-order') items,(SELECT count(*) FROM visitors WHERE visitor_id='aged-visitor')+(SELECT count(*) FROM visitor_links WHERE visitor_id='aged-visitor') visitors", cutoff) }, { views: 0, events: 0, items: 0, visitors: 0 });
   assert.equal(row("SELECT (SELECT count(*) FROM page_views WHERE received_at_ms>=?1)+(SELECT count(*) FROM events WHERE received_at_ms>=?1)+(SELECT count(*) FROM visitors WHERE last_seen_ms>=?1) n", cutoff).n, kept);
+  assert.deepEqual(rows("SELECT visitor_id,refused FROM forgotten_visitors WHERE visitor_id IN ('aged-withdrawn','aged-forgotten','expired-forgotten') ORDER BY 1").map((entry) => ({ ...entry })), [{ visitor_id: "aged-forgotten", refused: 0 }, { visitor_id: "aged-withdrawn", refused: 1 }]);
 
   return "full mode consent (regional, banner, GPC, decline, withdraw, forget), geography, SPA, errors, ecommerce, identity across devices and domains, heatmaps and overlay, forms, masked replay, people deletion, roles, public links, API, audit, Search Console, GA4 import, Ads and Meta, Slack and webhooks, export (rewritten after deletion), backups, retention in batches";
 });

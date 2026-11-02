@@ -108,7 +108,9 @@ workspace.
   every good and poor threshold exact). Paths reads whole days of them,
   since visits are split at midnight; Performance reads them up to the cut.
   Retention (the last eight weeks, 11 s at 2.5 million page views a month)
-  is computed once a day into `cache`; nothing else is cached.
+  is computed once a day into `cache`. Otherwise only the live heatmap
+  overlay keeps its last minute of data in memory, so a page warmed from
+  the workspace opens with its heatmap at once; nothing else is cached.
 - Browser events store their page view's traffic class when they arrive,
   so leaving out bots never looks up each event's page view in a report.
 - Page views, summaries and events are clustered by `(site_id,

@@ -43,25 +43,35 @@ const Session = struct {
     socket: *std.Io.Writer,
     last: []const u8 = "",
 
-    fn expect(self: *Session, code: []const u8) !void {
+    /// The reply code of the server's next (final) line.
+    fn reply(self: *Session) ![3]u8 {
         while (true) {
             const raw = self.reader.takeDelimiterInclusive('\n') catch |err| {
-                std.log.warn("smtp_read_failed expected={s} code={s}", .{ code, @errorName(err) });
+                std.log.warn("smtp_read_failed code={s}", .{@errorName(err)});
                 return error.SmtpConnectionLost;
             };
             const line = std.mem.trimEnd(u8, raw, "\r\n");
             self.last = line;
             if (line.len < 3) return error.SmtpProtocol;
             if (line.len > 3 and line[3] == '-') continue;
-            if (!std.mem.eql(u8, line[0..3], code)) {
-                std.log.warn("smtp_unexpected expected={s}", .{code});
-                return error.SmtpRejected;
-            }
-            return;
+            return line[0..3].*;
+        }
+    }
+
+    fn expect(self: *Session, code: []const u8) !void {
+        const got = try self.reply();
+        if (!std.mem.eql(u8, &got, code)) {
+            std.log.warn("smtp_unexpected expected={s} got={s}", .{ code, &got });
+            return error.SmtpRejected;
         }
     }
 
     fn command(self: *Session, comptime fmt: []const u8, args: anytype, code: []const u8) !void {
+        try self.send(fmt, args);
+        try self.expect(code);
+    }
+
+    fn send(self: *Session, comptime fmt: []const u8, args: anytype) !void {
         self.writer.print(fmt ++ "\r\n", args) catch |err| {
             std.log.warn("smtp_write_failed code={s}", .{@errorName(err)});
             return error.SmtpConnectionLost;
@@ -74,7 +84,6 @@ const Session = struct {
             std.log.warn("smtp_flush_failed code={s}", .{@errorName(err)});
             return error.SmtpConnectionLost;
         };
-        try self.expect(code);
     }
 };
 
@@ -149,7 +158,15 @@ fn sendRequest(arena: std.mem.Allocator, io: std.Io, config: Config, message: Me
     }
     const from_address = addressOf(config.from);
     try session.command("MAIL FROM:<{s}>", .{from_address}, "250");
-    for (message.to) |to| try session.command("RCPT TO:<{s}>", .{to}, "250");
+    // A recipient the server refuses (a mailbox since deleted) is skipped:
+    // everyone else still gets the message. 251 forwards it.
+    var accepted: usize = 0;
+    for (message.to) |to| {
+        try session.send("RCPT TO:<{s}>", .{to});
+        const code = try session.reply();
+        if (code[0] == '2') accepted += 1 else std.log.warn("smtp_recipient_refused code={s}", .{&code});
+    }
+    if (accepted == 0) return error.SmtpRejected;
     try session.command("DATA", .{}, "354");
     const boundary = "analytico-boundary-7f2c";
     var date_buffer: [40]u8 = undefined;

@@ -247,3 +247,29 @@ test "provider numbers stay within integer bounds" {
     try std.testing.expectEqual(@as(i64, 0), int(payload, "negative"));
     try std.testing.expectEqual(@as(i64, 12), int(payload, "fraction"));
 }
+
+/// Plain http to this machine only (127.0.0.1 or localhost, any port): the
+/// one exception to https for configured endpoints. The host is parsed, so
+/// `http://localhost@elsewhere/` or `http://localhost.example/` are not.
+pub fn loopbackHttp(url: []const u8) bool {
+    const prefix = "http://";
+    if (!std.mem.startsWith(u8, url, prefix)) return false;
+    const end = std.mem.findAnyPos(u8, url, prefix.len, "/?#") orelse url.len;
+    const authority = url[prefix.len..end];
+    if (authority.len == 0 or std.mem.findScalar(u8, authority, '@') != null) return false;
+    const colon = std.mem.findScalar(u8, authority, ':');
+    const name = if (colon) |at| authority[0..at] else authority;
+    if (colon) |at| {
+        if (at + 1 == authority.len) return false;
+        _ = std.fmt.parseInt(u16, authority[at + 1 ..], 10) catch return false;
+    }
+    return std.mem.eql(u8, name, "127.0.0.1") or std.ascii.eqlIgnoreCase(name, "localhost");
+}
+
+test loopbackHttp {
+    try std.testing.expect(loopbackHttp("http://127.0.0.1:11434/v1"));
+    try std.testing.expect(loopbackHttp("http://localhost:8080/v1"));
+    try std.testing.expect(!loopbackHttp("http://localhost:80@remote.example/v1"));
+    try std.testing.expect(!loopbackHttp("http://localhost.example/v1"));
+    try std.testing.expect(!loopbackHttp("https://127.0.0.1/v1"));
+}

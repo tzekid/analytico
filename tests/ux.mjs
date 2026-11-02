@@ -438,6 +438,8 @@ await journey("ux", async (t) => {
   await page.locator("#filter-pop").getByRole("button", { name: "Apply" }).click();
   await page.waitForURL(/f=country%3ADE/);
   assert.doesNotMatch(page.url(), /f[dov]=/);
+  // Nor is the date form: picking dates keeps the filter just applied.
+  assert.deepEqual(await page.locator("[data-range-form] input[name=f]").evaluateAll((inputs) => inputs.map((input) => input.value)), ["country:DE"]);
   // A filter popover set up on one page is not kept for the next one.
   await page.locator("a.nav", { hasText: "Pages" }).click();
   await page.waitForURL(/\/spike\/pages/);
@@ -448,6 +450,15 @@ await journey("ux", async (t) => {
   await page.goto(`${base}/spike?range=30d`);
   const draft = page.locator("[data-draft-note]");
   await draft.getByText("Traffic 7.5× usual, mostly from Hacker News").waitFor();
+  // A form whose answer never arrives is not sent again on its own: the
+  // server may have done it already.
+  const dropFetchedPosts = (route) => (route.request().method() === "POST" && route.request().headers()["x-requested-with"] === "fetch" ? route.abort() : route.continue());
+  await page.route("**/*", dropFetchedPosts);
+  await draft.getByRole("button", { name: "Keep as a note" }).click();
+  await page.locator(".toast.error", { hasText: "Couldn’t reach the server" }).waitFor();
+  await delay(500);
+  assert.equal(row("SELECT count(*) n FROM annotations WHERE draft=0").n, 0);
+  await page.unroute("**/*", dropFetchedPosts);
   await draft.getByRole("button", { name: "Keep as a note" }).click();
   await page.locator(".toast", { hasText: "Note kept on the chart." }).waitFor();
   await t.until(async () => (await draft.count()) === 0, "draft gone");

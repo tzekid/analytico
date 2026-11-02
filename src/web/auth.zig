@@ -162,38 +162,84 @@ test safeNext {
     }
 }
 
-fn ipHash(ip: []const u8) u64 {
+/// The client a limit applies to: its IPv4 address, or its IPv6 /64 (one
+/// host can hold a whole /64, so single IPv6 addresses would be free).
+fn clientKey(ip: []const u8) u64 {
+    if (std.Io.net.Ip6Address.parse(ip, 0)) |address| return std.hash.Wyhash.hash(0x616e616c, address.bytes[0..8]) else |_| {}
     return std.hash.Wyhash.hash(0x616e616c, ip);
 }
 
-pub fn tooManyFailures(ctx: *Ctx) bool {
-    const shared = ctx.shared;
-    const key = ipHash(ctx.clientIp());
-    const now = ctx.now();
-    shared.login_lock.lockUncancelable(shared.io);
-    defer shared.login_lock.unlock(shared.io);
-    for (&shared.login_failures) |*entry| {
-        if (entry.ip_hash == key and now - entry.window_start_ms < failure_window_ms) return entry.count >= failure_limit;
+/// Counts per client in a fixed window. A full table gives up its oldest
+/// count, never refuses everyone: clients past the table's size could
+/// otherwise lock the owner out. Rotating through more addresses than that
+/// buys nothing more addresses alone wouldn't.
+pub const Limiter = struct {
+    lock: std.Io.Mutex = .init,
+    slots: [1024]Slot = @splat(.{}),
+
+    const Slot = struct { key: u64 = 0, count: u32 = 0, since_ms: i64 = 0 };
+
+    fn over(self: *Limiter, io: std.Io, key: u64, now: i64, window: i64, limit: u32) bool {
+        self.lock.lockUncancelable(io);
+        defer self.lock.unlock(io);
+        for (&self.slots) |*slot| {
+            if (slot.key == key and slot.count != 0 and now - slot.since_ms < window) return slot.count >= limit;
+        }
+        return false;
     }
-    return false;
+
+    /// Adds one for `key`; false when that is past `limit`.
+    fn add(self: *Limiter, io: std.Io, key: u64, now: i64, window: i64, limit: u32) bool {
+        self.lock.lockUncancelable(io);
+        defer self.lock.unlock(io);
+        var free: ?*Slot = null;
+        var oldest = &self.slots[0];
+        for (&self.slots) |*slot| {
+            const live = slot.count != 0 and now - slot.since_ms < window;
+            if (live and slot.key == key) {
+                if (slot.count >= limit) return false;
+                slot.count += 1;
+                return true;
+            }
+            if (!live) {
+                if (free == null) free = slot;
+            } else if (slot.since_ms < oldest.since_ms) oldest = slot;
+        }
+        (free orelse oldest).* = .{ .key = key, .count = 1, .since_ms = now };
+        return true;
+    }
+};
+
+test Limiter {
+    const testing = std.testing;
+    var limiter: Limiter = .{};
+    const n = limiter.slots.len;
+    for (0..n) |index| try testing.expect(limiter.add(testing.io, index + 1, 0, 1000, 2));
+    // A client's count is found wherever it sits, past a free slot too.
+    limiter.slots[0].count = 0;
+    try testing.expect(limiter.add(testing.io, n, 1, 1000, 2));
+    try testing.expect(!limiter.add(testing.io, n, 1, 1000, 2));
+    try testing.expect(limiter.over(testing.io, n, 1, 1000, 2));
+    // A full table still lets a new client in, and counts it.
+    try testing.expect(limiter.add(testing.io, 5000, 1, 1000, 2));
+    try testing.expect(!limiter.over(testing.io, 6000, 1, 1000, 2));
+    try testing.expect(limiter.add(testing.io, 6000, 1, 1000, 2));
+    try testing.expect(limiter.add(testing.io, 6000, 1, 1000, 2));
+    try testing.expect(!limiter.add(testing.io, 6000, 1, 1000, 2));
+}
+
+pub fn tooManyFailures(ctx: *Ctx) bool {
+    return ctx.shared.login_failures.over(ctx.shared.io, clientKey(ctx.clientIp()), ctx.now(), failure_window_ms, failure_limit);
 }
 
 pub fn recordFailure(ctx: *Ctx) void {
-    const shared = ctx.shared;
-    const key = ipHash(ctx.clientIp());
-    const now = ctx.now();
-    shared.login_lock.lockUncancelable(shared.io);
-    defer shared.login_lock.unlock(shared.io);
-    var oldest: *@TypeOf(shared.login_failures[0]) = &shared.login_failures[0];
-    for (&shared.login_failures) |*entry| {
-        if (entry.ip_hash == key) {
-            if (now - entry.window_start_ms >= failure_window_ms) entry.* = .{ .ip_hash = key, .count = 0, .window_start_ms = now };
-            entry.count += 1;
-            return;
-        }
-        if (entry.window_start_ms < oldest.window_start_ms) oldest = entry;
-    }
-    oldest.* = .{ .ip_hash = key, .count = 1, .window_start_ms = now };
+    _ = ctx.shared.login_failures.add(ctx.shared.io, clientKey(ctx.clientIp()), ctx.now(), failure_window_ms, std.math.maxInt(u32));
+}
+
+/// Sign-in attempts one client may start in five minutes without an
+/// account, so nobody can fill the table of pending ones for everyone.
+pub fn startChallenge(ctx: *Ctx) bool {
+    return ctx.shared.challenges_started.add(ctx.shared.io, clientKey(ctx.clientIp()), ctx.now(), 5 * 60_000, 30);
 }
 
 pub fn logout(ctx: *Ctx) !void {

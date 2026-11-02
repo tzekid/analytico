@@ -259,8 +259,10 @@ pub fn ingest(
         if (!std.mem.eql(u8, record.type, "forget")) return error.SiteDisabled;
     };
     const received_at_ms = domain.nowMs();
-    if (envelope.sent_at_ms > received_at_ms + 5 * 60 * 1000 or
-        envelope.sent_at_ms < received_at_ms - 90 * 24 * 60 * 60 * 1000) return error.InvalidSentAt;
+    // Receipt time decides acceptance, not the device's clock: record times
+    // move by the batch's own offset (receipt minus send time), so a clock
+    // set fast or slow keeps its order and only the moved times are bounded.
+    const clock_offset = std.math.sub(i64, received_at_ms, envelope.sent_at_ms) catch return error.InvalidSentAt;
     const date = try domain.utcDate(received_at_ms);
     var dimensions: Dimensions = undefined;
     var visitor_day: [16]u8 = undefined;
@@ -291,17 +293,23 @@ pub fn ingest(
             !std.mem.eql(u8, original.type, "page_summary") and !std.mem.eql(u8, original.type, "event")) return error.UnknownRecordType;
         const digest = try recordHash(allocator, master_key, original);
         var record = original;
+        record.occurred_at_ms = std.math.add(i64, record.occurred_at_ms, clock_offset) catch return error.InvalidOccurredAt;
         if (site.mode == .full and source == .browser) {
             if (try enforceConsent(&record, result.decision, client.gpc)) result.dropped = true;
             if (record.visitor_id) |visitor_id| {
                 const granting = std.mem.eql(u8, record.type, "consent") and record.state != null and (std.mem.eql(u8, record.state.?, "granted") or std.mem.eql(u8, record.state.?, "not_required"));
-                if (!granting and !std.mem.eql(u8, record.type, "forget")) switch (try refusal(allocator, store, site.id, visitor_id)) {
+                if (!std.mem.eql(u8, record.type, "forget")) switch (try refusal(allocator, store, site.id, visitor_id)) {
                     .none => {},
+                    // The browser keeps the refusal. A grant is the exception:
+                    // it never brings the refused ID back but starts a new
+                    // identity, which the browser makes on `drop`.
                     .withdrawn => {
                         strip(&record, client.gpc);
-                        record.consent_mode = if (client.gpc) "gpc" else "denied";
                         result.dropped = true;
-                        result.withdrawn = true;
+                        if (!granting) {
+                            record.consent_mode = if (client.gpc) "gpc" else "denied";
+                            result.withdrawn = true;
+                        }
                     },
                     // Erased, not refused: the browser starts again under the
                     // site's policy, with a new identity if it gets one.
@@ -400,7 +408,7 @@ pub fn ingest(
 /// Why no record may keep a visitor ID: consent withdrawn (the browser keeps
 /// that refusal), or the visitor was forgotten (the ID alone is refused).
 fn refusal(allocator: std.mem.Allocator, store: *store_mod.Store, site_id: i64, visitor_id: []const u8) !enum { none, withdrawn, forgotten } {
-    const state = try store.database.scalar(allocator, i64, "SELECT CASE WHEN EXISTS(SELECT 1 FROM visitors WHERE site_id=?1 AND visitor_id=?2 AND consent_state IN ('denied','gpc')) THEN 1 WHEN EXISTS(SELECT 1 FROM forgotten_visitors WHERE site_id=?1 AND visitor_id=?2) THEN 2 ELSE 0 END", .{ site_id, visitor_id });
+    const state = try store.database.scalar(allocator, i64, "SELECT CASE WHEN EXISTS(SELECT 1 FROM visitors WHERE site_id=?1 AND visitor_id=?2 AND consent_state IN ('denied','gpc')) OR EXISTS(SELECT 1 FROM forgotten_visitors WHERE site_id=?1 AND visitor_id=?2 AND refused=1) THEN 1 WHEN EXISTS(SELECT 1 FROM forgotten_visitors WHERE site_id=?1 AND visitor_id=?2) THEN 2 ELSE 0 END", .{ site_id, visitor_id });
     return switch (state) {
         1 => .withdrawn,
         2 => .forgotten,
@@ -620,11 +628,13 @@ fn insertPageSummary(c: Context, record: Record) !void {
     var path: []const u8 = "";
     var viewport: []const u8 = "";
     if (clicks != null or attention != null or form_fields != null) {
-        var page = try c.store.database.prepare(allocator, "SELECT path,coalesce(viewport_class,'desktop') FROM page_views WHERE site_id=? AND page_id=?");
+        // Only human visits that aren't the team's own: the heatmap's view
+        // count beside these cells leaves the others out too.
+        var page = try c.store.database.prepare(allocator, "SELECT path,coalesce(viewport_class,'desktop') FROM page_views WHERE site_id=? AND page_id=? AND internal=0 AND traffic_class IN ('human_like','unknown')");
         defer page.deinit();
         try page.bindInt(1, c.site.id);
         try page.bindText(2, record.page_id.?);
-        if (try page.step() == .row and !recordExcluded(c.site.record_exclude, page.columnText(0))) {
+        if (!record.internal and try page.step() == .row and !recordExcluded(c.site.record_exclude, page.columnText(0))) {
             path = try allocator.dupe(u8, page.columnText(0));
             viewport = try allocator.dupe(u8, page.columnText(1));
         } else {
@@ -919,7 +929,8 @@ pub fn forgetVisitor(allocator: std.mem.Allocator, store: *store_mod.Store, site
     // The ID stays refused (see refusal): a tab or another of the
     // site's domains still holding it cannot start the visitor again. Only
     // IDs that were remembered, so made-up ones don't fill the table.
-    try store.database.run(allocator, "INSERT INTO forgotten_visitors(site_id,visitor_id,forgotten_at_ms) SELECT site_id,visitor_id,? FROM visitors WHERE site_id=? AND visitor_id=? ON CONFLICT DO NOTHING", .{ domain.nowMs(), site_id, visitor_id });
+    // A withdrawal outlives the erasure (`refused`).
+    try store.database.run(allocator, "INSERT INTO forgotten_visitors(site_id,visitor_id,forgotten_at_ms,refused) SELECT site_id,visitor_id,?,consent_state IN ('denied','gpc') FROM visitors WHERE site_id=? AND visitor_id=? ON CONFLICT DO NOTHING", .{ domain.nowMs(), site_id, visitor_id });
     inline for (.{
         "DELETE FROM page_summaries WHERE site_id=?1 AND (visitor_id=?2 OR page_id IN (SELECT page_id FROM page_views WHERE site_id=?1 AND visitor_id=?2))",
         "DELETE FROM event_items WHERE site_id=?1 AND event_id IN (SELECT event_id FROM events WHERE site_id=?1 AND visitor_id=?2)",
@@ -980,9 +991,12 @@ fn validateRecord(
 ) !void {
     try domain.validateUuid(record.event_id);
     try domain.validateName(record.type);
+    // Erasure goes through whatever the mode is now: what was collected in
+    // Full mode outlives a change of mode, and so does a snippet's forget().
+    const forget = std.mem.eql(u8, record.type, "forget");
     // A snippet left from before a mode change is caught here; the backend's
     // records are stored under the site's current mode whatever they name.
-    if (source == .browser and !std.mem.eql(u8, record.tracking_mode, domain.modeName(mode))) return error.TrackingModeMismatch;
+    if (source == .browser and !forget and !std.mem.eql(u8, record.tracking_mode, domain.modeName(mode))) return error.TrackingModeMismatch;
     try domain.validateText(record.consent_mode, 32, false);
     try domain.validateText(record.tracker_version, 32, false);
     try domain.validateText(record.release_id, 64, true);
@@ -990,7 +1004,7 @@ fn validateRecord(
         record.occurred_at_ms < received_at_ms - 90 * 24 * 60 * 60 * 1000) return error.InvalidOccurredAt;
     if (record.session_id) |session_id| try domain.validateUuid(session_id);
     if (record.visitor_id) |visitor_id| try domain.validateUuid(visitor_id);
-    switch (mode) {
+    if (!forget) switch (mode) {
         .lite => if (record.session_id != null or record.visitor_id != null) return error.SessionForbidden,
         .session => {
             if (record.visitor_id != null) return error.VisitorForbidden;
@@ -998,7 +1012,7 @@ fn validateRecord(
         },
         // A consented browser record carries both, an unconsented one neither.
         .full => if (source == .browser and (record.session_id == null) != (record.visitor_id == null)) return error.PartialIdentity,
-    }
+    };
     const identified = record.visitor_id != null;
     const kind = record.type;
 
@@ -1092,8 +1106,7 @@ fn validateRecord(
         if (source == .server and record.visitor_id == null) return error.MissingVisitorId;
         return;
     }
-    if (std.mem.eql(u8, kind, "forget")) {
-        if (mode != .full) return error.InvalidForget;
+    if (forget) {
         if (record.user_id) |user_id| {
             if (source != .server) return error.InvalidForget;
             try domain.validateText(user_id, 128, false);
@@ -1226,7 +1239,12 @@ fn canonicalProperties(allocator: std.mem.Allocator, optional: ?std.json.Value) 
         if (index != 0) try writer.writer.writeByte(',');
         try std.json.Stringify.value(key, .{}, &writer.writer);
         try writer.writer.writeByte(':');
-        try std.json.Stringify.value(object.get(key).?, .{}, &writer.writer);
+        // Email addresses are never stored, in a download's file name or a
+        // property the site sends alike.
+        const item = object.get(key).?;
+        if (item == .string and emailShaped(item.string)) {
+            try writer.writer.writeAll("\"[email]\"");
+        } else try std.json.Stringify.value(item, .{}, &writer.writer);
     }
     try writer.writer.writeByte('}');
     if (writer.writer.buffered().len > 2048) return error.PropertiesTooLarge;

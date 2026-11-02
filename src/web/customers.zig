@@ -411,9 +411,12 @@ fn computeRetention(arena: std.mem.Allocator, db: *db_mod.Db, site_id: i64, now:
 
     // Who comes back: visitors first seen 4 to 8 weeks ago (so each had the
     // full 4 weeks to return), by first source, merged by display name.
+    // Counted like the weeks they return in: crawlers and the team's own
+    // visits have no weeks, so they are in neither number.
     var sources = try db.prepare(arena,
         \\SELECT v.first_source,count(*),sum(EXISTS(SELECT 1 FROM visitor_weeks x WHERE x.site_id=v.site_id AND x.visitor_id=v.visitor_id AND x.week>(v.first_seen_ms/86400000+3)/7 AND x.week<=(v.first_seen_ms/86400000+3)/7+4))
-        \\FROM visitors v WHERE v.site_id=? AND v.first_seen_ms>=? AND v.first_seen_ms<? GROUP BY 1
+        \\FROM visitors v WHERE v.site_id=? AND v.first_seen_ms>=? AND v.first_seen_ms<?
+        \\ AND EXISTS(SELECT 1 FROM visitor_weeks f WHERE f.site_id=v.site_id AND f.visitor_id=v.visitor_id AND f.week=(v.first_seen_ms/86400000+3)/7) GROUP BY 1
     );
     defer sources.deinit();
     try sources.bindAll(.{ site_id, origin, now - 4 * week_ms });
