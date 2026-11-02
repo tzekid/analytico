@@ -169,24 +169,37 @@ pub fn forgetVisitors(allocator: std.mem.Allocator, database: *db_mod.Db, site_i
     try database.exec("COMMIT");
 }
 
-/// Retention: whole sessions older than the cutoff go, then free pages are
-/// returned to the file system.
-pub fn prune(allocator: std.mem.Allocator, database: *db_mod.Db, cutoff_ms: i64) !usize {
-    try database.exec("BEGIN IMMEDIATE");
-    errdefer database.exec("ROLLBACK") catch {};
+/// Deletes the whole sessions `condition` (on `replays`, with `?1`) selects,
+/// a few at a time, then returns the free pages to the file system in steps.
+/// `shared` (the server's state) holds the replay lock for one step at a
+/// time: uploads wait on it in request workers, so a long hold would leave
+/// none for collection. Returns the sessions removed.
+pub fn deleteSessions(allocator: std.mem.Allocator, shared: anytype, comptime condition: []const u8, value: anytype) !usize {
+    const batch = 10;
+    const chosen = "(SELECT site_id,session_id FROM replays WHERE " ++ condition ++ " ORDER BY site_id,session_id LIMIT " ++ std.fmt.comptimePrint("{d}", .{batch}) ++ ")";
     var removed: usize = 0;
-    inline for (.{
-        "DELETE FROM replay_chunks WHERE (site_id,session_id) IN (SELECT site_id,session_id FROM replays WHERE received_at_ms<?1)",
-        "DELETE FROM replays WHERE received_at_ms<?1",
-    }) |sql| {
-        var statement = try database.prepare(allocator, sql);
-        defer statement.deinit();
-        try statement.bindInt(1, cutoff_ms);
-        _ = try statement.step();
-        removed += database.changes();
+    while (true) {
+        const database = shared.lockReplays();
+        defer shared.unlockReplays();
+        try database.exec("BEGIN IMMEDIATE");
+        errdefer database.exec("ROLLBACK") catch {};
+        try database.run(allocator, "DELETE FROM replay_chunks WHERE (site_id,session_id) IN " ++ chosen, .{value});
+        try database.run(allocator, "DELETE FROM replays WHERE (site_id,session_id) IN " ++ chosen, .{value});
+        const sessions = database.changes();
+        try database.exec("COMMIT");
+        removed += sessions;
+        if (sessions < batch) break;
     }
-    try database.exec("COMMIT");
-    try database.exec("PRAGMA incremental_vacuum");
+    // Until none are left, or a step frees nothing (no incremental vacuum).
+    var left: i64 = std.math.maxInt(i64);
+    while (true) {
+        const database = shared.lockReplays();
+        defer shared.unlockReplays();
+        const free = try database.scalar(allocator, i64, "PRAGMA freelist_count", .{});
+        if (free == 0 or free >= left) break;
+        left = free;
+        try database.exec("PRAGMA incremental_vacuum(256)");
+    }
     return removed;
 }
 

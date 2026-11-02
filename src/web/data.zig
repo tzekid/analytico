@@ -861,6 +861,8 @@ pub const Totals = struct {
 
 pub fn totals(arena: std.mem.Allocator, db: *db_mod.Db, view: View, start: i64, end: i64) !Totals {
     if (try remembered(arena, view, .{ .totals = .{ .start = start, .end = end } })) |value| return value.totals;
+    try beginSnapshot(db);
+    defer endSnapshot(db);
     const split = try rollupSplit(arena, db, view, start, end);
     var out: Totals = .{};
     if (split < end) {
@@ -912,6 +914,8 @@ pub fn hasImported(arena: std.mem.Allocator, db: *db_mod.Db, view: View) !bool {
 /// One value per bucket of `range`, shifted to start at `start`.
 pub fn series(arena: std.mem.Allocator, db: *db_mod.Db, view: View, metric: Metric, start: i64) ![]f64 {
     if (try remembered(arena, view, .{ .series = .{ .metric = metric, .start = start } })) |value| return value.series;
+    try beginSnapshot(db);
+    defer endSnapshot(db);
     const range = view.range;
     const out = try arena.alloc(f64, range.buckets);
     @memset(out, 0);
@@ -984,6 +988,8 @@ pub const Row = struct {
 /// Top values of a dimension by page views, with the previous period's count.
 pub fn top(arena: std.mem.Allocator, db: *db_mod.Db, view: View, dim: Dim, limit: usize) ![]Row {
     if (try remembered(arena, view, .{ .top = .{ .dim = dim, .limit = limit } })) |value| return value.top;
+    try beginSnapshot(db);
+    defer endSnapshot(db);
     const imported_dim: ?[]const u8 = if (view.filters.len != 0) null else switch (dim) {
         .page => "page",
         .source => "source",
@@ -1165,6 +1171,21 @@ pub fn rolledUntil(arena: std.mem.Allocator, db: *db_mod.Db, site_id: i64) !i64 
 
 /// Rollups cover [start, split); raw rows cover [split, end). The split is
 /// a day boundary, or the latest partial cut when the range runs past it.
+/// The rollup cut and the rows on both sides of it come from one snapshot:
+/// a summary committed between those reads would count its minutes twice.
+/// Every reader of a partial day's summary holds one around its queries
+/// (Paths reads closed days only, which never change).
+pub fn beginSnapshot(db: *db_mod.Db) !void {
+    try db.exec("SAVEPOINT rollup_read");
+}
+
+pub fn endSnapshot(db: *db_mod.Db) void {
+    db.exec("RELEASE rollup_read") catch {
+        db.exec("ROLLBACK TO rollup_read") catch {};
+        db.exec("RELEASE rollup_read") catch {};
+    };
+}
+
 pub fn rollupSplit(arena: std.mem.Allocator, db: *db_mod.Db, view: View, start: i64, end: i64) !i64 {
     if (rollupScope(view) == null or @mod(start, day_ms) != 0) return start;
     const until = try rolledUntil(arena, db, view.site.id);
@@ -1245,6 +1266,8 @@ pub fn returningShare(arena: std.mem.Allocator, db: *db_mod.Db, view: View, star
 /// whole past days of unfiltered views, raw rows for everything else.
 pub fn keySums(arena: std.mem.Allocator, db: *db_mod.Db, view: View, dim: []const u8, start: i64, end: i64, limit: usize) ![]KeySum {
     if (try remembered(arena, view, .{ .key_sums = .{ .dim = dim, .start = start, .end = end, .limit = limit } })) |value| return value.key_sums;
+    try beginSnapshot(db);
+    defer endSnapshot(db);
     const split = if (view.filters.len == 0) try rollupSplit(arena, db, view, start, end) else start;
     var sql = Sql.init(arena);
     try sql.add("SELECT k,sum(a),sum(b),sum(c),sum(d),sum(e),sum(f),sum(g) FROM (SELECT ");

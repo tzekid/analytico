@@ -99,6 +99,8 @@ fn headerSafe(value: []const u8) bool {
 }
 
 pub fn send(arena: std.mem.Allocator, io: std.Io, config: Config, message: Message) !void {
+    // Settings saved before this rule existed are refused too, not used.
+    if (!plainAllowed(config.security, config.host)) return error.SmtpNeedsTls;
     return @import("../net.zig").bounded(sendRequest, .{ arena, io, config, message }, 30_000);
 }
 
@@ -206,6 +208,13 @@ fn writeBase64(arena: std.mem.Allocator, w: *std.Io.Writer, value: []const u8) !
     while (index < encoded.len) : (index += 76) {
         w.print("{s}\r\n", .{encoded[index..@min(encoded.len, index + 76)]}) catch return error.SmtpConnectionLost;
     }
+}
+
+/// Mail without TLS goes only to a relay on this machine: the password and
+/// the reports would otherwise cross the network in the clear.
+pub fn plainAllowed(security: Security, host: []const u8) bool {
+    if (security != .none) return true;
+    return std.mem.eql(u8, host, "127.0.0.1") or std.mem.eql(u8, host, "::1") or std.ascii.eqlIgnoreCase(host, "localhost");
 }
 
 /// "Analytico <a@b.c>" -> "a@b.c".

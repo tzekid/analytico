@@ -142,6 +142,7 @@ fn runEmailSet(allocator: std.mem.Allocator, io: std.Io, output: *std.Io.Writer,
     };
     const port = if (option(args, "--port")) |text| std.fmt.parseInt(u16, text, 10) catch return error.InvalidPort else default_port;
     const host = option(args, "--host") orelse return error.MissingHost;
+    if (!mail.plainAllowed(security, host)) return error.PlainSmtpNeedsLocalRelay;
     const username = option(args, "--username") orelse "";
     const from = option(args, "--from") orelse return error.MissingFrom;
     var buffer: [1024]u8 = undefined;
@@ -436,7 +437,8 @@ fn runReport(allocator: std.mem.Allocator, io: std.Io, output: *std.Io.Writer, a
     if (option(args, "--range")) |range| try w.print("&range={f}", .{html.url(range)});
     if (option(args, "--days")) |text| {
         const days = std.fmt.parseInt(i64, text, 10) catch return error.InvalidDays;
-        if (days < 1 or days > 3650) return error.InvalidDays;
+        // A range covers at most 366 days; more would be cut without a word.
+        if (days < 1 or days > 366) return error.InvalidDays;
         const today = domain.nowMs();
         try w.print("&range=custom&from={s}&to={s}", .{ &webdata.dateText(today - (days - 1) * webdata.day_ms), &webdata.dateText(today) });
     }

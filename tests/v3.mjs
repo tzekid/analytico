@@ -855,6 +855,8 @@ await journey("v3", async (t) => {
   await consentPage.locator("#to-other").click();
   await consentPage.waitForURL(`${originB}/welcome`);
   await t.until(async () => (await storedOn(consentPage, "visitor") || "").startsWith(originalVisitor), "identity continued on the other domain");
+  // Coming from the site's other domain is no referral: it is the site itself.
+  await t.until(() => row("SELECT referrer_host r FROM page_views WHERE path='/welcome' AND visitor_id=?", originalVisitor)?.r === "(self)", "the other domain counted as the site itself");
   await Promise.all([decision(consentPage), consentPage.goto(`${originA}/home`)]);
   const withdrawalDecision = consentPage.waitForResponse((response) => new URL(response.url()).pathname === "/e" && response.request().postData()?.includes('"state":"denied"'));
   await consentPage.evaluate(() => analytico.consent("denied"));
@@ -939,6 +941,10 @@ await journey("v3", async (t) => {
   await t.until(() => row("SELECT count(*) n FROM page_views WHERE visitor_id=?", newVisitor).n === 1, "new consented page");
   await consentPage.evaluate(() => analytico.forget());
   await t.until(() => !row("SELECT visitor_id FROM visitors WHERE visitor_id=?", newVisitor), "new visitor forgotten");
+  // forget() reaches the identity withdrawn earlier on this domain too:
+  // erased, and still refused.
+  await t.until(() => !row("SELECT visitor_id FROM visitors WHERE visitor_id=?", originalVisitor), "withdrawn visitor forgotten too");
+  assert.equal(row("SELECT refused FROM forgotten_visitors WHERE visitor_id=?", originalVisitor).refused, 1);
   await consentContext.close();
   // A tab or domain that still holds the forgotten ID cannot start them again;
   // being erased is not a refusal, so it starts over under the site's policy.
@@ -960,8 +966,7 @@ await journey("v3", async (t) => {
   assert.equal((await fetch(`http://127.0.0.1:${t.port}/i`, { method: "POST", headers: { "content-type": "application/json", ...t.sign("shop", afterWithdrawal) }, body: afterWithdrawal })).status, 204);
   assert.equal(row("SELECT visitor_id v FROM events WHERE name='plan_renewed'").v, null);
   assert.equal(row("SELECT count(*) n FROM visitor_links WHERE visitor_id IN (?,?)", originalVisitor, newVisitor).n, 0);
-  assert.deepEqual({ ...row("SELECT consent_state,user_hash FROM visitors WHERE visitor_id=?", originalVisitor) }, { consent_state: "denied", user_hash: null });
-  assert.equal(row("SELECT count(*) n FROM visitors WHERE visitor_id=?", newVisitor).n, 0);
+  assert.equal(row("SELECT count(*) n FROM visitors WHERE visitor_id IN (?,?)", originalVisitor, newVisitor).n, 0);
   // Erasing someone who had withdrawn keeps the refusal for their other tabs.
   const eraseWithdrawn = JSON.stringify({ v: 2, site: publicId, sent_at_ms: Date.now(), records: [{ ...serverRecord, occurred_at_ms: Date.now(), event_id: randomUUID(), type: "forget", visitor_id: originalVisitor }] });
   assert.equal((await fetch(`http://127.0.0.1:${t.port}/i`, { method: "POST", headers: { "content-type": "application/json", ...t.sign("shop", eraseWithdrawn) }, body: eraseWithdrawn })).status, 204);

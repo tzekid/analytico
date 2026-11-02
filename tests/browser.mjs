@@ -75,6 +75,27 @@ await journey("browser", async (t) => {
   assert.equal(stored.c, "春".repeat(42));
   assert.deepEqual([JSON.parse(stored.s).length, JSON.parse(stored.s).includes("our team")], [32, false]);
   assert.equal(db.prepare("SELECT count(*) n FROM events WHERE name='signup_started'").get().n, 1);
+  // A busy page keeps every event past fifteen; an outcome only the backend
+  // may report is refused here (the server would refuse the whole batch);
+  // a data: download sends its name, never its content.
+  const busy = await context.newPage();
+  await visit(busy, "/session");
+  const refusedOutcome = await busy.evaluate(() => {
+    for (let index = 0; index < 20; index++) analytico.track("busy_click", { n: index });
+    const link = document.createElement("a");
+    link.id = "export";
+    link.textContent = "Export";
+    link.download = "export.json";
+    link.href = "data:application/json;charset=utf-8," + encodeURIComponent(JSON.stringify({ name: "Jane Doe", phone: "+49 30 1234567" }));
+    link.addEventListener("click", (event) => event.preventDefault());
+    document.body.append(link);
+    return analytico.track("payment_confirmed", {});
+  });
+  assert.equal(refusedOutcome, "");
+  await busy.locator("#export").click();
+  await busy.goto(`${origin}/done`);
+  await t.until(() => db.prepare("SELECT count(*) n FROM events WHERE name='busy_click'").get().n === 20, "every event stored");
+  assert.deepEqual(db.prepare("SELECT json_extract(properties_json,'$.file') f FROM events WHERE name='file_download'").all().map((row) => row.f), ["export.json"]);
 
   // Back to a page kept in the back/forward cache: a new view with the
   // visit's source, and what it tracks still goes out. (Playwright runs

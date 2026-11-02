@@ -251,6 +251,8 @@ fn points(arena: std.mem.Allocator, current: f64, previous: f64) ![]const u8 {
 /// Views, visitors, average active time and average scroll of a page's
 /// view: the daily summaries up to their cut, raw rows after it.
 fn pageFigures(ctx: *Ctx, view: data.View, from: i64, to: i64) ![4]f64 {
+    try data.beginSnapshot(ctx.db);
+    defer data.endSnapshot(ctx.db);
     const split = try data.rollupSplit(ctx.arena, ctx.db, view, from, to);
     var sql = data.Sql.init(ctx.arena);
     try sql.add("SELECT count(*),");
@@ -282,6 +284,8 @@ fn sectionsList(ctx: *Ctx, view: data.View, limit: i64) !void {
     const range = view.range;
     const scope = data.rollupScope(view);
     const page: ?[]const u8 = if (scope != null and std.mem.eql(u8, scope.?.dim, "page")) scope.?.key else null;
+    try data.beginSnapshot(ctx.db);
+    defer data.endSnapshot(ctx.db);
     const split = if (page != null) try data.rollupSplit(arena, ctx.db, view, range.start_ms, range.end_ms) else range.start_ms;
     var sql = data.Sql.init(arena);
     try sql.add("WITH s AS (SELECT ps.sections_json FROM page_views pv JOIN page_summaries ps ON ps.site_id=pv.site_id AND ps.page_id=pv.page_id WHERE ");

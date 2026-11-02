@@ -411,6 +411,9 @@
     name = clean(name, 64);
     var safe = safeProperties(properties);
     if (!name || !/^[A-Za-z0-9_.:-]+$/.test(name) || safe === null) return "";
+    // Outcomes only the site's backend may report: the server would refuse
+    // the whole batch, and the events queued with it.
+    if (/^(registration_confirmed|payment_confirmed|payment_refunded|refund_confirmed|attendance_confirmed|match_created|registration_waitlisted|registration_cancelled)$/.test(name)) return "";
     var id = uuid();
     if (!id) return "";
     var record = Object.assign(base(id, "event"), {
@@ -431,7 +434,13 @@
         record.items = items;
       }
     }
-    if (queued.length < 15) queued.push(record);
+    queued.push(record);
+    // Events wait to leave with the page's summary, one batch at most: more
+    // go as they fill one, never dropped.
+    if (queued.length === 15) {
+      send(queued.slice());
+      queued.length = 0;
+    }
     /* @full-begin */
     if (replayConfig && replayConfig.goals && replayConfig.goals.indexOf(name) >= 0) triggerReplay();
     /* @full-end */
@@ -486,7 +495,10 @@
         var file = /\.(pdf|zip|csv|docx?|xlsx?|pptx?|ics|dmg|exe|msi|apk|mp3|mp4|epub)$/i.exec(url.pathname);
         if (link.hasAttribute("download") || file) {
           downloads++;
-          var fileName = clean(decodeURIComponent(url.pathname.split("/").pop() || "download"), 100);
+          // A name only from a web address: a data: or blob: link holds the
+          // file itself, whatever it says about the person downloading it.
+          var named = /^https?:$/.test(url.protocol) ? decodeURIComponent(url.pathname.split("/").pop() || "") : "";
+          var fileName = clean(named || link.getAttribute("download") || "", 100) || "download";
           track("file_download", { file: fileName, ext: (file ? file[1] : "").toLowerCase() || null });
         } else if (url.origin !== location.origin && /^https?:$/.test(url.protocol)) {
           outboundClicks++;
@@ -531,7 +543,11 @@
       duration = Date.now() - state.started;
       actionTimers.delete(id);
     }
-    var safe = safeProperties(properties) || {};
+    var given = safeProperties(properties) || {};
+    // The action and its duration always fit: at most six of the caller's
+    // own keys go beside them in an event's eight.
+    var safe = {};
+    Object.keys(given).filter(function (key) { return key !== "action" && key !== "duration_bucket"; }).slice(0, 6).forEach(function (key) { safe[key] = given[key]; });
     safe.action = id;
     if (duration !== null) safe.duration_bucket = duration < 100 ? "under-100ms" : duration < 500 ? "100-499ms" : duration < 2000 ? "500-1999ms" : "2-9s";
     return track("action_" + outcome, safe);
@@ -681,7 +697,8 @@
   /* @full-end */
 
   function summary() {
-    if (sentSummary) return;
+    // Nothing to sum up for a prerendered page never opened.
+    if (sentSummary || !pageId) return;
     sentSummary = true;
     settle(Date.now());
     /* @session-begin */
@@ -834,6 +851,12 @@
   }, { passive: true });
   document.addEventListener("visibilitychange", function () {
     settle(Date.now());
+    // A hidden tab may never come back (discarded, closed by the system):
+    // its events leave now, its summary when the page goes.
+    if (document.hidden && queued.length) {
+      send(queued.slice());
+      queued.length = 0;
+    }
     /* @full-begin */
     if (document.hidden && replay) replay.flush(true);
     /* @full-end */
@@ -884,6 +907,11 @@
   function routeChanged() {
     var path = location.pathname.slice(0, 512);
     if (path === currentPath) return;
+    // A prerendered page (not opened yet) only moves to where it will open.
+    if (!pageId) {
+      currentPath = path;
+      return;
+    }
     summary();
     currentPath = path;
     begin();
@@ -1006,6 +1034,10 @@
   }
 
   function clearIdentity(state) {
+    // A withdrawn identity is kept for one thing only: the visitor's own
+    // later forget(), which would otherwise have nothing left to erase.
+    var held = visitorId || storedVisitor();
+    if (held && (state === "denied" || state === "gpc")) save("withdrawn", held);
     identityGeneration += 1;
     linkArrival = null;
     visitorId = null;
@@ -1382,8 +1414,11 @@
   };
   // Erases everything stored about this visitor and stops tracking them.
   window.analytico.forget = function () {
-    if (visitorId) send([base(uuid(), "forget")]);
+    // The current identity and one withdrawn earlier on this domain.
+    var ids = [visitorId, load("withdrawn")].filter(function (id, index, all) { return isUuid(id) && all.indexOf(id) === index; });
+    if (ids.length) send(ids.map(function (id) { return Object.assign(base(uuid(), "forget"), { visitor_id: id }); }));
     clearIdentity("denied");
+    save("withdrawn", null);
   };
   window.analytico.variant = function (experiment, variant) {
     return track("experiment_viewed", { experiment: clean(String(experiment), 64), variant: clean(String(variant), 64) });
@@ -1391,15 +1426,31 @@
   window.analytico.replay = function () { triggerReplay(); };
   /* @full-end */
 
-  begin();
-  observeSections();
-  pageView();
-  if (pageType === "404") track("page_not_found", {});
-  /* @full-begin */
-  watchConsentMode();
-  /* @full-end */
-  api.forEach(function (call) {
-    var name = call && call[0];
-    if (typeof window.analytico[name] === "function") window.analytico[name].apply(null, Array.prototype.slice.call(call, 1));
+  // Until the page counts (prerendered, not opened yet), calls wait in line
+  // with those made before the tracker loaded.
+  Object.keys(window.analytico).forEach(function (name) {
+    var method = window.analytico[name];
+    window.analytico[name] = function () {
+      if (pageId) return method.apply(null, arguments);
+      api.push([name].concat(Array.prototype.slice.call(arguments)));
+      return "";
+    };
   });
+  function start() {
+    begin();
+    observeSections();
+    pageView();
+    if (pageType === "404") track("page_not_found", {});
+    /* @full-begin */
+    watchConsentMode();
+    /* @full-end */
+    api.forEach(function (call) {
+      var name = call && call[0];
+      if (typeof window.analytico[name] === "function") window.analytico[name].apply(null, Array.prototype.slice.call(call, 1));
+    });
+  }
+  // A page prerendered on a guess (Speculation Rules, the address bar)
+  // counts once the visitor actually opens it.
+  if (document.prerendering) document.addEventListener("prerenderingchange", start, { once: true });
+  else start();
 }());

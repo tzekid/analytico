@@ -196,6 +196,11 @@ await journey("workspace", async (t) => {
   for (const name of ["recent", "sessions", "session", "search", "errors"]) assert.ok(!tools.includes(name), name);
   const pages = await mcp({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "pages", arguments: { site: "shop", range: "7d" } } });
   assert.match(pages.result.content[0].text, /^Pages for .*\npath \| page_type/);
+  // A chosen period is the one reported, never the default.
+  const daysAgo = (days) => new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+  const chosen = await mcp({ jsonrpc: "2.0", id: 41, method: "tools/call", params: { name: "pages", arguments: { site: "shop", from: daysAgo(9), to: daysAgo(8) } } });
+  const until = daysAgo(8);
+  assert.match(chosen.result.content[0].text.split("\n")[0], new RegExp(`${Number(until.slice(8, 10))} ${["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][Number(until.slice(5, 7)) - 1]}`));
   const emptyFunnel = await mcp({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "funnel", arguments: { site: "shop", name: "Pricing to checkout", range: "7d", filters: ["country:ZZ"] } } });
   assert.match(emptyFunnel.result.content[0].text, /1 \| path \| \/pricing \| 0 \|/);
   // A bad argument is a tool error the model can read and correct.
@@ -560,8 +565,8 @@ await journey("access", async (t) => {
   // A user ID shaped like a UUID is hashed like any other user ID. The
   // browser establishes the visitor; the backend's identify links it.
   const now = Date.now();
-  const browserVisit = async (visitor) => {
-    const record = { event_id: randomUUID(), type: "page_view", occurred_at_ms: now, tracking_mode: "full", consent_mode: "granted", tracker_version: "2", release_id: "", internal: false, visitor_id: visitor, session_id: randomUUID(), page_id: randomUUID(), path: "/account" };
+  const browserVisit = async (visitor, session = randomUUID()) => {
+    const record = { event_id: randomUUID(), type: "page_view", occurred_at_ms: now, tracking_mode: "full", consent_mode: "granted", tracker_version: "2", release_id: "", internal: false, visitor_id: visitor, session_id: session, page_id: randomUUID(), path: "/account" };
     const response = await fetch(`${origin}/e`, { method: "POST", headers: { origin, "content-type": "text/plain", "user-agent": "Chrome/140", "x-forwarded-for": "203.0.113.9" }, body: JSON.stringify({ v: 2, site: publicId, sent_at_ms: now, records: [record] }) });
     assert.equal(response.status, 200);
   };
@@ -581,10 +586,14 @@ await journey("access", async (t) => {
   assert.equal(audit().at(-1).action, "person.deleted");
   // So are the backend's, through /i.
   const erased = randomUUID();
-  await browserVisit(erased);
+  const erasedSession = randomUUID();
+  await browserVisit(erased, erasedSession);
+  // The backend's payment names only the visit: it goes with the visitor.
+  await signed({ type: "event", name: "payment_confirmed", session_id: erasedSession, order_id: "ERASED-1", value_minor: 100, currency: "EUR" });
   const viaApi = await audited(() => signed({ type: "forget", visitor_id: erased }));
   assert.deepEqual([viaApi.action, viaApi.actor, viaApi.detail], ["person.deleted", "api", `Visitor ${erased.slice(0, 4)} · 1 visitor(s)`]);
   assert.equal(read("SELECT count(*) n FROM page_views WHERE visitor_id=?", erased)[0].n, 0);
+  assert.equal(read("SELECT count(*) n FROM events WHERE order_id='ERASED-1'")[0].n, 0);
   // A user known only from the backend's events can be exported and deleted.
   await signed({ type: "event", name: "registration_confirmed", user_id: "lite-user-7" });
   const liteExport = await context.request.get(`${origin}/settings/consent/export?site=shop&person=lite-user-7`);
@@ -609,6 +618,10 @@ await journey("access", async (t) => {
   await post(context, "/settings/sites/update", { site: "shop", name: "", mode: "session", enabled: "1" });
   await signed({ type: "forget", user_id: earlierUser });
   assert.equal(read("SELECT count(*) n FROM page_views WHERE visitor_id=?", earlier)[0].n, 0);
+  // Its events keep arriving too, without the user (a Full-mode feature).
+  await signed({ type: "event", name: "renewed_in_session", user_id: earlierUser, visitor_id: earlier });
+  assert.deepEqual({ ...read("SELECT user_hash,visitor_id FROM events WHERE name='renewed_in_session'")[0] }, { user_hash: null, visitor_id: null });
+  await signed({ type: "identify", visitor_id: earlier, user_id: earlierUser });
   await post(context, "/settings/sites/update", { site: "shop", name: "", mode: "full", enabled: "1" });
 
   // The CLI's deletions are logged too, once the server has stopped.

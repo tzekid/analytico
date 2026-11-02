@@ -8,8 +8,14 @@ Production uses one user service behind Caddy:
 ~/.local/share/analytico-sqlite/replays.db     session replays
 ~/.local/share/analytico-sqlite/secret.key
 ~/.local/share/analytico-sqlite/geo.bin        optional location database
+~/.local/share/analytico-sqlite/day.key        today's visitor-pseudonym key
 ~/.local/share/analytico-sqlite/exports/       optional daily CSV exports
 ```
+
+`day.key` is random, replaced by the first visit of each UTC day and never
+copied into a backup: once a day is over, its per-day pseudonyms can't be
+recomputed from any address, even with `secret.key`. A restored instance
+simply starts a new one.
 
 `analytico init ~/.local/share/analytico-sqlite` creates the data directory
 with mode 0700 and the key with mode 0600. Protect the key, database, backups,
@@ -136,8 +142,11 @@ are rate limited per client address. Sessions last thirty days; setting a new
 password signs out every other device.
 
 Automations use `analytico user key <email> <name> [--site <slug>]` to create a
-read-only API key for an existing person (`user invite` creates one; the first
-becomes the owner). Like every CLI write, it runs while the service is stopped.
+read-only API key for an existing person. `user invite` creates one: the
+first becomes the owner, later ones admins of every website, each with a
+sign-in link valid for seven days. For a key with less behind it, invite a
+Viewer limited to one website from Settings → Team instead. Like every CLI
+write, it runs while the service is stopped.
 Browser sessions are created only by completing a configured sign-in flow.
 
 Google sign-in needs an OAuth client (Web application) from Google Cloud with
@@ -248,7 +257,8 @@ on "Sync now"; failures show on the integration's card.
 Webhooks receive JSON signed like `/i`: lowercase hex
 `HMAC-SHA256(channel_secret, timestamp + "." + body)` in
 `X-Analytico-Signature`, the Unix timestamp in `X-Analytico-Timestamp`. The
-secret is shown once when the webhook is added.
+secret is shown once when the webhook is added, as 64 hex characters: the
+key is the 32 bytes they spell (`Buffer.from(secret, "hex")` in Node).
 
 The read API (`/api/v1/...`) uses keys from Settings → API & public links
 (or `analytico user key`); each reads with its creator's access, optionally
@@ -318,7 +328,9 @@ analytico vacuum ~/.local/share/analytico-sqlite \
 
 For exact body bytes `BODY` and Unix timestamp `T`, send lowercase hex
 `HMAC-SHA256(site_secret, T + "." + BODY)` in `X-Analytico-Signature` and `T`
-in `X-Analytico-Timestamp`. The body must use the site's public ID and arrive
+in `X-Analytico-Timestamp`. `site_secret` is the 32 bytes the 64 hex
+characters in Settings → Website & tracking spell, not the text itself
+(`Buffer.from(secret, "hex")` in Node, `bytes.fromhex(secret)` in Python). The body must use the site's public ID and arrive
 within five minutes. `analytico site sign <slug> < batch.json` prints both
 headers for a body, for scripts and tests that should not handle the secret.
 

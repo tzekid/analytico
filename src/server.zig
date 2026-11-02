@@ -87,6 +87,48 @@ pub const Shared = struct {
     /// Failed sign-ins, and sign-in attempts started without an account.
     login_failures: @import("web/auth.zig").Limiter = .{},
     challenges_started: @import("web/auth.zig").Limiter = .{},
+    /// Today's key for visitor pseudonyms; see `dayKey`.
+    day_key: struct { date: [10]u8 = @splat(0), key: [32]u8 = @splat(0) } = .{},
+
+    /// The key of a day's visitor pseudonyms (`domain.visitorDayId`): random,
+    /// kept in `day.key` beside the database so a restart keeps it, never in
+    /// a backup, and replaced by the first batch of the next UTC day. Once
+    /// its day is over a pseudonym can't be recomputed from any address,
+    /// even with the instance key. Collection calls it under the write lock.
+    pub fn dayKey(self: *Shared, arena: std.mem.Allocator, date: *const [10]u8) ![32]u8 {
+        if (std.mem.eql(u8, &self.day_key.date, date)) return self.day_key.key;
+        const io = self.io;
+        const path = try std.fs.path.join(arena, &.{ self.data, "day.key" });
+        if (std.Io.Dir.cwd().openFile(io, path, .{})) |file| {
+            defer file.close(io);
+            var stored: [42]u8 = undefined;
+            var buffer: [42]u8 = undefined;
+            var reader = file.reader(io, &buffer);
+            if (reader.interface.readSliceAll(&stored)) |_| {
+                if (std.mem.eql(u8, stored[0..10], date)) {
+                    self.day_key = .{ .date = date.*, .key = stored[10..42].* };
+                    return self.day_key.key;
+                }
+            } else |_| {}
+        } else |err| if (err != error.FileNotFound) return err;
+        var key: [32]u8 = undefined;
+        try io.randomSecure(&key);
+        const temporary = try std.fmt.allocPrint(arena, "{s}.new", .{path});
+        std.Io.Dir.cwd().deleteFile(io, temporary) catch {};
+        {
+            const file = try std.Io.Dir.cwd().createFile(io, temporary, .{ .exclusive = true, .permissions = @fromBackingInt(@intCast(0o600)) });
+            defer file.close(io);
+            var buffer: [42]u8 = undefined;
+            var writer = file.writer(io, &buffer);
+            try writer.interface.writeAll(date);
+            try writer.interface.writeAll(&key);
+            try writer.flush();
+            try file.sync(io);
+        }
+        try std.Io.Dir.cwd().rename(temporary, std.Io.Dir.cwd(), path, io);
+        self.day_key = .{ .date = date.*, .key = key };
+        return key;
+    }
 
     pub fn lockWrite(self: *Shared) *db_mod.Db {
         self.write_lock.lockUncancelable(self.io);
@@ -550,7 +592,7 @@ fn ingestBatch(job: *IngestJob) !Outcome {
     if (source == .browser) if (shared.geo) |geo| {
         client.place = geo.lookup(client.peer_ip);
     };
-    const result = collector.ingest(arena, store, shared.master_key, site, envelope, source, client) catch |err| {
+    const result = collector.ingest(arena, store, shared.master_key, shared, site, envelope, source, client) catch |err| {
         if (storageError(err)) return err;
         try store.database.exec("ROLLBACK TO batch");
         const status: std.http.Status = if (err == error.EventIdConflict) .conflict else if (err == error.SiteDisabled) .forbidden else .unprocessable_entity;

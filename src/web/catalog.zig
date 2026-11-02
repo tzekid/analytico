@@ -69,7 +69,7 @@ pub const common = [_]Param{
     .{ .name = "range", .description = "Period", .values = &.{ "24h", "7d", "30d", "90d" } },
     .{ .name = "from", .description = "Custom start date YYYY-MM-DD (with to)" },
     .{ .name = "to", .description = "Custom end date YYYY-MM-DD, inclusive" },
-    .{ .name = "filters", .description = "Filters like page:/pricing, source:google, device:mobile, country:DE, campaign:spring, release:v2; prefix the value with ! to exclude (page:!/admin)" },
+    .{ .name = "filters", .description = "Filters like page:/pricing, source:google, device:mobile, country:DE, campaign:spring, release:v2; put ! before the colon to exclude (page!:/admin)" },
 };
 
 const limit_param: Param = .{ .name = "limit", .description = "Maximum rows (1–1000, default 100)", .kind = .integer };
@@ -134,7 +134,16 @@ pub fn run(arena: std.mem.Allocator, db: *db_mod.Db, report: *const Report, site
         if (value.len == 0) return error.MissingParameter;
     };
     if (report.sessions and site.mode == .lite) return error.SessionModeRequired;
-    return report.run(.{ .arena = arena, .db = db, .view = try view(arena, site, params, now_ms), .params = params, .now_ms = now_ms });
+    return report.run(.{ .arena = arena, .db = db, .view = try periodView(arena, site, params, now_ms), .params = params, .now_ms = now_ms });
+}
+
+/// The view of the period asked for, or none: an unknown range or
+/// unreadable dates would otherwise quietly answer for the last seven days.
+pub fn periodView(arena: std.mem.Allocator, site: data.Site, params: html.Params, now_ms: i64) !data.View {
+    if (params.get("range")) |range| if (std.meta.stringToEnum(data.RangeKind, range) == null) return error.InvalidParameter;
+    const chosen = try view(arena, site, params, now_ms);
+    if (chosen.range.correction == .unreadable) return error.InvalidParameter;
+    return chosen;
 }
 
 // ---------------------------------------------------------------- renderers
@@ -600,10 +609,13 @@ fn pathsReport(input: Input) !Table {
     const from_path = input.get("from_path").?;
     try domain.validatePath(from_path);
     // Whole days come from the daily summaries, like the workspace's paths.
-    const next = try @import("journeys.zig").nextSteps(input.arena, input.db, input.view, from_path, input.int("limit", 100, 1, 1000) + 1);
+    // One more than asked for, in case one of them is leaving the site.
+    const limit = input.int("limit", 100, 1, 1000);
+    const next = try @import("journeys.zig").nextSteps(input.arena, input.db, input.view, from_path, limit + 1);
     var table: TableBuilder = .{ .arena = input.arena, .columns = &.{ "from_path", "next_path", "transitions" } };
     const exits = std.mem.eql(u8, input.get("exits") orelse "", "1");
     for (next.steps) |step| {
+        if (table.rows.items.len == @as(usize, @intCast(limit))) break;
         // Leaving the site is listed only when asked for, as it always was.
         if (step.path.len != 0 or exits) try table.add(.{ from_path, step.path, step.count });
     }
@@ -674,7 +686,7 @@ const sections_sql =
 const actions_sql =
     \\SELECT e.name,coalesce(json_extract(e.properties_json,'$.action'),'') AS action,count(*) AS occurrences
     \\FROM events e WHERE e.internal=0 AND e.site_id=? AND e.received_at_ms>=? AND e.received_at_ms<? AND (e.source='server' OR e.traffic_class IN ('human_like','unknown'))
-    \\AND (?='' OR coalesce(e.release_id,'')=?) AND (?='' OR coalesce(json_extract(e.properties_json,'$.campaign'),'')=?) AND (?='' OR coalesce(e.path,'')=?)
+    \\AND (?='' OR coalesce(e.release_id,'')=?) AND (?='' OR coalesce((SELECT pv.utm_campaign FROM page_views pv WHERE pv.site_id=e.site_id AND pv.page_id=e.page_id),'')=?) AND (?='' OR coalesce(e.path,'')=?)
     \\AND (e.name LIKE 'action_%' OR e.name='rage_click') GROUP BY e.name,action ORDER BY occurrences DESC LIMIT ?
 ;
 const recent_sql =
@@ -682,7 +694,7 @@ const recent_sql =
     \\ SELECT pv.received_at_ms,'page_view' AS kind,'page_view' AS name,pv.path,'browser' AS source,pv.session_id,pv.release_id,pv.utm_campaign,
     \\  coalesce(nullif(pv.utm_source,''),nullif(pv.referrer_host,''),'direct') AS referrer,pv.country,pv.device
     \\ FROM page_views pv WHERE pv.internal=0 AND pv.traffic_class IN ('human_like','unknown') AND pv.site_id=?1 AND pv.received_at_ms>=?2 AND pv.received_at_ms<?3
-    \\ UNION ALL SELECT e.received_at_ms,'event',e.name,coalesce(e.path,''),e.source,e.session_id,e.release_id,json_extract(e.properties_json,'$.campaign'),NULL,NULL,NULL
+    \\ UNION ALL SELECT e.received_at_ms,'event',e.name,coalesce(e.path,''),e.source,e.session_id,e.release_id,coalesce((SELECT pv.utm_campaign FROM page_views pv WHERE pv.site_id=e.site_id AND pv.page_id=e.page_id),json_extract(e.properties_json,'$.campaign')),NULL,NULL,NULL
     \\ FROM events e WHERE e.internal=0 AND e.site_id=?1 AND e.received_at_ms>=?2 AND e.received_at_ms<?3 AND (e.source='server' OR e.traffic_class IN ('human_like','unknown'))
     \\) WHERE (?4='' OR coalesce(release_id,'')=?5) AND (?6='' OR coalesce(utm_campaign,'')=?7) AND (?8='' OR path=?9)
     \\ORDER BY received_at_ms DESC LIMIT ?10

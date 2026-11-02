@@ -38,7 +38,8 @@ with the fields they had in v1. Version 2 adds:
   non-sensitive field: time,
   validation errors, abandoned, submitted; never values), consented only;
 - `event`: `order_id`, `items` (at most 32 of `id`, `name`, `category`,
-  `price_minor`, `quantity`) and, from `/i` only, `user_id`;
+  `price_minor`, `quantity`) and, from `/i` only, `user_id` (kept on Full-mode
+  websites; elsewhere the event is stored without it);
 - `consent` with `state` (`granted`, `not_required`, `denied`): attaches the
   page view it names to the consented visitor, or records the refusal;
 - `error` with `path`, `message`, `file`, `line`, `column`;
@@ -107,13 +108,16 @@ sends it again under a new ID.
 The loopback proxy must replace `X-Forwarded-For` with the immediate client's
 validated network address. Browser collection fails closed when this header is
 missing or invalid; Analytico never substitutes the loopback address. The
-address is used for the place lookup and the site/day pseudonym, then
-discarded.
+address is used for the place lookup and the site/day pseudonym (keyed with
+a random key for that UTC day, replaced the next day and never backed up),
+then discarded.
 
 Internal requests include `X-Analytico-Timestamp` (Unix seconds) and
 `X-Analytico-Signature` (lowercase hex HMAC-SHA256 of
-`timestamp + "." + body`). The timestamp must be within five minutes. `/i`
-also requires loopback or an explicitly configured trusted proxy boundary.
+`timestamp + "." + body`, keyed with the 32 bytes of the site's secret, which
+Settings shows as hex). The timestamp must be within five minutes. The server
+checks the signature only; the reverse proxy keeps `/i` off the public site
+(`deploy/Caddyfile`), so backends reach it over loopback.
 
 ## Replay chunks
 

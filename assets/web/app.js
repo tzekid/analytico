@@ -404,6 +404,13 @@
       if (id !== navigation) return;
       buttons.forEach((button) => { button.disabled = false; });
       if (busy && submitter) submitter.textContent = label;
+      // The page shows what the server has: a switch in its saved position,
+      // a row that was waiting to be deleted.
+      if (optimistic) $$("[data-autosubmit]", form).forEach((control) => {
+        if (control.type === "checkbox" || control.type === "radio") control.checked = control.defaultChecked;
+        else if (control instanceof HTMLSelectElement) for (const option of control.options) option.selected = option.defaultSelected;
+      });
+      if (form.dataset.undo) form.closest("tr, .list-row, .chip, li, .rank-row")?.removeAttribute("hidden");
       const toast = document.createElement("div");
       toast.className = "toast error";
       toast.setAttribute("role", "alert");

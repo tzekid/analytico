@@ -69,8 +69,8 @@ collected stays.
 | You get | page views, sources and campaigns, places, devices, engagement, error types, Web Vitals, a per-day visitor count | plus visits: paths, funnels, landing and exit pages, rage clicks | plus returning visitors and retention, people and revenue per person, replays, heatmaps, opt-in form analytics, visits across your own domains |
 
 In every mode the IP address is used once, for the country and a per-day
-pseudonym, and never stored. Global Privacy Control and Do Not Track keep
-a visitor in Lite. Anyone can be erased: by you, by your backend through
+pseudonym, and never stored. In Full mode, Global Privacy Control and Do
+Not Track keep a visitor in Lite. Anyone can be erased: by you, by your backend through
 the API, or by the visitor with `analytico.forget()`.
 
 ## Run it

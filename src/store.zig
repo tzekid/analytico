@@ -124,7 +124,10 @@ pub const Store = struct {
         const now = domain.nowMs();
         try self.database.exec("BEGIN IMMEDIATE");
         errdefer self.database.exec("ROLLBACK") catch {};
-        var insert = try self.database.prepare(self.allocator, "INSERT INTO sites(public_id,slug,tracking_mode,internal_secret,created_at_ms) VALUES(?,?,?,?,?)");
+        // The banner is on, as in the workspace's new-website form: in Full
+        // mode (now or later) visitors the policy asks see it unless the
+        // operator turns it off for a consent tool of their own.
+        var insert = try self.database.prepare(self.allocator, "INSERT INTO sites(public_id,slug,tracking_mode,internal_secret,created_at_ms,consent_banner) VALUES(?,?,?,?,?,1)");
         defer insert.deinit();
         try insert.bindText(1, &public_id);
         try insert.bindText(2, slug);
@@ -146,6 +149,7 @@ pub const Store = struct {
             .mode = mode,
             .enabled = true,
             .internal_secret = internal_secret,
+            .consent_banner = true,
             .banner_text = try self.allocator.dupe(u8, ""),
             .privacy_url = try self.allocator.dupe(u8, ""),
             .record_exclude = try self.allocator.dupe(u8, ""),

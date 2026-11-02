@@ -642,12 +642,19 @@ pub fn deliverGoals(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, n
     defer statement.deinit();
     try statement.bindInt(1, since);
     try statement.bindText(2, since_id);
-    var latest: []const u8 = "";
-    const Item = struct { site: []const u8, event: []const u8, value: ?i64, currency: []const u8, at: i64, goal: []const u8, site_id: i64 };
+    // `key` is the cursor an item leaves behind: its receipt time and event.
+    const Item = struct { site: []const u8, event: []const u8, value: ?i64, currency: []const u8, at: i64, goal: []const u8, site_id: i64, key: []const u8 };
     var items: std.ArrayList(Item) = .empty;
     while (try statement.step() == .row) {
-        try items.append(arena, .{ .site = try arena.dupe(u8, statement.columnText(0)), .event = try arena.dupe(u8, statement.columnText(1)), .value = if (statement.columnType(2) == db_mod.sqlite.SQLITE_NULL) null else statement.columnInt(2), .currency = try arena.dupe(u8, statement.columnText(3)), .at = statement.columnInt(4), .goal = try arena.dupe(u8, statement.columnText(5)), .site_id = statement.columnInt(6) });
-        latest = try std.fmt.allocPrint(arena, "{d}:{s}", .{ statement.columnInt(4), statement.columnText(7) });
+        try items.append(arena, .{ .site = try arena.dupe(u8, statement.columnText(0)), .event = try arena.dupe(u8, statement.columnText(1)), .value = if (statement.columnType(2) == db_mod.sqlite.SQLITE_NULL) null else statement.columnInt(2), .currency = try arena.dupe(u8, statement.columnText(3)), .at = statement.columnInt(4), .goal = try arena.dupe(u8, statement.columnText(5)), .site_id = statement.columnInt(6), .key = try std.fmt.allocPrint(arena, "{d}:{s}", .{ statement.columnInt(4), statement.columnText(7) }) });
+    }
+    // An event two goals match is two rows: a full page never ends between
+    // them, or the cursor would pass the second unsent.
+    if (items.items.len == 200) {
+        const last = items.items[items.items.len - 1].key;
+        var keep = items.items.len;
+        while (keep > 1 and std.mem.eql(u8, items.items[keep - 2].key, last)) keep -= 1;
+        if (keep > 1) items.shrinkRetainingCapacity(keep - 1);
     }
     // A webhook that fails misses the rest of this run's goals, as it
     // would have anyway, so a dead endpoint costs one timeout per run
@@ -665,8 +672,10 @@ pub fn deliverGoals(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, n
     try pushGoals(arena, shared, db, items.items);
     const write = shared.lockWrite();
     defer shared.unlockWrite();
-    const cursor = if (items.items.len != 0) latest else if (since < now_ms - 60_000) try std.fmt.allocPrint(arena, "{d}", .{now_ms - 60_000}) else stored;
-    if (cursor.len != 0) try data.putSetting(arena, write, .@"webhooks.cursor", cursor);
+    // With nothing new the place still moves up to a minute ago, never
+    // further: a tick that starts late still looks back far enough.
+    const cursor = if (items.items.len != 0) items.items[items.items.len - 1].key else if (stored.len == 0 or since < now_ms - 60_000) try std.fmt.allocPrint(arena, "{d}", .{now_ms - 60_000}) else stored;
+    try data.putSetting(arena, write, .@"webhooks.cursor", cursor);
 }
 
 /// One notification per website per run, so a busy minute is one buzz:

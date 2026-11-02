@@ -167,7 +167,7 @@ fn sitesSection(ctx: *Ctx, maybe_site: ?data.Site) !void {
     if (raw_secret.len == 32) {
         const hex = std.fmt.bytesToHex(raw_secret[0..32].*, .lower);
         try render(w,
-            \\<h3 class="section-title">Server events<span class="note">Signed POSTs to /i from your backend</span></h3><details class="card"><summary class="t-13 strong">Show signing secret</summary><p class="hint mt-10 mb-10">HMAC-SHA256 key for the <code>x-analytico-signature</code> header. Keep it on your server.</p><div class="code"><button class="copy" type="button" data-copy="{secret}">Copy</button>{secret}</div><p class="hint mt-10">Site ID: <span class="mono">{id}</span></p></details>
+            \\<h3 class="section-title">Server events<span class="note">Signed POSTs to /i from your backend</span></h3><details class="card"><summary class="t-13 strong">Show signing secret</summary><p class="hint mt-10 mb-10">HMAC-SHA256 key for the <code>x-analytico-signature</code> header: the 32 bytes these hex characters spell. Keep it on your server.</p><div class="code"><button class="copy" type="button" data-copy="{secret}">Copy</button>{secret}</div><p class="hint mt-10">Site ID: <span class="mono">{id}</span></p></details>
         , .{ .secret = &hex, .id = site.public_id });
     }
 }
@@ -245,6 +245,7 @@ fn emailPost(ctx: *Ctx, action: []const u8) !void {
     const security = std.meta.stringToEnum(mail.Security, try ctx.field("security")) orelse .starttls;
     const from = std.mem.trim(u8, try ctx.field("from"), " ");
     if (host.len == 0 or host.len > 253) return fail(ctx, "email", "Enter the SMTP server name.");
+    if (!mail.plainAllowed(security, host)) return fail(ctx, "email", "Without TLS, only a mail relay on this machine (localhost or 127.0.0.1).");
     if (!auth.validEmail(mail.addressOf(from))) return fail(ctx, "email", "The From address needs a valid email, e.g. Analytico <analytics@example.com>.");
     const password = try ctx.field("password");
     {

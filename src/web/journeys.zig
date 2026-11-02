@@ -764,6 +764,8 @@ pub const Samples = struct {
 pub fn loadSamples(arena: std.mem.Allocator, db: *db_mod.Db, view: data.View) !Samples {
     const range = view.range;
     var out: Samples = .{};
+    try data.beginSnapshot(db);
+    defer data.endSnapshot(db);
     const split = if (view.filters.len == 0) try data.rollupSplit(arena, db, view, range.start_ms, range.end_ms) else range.start_ms;
     if (split > range.start_ms) {
         var rolled = try db.prepare(arena, "SELECT path,metric,value,sum(samples) FROM vitals_daily WHERE site_id=? AND metric IN ('lcp','inp','cls','ttfb','fcp') AND day>=? AND day<=? GROUP BY metric,path,value");

@@ -88,7 +88,7 @@ pub fn consentSection(ctx: *Ctx, maybe_site: ?data.Site) !void {
 
     try w.writeAll("<div class=\"stack\"><section class=\"card\"><h2 class=\"card-title\">Always true, in every mode</h2><div class=\"stack-s mt-12\">");
     const promises = [_][]const u8{
-        "Global Privacy Control and Do Not Track keep a visitor in Lite",
+        "In Full mode, Global Privacy Control and Do Not Track keep a visitor in Lite",
         "IP addresses are used for the country, then discarded",
         "Typed values, passwords and card numbers are never recorded",
         "No fingerprinting, no third-party cookies, no data selling",
@@ -180,7 +180,7 @@ pub fn recordingSection(ctx: *Ctx, maybe_site: ?data.Site) !void {
     });
     for ([_][]const u8{ "7", "14", "30", "90" }) |days| try render(w, "<option value=\"{days}\"{!selected}>{days} days</option>", .{ .days = days, .selected = if (std.mem.eql(u8, days, retention)) " selected" else "" });
     try render(w,
-        \\</select></span><small>Recordings stop after 30 minutes or 5 MB per session.</small></label>
+        \\</select></span><small>For every website’s recordings. Recordings stop after 30 minutes or 5 MB per session.</small></label>
         \\<label class="field">Never record these pages<textarea class="input mono" name="record_exclude" rows="4" placeholder="/account/*&#10;/checkout/payment">{exclude}</textarea><small>One path per line; <code>*</code> matches anything. Replays and heatmaps skip them; page views still count.</small></label>
         \\<div class="row end"><button class="btn btn-primary">Save</button></div></form>
     , .{ .exclude = site.record_exclude });
@@ -207,13 +207,8 @@ pub fn recordingPost(ctx: *Ctx, action: []const u8) !void {
     const arena = ctx.arena;
     const site = try ctx.visibleSite(try ctx.field("site")) orelse return layout.message(ctx, .not_found, "Unknown website", "");
     if (std.mem.eql(u8, action, "delete-all")) {
-        {
-            const replays = ctx.shared.lockReplays();
-            defer ctx.shared.unlockReplays();
-            try replays.run(arena, "DELETE FROM replay_chunks WHERE site_id=?", .{site.id});
-            try replays.run(arena, "DELETE FROM replays WHERE site_id=?", .{site.id});
-            try replays.exec("PRAGMA incremental_vacuum");
-        }
+        ctx.extendDeadline(600);
+        _ = try replay.deleteSessions(arena, ctx.shared, "site_id=?1", site.id);
         const db = ctx.shared.lockWrite();
         defer ctx.shared.unlockWrite();
         try audit.record(ctx, db, site.id, "replays.deleted", "Deleted all recordings");
@@ -248,16 +243,18 @@ pub fn pruneReplays(arena: std.mem.Allocator, shared: anytype, db: anytype, now_
     // week lose any that remain.
     const Gone = struct { site_id: i64, visitor_id: []const u8 };
     const gone = try db.all(arena, Gone, "SELECT site_id,visitor_id FROM forgotten_visitors WHERE forgotten_at_ms>=?1 UNION SELECT site_id,visitor_id FROM visitors WHERE consent_state IN ('denied','gpc') AND last_seen_ms>=?1 ORDER BY 1", .{now_ms - 7 * data.day_ms});
-    const replays = shared.lockReplays();
-    defer shared.unlockReplays();
     var start: usize = 0;
     while (start < gone.len) {
         var end = start;
         var ids: std.ArrayList([]const u8) = .empty;
         while (end < gone.len and gone[end].site_id == gone[start].site_id) : (end += 1) try ids.append(arena, gone[end].visitor_id);
-        try replay.forgetVisitors(arena, replays, gone[start].site_id, ids.items);
+        {
+            const replays = shared.lockReplays();
+            defer shared.unlockReplays();
+            try replay.forgetVisitors(arena, replays, gone[start].site_id, ids.items);
+        }
         start = end;
     }
-    const removed = try replay.prune(arena, replays, now_ms - days * data.day_ms);
-    if (removed != 0) std.log.info("replays_pruned rows={d}", .{removed});
+    const removed = try replay.deleteSessions(arena, shared, "received_at_ms<?1", now_ms - days * data.day_ms);
+    if (removed != 0) std.log.info("replays_pruned sessions={d}", .{removed});
 }

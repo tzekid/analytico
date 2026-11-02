@@ -249,6 +249,8 @@ pub fn ingest(
     allocator: std.mem.Allocator,
     store: *store_mod.Store,
     master_key: [32]u8,
+    /// Gives the day's pseudonym key: `dayKey(allocator, *const [10]u8)`.
+    day_keys: anytype,
     site: store_mod.Site,
     envelope: Envelope,
     source: Source,
@@ -272,7 +274,7 @@ pub fn ingest(
         const coarse = try std.fmt.bufPrint(&coarse_buffer, "{s}/{s}/{s}", .{
             dimensions.browser, dimensions.operating_system, dimensions.device,
         });
-        visitor_day = domain.visitorDayId(master_key, site.public_id, &date, client.peer_ip, coarse);
+        visitor_day = domain.visitorDayId(try day_keys.dayKey(allocator, &date), site.public_id, &date, client.peer_ip, coarse);
     }
     const context: Context = .{
         .allocator = allocator,
@@ -294,6 +296,19 @@ pub fn ingest(
         const digest = try recordHash(allocator, master_key, original);
         var record = original;
         record.occurred_at_ms = std.math.add(i64, record.occurred_at_ms, clock_offset) catch return error.InvalidOccurredAt;
+        // A backend's records keep flowing whatever the website's mode is now:
+        // what that mode doesn't keep (users and visitors outside Full,
+        // sessions in Lite) stays out, not the batch. Erasure keeps its
+        // target; an identify has nothing to link outside Full mode.
+        if (source == .server and site.mode != .full and !std.mem.eql(u8, record.type, "forget")) {
+            if (std.mem.eql(u8, record.type, "identify")) {
+                result.accepted += 1;
+                continue;
+            }
+            record.user_id = null;
+            record.visitor_id = null;
+            if (site.mode == .lite) record.session_id = null;
+        }
         if (site.mode == .full and source == .browser) {
             if (try enforceConsent(&record, result.decision, client.gpc)) result.dropped = true;
             if (record.visitor_id) |visitor_id| {
@@ -537,12 +552,28 @@ pub fn classify(user_agent: []const u8) Dimensions {
     };
 }
 
+/// Whether `host` (no port) is one of the site's own origins.
+fn ownHost(c: Context, host: []const u8) !bool {
+    var origins = try c.store.database.prepare(c.allocator, "SELECT origin FROM site_origins WHERE site_id=?");
+    defer origins.deinit();
+    try origins.bindInt(1, c.site.id);
+    while (try origins.step() == .row) {
+        const origin = origins.columnText(0);
+        const authority = if (std.mem.find(u8, origin, "://")) |at| origin[at + 3 ..] else origin;
+        const name = if (std.mem.lastIndexOfScalar(u8, authority, ':')) |colon| authority[0..colon] else authority;
+        if (std.ascii.eqlIgnoreCase(name, host)) return true;
+    }
+    return false;
+}
+
 fn insertPageView(c: Context, record: Record) !void {
     const allocator = c.allocator;
-    // A page reached from the site itself, with no arrival kept, is internal.
+    // A page reached from the site itself, or from another of its domains,
+    // with no arrival kept, is internal: never a referral to itself.
     const referrer_host = if (record.referrer_host) |host| blk: {
         const lower = try lowercaseAscii(allocator, host);
-        break :blk if (c.client.page_host.len != 0 and std.ascii.eqlIgnoreCase(lower, c.client.page_host)) self_referrer else lower;
+        if (c.client.page_host.len != 0 and std.ascii.eqlIgnoreCase(lower, c.client.page_host)) break :blk self_referrer;
+        break :blk if (try ownHost(c, lower)) self_referrer else lower;
     } else null;
     const search_term = if (record.search_term) |term| try searchTerm(allocator, term) else null;
     const place = c.client.place;
@@ -933,8 +964,9 @@ pub fn forgetVisitor(allocator: std.mem.Allocator, store: *store_mod.Store, site
     try store.database.run(allocator, "INSERT INTO forgotten_visitors(site_id,visitor_id,forgotten_at_ms,refused) SELECT site_id,visitor_id,?,consent_state IN ('denied','gpc') FROM visitors WHERE site_id=? AND visitor_id=? ON CONFLICT DO NOTHING", .{ domain.nowMs(), site_id, visitor_id });
     inline for (.{
         "DELETE FROM page_summaries WHERE site_id=?1 AND (visitor_id=?2 OR page_id IN (SELECT page_id FROM page_views WHERE site_id=?1 AND visitor_id=?2))",
-        "DELETE FROM event_items WHERE site_id=?1 AND event_id IN (SELECT event_id FROM events WHERE site_id=?1 AND visitor_id=?2)",
-        "DELETE FROM events WHERE site_id=?1 AND visitor_id=?2",
+        // Server events may name the visit only (its session), not the visitor.
+        "DELETE FROM event_items WHERE site_id=?1 AND event_id IN (SELECT event_id FROM events WHERE site_id=?1 AND (visitor_id=?2 OR session_id IN (SELECT session_id FROM page_views WHERE site_id=?1 AND visitor_id=?2 AND session_id IS NOT NULL)))",
+        "DELETE FROM events WHERE site_id=?1 AND (visitor_id=?2 OR session_id IN (SELECT session_id FROM page_views WHERE site_id=?1 AND visitor_id=?2 AND session_id IS NOT NULL))",
         "DELETE FROM errors WHERE site_id=?1 AND visitor_id=?2",
         "DELETE FROM page_views WHERE site_id=?1 AND visitor_id=?2",
         "DELETE FROM visitor_links WHERE site_id=?1 AND visitor_id=?2",

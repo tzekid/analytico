@@ -73,9 +73,11 @@ analytics.example.com {
 			header_up -CF-IPCountry
 			request_buffers 2MiB
 
+			# Backups, retention, imports and deleting recordings may take
+			# up to ten minutes before they answer.
 			transport http {
 				dial_timeout 2s
-				response_header_timeout 120s
+				response_header_timeout 600s
 			}
 		}
 	}

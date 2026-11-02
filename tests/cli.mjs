@@ -6,7 +6,7 @@
 // CLI and the read API; backup, restore and doctor.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Script } from "node:vm";
 import { DatabaseSync } from "node:sqlite";
@@ -185,6 +185,11 @@ await journey("cli", async (t) => {
   assert.match(t.log, /serve_stopped/);
   const restored = join(t.temporary, "restored");
   execFileSync(t.app, ["restore", backup, restored]);
+  // The day's pseudonym key stays with the instance, private, and out of
+  // every backup: a day's pseudonyms can't be recomputed from a copy.
+  const dayKey = statSync(join(t.data, "day.key"));
+  assert.deepEqual([dayKey.size, dayKey.mode & 0o777], [42, 0o600]);
+  assert.ok(!readdirSync(restored).includes("day.key"));
   assert.match(execFileSync(t.app, ["doctor", "--data", restored], { encoding: "utf8" }), /page_views=1 summaries=1 events=6/);
   // An older schema migrates only after a verified backup of the new copy.
   const old = new DatabaseSync(join(restored, "analytico.db"));

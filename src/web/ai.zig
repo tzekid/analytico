@@ -483,7 +483,10 @@ pub fn describe(ctx: *Ctx, site: data.Site) !void {
     const reply = sent.reply catch |err| return jsonFailed(ctx, errorText(err));
     const object = jsonObject(arena, reply) orelse return jsonFailed(ctx, "Couldn’t turn that into filters. Try naming a period, country, device, source or page.");
     var overrides: std.ArrayList([2][]const u8) = .empty;
-    try overrides.append(arena, .{ "f!", "" });
+    // A described segment is all of what it names, whatever joined the
+    // filters before (as Clear resets it too).
+    try overrides.appendSlice(arena, &.{ .{ "f!", "" }, .{ "fm", "" } });
+    const resets = overrides.items.len;
     const range = jsonString(object, "range");
     if (std.meta.stringToEnum(data.RangeKind, range)) |kind| {
         const from = jsonString(object, "from");
@@ -502,7 +505,7 @@ pub fn describe(ctx: *Ctx, site: data.Site) !void {
         const negate = if (item.object.get("not")) |not| not == .bool and not.bool else false;
         try overrides.append(arena, .{ "f+", try std.fmt.allocPrint(arena, "{s}{s}:{s}", .{ @tagName(dim), if (negate) "!" else "", value }) });
     };
-    if (overrides.items.len == 1) return jsonFailed(ctx, "Couldn’t turn that into filters. Try naming a period, country, device, source or page.");
+    if (overrides.items.len == resets) return jsonFailed(ctx, "Couldn’t turn that into filters. Try naming a period, country, device, source or page.");
     const href = try current.href(arena, path, overrides.items);
     // The chips read back what the address now says.
     const next_at = std.mem.findScalar(u8, href, '?') orelse href.len;

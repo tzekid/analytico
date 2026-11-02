@@ -16,7 +16,7 @@ Analytico is a self-hosted web analytics service. Its tracker sends bounded anal
 - Browser sessions are created only by a configured sign-in ceremony. The CLI cannot mint browser sessions.
 - Session, invite, OAuth, API and share tokens are stored as hashes. Provider credentials are encrypted with the instance key.
 - Password changes revoke every browser session, OAuth grant and registered push device for that account before creating the replacement browser session.
-- Roles and per-site grants are checked on the server. Instance-wide sign-in policy and provider credentials require Admin.
+- Roles and per-site grants are checked on the server. Instance-wide sign-in policy requires Admin; sign-in provider credentials, and changing an admin's access, require the Owner.
 - Native-app tokens, API keys and MCP tokens have separate endpoints and scopes.
 
 ## AI boundary

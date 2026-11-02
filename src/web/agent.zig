@@ -73,17 +73,25 @@ pub fn tool(arena: std.mem.Allocator, db: *db_mod.Db, site: data.Site, name: []c
     const overview = std.mem.eql(u8, name, "site_overview");
     const report = if (overview) null else catalog.find(name) orelse return error.UnknownTool;
     if (report) |value| if (!safeReport(value.name)) return error.UnknownTool;
-    // Period and filters; a filter on a hidden dimension would let the model probe for its values.
+    // Period and filters. The first `range` read wins: a custom one only.
     var query: std.Io.Writer.Allocating = .init(arena);
-    try query.writer.print("range={f}", .{html.url(argString(arguments, "range") orelse if (overview) "7d" else "30d")});
-    if (argString(arguments, "from")) |from| try query.writer.print("&range=custom&from={f}&to={f}", .{ html.url(from), html.url(argString(arguments, "to") orelse "") });
+    if (argString(arguments, "from")) |from| {
+        try query.writer.print("range=custom&from={f}&to={f}", .{ html.url(from), html.url(argString(arguments, "to") orelse "") });
+    } else try query.writer.print("range={f}", .{html.url(argString(arguments, "range") orelse if (overview) "7d" else "30d")});
+    // A filter on a hidden dimension is refused, never dropped: dropped, the
+    // answer would pass whole-site numbers off as the filtered ones.
     if (arguments.get("filters")) |filters| if (filters == .array) for (filters.array.items) |item| {
-        if (item == .string and !hiddenFilter(item.string, paths, sources)) try query.writer.print("&f={f}", .{html.url(item.string)});
+        if (item != .string) continue;
+        if (hiddenFilter(item.string, paths, sources)) return .{ .text = "This instance doesn't share that with AI tools (Settings → AI → What the AI can see).", .used = "None" };
+        try query.writer.print("&f={f}", .{html.url(item.string)});
     };
     if (report) |value| try query.writer.writeAll(try catalog.reportParams(arena, value, arguments));
     const params = try html.Params.parse(arena, query.written());
     if (report == null) {
-        const view = try data.View.parse(arena, site, params, now_ms);
+        const view = catalog.periodView(arena, site, params, now_ms) catch |err| switch (err) {
+            error.InvalidParameter => return .{ .text = "An argument is not valid; see the tool's input schema for its allowed values.", .used = "None" },
+            else => return err,
+        };
         return .{ .text = try ai.packet(arena, db, view, paths, sources), .used = try ai.dataUsed(arena, view) };
     }
     if (!revealed(report.?, arguments, paths, sources)) return .{ .text = "This instance doesn't share that with AI tools (Settings → AI → What the AI can see).", .used = "None" };
