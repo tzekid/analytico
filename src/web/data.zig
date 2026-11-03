@@ -824,10 +824,26 @@ pub const Sql = struct {
         if (view.filters.len == 0) {
             try self.add(" AND (e.source='server' OR e.traffic_class IN ('human_like','unknown'))");
         } else {
-            try self.add(" AND EXISTS(SELECT 1 FROM page_views pv WHERE pv.site_id=e.site_id AND pv.internal=0 AND pv.traffic_class IN ('human_like','unknown') AND (pv.page_id=e.page_id OR (e.source='server' AND (pv.session_id=e.session_id OR (e.order_id IS NOT NULL AND pv.page_id IN (SELECT b.page_id FROM events b WHERE b.site_id=e.site_id AND b.order_id=e.order_id AND b.source='browser' AND b.internal=0 AND b.traffic_class IN ('human_like','unknown') AND b.name IN ('purchase','payment_confirmed'))))))");
-            try self.filters(view);
-            try self.add(")");
+            // Each way an event belongs to a person's page view is its own
+            // indexed lookup. Joined by OR in one subquery (the order's
+            // pages are a list), SQLite scanned every page view of the site
+            // for each event: 94 s for a filtered month of 177,000 views.
+            try self.add(" AND (");
+            try self.humanPageView(view, "pv.page_id=e.page_id");
+            try self.add(" OR (e.source='server' AND (");
+            try self.humanPageView(view, "pv.session_id=e.session_id");
+            try self.add(" OR (e.order_id IS NOT NULL AND ");
+            try self.humanPageView(view, "pv.page_id IN (SELECT b.page_id FROM events b WHERE b.site_id=e.site_id AND b.order_id=e.order_id AND b.source='browser' AND b.internal=0 AND b.traffic_class IN ('human_like','unknown') AND b.name IN ('purchase','payment_confirmed'))");
+            try self.add("))))");
         }
+    }
+
+    /// A person's page view (not the team's, not a bot's) that `match` names
+    /// and the view's filters keep.
+    fn humanPageView(self: *Sql, view: View, comptime match: []const u8) !void {
+        try self.add("EXISTS(SELECT 1 FROM page_views pv WHERE pv.site_id=e.site_id AND " ++ match ++ " AND pv.internal=0 AND pv.traffic_class IN ('human_like','unknown')");
+        try self.filters(view);
+        try self.add(")");
     }
 
     pub fn prepare(self: *Sql, db: *db_mod.Db) !db_mod.Statement {
