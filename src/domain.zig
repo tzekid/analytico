@@ -210,3 +210,39 @@ test "signed tokens" {
     try std.testing.expect(verifyToken(key, "link", token, 1001) == null);
     try std.testing.expect(verifyToken(key, "overlay", token, 999) == null);
 }
+
+/// Whether `json` nests `[` and `{` no deeper than `limit`, counted on the raw
+/// bytes (strings skipped). Request bodies are checked before parsing: Zig's
+/// JSON writer asserts a fixed depth (256) in safe builds, so a deeper value
+/// hashed or echoed later would stop the whole process.
+pub fn jsonDepthWithin(json: []const u8, limit: usize) bool {
+    var depth: usize = 0;
+    var in_string = false;
+    var escaped = false;
+    for (json) |byte| {
+        if (in_string) {
+            if (escaped) {
+                escaped = false;
+            } else if (byte == '\\') {
+                escaped = true;
+            } else if (byte == '"') in_string = false;
+            continue;
+        }
+        switch (byte) {
+            '"' => in_string = true,
+            '[', '{' => {
+                depth += 1;
+                if (depth > limit) return false;
+            },
+            ']', '}' => depth -|= 1,
+            else => {},
+        }
+    }
+    return true;
+}
+
+test jsonDepthWithin {
+    try std.testing.expect(jsonDepthWithin("{\"a\":[{\"b\":1}]}", 3));
+    try std.testing.expect(!jsonDepthWithin("{\"a\":[{\"b\":1}]}", 2));
+    try std.testing.expect(jsonDepthWithin("{\"a\":\"[[[[\\\"[[\"}", 1));
+}

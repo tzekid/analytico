@@ -1033,17 +1033,24 @@
     if (arrival) remember(arrival);
   }
 
-  // A withdrawn identity is kept for one thing only: the visitor's own later
+  // Withdrawn identities are kept for one thing only: the visitor's own later
   // forget(), which would otherwise have nothing left to erase. Only on a
-  // withdrawal (never after an erasure), and for the ID's 13 months.
-  function keepWithdrawn() {
-    var held = visitorId || storedVisitor();
-    if (held) save("withdrawn", held + "." + Date.now());
+  // withdrawal (never after an erasure), each for its ID's 13 months, the
+  // last eight ("id.time id.time", newest first).
+  function withdrawnEntries() {
+    return (load("withdrawn") || "").split(" ").map(function (entry) {
+      var parts = entry.split(".");
+      // An entry kept before entries had a time counts from now.
+      return { id: parts[0], at: parts.length > 1 ? Number(parts[1]) : Date.now() };
+    }).filter(function (entry) { return isUuid(entry.id) && Date.now() - entry.at < 395 * 86400000; });
   }
 
-  function withdrawnVisitor() {
-    var parts = (load("withdrawn") || "").split(".");
-    return isUuid(parts[0]) && Date.now() - Number(parts[1]) < 395 * 86400000 ? parts[0] : null;
+  function keepWithdrawn() {
+    var held = visitorId || storedVisitor();
+    if (!held) return;
+    var entries = withdrawnEntries().filter(function (entry) { return entry.id !== held; });
+    entries.unshift({ id: held, at: Date.now() });
+    save("withdrawn", entries.slice(0, 8).map(function (entry) { return entry.id + "." + entry.at; }).join(" "));
   }
 
   function clearIdentity(state) {
@@ -1429,8 +1436,8 @@
   };
   // Erases everything stored about this visitor and stops tracking them.
   window.analytico.forget = function () {
-    // The current identity and one withdrawn earlier on this domain.
-    var ids = [visitorId, withdrawnVisitor()].filter(function (id, index, all) { return isUuid(id) && all.indexOf(id) === index; });
+    // The current identity and those withdrawn earlier on this domain.
+    var ids = [visitorId].concat(withdrawnEntries().map(function (entry) { return entry.id; })).filter(function (id, index, all) { return isUuid(id) && all.indexOf(id) === index; });
     if (ids.length) send(ids.map(function (id) { return Object.assign(base(uuid(), "forget"), { visitor_id: id }); }));
     clearIdentity("denied");
     save("withdrawn", null);

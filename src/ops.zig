@@ -88,14 +88,13 @@ pub fn copyVerified(
     defer paths.deinit(allocator);
     _ = try store_mod.readKey(io, paths.key);
     try db_mod.integrity(source, allocator);
-    // A copy that fails leaves nothing behind, journals included: none of
-    // these existed before (see above).
-    errdefer inline for (.{ "", ".replays" }) |database| inline for (.{ "", "-wal", "-shm" }) |suffix| {
-        if (std.fmt.allocPrint(allocator, "{s}" ++ database ++ suffix, .{destination})) |path| {
-            std.Io.Dir.cwd().deleteFile(io, path) catch {};
-        } else |_| {}
-    };
+    // A copy that fails leaves nothing behind, journals included, but only
+    // what it made itself: the exclusive create below is what makes a file
+    // this copy's (another one may have taken the name meanwhile).
     try createEmptyFile(io, destination);
+    errdefer removeCopy(allocator, io, destination);
+    var made_replays = false;
+    errdefer if (made_replays) removeCopy(allocator, io, replay_destination);
     var target = try db_mod.Db.open(allocator, destination, true);
     defer target.close();
     // Written straight into the file: through a write-ahead log the copy
@@ -108,6 +107,7 @@ pub fn copyVerified(
         var replays = try db_mod.Db.open(allocator, paths.replays, false);
         defer replays.close();
         try createEmptyFile(io, replay_destination);
+        made_replays = true;
         var replay_target = try db_mod.Db.open(allocator, replay_destination, true);
         defer replay_target.close();
         try replay_target.exec("PRAGMA journal_mode=OFF");
@@ -121,6 +121,15 @@ pub fn copyVerified(
     defer key_file.close(io);
     try key_file.sync(io);
     return key_destination;
+}
+
+/// Removes a database copy with its journals.
+fn removeCopy(allocator: std.mem.Allocator, io: std.Io, path: []const u8) void {
+    inline for (.{ "", "-wal", "-shm" }) |suffix| {
+        if (std.fmt.allocPrint(allocator, "{s}" ++ suffix, .{path})) |file| {
+            std.Io.Dir.cwd().deleteFile(io, file) catch {};
+        } else |_| {}
+    }
 }
 
 /// Backs up, then applies pending numbered migrations under the writer lock.

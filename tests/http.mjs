@@ -21,7 +21,15 @@ await journey("http", async (t) => {
   let socket;
   let trickle;
   const setupLink = t.init(`http://127.0.0.1:${t.port}`);
+  const siteOrigin = "https://hostile.example";
+  const siteId = /public_id=([^ ]+)/.exec(t.cli("site", "add", "hostile", siteOrigin, "--mode", "session"))[1];
   await t.serve();
+  // Nesting past what a batch ever holds is refused, and the process that
+  // refused it keeps collecting (a deep value once stopped it).
+  const event = (properties) => `{"v":1,"site":"${siteId}","sent_at_ms":${Date.now()},"records":[{"event_id":"${crypto.randomUUID()}","type":"event","session_id":"${crypto.randomUUID()}","page_id":"${crypto.randomUUID()}","occurred_at_ms":${Date.now()},"tracking_mode":"session","consent_mode":"analytics","tracker_version":"1","release_id":"","internal":false,"name":"nested","path":"/x","properties":${properties}}]}`;
+  const collect = (body) => fetch(`http://127.0.0.1:${t.port}/e`, { method: "POST", headers: { origin: siteOrigin, "content-type": "text/plain", "x-forwarded-for": "198.51.100.7" }, body });
+  assert.equal((await collect(event(`{"a":${"[".repeat(300)}${"]".repeat(300)}}`))).status, 422);
+  assert.equal((await collect(event(`{"a":1}`))).status, 204);
   const ready = async () => {
     const response = await fetch(`http://127.0.0.1:${t.port}/readyz`, { signal: AbortSignal.timeout(500) });
     assert.equal(response.status, 200);
@@ -111,7 +119,8 @@ await journey("http", async (t) => {
     await closed;
     assert.match(t.log, /serve_stopped/);
     const doctor = t.cli("doctor");
-    assert.match(doctor, /ok schema=\d+ sites=0 page_views=0 summaries=0 events=0/);
+    // The one site and the one event accepted after the refused batch above.
+    assert.match(doctor, /ok schema=\d+ sites=1 page_views=0 summaries=0 events=1 /);
     assert.doesNotMatch(t.log, /leaked|panic|segmentation/i);
   } finally {
     clearInterval(trickle);

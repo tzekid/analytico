@@ -365,8 +365,10 @@ await journey("ux", async (t) => {
     assert.equal(await pill.evaluate((node) => node.classList.contains("shown")), false);
     await phone.evaluate(() => scrollTo(0, 900));
     await t.until(() => pill.evaluate((node) => node.classList.contains("shown")), "period pill shown");
-    await pill.getByRole("button", { name: /^Period: / }).click();
-    assert.equal(await phone.locator("#range-pop.as-sheet:popover-open").count(), 1);
+    // Pressed where it floats: the driver's own scrolling into view would
+    // bring the period bar back, which hides the pill (rightly) mid-click.
+    await pill.getByRole("button", { name: /^Period: / }).evaluate((button) => button.click());
+    await phone.locator("#range-pop.as-sheet:popover-open").waitFor();
     // A tap on the dimmed page around it closes the sheet and presses nothing
     // under it, here the site switcher.
     const under = await phone.locator(".phone-site").boundingBox();

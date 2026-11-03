@@ -154,6 +154,7 @@ test validRedirect {
 fn register(ctx: *Ctx) !void {
     const arena = ctx.arena;
     const body = ctx.bodyBytes() catch return oauthError(ctx, .bad_request, "invalid_client_metadata", "Body too large.");
+    if (!@import("../domain.zig").jsonDepthWithin(body, 16)) return oauthError(ctx, .bad_request, "invalid_client_metadata", "Expected JSON.");
     const parsed = std.json.parseFromSliceLeaky(std.json.Value, arena, body, .{}) catch return oauthError(ctx, .bad_request, "invalid_client_metadata", "Expected JSON.");
     if (parsed != .object) return oauthError(ctx, .bad_request, "invalid_client_metadata", "Expected an object.");
     const uris_value = parsed.object.get("redirect_uris") orelse return oauthError(ctx, .bad_request, "invalid_redirect_uri", "redirect_uris is required.");
@@ -499,6 +500,9 @@ fn mcp(ctx: *Ctx) !void {
         return ctx.json();
     };
     const body = ctx.bodyBytes() catch return rpcError(ctx, null, -32700, "Body too large");
+    // Requests are shallow; a deeper one is refused before any of it is
+    // written back out (the id echoed, arguments logged).
+    if (!@import("../domain.zig").jsonDepthWithin(body, 16)) return rpcError(ctx, null, -32700, "Parse error");
     const parsed = std.json.parseFromSliceLeaky(std.json.Value, arena, body, .{}) catch return rpcError(ctx, null, -32700, "Parse error");
     if (parsed != .object) return rpcError(ctx, null, -32600, "Invalid request");
     const method_value = parsed.object.get("method") orelse return rpcError(ctx, null, -32600, "Invalid request");

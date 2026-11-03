@@ -157,6 +157,9 @@ pub const Source = enum { browser, server };
 pub fn parse(allocator: std.mem.Allocator, body: []const u8) !Envelope {
     if (body.len == 0 or body.len > maximum_body_bytes) return error.InvalidBodySize;
     if (!std.unicode.utf8ValidateSlice(body)) return error.InvalidUtf8;
+    // A batch is shallow (envelope, records, an item); a deeper one is refused
+    // before anything would write it out again.
+    if (!domain.jsonDepthWithin(body, 8)) return error.InvalidJson;
     const raw = std.json.parseFromSliceLeaky(std.json.Value, allocator, body, .{
         .duplicate_field_behavior = .@"error",
         .max_value_len = maximum_body_bytes,

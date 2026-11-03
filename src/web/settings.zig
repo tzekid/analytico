@@ -336,7 +336,8 @@ pub fn pruneBackups(arena: std.mem.Allocator, io: std.Io, data_dir: []const u8, 
     const hour_ago = @import("../domain.zig").nowMs() - data.hour_ms;
     var leftovers: std.ArrayList([]const u8) = .empty;
     while (try iterator.next(io)) |entry| {
-        if (entry.kind != .file) continue;
+        // Only what this service names; anything else there is the operator's.
+        if (entry.kind != .file or !std.mem.startsWith(u8, entry.name, "analytico-")) continue;
         const stat = dir.statFile(io, entry.name, .{}) catch continue;
         if (stat.mtime.toMilliseconds() >= hour_ago) continue;
         if (std.mem.endsWith(u8, entry.name, ".db")) {
@@ -344,10 +345,18 @@ pub fn pruneBackups(arena: std.mem.Allocator, io: std.Io, data_dir: []const u8, 
             try abandoned.append(arena, try arena.dupe(u8, entry.name));
             continue;
         }
-        // Journals and replay copies whose copy is gone.
+        // A copy's own journals and replay copy, left by one cut off before
+        // its key (written last): any other file stays, and so does all of a
+        // finished copy whose database was moved or compressed.
         const end = std.mem.find(u8, entry.name, ".db") orelse continue;
-        if (end + 3 == entry.name.len) continue;
-        if (dir.statFile(io, entry.name[0 .. end + 3], .{})) |_| continue else |_| {}
+        const companion = entry.name[end + 3 ..];
+        const known = for ([_][]const u8{ "-wal", "-shm", ".replays", ".replays-wal", ".replays-shm" }) |suffix| {
+            if (std.mem.eql(u8, companion, suffix)) break true;
+        } else false;
+        if (!known) continue;
+        const base = entry.name[0 .. end + 3];
+        if (dir.statFile(io, base, .{})) |_| continue else |_| {}
+        if (dir.statFile(io, try std.fmt.allocPrint(arena, "{s}.key", .{base}), .{})) |_| continue else |_| {}
         try leftovers.append(arena, try arena.dupe(u8, entry.name));
     }
     for (leftovers.items) |name| dir.deleteFile(io, name) catch {};
