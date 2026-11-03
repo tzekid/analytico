@@ -11,6 +11,9 @@ ExecStartPre=%h/.local/opt/analytico/current/bin/analytico doctor --quick --data
 ExecStart=%h/.local/opt/analytico/current/bin/analytico serve --data %h/.local/share/analytico-sqlite --listen 127.0.0.1:4318
 Restart=on-failure
 RestartSec=2s
+# The pre-start quick check reads every page: on a large database that
+# outlasts systemd's default 90 seconds, and a timed-out start loops.
+TimeoutStartSec=30min
 TimeoutStopSec=10s
 KillSignal=SIGTERM
 UMask=0077

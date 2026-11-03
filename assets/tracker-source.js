@@ -1033,11 +1033,20 @@
     if (arrival) remember(arrival);
   }
 
-  function clearIdentity(state) {
-    // A withdrawn identity is kept for one thing only: the visitor's own
-    // later forget(), which would otherwise have nothing left to erase.
+  // A withdrawn identity is kept for one thing only: the visitor's own later
+  // forget(), which would otherwise have nothing left to erase. Only on a
+  // withdrawal (never after an erasure), and for the ID's 13 months.
+  function keepWithdrawn() {
     var held = visitorId || storedVisitor();
-    if (held && (state === "denied" || state === "gpc")) save("withdrawn", held);
+    if (held) save("withdrawn", held + "." + Date.now());
+  }
+
+  function withdrawnVisitor() {
+    var parts = (load("withdrawn") || "").split(".");
+    return isUuid(parts[0]) && Date.now() - Number(parts[1]) < 395 * 86400000 ? parts[0] : null;
+  }
+
+  function clearIdentity(state) {
     identityGeneration += 1;
     linkArrival = null;
     visitorId = null;
@@ -1065,6 +1074,7 @@
 
   function restore() {
     if (gpc) {
+      keepWithdrawn();
       clearIdentity("gpc");
       return;
     }
@@ -1130,6 +1140,7 @@
     } else if (value === "denied") {
       hideBanner();
       if (consent === "denied") return;
+      keepWithdrawn();
       clearIdentity("denied");
       var refusal = Object.assign(base(uuid(), "consent"), { state: "denied" });
       send([refusal]);
@@ -1166,10 +1177,14 @@
     // The visitor withdrew (in another tab, or on another of the site's
     // domains): keep the refusal stored, so no later answer starts again.
     if (response.drop_state === "denied") {
+      // First to hear of it on this domain (a withdrawal on another one):
+      // a refusal already stored here kept, or erased, the ID itself.
+      if (load("consent") !== "denied") keepWithdrawn();
       clearIdentity("denied");
       return;
     }
     if (response.upgrade === "never") {
+      if (visitorId) keepWithdrawn();
       if (visitorId || consent !== "gpc") clearIdentity("gpc");
       return;
     }
@@ -1415,7 +1430,7 @@
   // Erases everything stored about this visitor and stops tracking them.
   window.analytico.forget = function () {
     // The current identity and one withdrawn earlier on this domain.
-    var ids = [visitorId, load("withdrawn")].filter(function (id, index, all) { return isUuid(id) && all.indexOf(id) === index; });
+    var ids = [visitorId, withdrawnVisitor()].filter(function (id, index, all) { return isUuid(id) && all.indexOf(id) === index; });
     if (ids.length) send(ids.map(function (id) { return Object.assign(base(uuid(), "forget"), { visitor_id: id }); }));
     clearIdentity("denied");
     save("withdrawn", null);

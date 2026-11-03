@@ -323,9 +323,9 @@ pub fn pruneBackups(arena: std.mem.Allocator, io: std.Io, data_dir: []const u8, 
         automatic += 1;
         if (automatic <= keep) continue;
         const path = try std.fs.path.join(arena, &.{ directory, file.name });
-        std.Io.Dir.cwd().deleteFile(io, path) catch {};
-        std.Io.Dir.cwd().deleteFile(io, try std.fmt.allocPrint(arena, "{s}.key", .{path})) catch {};
-        std.Io.Dir.cwd().deleteFile(io, try std.fmt.allocPrint(arena, "{s}.replays", .{path})) catch {};
+        inline for (.{ "", ".key", "-wal", "-shm", ".replays", ".replays-wal", ".replays-shm" }) |suffix| {
+            std.Io.Dir.cwd().deleteFile(io, try std.fmt.allocPrint(arena, "{s}" ++ suffix, .{path})) catch {};
+        }
     }
     // Copies cut off before their key was written (the process stopped
     // midway) are never listed; once surely not still being written, they go.
@@ -334,12 +334,23 @@ pub fn pruneBackups(arena: std.mem.Allocator, io: std.Io, data_dir: []const u8, 
     var abandoned: std.ArrayList([]const u8) = .empty;
     var iterator = dir.iterate();
     const hour_ago = @import("../domain.zig").nowMs() - data.hour_ms;
+    var leftovers: std.ArrayList([]const u8) = .empty;
     while (try iterator.next(io)) |entry| {
-        if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".db")) continue;
-        if (dir.statFile(io, try std.fmt.allocPrint(arena, "{s}.key", .{entry.name}), .{})) |_| continue else |_| {}
+        if (entry.kind != .file) continue;
         const stat = dir.statFile(io, entry.name, .{}) catch continue;
-        if (stat.mtime.toMilliseconds() < hour_ago) try abandoned.append(arena, try arena.dupe(u8, entry.name));
+        if (stat.mtime.toMilliseconds() >= hour_ago) continue;
+        if (std.mem.endsWith(u8, entry.name, ".db")) {
+            if (dir.statFile(io, try std.fmt.allocPrint(arena, "{s}.key", .{entry.name}), .{})) |_| continue else |_| {}
+            try abandoned.append(arena, try arena.dupe(u8, entry.name));
+            continue;
+        }
+        // Journals and replay copies whose copy is gone.
+        const end = std.mem.find(u8, entry.name, ".db") orelse continue;
+        if (end + 3 == entry.name.len) continue;
+        if (dir.statFile(io, entry.name[0 .. end + 3], .{})) |_| continue else |_| {}
+        try leftovers.append(arena, try arena.dupe(u8, entry.name));
     }
+    for (leftovers.items) |name| dir.deleteFile(io, name) catch {};
     // With their write-ahead logs: a copy cut off midway keeps most of its
     // pages there.
     for (abandoned.items) |name| inline for (.{ "", ".replays" }) |database| inline for (.{ "", "-wal", "-shm" }) |suffix| {
@@ -375,8 +386,9 @@ fn backupsSection(ctx: *Ctx) !void {
         \\</section><dialog class="dialog dialog-wide" id="restore-dialog"><div class="dialog-head"><div><h2>Restore a backup</h2><p>Restoring creates a fresh data directory, so your current data stays untouched until you switch.</p></div><button class="btn btn-quiet btn-icon close" type="button" data-close aria-label="Close">×</button></div>
         \\<div class="dialog-body"><ol class="stack steps-list"><li>Restore into a new directory (works while Analytico runs):<div class="code mt-8"><span data-restore-command>analytico restore {directory}/<b data-restore-name>backup.db</b> {data}-restored</span></div></li>
         \\<li>If you use locations, copy <code>geo.bin</code> from <code>{data}</code> into the new directory — backups leave it out.</li>
+        \\<li>People erased since the backup was taken are back in it: erase them again (a person’s page, or <code>analytico forget</code>) before you switch.</li>
         \\<li>Stop the service, point it at the new directory (or swap the directories), and start it again. Collection pauses for a few seconds.</li></ol>
-        \\<p class="hint">The backup’s <code>.key</code> companion is copied automatically — it holds the visitor pseudonym key.</p></div><div class="dialog-foot"><button class="btn" type="button" data-close>Done</button></div></dialog>
+        \\<p class="hint">The backup’s <code>.key</code> companion, the instance key, is copied automatically.</p></div><div class="dialog-foot"><button class="btn" type="button" data-close>Done</button></div></dialog>
     , .{ .directory = try backupDirectory(arena, ctx.shared.data), .data = ctx.shared.data });
 }
 

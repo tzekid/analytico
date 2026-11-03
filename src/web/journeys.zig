@@ -558,11 +558,13 @@ pub fn audience(ctx: *Ctx, site: data.Site) !void {
     const w = ctx.w();
     const path = try std.fmt.allocPrint(arena, "/{s}/audience", .{site.slug});
     try layout.head(ctx, .{ .title = "Audience", .subtitle = try std.fmt.allocPrint(arena, "Who visits · {f}", .{view.range}), .view = view, .path = path });
-    const Stats = struct { visitors: i64, views: i64, engaged: i64, active: i64 };
+    // Counts include imported history; rates of engagement only collection
+    // measured (`measured_*`).
+    const Stats = struct { visitors: i64, views: i64, engaged: i64, active: i64, measured_views: i64, measured_visitors: i64 };
     const stats = struct {
         fn get(c: *Ctx, v: data.View, from: i64, to: i64) !Stats {
             const sums = data.keySum(try data.keySums(c.arena, c.db, v, "total", from, to, 1), "");
-            return .{ .visitors = sums.visitors, .views = sums.views, .engaged = sums.engaged, .active = sums.active_ms };
+            return .{ .visitors = sums.visitors, .views = sums.views, .engaged = sums.engaged, .active = sums.active_ms, .measured_views = sums.views - sums.imported_views, .measured_visitors = sums.visitors - sums.imported_visitors };
         }
     };
     const tech = ctx.param("tech") orelse "device";
@@ -589,8 +591,8 @@ pub fn audience(ctx: *Ctx, site: data.Site) !void {
     const tiles = [_]struct { []const u8, f64, f64, u8 }{
         .{ "Visitor-days", @floatFromInt(now_stats.visitors), @floatFromInt(prev_stats.visitors), 0 },
         .{ "Pages per visitor", ratio.of(now_stats.views, now_stats.visitors), ratio.of(prev_stats.views, prev_stats.visitors), 1 },
-        .{ "Engaged views", ratio.of(now_stats.engaged, now_stats.views) * 100, ratio.of(prev_stats.engaged, prev_stats.views) * 100, 2 },
-        .{ "Active time per visitor", ratio.of(now_stats.active, now_stats.visitors), ratio.of(prev_stats.active, prev_stats.visitors), 3 },
+        .{ "Engaged views", ratio.of(now_stats.engaged, now_stats.measured_views) * 100, ratio.of(prev_stats.engaged, prev_stats.measured_views) * 100, 2 },
+        .{ "Active time per visitor", ratio.of(now_stats.active, now_stats.measured_visitors), ratio.of(prev_stats.active, prev_stats.measured_visitors), 3 },
     };
     const format = struct {
         fn text(a: std.mem.Allocator, kind: u8, value: f64) ![]const u8 {
@@ -610,11 +612,13 @@ pub fn audience(ctx: *Ctx, site: data.Site) !void {
     try w.writeAll("</div>");
     try w.writeAll("<div class=\"grid grid-2\"><section class=\"card\"><div class=\"card-head\"><h2>Technology</h2></div>");
     try ui.tabs(ctx.w(), ctx.arena, view, path, "tech", &.{ .{ "device", "Devices" }, .{ "browser", "Browsers" }, .{ "os", "Operating systems" } }, tech);
-    try breakdown(ctx, view, tech_dim, now_stats.views, try std.fmt.allocPrint(arena, "/{s}", .{site.slug}));
+    // Shares of all views where imported history has the dimension (devices),
+    // of collected views where it doesn't.
+    try breakdown(ctx, view, tech_dim, if (tech_dim == .device) now_stats.views else now_stats.measured_views, try std.fmt.allocPrint(arena, "/{s}", .{site.slug}));
     try w.writeAll("</section><section class=\"card\"><div class=\"card-head\"><h2>Languages</h2><span class=\"meta\">Browser language</span></div>");
-    try columnBreakdown(ctx, view, "language", now_stats.views);
+    try columnBreakdown(ctx, view, "language", now_stats.measured_views);
     try w.writeAll("</section><section class=\"card\"><div class=\"card-head\"><h2>Screen sizes</h2><span class=\"meta\">Viewport class</span></div>");
-    try columnBreakdown(ctx, view, "viewport", now_stats.views);
+    try columnBreakdown(ctx, view, "viewport", now_stats.measured_views);
     try w.writeAll("</section><section class=\"card\"><div class=\"card-head\"><h2>Where they are</h2>");
     try w.writeAll("<span class=\"meta\">IP used once, never stored</span></div>");
     if (ctx.shared.geo == null) {
@@ -623,7 +627,7 @@ pub fn audience(ctx: *Ctx, site: data.Site) !void {
         try w.writeAll("<span>No location yet. Install the free DB-IP Lite database with <code>analytico geo import</code> to see countries, regions and cities. The address is used for the lookup and then discarded.</span></div>");
     } else {
         try ui.tabs(ctx.w(), ctx.arena, view, path, "geo", &.{ .{ "country", "Countries" }, .{ "region", "Regions" }, .{ "city", "Cities" } }, geo_tab);
-        try places(ctx, view, geo_dim, now_stats.views, try std.fmt.allocPrint(arena, "/{s}", .{site.slug}));
+        try places(ctx, view, geo_dim, if (geo_dim == .country) now_stats.views else now_stats.measured_views, try std.fmt.allocPrint(arena, "/{s}", .{site.slug}));
         try w.writeAll("<p class=\"hint mt-12\"><a class=\"link\" href=\"https://db-ip.com\" rel=\"noopener\">IP location by DB-IP</a> (CC BY 4.0)</p>");
     }
     try w.writeAll("</section></div>");

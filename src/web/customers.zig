@@ -85,7 +85,9 @@ pub fn sales(arena: std.mem.Allocator, db: *db_mod.Db, view: data.View, start: i
 
 fn conversionBase(ctx: *Ctx, view: data.View, start: i64, end: i64) !i64 {
     if (view.site.linked()) return data.visits(ctx.arena, ctx.db, view, start, end);
-    return (try data.totals(ctx.arena, ctx.db, view, start, end)).visitor_days;
+    // Collected visitors only: orders come from collection, never the import.
+    const imported = if (view.filters.len == 0) (try data.importedTotal(ctx.arena, ctx.db, view, start, end))[1] else 0;
+    return (try data.totals(ctx.arena, ctx.db, view, start, end)).visitor_days - imported;
 }
 
 fn metricTile(w: *std.Io.Writer, arena: std.mem.Allocator, label: []const u8, value: []const u8, before: []const u8, current: f64, previous: f64, compare: bool, points: bool) !void {
@@ -295,7 +297,8 @@ fn bySource(ctx: *Ctx, view: data.View) !void {
     var statement = try sql.prepare(ctx.db);
     defer statement.deinit();
     try w.writeAll("<section class=\"card\">");
-    try ui.cardHead(w, "Revenue by source", "<span class=\"meta\">ROAS</span>");
+    // Order value as each visit brought it, like the chart: before refunds.
+    try ui.cardHead(w, "Revenue by source", "<span class=\"meta\">Before refunds · ROAS</span>");
     try w.writeAll("<div class=\"stack\">");
     const Money = struct { key: []const u8, value: i64, spend: i64 };
     var rows: std.ArrayList(Money) = .empty;

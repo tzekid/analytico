@@ -1270,18 +1270,33 @@ pub fn keySums(arena: std.mem.Allocator, db: *db_mod.Db, view: View, dim: []cons
     defer endSnapshot(db);
     const split = if (view.filters.len == 0) try rollupSplit(arena, db, view, start, end) else start;
     var sql = Sql.init(arena);
-    try sql.add("SELECT k,sum(a),sum(b),sum(c),sum(d),sum(e),sum(f),sum(g) FROM (SELECT ");
+    try sql.add("SELECT k,sum(a),sum(b),sum(c),sum(d),sum(e),sum(f),sum(g),sum(h),sum(i) FROM (SELECT ");
     try sql.add(dimExpression(dim));
     try sql.add(" k,count(*) a,");
     try sql.distinctAfter(view, "visitor_day_id", dimExpression(dim), start, split);
     try sql.add(" b,");
     try sql.distinctAfter(view, "session_id", dimExpression(dim), start, split);
-    try sql.add(" c,count(pv.active_ms) d,coalesce(sum(pv.active_ms),0) e,coalesce(sum(pv.active_ms>=10000 OR pv.max_scroll>=50 OR pv.interaction_count>0),0) f,coalesce(sum(pv.max_scroll),0) g FROM page_views pv WHERE ");
+    try sql.add(" c,count(pv.active_ms) d,coalesce(sum(pv.active_ms),0) e,coalesce(sum(pv.active_ms>=10000 OR pv.max_scroll>=50 OR pv.interaction_count>0),0) f,coalesce(sum(pv.max_scroll),0) g,0 h,0 i FROM page_views pv WHERE ");
     try sql.pageViews(view, split, end);
     try sql.add(" GROUP BY k");
     if (split > start) {
-        try sql.add(" UNION ALL SELECT key,sum(views),sum(visitors),sum(sessions),sum(summaries),sum(active_ms),sum(engaged),sum(scroll_sum)");
+        try sql.add(" UNION ALL SELECT key,sum(views),sum(visitors),sum(sessions),sum(summaries),sum(active_ms),sum(engaged),sum(scroll_sum),0,0");
         try rollupWhere(&sql, view.site.id, .{ .dim = dim, .key = null }, start, split);
+        try sql.add(" GROUP BY key");
+    }
+    // Imported history counts here as in `totals` and `top` (views and
+    // visitors only), so a table agrees with the overview's list; it is kept
+    // apart too, for rates of what only collection measures.
+    const imported = view.filters.len == 0 and (std.mem.eql(u8, dim, "total") or std.mem.eql(u8, dim, "page") or std.mem.eql(u8, dim, "source") or std.mem.eql(u8, dim, "country") or std.mem.eql(u8, dim, "device"));
+    if (imported) {
+        try sql.add(" UNION ALL SELECT key,sum(views),sum(visitors),0,0,0,0,0,sum(views),sum(visitors) FROM imported_daily WHERE site_id=");
+        try sql.int(view.site.id);
+        try sql.add(" AND dim=");
+        try sql.str(dim);
+        try sql.add(" AND day>=");
+        try sql.str(try arena.dupe(u8, &dateText(start)));
+        try sql.add(" AND day<");
+        try sql.str(try arena.dupe(u8, &dateText(end)));
         try sql.add(" GROUP BY key");
     }
     try sql.add(") GROUP BY k ORDER BY 2 DESC,1 LIMIT ");
@@ -1297,6 +1312,8 @@ pub fn keySums(arena: std.mem.Allocator, db: *db_mod.Db, view: View, dim: []cons
         .active_ms = statement.columnInt(5),
         .engaged = statement.columnInt(6),
         .scroll_sum = statement.columnInt(7),
+        .imported_views = statement.columnInt(8),
+        .imported_visitors = statement.columnInt(9),
     } });
     return out.items;
 }
@@ -1313,7 +1330,18 @@ pub fn keySum(sums: []const KeySum, key: []const u8) RollupSums {
     return .{};
 }
 
-pub const RollupSums = struct { views: i64 = 0, visitors: i64 = 0, sessions: i64 = 0, summaries: i64 = 0, active_ms: i64 = 0, engaged: i64 = 0, scroll_sum: i64 = 0 };
+pub const RollupSums = struct {
+    views: i64 = 0,
+    visitors: i64 = 0,
+    sessions: i64 = 0,
+    summaries: i64 = 0,
+    active_ms: i64 = 0,
+    engaged: i64 = 0,
+    scroll_sum: i64 = 0,
+    /// Of `views` and `visitors`, those imported (no engagement measured).
+    imported_views: i64 = 0,
+    imported_visitors: i64 = 0,
+};
 
 pub fn rollupSums(arena: std.mem.Allocator, db: *db_mod.Db, view: View, start: i64, end: i64) !RollupSums {
     var sql = Sql.init(arena);

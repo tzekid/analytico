@@ -1051,7 +1051,7 @@ fn exportSiteDay(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db, site
     const tables = [_][2][]const u8{
         .{ "page_views", "SELECT received_at_ms,page_id,session_id,visitor_id,path,referrer_host,utm_source,utm_medium,utm_campaign,utm_content,utm_term,country,region,city,browser,operating_system,device,viewport_class,language,consent_mode,tracking_mode,traffic_class,search_term FROM page_views WHERE site_id=?1 AND received_at_ms>=?2 AND received_at_ms<?3 AND internal=0 ORDER BY received_at_ms" },
         .{ "events", "SELECT received_at_ms,event_id,page_id,session_id,visitor_id,source,name,path,value_minor,currency,order_id,properties_json,consent_mode FROM events WHERE site_id=?1 AND received_at_ms>=?2 AND received_at_ms<?3 AND internal=0 ORDER BY received_at_ms" },
-        .{ "order_items", "SELECT e.received_at_ms,e.event_id,e.order_id,e.name,i.item_id,i.name,i.category,i.price_minor,i.quantity FROM event_items i JOIN events e ON e.site_id=i.site_id AND e.event_id=i.event_id WHERE i.site_id=?1 AND e.received_at_ms>=?2 AND e.received_at_ms<?3 ORDER BY e.received_at_ms" },
+        .{ "order_items", "SELECT e.received_at_ms,e.event_id,e.order_id,e.name,i.item_id,i.name,i.category,i.price_minor,i.quantity FROM event_items i JOIN events e ON e.site_id=i.site_id AND e.event_id=i.event_id WHERE i.site_id=?1 AND e.received_at_ms>=?2 AND e.received_at_ms<?3 AND e.internal=0 ORDER BY e.received_at_ms" },
     };
     const directory = try std.fs.path.join(arena, &.{ shared.data, "exports", site.slug, &data.dateText(day_start) });
     try std.Io.Dir.cwd().createDirPath(shared.io, directory);

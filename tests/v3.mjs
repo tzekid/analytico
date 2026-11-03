@@ -637,9 +637,7 @@ await journey("v3", async (t) => {
   await integration("channels").getByRole("textbox", { name: "URL" }).fill(`${fakeBase}/hook`);
   await integration("channels").getByRole("button", { name: "Add and send a test" }).click();
   const webhookSecret = /secret \(shown once\): ([0-9a-f]{64})/.exec(await page.locator(".toast").textContent())[1];
-  // A person's browser (a headless one counts as a crawler, which reaches
-  // no goal), as the goal reports count them.
-  const goalVisitor = await (await newContext({ userAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36" })).newPage();
+  const goalVisitor = await (await newContext()).newPage();
   await Promise.all([decision(goalVisitor), goalVisitor.goto(`${originB}/welcome`)]);
   await goalVisitor.evaluate(() => analytico.track("purchase", {}, { value_minor: 2500, currency: "EUR", order_id: "B-7" }));
   await goalVisitor.goto(`${originB}/checkout`);

@@ -349,6 +349,11 @@ on its next run (after a CLI deletion, once the service starts). Aggregated
 heatmaps and form statistics hold no identifier and stay. Deletion is
 recorded in the audit log.
 
+Backups keep what they held when they were taken: the automatic daily
+copies for fourteen days, manual and pre-maintenance copies until you delete
+them. A restore from before an erasure brings that person back, so repeat
+the erasure (the audit log lists them) before serving the restored data.
+
 ## Diagnostics
 
 ```sh

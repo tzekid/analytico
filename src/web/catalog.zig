@@ -403,7 +403,8 @@ fn revenueReport(input: Input) !Table {
 }
 
 fn errorsReport(input: Input) !Table {
-    const unit = if (input.view.site.linked()) "coalesce(x.session_id,x.page_id)" else "x.page_id";
+    // Visits as the workspace counts them: split at midnight like sessions.
+    const unit = if (input.view.site.linked()) "strftime('%Y-%m-%d',x.received_at_ms/1000,'unixepoch')||char(31)||coalesce(x.session_id,x.page_id)" else "x.page_id";
     var sql = data.Sql.init(input.arena);
     try sql.add("SELECT max(x.message) AS message,coalesce(max(x.file),'') AS file,coalesce(max(x.line),0) AS line,(SELECT y.path FROM errors y WHERE y.site_id=x.site_id AND y.fingerprint=x.fingerprint GROUP BY y.path ORDER BY count(*) DESC LIMIT 1) AS path,count(*) AS occurrences,count(DISTINCT ");
     try sql.add(unit);
@@ -678,7 +679,7 @@ const sections_sql =
     \\ SELECT ps.* FROM page_summaries ps JOIN filtered f ON f.site_id=ps.site_id AND f.page_id=ps.page_id
     \\)
     \\SELECT j.value AS section,count(*) AS exposures,
-    \\ round(100.0*count(*)/max(1,(SELECT count(*) FROM filtered)),1) AS exposure_percent,
+    \\ round(100.0*count(*)/max(1,(SELECT count(*) FROM summaries)),1) AS exposure_percent,
     \\ sum(CASE WHEN ps.last_section=j.value THEN 1 ELSE 0 END) AS final_section
     \\FROM summaries ps, json_each(ps.sections_json) j
     \\GROUP BY j.value ORDER BY exposures DESC,j.value LIMIT ?10

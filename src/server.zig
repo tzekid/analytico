@@ -95,7 +95,27 @@ pub const Shared = struct {
     /// a backup, and replaced by the first batch of the next UTC day. Once
     /// its day is over a pseudonym can't be recomputed from any address,
     /// even with the instance key. Collection calls it under the write lock.
+    /// A key that can't be read or written fails collection as storage does
+    /// (logged, 503), never as the visitor's fault.
     pub fn dayKey(self: *Shared, arena: std.mem.Allocator, date: *const [10]u8) ![32]u8 {
+        return self.loadDayKey(arena, date) catch |err| {
+            std.log.err("day_key_failed code={s}", .{@errorName(err)});
+            return error.DayKeyUnavailable;
+        };
+    }
+
+    /// The background job drops a finished day's key at once, so a quiet day
+    /// never keeps yesterday's. Under the write lock.
+    pub fn expireDayKey(self: *Shared, arena: std.mem.Allocator, today: *const [10]u8) !void {
+        if (self.day_key.date[0] == 0 or std.mem.eql(u8, &self.day_key.date, today)) return;
+        self.day_key = .{};
+        std.Io.Dir.cwd().deleteFile(self.io, try std.fs.path.join(arena, &.{ self.data, "day.key" })) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        };
+    }
+
+    fn loadDayKey(self: *Shared, arena: std.mem.Allocator, date: *const [10]u8) ![32]u8 {
         if (std.mem.eql(u8, &self.day_key.date, date)) return self.day_key.key;
         const io = self.io;
         const path = try std.fs.path.join(arena, &.{ self.data, "day.key" });
@@ -278,6 +298,14 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
         .replay_path = paths.replays,
     };
     for (&pool.stores) |*reader| try attachReplays(&shared, &reader.database);
+    {
+        // Today's pseudonym key before any thread runs: a key left from a day
+        // that is over is replaced, and a data directory the service can't
+        // write stops it here rather than failing every visit.
+        var arena_state = std.heap.ArenaAllocator.init(allocator);
+        defer arena_state.deinit();
+        _ = try shared.dayKey(arena_state.allocator(), &(try domain.utcDate(domain.nowMs())));
+    }
     @import("assets.zig").init();
     const address = try std.Io.net.IpAddress.parse(options.host, options.port);
     var listener = try address.listen(io, .{ .reuse_address = true, .kernel_backlog = 256 });
@@ -887,5 +915,5 @@ fn safeCode(err: anyerror) []const u8 {
 
 fn storageError(err: anyerror) bool {
     return err == error.SqliteStepFailed or err == error.SqliteExecFailed or
-        err == error.SqlitePrepareFailed or err == error.DatabaseNotReady;
+        err == error.SqlitePrepareFailed or err == error.DatabaseNotReady or err == error.DayKeyUnavailable;
 }

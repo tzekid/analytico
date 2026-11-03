@@ -42,6 +42,8 @@ pub fn doctor(allocator: std.mem.Allocator, io: std.Io, output: *std.Io.Writer, 
     var replays = try replay.open(allocator, paths.replays, false);
     defer replays.close();
     if (quick) try db_mod.quickCheck(&replays, allocator) else try db_mod.integrity(&replays, allocator);
+    // The pre-start check stops here: counting rows reads whole tables.
+    if (quick) return output.print("ok schema={d} quick\n", .{schema.current_version});
     var counts = try store.database.prepare(allocator, "SELECT (SELECT count(*) FROM sites),(SELECT count(*) FROM page_views)," ++
         "(SELECT count(*) FROM page_summaries),(SELECT count(*) FROM events)");
     defer counts.deinit();
@@ -86,10 +88,19 @@ pub fn copyVerified(
     defer paths.deinit(allocator);
     _ = try store_mod.readKey(io, paths.key);
     try db_mod.integrity(source, allocator);
+    // A copy that fails leaves nothing behind, journals included: none of
+    // these existed before (see above).
+    errdefer inline for (.{ "", ".replays" }) |database| inline for (.{ "", "-wal", "-shm" }) |suffix| {
+        if (std.fmt.allocPrint(allocator, "{s}" ++ database ++ suffix, .{destination})) |path| {
+            std.Io.Dir.cwd().deleteFile(io, path) catch {};
+        } else |_| {}
+    };
     try createEmptyFile(io, destination);
-    errdefer std.Io.Dir.cwd().deleteFile(io, destination) catch {};
     var target = try db_mod.Db.open(allocator, destination, true);
     defer target.close();
+    // Written straight into the file: through a write-ahead log the copy
+    // would first need its whole size again in free space.
+    try target.exec("PRAGMA journal_mode=OFF");
     try db_mod.backup(source, &target);
     try db_mod.integrity(&target, allocator);
     // Before `migrate` creates it, an older data directory has no replays.
@@ -97,9 +108,9 @@ pub fn copyVerified(
         var replays = try db_mod.Db.open(allocator, paths.replays, false);
         defer replays.close();
         try createEmptyFile(io, replay_destination);
-        errdefer std.Io.Dir.cwd().deleteFile(io, replay_destination) catch {};
         var replay_target = try db_mod.Db.open(allocator, replay_destination, true);
         defer replay_target.close();
+        try replay_target.exec("PRAGMA journal_mode=OFF");
         try db_mod.backup(&replays, &replay_target);
         try db_mod.integrity(&replay_target, allocator);
     } else |err| if (err != error.FileNotFound) return err;

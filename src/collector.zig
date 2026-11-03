@@ -956,7 +956,7 @@ pub fn forgetUser(allocator: std.mem.Allocator, store: *store_mod.Store, site_id
 /// Removes everything stored about one visitor. Aggregates (click cells,
 /// form fields) carry no identifier and stay.
 pub fn forgetVisitor(allocator: std.mem.Allocator, store: *store_mod.Store, site_id: i64, visitor_id: []const u8) !void {
-    try noteExportRefresh(allocator, store, site_id, "SELECT received_at_ms FROM page_views WHERE site_id=?1 AND visitor_id=?2 UNION ALL SELECT received_at_ms FROM events WHERE site_id=?1 AND visitor_id=?2", visitor_id);
+    try noteExportRefresh(allocator, store, site_id, "SELECT received_at_ms FROM page_views WHERE site_id=?1 AND visitor_id=?2 UNION ALL SELECT received_at_ms FROM events WHERE site_id=?1 AND (visitor_id=?2 OR (visitor_id IS NULL AND session_id IN (SELECT session_id FROM page_views WHERE site_id=?1 AND visitor_id=?2 AND session_id IS NOT NULL)))", visitor_id);
     // The ID stays refused (see refusal): a tab or another of the
     // site's domains still holding it cannot start the visitor again. Only
     // IDs that were remembered, so made-up ones don't fill the table.
@@ -964,9 +964,9 @@ pub fn forgetVisitor(allocator: std.mem.Allocator, store: *store_mod.Store, site
     try store.database.run(allocator, "INSERT INTO forgotten_visitors(site_id,visitor_id,forgotten_at_ms,refused) SELECT site_id,visitor_id,?,consent_state IN ('denied','gpc') FROM visitors WHERE site_id=? AND visitor_id=? ON CONFLICT DO NOTHING", .{ domain.nowMs(), site_id, visitor_id });
     inline for (.{
         "DELETE FROM page_summaries WHERE site_id=?1 AND (visitor_id=?2 OR page_id IN (SELECT page_id FROM page_views WHERE site_id=?1 AND visitor_id=?2))",
-        // Server events may name the visit only (its session), not the visitor.
-        "DELETE FROM event_items WHERE site_id=?1 AND event_id IN (SELECT event_id FROM events WHERE site_id=?1 AND (visitor_id=?2 OR session_id IN (SELECT session_id FROM page_views WHERE site_id=?1 AND visitor_id=?2 AND session_id IS NOT NULL)))",
-        "DELETE FROM events WHERE site_id=?1 AND (visitor_id=?2 OR session_id IN (SELECT session_id FROM page_views WHERE site_id=?1 AND visitor_id=?2 AND session_id IS NOT NULL))",
+        // Server events may name the visit only (its session), not anyone.
+        "DELETE FROM event_items WHERE site_id=?1 AND event_id IN (SELECT event_id FROM events WHERE site_id=?1 AND (visitor_id=?2 OR (visitor_id IS NULL AND session_id IN (SELECT session_id FROM page_views WHERE site_id=?1 AND visitor_id=?2 AND session_id IS NOT NULL))))",
+        "DELETE FROM events WHERE site_id=?1 AND (visitor_id=?2 OR (visitor_id IS NULL AND session_id IN (SELECT session_id FROM page_views WHERE site_id=?1 AND visitor_id=?2 AND session_id IS NOT NULL)))",
         "DELETE FROM errors WHERE site_id=?1 AND visitor_id=?2",
         "DELETE FROM page_views WHERE site_id=?1 AND visitor_id=?2",
         "DELETE FROM visitor_links WHERE site_id=?1 AND visitor_id=?2",

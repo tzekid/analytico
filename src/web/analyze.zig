@@ -424,7 +424,7 @@ fn sources(ctx: *Ctx, view: data.View) !void {
             .label = label,
             .views = html.int(views),
             .visitors = html.int(entry.sums.visitors),
-            .engaged = html.share(entry.sums.engaged, views),
+            .engaged = html.share(entry.sums.engaged, views - entry.sums.imported_views),
         });
         try ui.delta(w, @floatFromInt(views), @floatFromInt(data.keySum(previous_sums, key).views), false);
         try render(w, "</td><td class=\"bar-cell hide-m\"><div class=\"mini-bar\" style=\"width:{width:.0}%\"></div></td></tr>", .{ .width = @as(f64, @floatFromInt(views)) / @as(f64, @floatFromInt(@max(largest, 1))) * 100 });

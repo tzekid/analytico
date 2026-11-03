@@ -136,19 +136,21 @@ fn signalSet(sql: *data.Sql, view: data.View, signal: Signal) !void {
             try sql.add(")");
             return;
         },
+        // People only, as the list each count opens: not the team, not bots.
         .rage => {
             try sql.add("(SELECT e.session_id FROM events e WHERE e.site_id=");
             try sql.int(id);
-            try sql.add(" AND e.name='rage_click'");
+            try sql.add(" AND e.name='rage_click' AND e.internal=0 AND e.traffic_class IN ('human_like','unknown')");
         },
         .errors => {
             try sql.add("(SELECT e.session_id FROM errors e WHERE e.site_id=");
             try sql.int(id);
+            try sql.add(" AND e.internal=0 AND EXISTS(SELECT 1 FROM page_views pv WHERE pv.site_id=e.site_id AND pv.page_id=e.page_id AND pv.traffic_class IN ('human_like','unknown'))");
         },
         .goal => {
             try sql.add("(SELECT e.session_id FROM events e WHERE e.site_id=");
             try sql.int(id);
-            try sql.add(" AND e.name IN (SELECT g.match_value FROM goals g WHERE g.site_id=");
+            try sql.add(" AND e.internal=0 AND (e.source='server' OR e.traffic_class IN ('human_like','unknown')) AND e.name IN (SELECT g.match_value FROM goals g WHERE g.site_id=");
             try sql.int(id);
             try sql.add(" AND g.kind='event')");
         },
@@ -489,11 +491,10 @@ pub fn errorScope(sql: *data.Sql, view: data.View, start: i64, end: i64) !void {
     try sql.int(start);
     try sql.add(" AND x.received_at_ms<");
     try sql.int(end);
-    if (view.filters.len != 0) {
-        try sql.add(" AND EXISTS(SELECT 1 FROM page_views pv WHERE pv.site_id=x.site_id AND pv.page_id=x.page_id");
-        try sql.filters(view);
-        try sql.add(")");
-    }
+    // People's pages only, like the visits it is set against: not bots.
+    try sql.add(" AND EXISTS(SELECT 1 FROM page_views pv WHERE pv.site_id=x.site_id AND pv.page_id=x.page_id AND pv.traffic_class IN ('human_like','unknown')");
+    try sql.filters(view);
+    try sql.add(")");
 }
 
 /// New in the period, quiet for a week (probably fixed), or still happening.

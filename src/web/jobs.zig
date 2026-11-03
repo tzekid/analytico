@@ -42,6 +42,12 @@ const now = @import("../domain.zig").nowMs;
 
 fn tick(arena: std.mem.Allocator, shared: *Shared, db: *db_mod.Db) !void {
     const at = now();
+    {
+        const today = try @import("../domain.zig").utcDate(at);
+        _ = shared.lockWrite();
+        defer shared.unlockWrite();
+        shared.expireDayKey(arena, &today) catch |err| std.log.warn("jobs_day_key_failed code={s}", .{@errorName(err)});
+    }
     // Independent: a failing report must not hold up alerts or backups.
     schedules(arena, shared, db, at) catch |err| std.log.warn("jobs_schedules_failed code={s}", .{@errorName(err)});
     alerts(arena, shared, db, at) catch |err| std.log.warn("jobs_alerts_failed code={s}", .{@errorName(err)});
